@@ -1,0 +1,466 @@
+openapi: 3.0.3
+info:
+  title: blowball Multi-Agent Backend API
+  version: "1.0.0"
+  description: |
+    HTTP API surface for the blowball multi-agent backend.
+
+    Authentication is JWT Bearer. All routes except `/auth/login` require an
+    `Authorization: Bearer <token>` header. Errors follow the unified envelope
+    `{"error": {"code": "ERROR_CODE", "message": "..."}}`.
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token issued by POST /api/v1/auth/login.
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable error code.
+              example: BAD_REQUEST
+            message:
+              type: string
+              description: Human-readable error description.
+              example: invalid request body
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+    LoginResponse:
+      type: object
+      required: [access_token, expire, token_type]
+      properties:
+        access_token:
+          type: string
+          description: Signed JWT to send as `Bearer` in subsequent requests.
+        expire:
+          type: integer
+          format: int64
+          description: Token expiry as a Unix timestamp (seconds).
+        token_type:
+          type: string
+          enum: [Bearer]
+          example: Bearer
+    SessionListEntry:
+      type: object
+      required: [session_id, title, update_time]
+      properties:
+        session_id:
+          type: string
+        title:
+          type: string
+        update_time:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp of the last update.
+    SessionListResponse:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionListEntry'
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: User message text.
+    # ---- SSE event payloads -------------------------------------------------
+    SSEAgentStart:
+      type: object
+      required: [type, agent]
+      properties:
+        type: {type: string, enum: [agent_start]}
+        agent: {type: string}
+    SSEToken:
+      type: object
+      required: [type, agent, content]
+      properties:
+        type: {type: string, enum: [token]}
+        agent: {type: string}
+        content: {type: string, description: Incremental text token.}
+    SSEToolCall:
+      type: object
+      required: [type, agent, content]
+      properties:
+        type: {type: string, enum: [tool_call]}
+        agent: {type: string}
+        content: {type: string, description: Tool name.}
+        meta:
+          type: object
+          properties:
+            args: {type: object, additionalProperties: true}
+    SSEAgentEnd:
+      type: object
+      required: [type, agent]
+      properties:
+        type: {type: string, enum: [agent_end]}
+        agent: {type: string}
+    SSEAgentError:
+      type: object
+      required: [type, agent, content]
+      properties:
+        type: {type: string, enum: [agent_error]}
+        agent: {type: string}
+        content: {type: string, description: Error message.}
+        meta:
+          type: object
+          properties:
+            error_code: {type: string}
+    SSEDone:
+      type: object
+      required: [type, meta]
+      properties:
+        type: {type: string, enum: [done]}
+        meta:
+          type: object
+          required: [usage]
+          properties:
+            usage:
+              type: object
+              required: [prompt_tokens, completion_tokens, total_tokens]
+              properties:
+                prompt_tokens: {type: integer}
+                completion_tokens: {type: integer}
+                total_tokens: {type: integer}
+    FileEntry:
+      type: object
+      required: [name, type, size, update_time]
+      properties:
+        name: {type: string}
+        type: {type: string, enum: [file, dir]}
+        size: {type: integer, format: int64}
+        update_time:
+          type: string
+          format: date-time
+    FileListResponse:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/FileEntry'
+    UploadResponse:
+      type: object
+      required: [path, size]
+      properties:
+        path: {type: string, description: Workspace-relative path of the stored file.}
+        size: {type: integer, format: int64}
+    FileContentResponse:
+      type: object
+      required: [path, content, size]
+      properties:
+        path: {type: string}
+        content: {type: string}
+        size: {type: integer}
+    MCPTool:
+      type: object
+      required: [name, description, parameters]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        parameters:
+          type: object
+          additionalProperties: true
+          description: JSON Schema describing the tool's input parameters.
+    MCPToolsResponse:
+      type: object
+      required: [tools]
+      properties:
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/MCPTool'
+    SkillEntry:
+      type: object
+      required: [name, filename, size, update_time]
+      properties:
+        name: {type: string, description: Skill identifier (filename without extension).}
+        filename: {type: string}
+        size: {type: integer, format: int64}
+        update_time:
+          type: string
+          format: date-time
+    SkillsResponse:
+      type: object
+      required: [skills]
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkillEntry'
+  responses:
+    BadRequest:
+      description: Malformed request body or missing field.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: Operation not permitted (e.g. path outside workspace).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    PayloadTooLarge:
+      description: Uploaded file exceeds the size limit.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Internal:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+security:
+  - BearerAuth: []
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange credentials for a JWT access token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+            example: {username: alice, password: hunter2}
+      responses:
+        '200':
+          description: Successful login.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginResponse'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: |
+            Authentication failed. The `message` distinguishes the cause:
+            `user not found`, `invalid credentials`, or `user disabled`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                userNotFound:    {value: {error: {code: UNAUTHORIZED, message: "user not found"}}}
+                invalidCreds:    {value: {error: {code: UNAUTHORIZED, message: "invalid credentials"}}}
+                userDisabled:    {value: {error: {code: UNAUTHORIZED, message: "user disabled"}}}
+  /api/v1/sessions:
+    get:
+      tags: [Session]
+      summary: List the authenticated user's sessions, newest first.
+      responses:
+        '200':
+          description: Session list (empty array when none exist).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionListResponse'}
+              examples:
+                populated: {value: {sessions: [{session_id: sess_1, title: "Plan release", update_time: "2026-06-11T10:00:00Z"}]}}
+                empty:     {value: {sessions: []}}
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/sessions/{session_id}/messages:
+    post:
+      tags: [Session]
+      summary: Send a user message and stream the agent's response as SSE.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SendMessageRequest'}
+      responses:
+        '200':
+          description: |
+            Server-Sent Events stream. Each event is two lines:
+            `event: <type>` and `data: <json>` followed by a blank line.
+            Event types: `agent_start`, `token`, `tool_call`, `agent_end`,
+            `agent_error`, `done`. The `done` event is always the final event.
+          content:
+            text/event-stream:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SSEAgentStart'
+                  - $ref: '#/components/schemas/SSEToken'
+                  - $ref: '#/components/schemas/SSEToolCall'
+                  - $ref: '#/components/schemas/SSEAgentEnd'
+                  - $ref: '#/components/schemas/SSEAgentError'
+                  - $ref: '#/components/schemas/SSEDone'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/workspace/files:
+    get:
+      tags: [Workspace]
+      summary: List files in (a subdirectory of) the user's workspace.
+      parameters:
+        - name: path
+          in: query
+          required: false
+          schema: {type: string}
+          description: Optional workspace-relative subdirectory. Defaults to the workspace root.
+      responses:
+        '200':
+          description: File/dir entries, sorted (directories first, then name).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FileListResponse'}
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/workspace/upload:
+    post:
+      tags: [Workspace]
+      summary: Upload a file into the user's workspace.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                path:
+                  type: string
+                  description: Destination subdirectory (empty/absent means root).
+      responses:
+        '200':
+          description: Upload succeeded.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadResponse'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/workspace/files/{path}:
+    get:
+      tags: [Workspace]
+      summary: Download a workspace file as raw bytes.
+      description: |
+        The `path` parameter is a workspace-relative path (which may contain
+        slashes). `path` ending in `/content` selects the text-content
+        endpoint instead. The content-type of the response reflects the
+        file's extension.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Workspace-relative file path (catch-all, may include `/`).
+          example: reports/2026-q2.md
+      responses:
+        '200':
+          description: File bytes; content-type varies by extension.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Path resolves to a directory.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/workspace/files/{path}/content:
+    get:
+      tags: [Workspace]
+      summary: Fetch a workspace file's text content as JSON.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Workspace-relative file path (catch-all, may include `/`).
+      responses:
+        '200':
+          description: Decoded text content of the file.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FileContentResponse'}
+        '400':
+          description: File is binary or path is a directory. Use the download endpoint for binary files.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/mcp/tools:
+    get:
+      tags: [MCP]
+      summary: List the combined MCP tool catalogue.
+      description: |
+        Returns regular Xizhi registry tools plus the synthetic
+        `invoke_chongzhi` and `invoke_liang` agent-invocation tools.
+      responses:
+        '200':
+          description: Tool list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MCPToolsResponse'}
+  /api/v1/skills:
+    get:
+      tags: [Skills]
+      summary: List the authenticated user's skills.
+      responses:
+        '200':
+          description: Skill list (empty array when none exist).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SkillsResponse'}
+        '500':
+          $ref: '#/components/responses/Internal'

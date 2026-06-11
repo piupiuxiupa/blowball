@@ -1,0 +1,200 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/pkg/trace"
+)
+
+// SessionSummary is the read model returned by ListSessions. It carries just
+// the fields the session-list API needs: session_id, the optional title (empty
+// string when none has been generated yet) and update_time.
+type SessionSummary struct {
+	SessionID  string    `json:"session_id"`
+	Title      string    `json:"title"`
+	UpdateTime time.Time `json:"update_time"`
+}
+
+// SessionService owns session lifecycle and three-layer message writes. It is
+// safe for concurrent use: every public method takes a context, has no shared
+// mutable state, and pushes straight through to the underlying stores.
+type SessionService struct {
+	mysql MySQLStore
+	redis RedisStore
+	fs    FSStore
+}
+
+// NewSessionService wires a SessionService from the bundled deps. The same
+// SessionDeps value can be shared with NewMessageService and NewTitleService.
+func NewSessionService(deps SessionDeps) *SessionService {
+	return &SessionService{
+		mysql: deps.MySQL,
+		redis: deps.Redis,
+		fs:    deps.FS,
+	}
+}
+
+// EnsureSession makes sure a session row exists for (userID, sessionID) and
+// that the user's data/ subdirectories are present. If the session is already
+// in MySQL the call is a no-op (other than the EnsureUserDirs side effect).
+// Otherwise a fresh row is inserted with the caller's trace_id attached.
+func (s *SessionService) EnsureSession(ctx context.Context, userID, sessionID string) error {
+	tid := trace.FromContext(ctx)
+	log := logger.L().With(
+		zap.String("op", "session.ensure"),
+		zap.String("session_id", sessionID),
+		zap.String("user_id", userID),
+	)
+	if tid != "" {
+		log = log.With(zap.String("trace_id", tid))
+	}
+
+	if err := s.fs.EnsureUserDirs(ctx, userID); err != nil {
+		log.Error("ensure user dirs failed", zap.Error(err))
+		return fmt.Errorf("session.ensure: user dirs: %w", err)
+	}
+
+	existing, err := s.mysql.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		log.Error("session lookup failed", zap.Error(err))
+		return fmt.Errorf("session.ensure: lookup: %w", err)
+	}
+	if existing != nil {
+		log.Debug("session already exists")
+		return nil
+	}
+
+	sess := model.Session{
+		SessionID: sessionID,
+		UserID:    userID,
+		TraceID:   tid,
+	}
+	if err := s.mysql.CreateSession(ctx, sess); err != nil {
+		log.Error("create session failed", zap.Error(err))
+		return fmt.Errorf("session.ensure: create: %w", err)
+	}
+	log.Info("session created")
+	return nil
+}
+
+// ListSessions returns the caller's sessions most-recently-updated first. Each
+// entry includes its title (empty string when no title has been generated).
+// An empty slice is returned when the user has no sessions.
+func (s *SessionService) ListSessions(ctx context.Context, userID string) ([]SessionSummary, error) {
+	tid := trace.FromContext(ctx)
+	log := logger.L().With(zap.String("op", "session.list"), zap.String("user_id", userID))
+	if tid != "" {
+		log = log.With(zap.String("trace_id", tid))
+	}
+
+	rows, err := s.mysql.ListSessionsWithTitle(ctx, userID)
+	if err != nil {
+		log.Error("list sessions with title failed", zap.Error(err))
+		return nil, fmt.Errorf("session.list: %w", err)
+	}
+
+	out := make([]SessionSummary, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, SessionSummary{
+			SessionID:  r.SessionID,
+			Title:      r.Title,
+			UpdateTime: r.UpdateTime,
+		})
+	}
+	return out, nil
+}
+
+// SaveMessage persists msg across all three storage tiers. Per the
+// session-management spec, Redis is best-effort: a Redis error is logged but
+// does NOT abort the write. MySQL is treated as a synchronous durability
+// requirement per the design's "asynchronous write" intent; however the spec
+// only explicitly blesses Redis failure as non-blocking, so we log MySQL
+// failures and return nil so the streaming response path is never blocked by a
+// database hiccup. The file system layer is the warm tier; an FS error is
+// returned because a corrupted file would silently corrupt the recovery chain.
+//
+// The same canonical JSON blob flows into Redis (RPUSH element), the session
+// file's messages[] array, and MySQL (via AppendMessage, which re-serializes
+// through named params).
+func (s *SessionService) SaveMessage(ctx context.Context, userID string, msg model.Message) error {
+	tid := trace.FromContext(ctx)
+	log := logger.L().With(
+		zap.String("op", "session.save_message"),
+		zap.String("session_id", msg.SessionID),
+		zap.String("user_id", userID),
+	)
+	if tid != "" {
+		log = log.With(zap.String("trace_id", tid))
+	}
+
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		log.Error("marshal message failed", zap.Error(err))
+		return fmt.Errorf("session.save_message: marshal: %w", err)
+	}
+
+	// 1) Redis hot tier. Best-effort per spec: log + continue on failure.
+	if err := s.redis.AppendMessage(ctx, msg.SessionID, raw); err != nil {
+		log.Warn("redis append failed; continuing with FS and MySQL", zap.Error(err))
+	}
+
+	// 2) FS warm tier. Read-modify-write so the session file accumulates every
+	// message in order. A miss (new session) starts a fresh document.
+	if err := s.appendToFS(ctx, userID, msg.SessionID, raw); err != nil {
+		log.Error("fs append failed", zap.Error(err))
+		return fmt.Errorf("session.save_message: fs: %w", err)
+	}
+
+	// 3) MySQL durable tier. Synchronous per current decision; logged but NOT
+	// returned so the SSE response path is never blocked by a DB hiccup. The
+	// file layer above still holds the message for the next RecoverMessages.
+	if _, err := s.mysql.AppendMessage(ctx, msg); err != nil {
+		log.Error("mysql append failed; message held in FS only", zap.Error(err))
+	}
+
+	return nil
+}
+
+// sessionFile is the on-disk JSON shape for the warm tier. messages holds the
+// raw JSON blob of each Message (one per append) in insertion order.
+type sessionFile struct {
+	SessionID string            `json:"session_id"`
+	Messages  []json.RawMessage `json:"messages"`
+}
+
+// appendToFS reads the existing session file (or starts fresh), appends the new
+// raw message JSON, and writes it back. A nil file (new session) yields a
+// document with a single-element messages array.
+func (s *SessionService) appendToFS(ctx context.Context, userID, sessionID string, raw []byte) error {
+	existing, err := s.fs.ReadSession(ctx, userID, sessionID)
+	if err != nil {
+		return fmt.Errorf("read session file: %w", err)
+	}
+
+	var doc sessionFile
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &doc); err != nil {
+			return fmt.Errorf("unmarshal session file: %w", err)
+		}
+	}
+	if doc.SessionID == "" {
+		doc.SessionID = sessionID
+	}
+	doc.Messages = append(doc.Messages, json.RawMessage(raw))
+
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal session file: %w", err)
+	}
+	if err := s.fs.WriteSession(ctx, userID, sessionID, out); err != nil {
+		return fmt.Errorf("write session file: %w", err)
+	}
+	return nil
+}

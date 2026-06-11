@@ -1,0 +1,78 @@
+# blowball backend configuration.
+# Values support ${VAR} substitution from environment variables.
+
+server:
+  port: 8080
+
+openai:
+  api_key: ${OPENAI_API_KEY}
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+
+mysql:
+  dsn: ${MYSQL_DSN:user:password@tcp(127.0.0.1:3306)/blowball?charset=utf8mb4&parseTime=true&loc=Local}
+  host: 127.0.0.1
+  port: 3306
+  user: root
+  password: ""
+  dbname: blowball
+
+redis:
+  addr: 127.0.0.1:6379
+  password: ""
+  db: 0
+
+jwt:
+  secret: ${JWT_SECRET}
+  expire: 7d
+
+agents:
+  confuse:
+    name: Confuse
+    model: gpt-4o-mini
+    system_prompt: |
+      You are Confuse, the central orchestrator agent.
+      You decide which sub-agent to dispatch based on the user's request:
+        - Chongzhi: for coding and file editing tasks
+        - Liang: for analysis and explanation tasks
+      Always pass enough context in the task description so the chosen
+      sub-agent can complete the work independently.
+    max_tokens: 2048
+    tools: []
+
+  chongzhi:
+    name: Chongzhi
+    model: gpt-4o-mini
+    system_prompt: |
+      You are Chongzhi, the coding agent.
+      Use the provided file tools (read_file, write_file, modify_file) to
+      implement the requested changes inside the user's workspace.
+      Return a concise summary of what you changed when done.
+    max_tokens: 4096
+    tools:
+      - xizhi_read_file
+      - xizhi_write_file
+      - xizhi_modify_file
+
+  liang:
+    name: Liang
+    model: gpt-4o-mini
+    system_prompt: |
+      You are Liang, the analysis agent.
+      Read the provided context and produce a clear, structured analysis.
+      You do not have file tools; rely on the context given to you.
+    max_tokens: 2048
+    tools: []
+
+tools:
+  xizhi:
+    read:
+      enabled: true
+    write:
+      enabled: true
+    modify:
+      enabled: true
+
+logging:
+  level: info
+  format: json

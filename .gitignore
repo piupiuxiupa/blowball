@@ -1,0 +1,5 @@
+bin/
+.codegraph/
+/config.yaml
+.claude/settings.local.json
+/data/
