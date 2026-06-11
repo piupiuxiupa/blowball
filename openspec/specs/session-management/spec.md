@@ -1,7 +1,13 @@
-## ADDED Requirements
+# session-management Specification
+
+## Purpose
+
+定义会话管理能力，包括按需创建会话、SSE 流式响应、会话列表、自动标题生成、三层消息存储（Redis → 文件 → MySQL）、消息恢复降级策略以及消息数据模型。
+
+## Requirements
 
 ### Requirement: Create session
-系统 SHALL 在用户首次发送消息时自动创建会话，生成全局唯一 session_id (UUID)。
+系统 SHALL 在用户首次发送消息时根据请求中携带的 session_id 自动创建会话，session_id由客户端生成（UUID v4）。
 
 #### Scenario: Auto create on first message
 - **WHEN** 用户发送 POST /api/v1/sessions/:session_id/messages，session_id 为新 UUID

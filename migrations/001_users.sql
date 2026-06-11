@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS `users` (
     `username`    VARCHAR(64)  NOT NULL COMMENT 'Unique login name',
     `password`    VARCHAR(255) NOT NULL COMMENT 'bcrypt password hash',
     `status`      VARCHAR(16)  NOT NULL DEFAULT 'active' COMMENT 'active | disabled',
-    `trace_id`    CHAR(36)     NOT NULL COMMENT 'request trace that created/last-touched the row',
     `update_time` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `create_time` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`user_id`),

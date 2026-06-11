@@ -13,8 +13,7 @@ import (
 // faithful mirror of the migration schemas.
 var expectedDBTags = map[string][]string{
 	"User": {
-		"user_id", "username", "password", "status",
-		"trace_id", "update_time", "create_time",
+		"user_id", "username", "password", "status", "update_time", "create_time",
 	},
 	"Session": {
 		"session_id", "user_id", "trace_id",
@@ -77,11 +76,11 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 			name: "User",
 			target: User{
 				UserID: "u-1", Username: "alice", Password: "secret",
-				Status: "active", TraceID: "t-1",
+				Status:     "active",
 				UpdateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 				CreateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 			},
-			want: []string{"user_id", "username", "status", "trace_id", "update_time", "create_time"},
+			want: []string{"user_id", "username", "status", "update_time", "create_time"},
 			skip: []string{"password"},
 		},
 		{

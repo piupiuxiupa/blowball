@@ -14,13 +14,13 @@ import (
 // (UUID generated upstream) so the user record is addressable before/after the
 // insert without an extra round trip.
 const createUserSQL = `
-INSERT INTO users (user_id, username, password, status, trace_id)
-VALUES (:user_id, :username, :password, :status, :trace_id)
+INSERT INTO users (user_id, username, password, status)
+VALUES (:user_id, :username, :password, :status)
 `
 
 // getUserByUsernameSQL looks up a single user by its unique username.
 const getUserByUsernameSQL = `
-SELECT user_id, username, password, status, trace_id, update_time, create_time
+SELECT user_id, username, password, status, update_time, create_time
 FROM users
 WHERE username = ?
 LIMIT 1
@@ -28,7 +28,7 @@ LIMIT 1
 
 // getUserByIDSQL looks up a single user by its primary key.
 const getUserByIDSQL = `
-SELECT user_id, username, password, status, trace_id, update_time, create_time
+SELECT user_id, username, password, status, update_time, create_time
 FROM users
 WHERE user_id = ?
 LIMIT 1

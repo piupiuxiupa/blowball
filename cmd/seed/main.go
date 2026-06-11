@@ -29,7 +29,6 @@ import (
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/pkg/trace"
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 )
 
@@ -109,11 +108,9 @@ func run(ctx context.Context, f *flags) error {
 		return fmt.Errorf("bcrypt hashing: %w", err)
 	}
 	userID := uuid.NewString()
-	traceID := trace.New()
 
 	fmt.Fprintf(os.Stderr, "username : %s\n", f.username)
 	fmt.Fprintf(os.Stderr, "user_id  : %s\n", userID)
-	fmt.Fprintf(os.Stderr, "trace_id : %s\n", traceID)
 	fmt.Fprintf(os.Stderr, "status   : %s\n", f.status)
 	fmt.Fprintf(os.Stderr, "bcrypt   : cost=%d len=%d\n", f.cost, len(hash))
 
@@ -149,7 +146,6 @@ func run(ctx context.Context, f *flags) error {
 		Username: f.username,
 		Password: string(hash),
 		Status:   f.status,
-		TraceID:  traceID,
 	}
 	if err := store.CreateUser(ctx, u); err != nil {
 		return fmt.Errorf("inserting user: %w", err)

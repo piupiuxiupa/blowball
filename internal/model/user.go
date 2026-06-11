@@ -17,7 +17,6 @@ type User struct {
 	Username   string    `db:"username"    json:"username"`
 	Password   string    `db:"password"    json:"-"` // bcrypt hash, never serialized
 	Status     string    `db:"status"      json:"status"`
-	TraceID    string    `db:"trace_id"    json:"trace_id"`
 	UpdateTime time.Time `db:"update_time" json:"update_time"`
 	CreateTime time.Time `db:"create_time" json:"create_time"`
 }
