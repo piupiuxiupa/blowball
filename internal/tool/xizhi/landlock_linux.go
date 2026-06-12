@@ -16,7 +16,10 @@ func applyLandlock(dataDir string) error {
 	if dataDir == "" {
 		return fmt.Errorf("landlock: dataDir is empty")
 	}
-	if err := landlock.V2.BestEffort().RestrictPaths(landlock.RWDirs(dataDir)); err != nil {
+	if err := landlock.V2.BestEffort().RestrictPaths(
+		landlock.RODirs("/etc", "/usr", "/bin", "/lib", "/lib64", "/proc"), // allow read-only access to system files
+		landlock.RWDirs(dataDir),
+	); err != nil {
 		return fmt.Errorf("landlock: restrict %q: %w", dataDir, err)
 	}
 	return nil

@@ -4,7 +4,6 @@
 -- Each row is keyed by a UUID user_id and carries a trace_id for observability.
 
 CREATE TABLE IF NOT EXISTS `users` (
-    `id`        BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `user_id`     CHAR(36)     NOT NULL COMMENT 'UUID primary key',
     `username`    VARCHAR(64)  NOT NULL COMMENT 'Unique login name',
     `password`    VARCHAR(255) NOT NULL COMMENT 'bcrypt password hash',
@@ -12,6 +11,5 @@ CREATE TABLE IF NOT EXISTS `users` (
     `update_time` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `create_time` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`user_id`),
-    KEY idx_id (`id`),
     UNIQUE KEY `uk_users_username` (`username`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='blowball user accounts';

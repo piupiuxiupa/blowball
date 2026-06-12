@@ -131,7 +131,7 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	}
 
 	workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")
-
+	ctx = context.WithValue(ctx, "workspace", workspaceRoot)
 	hub := h.newHub()
 	type runResult struct {
 		assistantContent string

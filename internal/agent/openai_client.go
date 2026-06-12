@@ -48,7 +48,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 
 	params := openai.ChatCompletionNewParams{
 		Model:    shared.ChatModel(req.Model),
-		Messages: toOpenAIMessages(req.Messages),
+		Messages: toOpenAIMessages(ctx, req.Messages),
 	}
 	if req.MaxTokens > 0 {
 		params.MaxTokens = openai.Int(int64(req.MaxTokens))
@@ -119,21 +119,23 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 
 // toOpenAIMessages converts our Message slice into the openai-go union
 // message param shape. System / user / assistant / tool are all supported.
-func toOpenAIMessages(msgs []Message) []openai.ChatCompletionMessageParamUnion {
+func toOpenAIMessages(ctx context.Context, msgs []Message) []openai.ChatCompletionMessageParamUnion {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, toOpenAIMessage(m))
+		out = append(out, toOpenAIMessage(ctx, m))
 	}
 	return out
 }
 
-func toOpenAIMessage(m Message) openai.ChatCompletionMessageParamUnion {
+func toOpenAIMessage(ctx context.Context, m Message) openai.ChatCompletionMessageParamUnion {
 	switch m.Role {
 	case "system", "developer":
+		env := AppendSystemPromptEnv(ctx)
+
 		return openai.ChatCompletionMessageParamUnion{
 			OfSystem: &openai.ChatCompletionSystemMessageParam{
 				Content: openai.ChatCompletionSystemMessageParamContentUnion{
-					OfString: openai.String(m.Content),
+					OfString: openai.String(m.Content + env),
 				},
 			},
 		}
