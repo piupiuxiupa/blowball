@@ -213,32 +213,36 @@ func TestParallelAgent_ConfuseDispatchesBothSubAgents(t *testing.T) {
 	assert.NotEmpty(t, liangTokens)
 	mu.Unlock()
 
-	// The persisted assistant message must be the Confuse round-2 summary.
+	// With event-stream storage, every assistant event is persisted. The
+	// assistant summary is reconstructed from Confuse round-2 token events.
 	require.Eventually(t, func() bool {
 		msgs := env.mysqlFake.messagesFor(defaultSessionID)
+		var summaryBuf string
 		for _, m := range msgs {
-			if m.Role == model.RoleAssistant {
-				return m.Content == summary
+			if m.Agent == stream.AgentConfuse && m.EventType == model.EventTypeToken {
+				summaryBuf += m.Content
 			}
 		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond, "assistant content must equal the round-2 summary")
+		return summaryBuf == summary
+	}, 2*time.Second, 10*time.Millisecond, "Confuse round-2 token events must reconstruct the summary")
 
-	// Sanity: three rows persisted total (user, assistant). The user msg
-	// plus the assistant summary — sub-agent messages are NOT persisted (they
-	// run in isolated contexts and feed back as tool results).
+	// Sanity: many rows persisted (user + all assistant events).
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
-	require.Len(t, msgs, 2)
+	require.Greater(t, len(msgs), 2, "expected user message plus multiple assistant events")
 
-	// Both tiers must agree on the assistant content.
+	// The user row must be first and correctly tagged.
+	require.Equal(t, model.AgentUser, msgs[0].Agent)
+	require.Equal(t, model.EventTypeMessage, msgs[0].EventType)
+	require.Equal(t, 0, msgs[0].MsgIndex)
+
+	// RecoverMessages returns the full ordered event stream.
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
-	require.Len(t, recovered, 2)
-	assert.Equal(t, model.RoleUser, recovered[0].Role)
-	assert.Equal(t, model.RoleAssistant, recovered[1].Role)
-	assert.Equal(t, summary, recovered[1].Content)
+	require.GreaterOrEqual(t, len(recovered), 3)
+	assert.Equal(t, model.AgentUser, recovered[0].Agent)
+	assert.Equal(t, model.EventTypeMessage, recovered[0].EventType)
 
-	// FS tier carries the same content.
+	// FS tier carries the same ordered stream.
 	sessionFile := filepath.Join(env.dataDir, defaultUserID, "sessions", defaultSessionID+".json")
 	data, err := os.ReadFile(sessionFile)
 	require.NoError(t, err)
@@ -246,10 +250,11 @@ func TestParallelAgent_ConfuseDispatchesBothSubAgents(t *testing.T) {
 		Messages []json.RawMessage `json:"messages"`
 	}
 	require.NoError(t, json.Unmarshal(data, &doc))
-	require.Len(t, doc.Messages, 2)
-	var assistantFS model.Message
-	require.NoError(t, json.Unmarshal(doc.Messages[1], &assistantFS))
-	assert.Equal(t, summary, assistantFS.Content)
+	require.Greater(t, len(doc.Messages), 2)
+	var firstFS model.Message
+	require.NoError(t, json.Unmarshal(doc.Messages[0], &firstFS))
+	assert.Equal(t, model.AgentUser, firstFS.Agent)
+	assert.Equal(t, model.EventTypeMessage, firstFS.EventType)
 }
 
 // trackingLLMClient wraps an agent.LLMClient, invoking the supplied hooks

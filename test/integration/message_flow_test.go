@@ -21,14 +21,14 @@ import (
 
 // TestMessageFlow_DirectAnswer_PersistsAllTiers exercises the full happy path:
 // a user POSTs a chat message, the orchestrator produces a direct (no tool
-// calls) answer, the SSE response carries the spec event sequence, and both
-// the user and assistant messages are persisted to Redis, FS, and the
+// calls) answer, the SSE response carries the spec event sequence, and the
+// user message plus every assistant event are persisted to Redis, FS, and the
 // in-memory MySQL tier. The done event's Meta.usage must be non-nil.
 //
 // Components on the critical path:
 //   - gin engine + middleware.TraceMiddleware + middleware.AuthMiddleware
 //   - handler.RegisterRoutes + handler.SessionHandler.SendMessage
-//   - service.SessionService (EnsureSession + SaveMessage, three-tier write)
+//   - service.SessionService (EnsureSession + SaveMessage/SaveMessagesBatch, three-tier write)
 //   - service.MessageService (RecoverMessages, Redis hit on the assistant turn)
 //   - real fs.Store, real redis.Store (miniredis), in-memory MySQL fake
 //   - agent.NewOrchestrator + handler.NewOrchestratorAdapter
@@ -102,20 +102,20 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	env.mysqlFake.mu.Unlock()
 	assert.True(t, ok, "session must be persisted to MySQL tier")
 
-	// Wait for both messages (user + assistant) to land in every tier. The
-	// assistant message is saved AFTER the SSE response completes via a
+	// Wait for the user message + assistant event batch to land in every tier.
+	// The assistant batch is saved AFTER the SSE response completes via a
 	// detached context, so we poll.
 	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 2
-	}, 2*time.Second, 10*time.Millisecond, "expected user + assistant message in MySQL tier")
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 5 // 1 user + 4 assistant events
+	}, 2*time.Second, 10*time.Millisecond, "expected user + 4 assistant events in MySQL tier")
 
-	// Redis tier: 2 messages cached under msgs:{session_id}.
+	// Redis tier: 5 messages cached under msgs:{session_id}.
 	require.Eventually(t, func() bool {
 		raws, err := env.redisSvc.GetMessages(context.Background(), defaultSessionID)
-		return err == nil && len(raws) == 2
-	}, 2*time.Second, 10*time.Millisecond, "expected 2 messages cached in Redis")
+		return err == nil && len(raws) == 5
+	}, 2*time.Second, 10*time.Millisecond, "expected 5 messages cached in Redis")
 
-	// FS tier: the session file must contain both messages in order.
+	// FS tier: the session file must contain all messages in order.
 	sessionFile := filepath.Join(env.dataDir, defaultUserID, "sessions", defaultSessionID+".json")
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(sessionFile)
@@ -130,27 +130,79 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 		Messages  []json.RawMessage `json:"messages"`
 	}
 	require.NoError(t, json.Unmarshal(data, &doc))
-	require.Len(t, doc.Messages, 2, "FS session file must contain user + assistant messages")
+	require.Len(t, doc.Messages, 5, "FS session file must contain user + 4 assistant events")
 
 	var first model.Message
 	require.NoError(t, json.Unmarshal(doc.Messages[0], &first))
 	assert.Equal(t, model.RoleUser, first.Role)
+	assert.Equal(t, model.AgentUser, first.Agent)
+	assert.Equal(t, model.EventTypeMessage, first.EventType)
+	assert.Equal(t, 0, first.MsgIndex)
 	assert.Equal(t, "hello", first.Content)
-	assert.Equal(t, model.AgentConfuse, first.Agent)
 
-	var second model.Message
-	require.NoError(t, json.Unmarshal(doc.Messages[1], &second))
-	assert.Equal(t, model.RoleAssistant, second.Role)
-	assert.Equal(t, "Hello, world!", second.Content)
-	assert.Equal(t, model.AgentConfuse, second.Agent)
+	// Assistant events follow in order: agent_start, token, token, agent_end.
+	wantEvents := []struct {
+		EventType string
+		Agent     string
+		Role      string
+	}{
+		{model.EventTypeAgentStart, stream.AgentConfuse, ""},
+		{model.EventTypeToken, stream.AgentConfuse, model.RoleAssistant},
+		{model.EventTypeToken, stream.AgentConfuse, model.RoleAssistant},
+		{model.EventTypeAgentEnd, stream.AgentConfuse, ""},
+	}
+	for i, want := range wantEvents {
+		var m model.Message
+		require.NoError(t, json.Unmarshal(doc.Messages[i+1], &m))
+		assert.Equal(t, want.EventType, m.EventType, "assistant event %d", i)
+		assert.Equal(t, want.Agent, m.Agent, "assistant event %d", i)
+		assert.Equal(t, want.Role, m.Role, "assistant event %d", i)
+		assert.Equal(t, i+1, m.MsgIndex, "assistant event %d", i)
+	}
 
-	// RecoverMessages through the public service API must return the same two
-	// messages (Redis hit fast-path).
+	// RecoverMessages through the public service API must return the same
+	// ordered stream (Redis hit fast-path).
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
-	require.Len(t, recovered, 2)
+	require.Len(t, recovered, 5)
 	assert.Equal(t, "hello", recovered[0].Content)
-	assert.Equal(t, "Hello, world!", recovered[1].Content)
+	assert.Equal(t, model.EventTypeAgentStart, recovered[1].EventType)
+	assert.Equal(t, model.EventTypeAgentEnd, recovered[4].EventType)
+}
+
+// TestMessageFlow_OrchestratorFailure_PersistsOnlyUserMessage verifies that
+// when the orchestrator returns an error, only the user message survives in
+// MySQL and no assistant event rows are written.
+func TestMessageFlow_OrchestratorFailure_PersistsOnlyUserMessage(t *testing.T) {
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{
+			tokens:       []string{"Hello"},
+			content:      "Hello",
+			finishReason: "stop",
+			usage:        agent.Usage{TotalTokens: 1},
+			err:          assert.AnError,
+		},
+	)
+	env := newTestEnv(t, llm)
+
+	token := authToken(t, defaultUserID)
+	w := env.postMessage(`{"content":"hello"}`, token)
+
+	// The handler returns 200 because the SSE stream starts before the error
+	// is observed; the stream simply terminates early.
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Only the user message should be persisted.
+	require.Eventually(t, func() bool {
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 1
+	}, 2*time.Second, 10*time.Millisecond, "expected exactly one user message in MySQL tier")
+
+	msgs := env.mysqlFake.messagesFor(defaultSessionID)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, model.AgentUser, msgs[0].Agent)
+	assert.Equal(t, model.EventTypeMessage, msgs[0].EventType)
+	assert.Equal(t, model.RoleUser, msgs[0].Role)
+	assert.Equal(t, 0, msgs[0].MsgIndex)
 }
 
 // TestMessageFlow_Unauthenticated_401 verifies that the real AuthMiddleware is

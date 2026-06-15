@@ -41,6 +41,11 @@ type fakeMySQLStore struct {
 	appendMessageID    int64
 	appendMessageErr   error
 
+	appendMessagesCalls int
+	appendMessagesArg   []model.Message
+	appendMessagesIDs   []int64
+	appendMessagesErr   error
+
 	listMessagesRows []model.Message
 	listMessagesErr  error
 }
@@ -111,6 +116,17 @@ func (f *fakeMySQLStore) AppendMessage(_ context.Context, m model.Message) (int6
 	return f.appendMessageID, nil
 }
 
+func (f *fakeMySQLStore) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appendMessagesCalls++
+	f.appendMessagesArg = msgs
+	if f.appendMessagesErr != nil {
+		return nil, f.appendMessagesErr
+	}
+	return f.appendMessagesIDs, nil
+}
+
 func (f *fakeMySQLStore) ListMessages(_ context.Context, sessionID string) ([]model.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -126,9 +142,13 @@ func (f *fakeMySQLStore) ListMessages(_ context.Context, sessionID string) ([]mo
 type fakeRedisStore struct {
 	mu sync.Mutex
 
-	appendCalls int
-	appendArg   []byte
-	appendErr   error
+	appendCalls  int
+	appendArg    []byte
+	appendErr    error
+
+	appendMessagesCalls int
+	appendMessagesArgs  [][]byte
+	appendMessagesErr   error
 
 	getCalls  int
 	getResult [][]byte
@@ -145,6 +165,17 @@ func (f *fakeRedisStore) AppendMessage(_ context.Context, sessionID string, raw 
 	f.appendCalls++
 	f.appendArg = append([]byte(nil), raw...)
 	return f.appendErr
+}
+
+func (f *fakeRedisStore) AppendMessages(_ context.Context, sessionID string, raws [][]byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appendMessagesCalls++
+	f.appendMessagesArgs = make([][]byte, len(raws))
+	for i, b := range raws {
+		f.appendMessagesArgs[i] = append([]byte(nil), b...)
+	}
+	return f.appendMessagesErr
 }
 
 func (f *fakeRedisStore) GetMessages(_ context.Context, sessionID string) ([][]byte, error) {
@@ -262,9 +293,10 @@ func sampleMessage(sessionID, content string) model.Message {
 		ID:        1,
 		SessionID: sessionID,
 		MsgTime:   time.Unix(1_700_000_000, 0).UTC(),
-		Agent:     model.AgentConfuse,
+		Agent:     model.AgentUser,
 		MsgIndex:  0,
 		Role:      model.RoleUser,
+		EventType: model.EventTypeMessage,
 		Content:   content,
 		TraceID:   "trace-1",
 	}

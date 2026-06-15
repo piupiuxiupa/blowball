@@ -20,6 +20,27 @@ func (s *Store) AppendMessage(ctx context.Context, sessionID string, raw []byte)
 	return err
 }
 
+// AppendMessages appends multiple serialised messages (raws) to the cached
+// message list for sessionID in a single transactional pipeline. The key's TTL
+// is refreshed. An empty raws slice is a no-op.
+func (s *Store) AppendMessages(ctx context.Context, sessionID string, raws [][]byte) error {
+	if len(raws) == 0 {
+		return nil
+	}
+	key := messagesKey(sessionID)
+	logCmd(ctx, "msgs.append_batch", key)
+
+	pipe := s.client.TxPipeline()
+	members := make([]any, len(raws))
+	for i := range raws {
+		members[i] = raws[i]
+	}
+	pipe.RPush(ctx, key, members...)
+	pipe.Expire(ctx, key, s.ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 // GetMessages returns the cached message list for sessionID in insertion order
 // (LRANGE 0 -1). An empty slice is returned when the list does not exist or is
 // empty — both manifest as a zero-length result from LRANGE.

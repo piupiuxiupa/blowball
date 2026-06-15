@@ -24,6 +24,7 @@ type MySQLStore interface {
 	UpsertTitle(ctx context.Context, t model.Title) error
 	GetTitle(ctx context.Context, sessionID string) (*model.Title, error)
 	AppendMessage(ctx context.Context, m model.Message) (int64, error)
+	AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error)
 	ListMessages(ctx context.Context, sessionID string) ([]model.Message, error)
 }
 
@@ -31,6 +32,7 @@ type MySQLStore interface {
 // MessageService call. It is satisfied by *redis.Store.
 type RedisStore interface {
 	AppendMessage(ctx context.Context, sessionID string, raw []byte) error
+	AppendMessages(ctx context.Context, sessionID string, raws [][]byte) error
 	GetMessages(ctx context.Context, sessionID string) ([][]byte, error)
 	SetMessages(ctx context.Context, sessionID string, raws [][]byte) error
 }

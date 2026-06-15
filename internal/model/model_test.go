@@ -25,13 +25,13 @@ var expectedDBTags = map[string][]string{
 	},
 	"Message": {
 		"id", "session_id", "msg_time", "agent", "msg_index",
-		"role", "content", "trace_id", "update_time",
+		"role", "event_type", "content", "trace_id", "update_time",
 	},
 }
 
 // structTypes returns the model structs covered by the test.
-func structTypes() map[string]interface{} {
-	return map[string]interface{}{
+func structTypes() map[string]any {
+	return map[string]any{
 		"User":    User{},
 		"Session": Session{},
 		"Title":   Title{},
@@ -68,7 +68,7 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 	// key set and, importantly, that User.Password is never emitted.
 	cases := []struct {
 		name   string
-		target interface{}
+		target any
 		want   []string
 		skip   []string // keys that must NOT appear
 	}{
@@ -105,12 +105,13 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 			name: "Message",
 			target: Message{
 				ID: 42, SessionID: "s-1", Agent: AgentConfuse,
-				MsgIndex: 3, Role: RoleUser, Content: "hi", TraceID: "t-1",
+				MsgIndex: 3, Role: RoleUser, EventType: EventTypeMessage,
+				Content: "hi", TraceID: "t-1",
 				MsgTime:    time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 				UpdateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 			},
 			want: []string{"id", "session_id", "msg_time", "agent", "msg_index",
-				"role", "content", "trace_id", "update_time"},
+				"role", "event_type", "content", "trace_id", "update_time"},
 		},
 	}
 
@@ -145,10 +146,19 @@ func TestConstants_RolesAndAgents(t *testing.T) {
 			t.Fatal("role constant must be non-empty")
 		}
 	}
-	agents := []string{AgentConfuse, AgentChongzhi, AgentLiang}
+	agents := []string{AgentUser, AgentConfuse, AgentChongzhi, AgentLiang}
 	for _, a := range agents {
 		if a == "" {
 			t.Fatal("agent constant must be non-empty")
+		}
+	}
+	eventTypes := []string{
+		EventTypeMessage, EventTypeToken, EventTypeToolCall,
+		EventTypeAgentStart, EventTypeAgentEnd, EventTypeAgentError,
+	}
+	for _, e := range eventTypes {
+		if e == "" {
+			t.Fatal("event type constant must be non-empty")
 		}
 	}
 }

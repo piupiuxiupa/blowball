@@ -124,39 +124,60 @@ func (s *SessionService) ListSessions(ctx context.Context, userID string) ([]Ses
 // file's messages[] array, and MySQL (via AppendMessage, which re-serializes
 // through named params).
 func (s *SessionService) SaveMessage(ctx context.Context, userID string, msg model.Message) error {
+	return s.SaveMessagesBatch(ctx, userID, []model.Message{msg})
+}
+
+// SaveMessagesBatch persists msgs across all three storage tiers in batch form.
+// It follows the same best-effort/error policies as SaveMessage:
+//   - Redis: best-effort, logged and ignored on failure.
+//   - FS: synchronous; an error is returned because a corrupted session file
+//     would break recovery.
+//   - MySQL: synchronous attempt; failures are logged and NOT returned so the
+//     streaming response path is never blocked by a database hiccup.
+//
+// All messages are first canonicalised into raw JSON, then pushed to Redis in
+// one RPUSH, appended to the session file in one read-modify-write, and finally
+// inserted into MySQL with a single multi-value INSERT.
+func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, msgs []model.Message) error {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
-		zap.String("op", "session.save_message"),
-		zap.String("session_id", msg.SessionID),
+		zap.String("op", "session.save_messages_batch"),
 		zap.String("user_id", userID),
 	)
 	if tid != "" {
 		log = log.With(zap.String("trace_id", tid))
 	}
+	if len(msgs) == 0 {
+		return nil
+	}
 
-	raw, err := json.Marshal(msg)
-	if err != nil {
-		log.Error("marshal message failed", zap.Error(err))
-		return fmt.Errorf("session.save_message: marshal: %w", err)
+	raws := make([][]byte, 0, len(msgs))
+	for i := range msgs {
+		raw, err := json.Marshal(msgs[i])
+		if err != nil {
+			log.Error("marshal message failed", zap.Int("index", i), zap.Error(err))
+			return fmt.Errorf("session.save_messages_batch: marshal: %w", err)
+		}
+		raws = append(raws, raw)
 	}
 
 	// 1) Redis hot tier. Best-effort per spec: log + continue on failure.
-	if err := s.redis.AppendMessage(ctx, msg.SessionID, raw); err != nil {
-		log.Warn("redis append failed; continuing with FS and MySQL", zap.Error(err))
+	if err := s.redis.AppendMessages(ctx, msgs[0].SessionID, raws); err != nil {
+		log.Warn("redis append batch failed; continuing with FS and MySQL", zap.Error(err))
 	}
 
 	// 2) FS warm tier. Read-modify-write so the session file accumulates every
 	// message in order. A miss (new session) starts a fresh document.
-	if err := s.appendToFS(ctx, userID, msg.SessionID, raw); err != nil {
+	if err := s.appendToFS(ctx, userID, msgs[0].SessionID, raws); err != nil {
 		log.Error("fs append failed", zap.Error(err))
-		return fmt.Errorf("session.save_message: fs: %w", err)
+		return fmt.Errorf("session.save_messages_batch: fs: %w", err)
 	}
 
 	// 3) MySQL durable tier. Synchronous per current decision; logged but NOT
 	// returned so the SSE response path is never blocked by a DB hiccup. The
-	// file layer above still holds the message for the next RecoverMessages.
-	if _, err := s.mysql.AppendMessage(ctx, msg); err != nil {
-		log.Error("mysql append failed; message held in FS only", zap.Error(err))
+	// file layer above still holds the messages for the next RecoverMessages.
+	if _, err := s.mysql.AppendMessages(ctx, msgs); err != nil {
+		log.Error("mysql append batch failed; messages held in FS only", zap.Error(err))
 	}
 
 	return nil
@@ -170,9 +191,9 @@ type sessionFile struct {
 }
 
 // appendToFS reads the existing session file (or starts fresh), appends the new
-// raw message JSON, and writes it back. A nil file (new session) yields a
-// document with a single-element messages array.
-func (s *SessionService) appendToFS(ctx context.Context, userID, sessionID string, raw []byte) error {
+// raw message JSON blobs, and writes it back. A nil file (new session) yields a
+// document whose messages array contains all supplied raws in order.
+func (s *SessionService) appendToFS(ctx context.Context, userID, sessionID string, raws [][]byte) error {
 	existing, err := s.fs.ReadSession(ctx, userID, sessionID)
 	if err != nil {
 		return fmt.Errorf("read session file: %w", err)
@@ -187,7 +208,9 @@ func (s *SessionService) appendToFS(ctx context.Context, userID, sessionID strin
 	if doc.SessionID == "" {
 		doc.SessionID = sessionID
 	}
-	doc.Messages = append(doc.Messages, json.RawMessage(raw))
+	for _, raw := range raws {
+		doc.Messages = append(doc.Messages, json.RawMessage(raw))
+	}
 
 	out, err := json.Marshal(doc)
 	if err != nil {

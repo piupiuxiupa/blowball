@@ -207,6 +207,20 @@ func (m *memoryMySQL) AppendMessage(_ context.Context, msg model.Message) (int64
 	return msg.ID, nil
 }
 
+func (m *memoryMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]int64, 0, len(msgs))
+	for i := range msgs {
+		m.nextID++
+		msgs[i].ID = m.nextID
+		msgs[i].UpdateTime = time.Now().UTC()
+		m.messages[msgs[i].SessionID] = append(m.messages[msgs[i].SessionID], msgs[i])
+		ids = append(ids, msgs[i].ID)
+	}
+	return ids, nil
+}
+
 func (m *memoryMySQL) ListMessages(_ context.Context, sessionID string) ([]model.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -384,17 +398,16 @@ func parseSSEBody(t *testing.T, body string) ([]string, []map[string]any) {
 	if body == "" {
 		return nil, nil
 	}
-	blocks := strings.Split(body, "\n\n")
-	types := make([]string, 0, len(blocks))
-	payloads := make([]map[string]any, 0, len(blocks))
-	for _, b := range blocks {
+	types := make([]string, 0)
+	payloads := make([]map[string]any, 0)
+	for b := range strings.SplitSeq(body, "\n\n") {
 		b = strings.TrimSpace(b)
 		if b == "" {
 			continue
 		}
 		var eventType string
 		var dataLine string
-		for _, line := range strings.Split(b, "\n") {
+		for line := range strings.SplitSeq(b, "\n") {
 			switch {
 			case strings.HasPrefix(line, "event: "):
 				eventType = strings.TrimPrefix(line, "event: ")

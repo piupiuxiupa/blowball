@@ -1,50 +1,27 @@
-# session-management Specification
+## MODIFIED Requirements
 
-## Purpose
+### Requirement: Message data model
+每条消息 SHALL 包含 session_id、msg_time、agent、msg_index、role、event_type、content、trace_id。`event_type` 标识消息的语义类别，`agent` 标识消息的产生方（用户消息填 `'user'`，assistant 事件填产生该事件的 agent 名）。
 
-定义会话管理能力，包括按需创建会话、SSE 流式响应、会话列表、自动标题生成、三层消息存储（Redis → 文件 → MySQL）、消息恢复降级策略以及消息数据模型。
+#### Scenario: Message record structure
+- **WHEN** 消息写入 MySQL
+- **THEN** messages 表包含字段：id (BIGINT AUTO_INCREMENT)、session_id (CHAR 36)、msg_time (TIMESTAMP(3) 毫秒精度)、agent (VARCHAR 32, 用户消息填 `'user'`)、msg_index (INT)、role (VARCHAR 16, 可为 NULL)、event_type (VARCHAR 16)、content (MEDIUMTEXT)、trace_id (CHAR 36)、update_time (TIMESTAMP)
 
-## Requirements
+#### Scenario: event_type values
+- **WHEN** 系统向 messages 表写入一行
+- **THEN** event_type 取值为下列之一：`message`（用户完整消息）、`token`（assistant 内容增量）、`tool_call`（assistant 发起的工具调用）、`agent_start`（agent 开始执行）、`agent_end`（agent 正常结束）、`agent_error`（agent 报错）
 
-### Requirement: Create session
-系统 SHALL 在用户首次发送消息时根据请求中携带的 session_id 自动创建会话，session_id由客户端生成（UUID v4）。
+#### Scenario: role column nullable for marker events
+- **WHEN** 写入 event_type 为 `agent_start`、`agent_end` 的 marker 行
+- **THEN** role 列 SHALL 为 NULL
 
-#### Scenario: Auto create on first message
-- **WHEN** 用户发送 POST /api/v1/sessions/:session_id/messages，session_id 为新 UUID
-- **THEN** 系统创建新会话记录，关联 user_id 和 session_id
+#### Scenario: msg_index per-turn semantics
+- **WHEN** 用户发送一条消息触发一次 turn
+- **THEN** 用户消息行的 msg_index SHALL 为 0；同一 turn 内 assistant 事件的 msg_index SHALL 从 1 严格单调递增；下一个 turn 的用户消息 msg_index 重新从 0 开始
 
-### Requirement: Send message and stream response
-系统 SHALL 接受用户消息并通过 SSE 流式返回 Agent 响应。
-
-#### Scenario: Successful message streaming
-- **WHEN** 用户发送 POST /api/v1/sessions/:session_id/messages，body 包含 {"content": "..."}
-- **THEN** 系统返回 Content-Type: text/event-stream，逐个推送 StreamEvent
-
-#### Scenario: SSE event format
-- **WHEN** 系统推送流式事件
-- **THEN** 每个 SSE 事件格式为 "event: <type>\ndata: <json>\n\n"，type 为 agent_start | token | tool_call | agent_end | agent_error | done
-
-### Requirement: Session list
-系统 SHALL 返回当前用户的会话列表，包含 session_id 和标题。
-
-#### Scenario: List sessions
-- **WHEN** 用户发送 GET /api/v1/sessions
-- **THEN** 系统返回 HTTP 200，body 为会话数组，每项包含 session_id 和 title，按 update_time 降序排列
-
-#### Scenario: Empty session list
-- **WHEN** 用户没有任何会话
-- **THEN** 系统返回 HTTP 200，body 为空数组 []
-
-### Requirement: Auto generate session title
-系统 SHALL 在用户首条消息发出后，异步调用 OpenAI 根据用户提问和 Agent 回答生成简短标题。
-
-#### Scenario: Title generated after first exchange
-- **WHEN** 用户在新会话中发送首条消息并收到完整回复
-- **THEN** 系统异步调用 OpenAI，生成不超过 20 字的简短标题，写入 titles 表
-
-#### Scenario: Title generation failure
-- **WHEN** 标题生成调用 OpenAI 失败
-- **THEN** 系统使用用户消息前 20 字符作为默认标题，记录警告日志
+#### Scenario: User message agent value
+- **WHEN** 写入用户消息行
+- **THEN** agent 列 SHALL 填 `'user'`，event_type SHALL 填 `'message'`，role SHALL 填 `'user'`
 
 ### Requirement: Three-layer message storage
 消息 SHALL 按顺序写入三层存储：Redis 缓存 → 用户目录文件 → MySQL。用户消息走单条同步写入；assistant 一轮产生的所有事件仅在 orchestrator 成功完成后通过 goroutine 批量写入三层存储。
@@ -88,28 +65,7 @@
 - **WHEN** 系统恢复一个已存在的会话历史
 - **THEN** 返回的 message 序列 SHALL 包含每个 turn 的用户消息以及 assistant 在该 turn 内产生的所有事件（token / tool_call / agent_start / agent_end / agent_error），按产生顺序排列
 
-### Requirement: Message data model
-每条消息 SHALL 包含 session_id、msg_time、agent、msg_index、role、event_type、content、trace_id。`event_type` 标识消息的语义类别，`agent` 标识消息的产生方（用户消息填 `'user'`，assistant 事件填产生该事件的 agent 名）。
-
-#### Scenario: Message record structure
-- **WHEN** 消息写入 MySQL
-- **THEN** messages 表包含字段：id (BIGINT AUTO_INCREMENT)、session_id (CHAR 36)、msg_time (TIMESTAMP(3) 毫秒精度)、agent (VARCHAR 32, 用户消息填 `'user'`)、msg_index (INT)、role (VARCHAR 16, 可为 NULL)、event_type (VARCHAR 16)、content (MEDIUMTEXT)、trace_id (CHAR 36)、update_time (TIMESTAMP)
-
-#### Scenario: event_type values
-- **WHEN** 系统向 messages 表写入一行
-- **THEN** event_type 取值为下列之一：`message`（用户完整消息）、`token`（assistant 内容增量）、`tool_call`（assistant 发起的工具调用）、`agent_start`（agent 开始执行）、`agent_end`（agent 正常结束）、`agent_error`（agent 报错）
-
-#### Scenario: role column nullable for marker events
-- **WHEN** 写入 event_type 为 `agent_start`、`agent_end` 的 marker 行
-- **THEN** role 列 SHALL 为 NULL
-
-#### Scenario: msg_index per-turn semantics
-- **WHEN** 用户发送一条消息触发一次 turn
-- **THEN** 用户消息行的 msg_index SHALL 为 0；同一 turn 内 assistant 事件的 msg_index SHALL 从 1 严格单调递增；下一个 turn 的用户消息 msg_index 重新从 0 开始
-
-#### Scenario: User message agent value
-- **WHEN** 写入用户消息行
-- **THEN** agent 列 SHALL 填 `'user'`，event_type SHALL 填 `'message'`，role SHALL 填 `'user'`
+## ADDED Requirements
 
 ### Requirement: Assistant event stream collection
 系统 SHALL 在 orchestrator 执行期间收集其产生的所有 StreamEvent 到内存，作为该 turn 的待入库事件流；该事件流不经过任何拼接或内容合并，保持模型原始输出形态。

@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 
@@ -10,19 +12,27 @@ import (
 
 // appendMessageSQL inserts a new message row. id is AUTO_INCREMENT and is
 // returned to the caller via AppendMessage. msg_index is supplied by the
-// service layer which tracks the per-session counter.
+// service layer which tracks the per-turn counter.
 const appendMessageSQL = `
-INSERT INTO messages (session_id, msg_time, agent, msg_index, role, content, trace_id)
-VALUES (:session_id, :msg_time, :agent, :msg_index, :role, :content, :trace_id)
+INSERT INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id)
+VALUES (:session_id, :msg_time, :agent, :msg_index, :role, :event_type, :content, :trace_id)
 `
 
-// listMessagesSQL returns every message for sessionID in msg_index order. The
-// covering index idx_messages_session_index makes this a single index walk.
+// appendMessagesSQL inserts multiple message rows in a single statement. The
+// VALUES clause is expanded at runtime by AppendMessages.
+const appendMessagesSQL = `
+INSERT INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id)
+VALUES %s
+`
+
+// listMessagesSQL returns every message for sessionID in (msg_time, msg_index)
+// order. The covering index idx_messages_session_time makes the leading
+// msg_time sort efficient; msg_index resolves ties within a single batch.
 const listMessagesSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, content, trace_id, update_time
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time
 FROM messages
 WHERE session_id = ?
-ORDER BY msg_index ASC
+ORDER BY msg_time ASC, msg_index ASC
 `
 
 // AppendMessage inserts m into the messages table and returns the
@@ -41,8 +51,55 @@ func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, erro
 	return id, nil
 }
 
-// ListMessages returns every message for sessionID in msg_index order, or an
-// empty (non-nil) slice when the session has no messages.
+// AppendMessages inserts msgs in a single multi-value INSERT and returns the
+// auto-incremented ids assigned by MySQL, in the same order as msgs.
+func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error) {
+	if len(msgs) == 0 {
+		return []int64{}, nil
+	}
+
+	placeholders := make([]string, 0, len(msgs))
+	args := make([]any, 0, len(msgs)*8)
+	for _, m := range msgs {
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			m.SessionID,
+			m.MsgTime,
+			m.Agent,
+			m.MsgIndex,
+			m.Role,
+			m.EventType,
+			m.Content,
+			m.TraceID,
+		)
+	}
+
+	query := fmt.Sprintf(appendMessagesSQL, strings.Join(placeholders, ", "))
+	logQuery(ctx, "message.append_batch", query)
+
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	firstID, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make([]int64, 0, affected)
+	for i := range affected {
+		ids = append(ids, firstID+i)
+	}
+	return ids, nil
+}
+
+// ListMessages returns every message for sessionID in (msg_time, msg_index)
+// order, or an empty (non-nil) slice when the session has no messages.
 func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Message, error) {
 	logQuery(ctx, "message.list", listMessagesSQL, sessionID)
 

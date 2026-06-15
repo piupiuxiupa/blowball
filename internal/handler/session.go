@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -116,8 +117,10 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	userMsg := model.Message{
 		SessionID: sessionID,
 		MsgTime:   time.Now().UTC(),
-		Agent:     model.AgentConfuse,
+		Agent:     model.AgentUser,
+		MsgIndex:  0,
 		Role:      model.RoleUser,
+		EventType: model.EventTypeMessage,
 		Content:   req.Content,
 		TraceID:   tid,
 	}
@@ -134,8 +137,8 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	ctx = context.WithValue(ctx, "workspace", workspaceRoot)
 	hub := h.newHub()
 	type runResult struct {
-		assistantContent string
-		err              error
+		events []stream.StreamEvent
+		err    error
 	}
 	resultCh := make(chan runResult, 1)
 
@@ -144,8 +147,8 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 		// cancels the agent loop. We close the hub when Handle returns so the
 		// SSE writer drains remaining events and exits cleanly.
 		defer hub.Close()
-		content, err := h.orch.Handle(ctx, workspaceRoot, req.Content, hub)
-		resultCh <- runResult{assistantContent: content, err: err}
+		events, err := h.orch.Handle(ctx, workspaceRoot, req.Content, hub)
+		resultCh <- runResult{events: events, err: err}
 	}()
 
 	// writeSSE returns when the hub is closed (orchestrator finished) or the
@@ -161,34 +164,68 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	// Persist the assistant reply using a detached context so a client
 	// disconnect mid-stream (which cancels the request ctx) does NOT lose the
 	// saved message. We always wait for the orchestrator to finish so the
-	// content is complete.
+	// event stream is complete.
 	res := <-resultCh
-	if res.err != nil && errors.Is(res.err, context.Canceled) && res.assistantContent == "" {
-		// Client disconnect before the agent produced anything meaningful;
-		// nothing worth persisting as assistant content. The user message is
-		// already saved above.
+	if res.err != nil {
+		// On failure, drop the collected assistant events. The user message is
+		// already saved above; persisting a partial or error event stream would
+		// pollute the history. The one exception is a cancellation that happened
+		// before the agent produced anything, which is already handled by
+		// returning early.
+		if errors.Is(res.err, context.Canceled) {
+			return
+		}
 		return
 	}
 
+	// Success path: persist the full event stream asynchronously. The response
+	// has already been sent; there is no need to block the HTTP handler on
+	// three-layer storage.
 	saveCtx := trace.WithContext(context.Background(), tid)
-	assistantMsg := model.Message{
-		SessionID: sessionID,
-		MsgTime:   time.Now().UTC(),
-		Agent:     model.AgentConfuse,
-		Role:      model.RoleAssistant,
-		Content:   res.assistantContent,
-		TraceID:   tid,
-	}
-	if err := h.sessSvc.SaveMessage(saveCtx, userID, assistantMsg); err != nil {
-		logger.L().Error("save assistant message failed",
-			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
-			zap.Error(err))
-	}
+	go func(events []stream.StreamEvent) {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.L().Error("panic saving assistant event stream",
+					zap.String("op", "handler.send_message"),
+					zap.String("session_id", sessionID),
+					zap.Any("recover", r))
+			}
+		}()
+
+		now := time.Now().UTC()
+		msgs := make([]model.Message, 0, len(events))
+		for i, e := range events {
+			msg, mErr := MessageFromEvent(e, sessionID, tid, i+1, now)
+			if mErr != nil {
+				logger.L().Error("map event to message failed",
+					zap.String("op", "handler.send_message"),
+					zap.String("session_id", sessionID),
+					zap.Error(mErr))
+				return
+			}
+			msgs = append(msgs, msg)
+		}
+
+		if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
+			logger.L().Error("save assistant event stream failed",
+				zap.String("op", "handler.send_message"),
+				zap.String("session_id", sessionID),
+				zap.Error(err))
+		}
+	}(res.events)
 
 	if isFirstTurn && h.titleSvc != nil {
+		// Title generation still needs a single assistant content string. We
+		// derive it from the token events emitted by Confuse so the title
+		// service contract remains unchanged.
+		var assistantContent strings.Builder
+		for _, e := range res.events {
+			if e.Type == stream.EventToken && e.Agent == stream.AgentConfuse {
+				assistantContent.WriteString(e.Content)
+			}
+		}
 		// Fire-and-forget; TitleService.GenerateTitle has its own recover().
-		go h.titleSvc.GenerateTitle(saveCtx, sessionID, req.Content, res.assistantContent)
+		go h.titleSvc.GenerateTitle(saveCtx, sessionID, req.Content, assistantContent.String())
 	}
 }
 

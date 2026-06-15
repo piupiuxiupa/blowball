@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,19 +23,18 @@ import (
 
 // stubOrchestrator is a canned OrchestratorRunner for handler tests. It writes
 // the configured events to the hub, optionally sleeps to simulate work, then
-// returns the canned assistant content + error. The recorded call args let
-// tests assert the handler wired the orchestrator correctly.
+// returns the same events + error. The recorded call args let tests assert the
+// handler wired the orchestrator correctly.
 type stubOrchestrator struct {
-	mu             sync.Mutex
-	gotWorkspace   string
-	gotMessage     string
-	eventsToEmit   []stream.StreamEvent
-	assistantReply string
-	returnErr      error
-	preCloseSleep  time.Duration
+	mu            sync.Mutex
+	gotWorkspace  string
+	gotMessage    string
+	eventsToEmit  []stream.StreamEvent
+	returnErr     error
+	preCloseSleep time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userMessage string, hub *stream.Hub) (string, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
 	s.gotMessage = userMessage
@@ -51,33 +51,44 @@ func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userMessag
 		case <-ctx.Done():
 		}
 	}
-	return s.assistantReply, s.returnErr
+	// Mimic the production adapter contract: done is forwarded to the hub for
+	// the SSE wire but is not part of the persisted event stream.
+	var out []stream.StreamEvent
+	for _, e := range s.eventsToEmit {
+		if e.Type != stream.EventDone {
+			out = append(out, e)
+		}
+	}
+	return out, s.returnErr
 }
 
 // msgRecorder is a handler-package-local fake MySQLStore/FSStore/RedisStore
 // combo for driving *service.SessionService through the real persistence path.
-// It captures the messages handed to SaveMessage so handler tests can assert
-// on them.
+// It captures the messages handed to SaveMessage / SaveMessagesBatch so handler
+// tests can assert on them.
 //
 // We reuse the existing service-package fakeMySQLStore etc. by exposing them
 // through a tiny set of in-handler-package types — but those are private, so
 // we re-declare minimal fakes here that satisfy service.MySQLStore /
 // service.RedisStore / service.FSStore.
 type handlerFakeMySQL struct {
-	mu                  sync.Mutex
-	createSessionCalls  int
-	createSessionErr    error
-	getSessionByIDFound *model.Session
-	getSessionIDErr     error
-	listSessionsRows    []mysqlstore.SessionWithTitle
-	listSessionsErr     error
-	upsertTitleCalls    int
-	upsertTitleArg      model.Title
-	appendMessageCalls  int
-	appendMessageArg    model.Message
-	appendMessageErr    error
-	listMessagesRows    []model.Message
-	listMessagesErr     error
+	mu                   sync.Mutex
+	createSessionCalls   int
+	createSessionErr     error
+	getSessionByIDFound  *model.Session
+	getSessionIDErr      error
+	listSessionsRows     []mysqlstore.SessionWithTitle
+	listSessionsErr      error
+	upsertTitleCalls     int
+	upsertTitleArg       model.Title
+	appendMessageCalls   int
+	appendMessageArg     model.Message
+	appendMessageErr     error
+	appendMessagesCalls  int
+	appendMessagesArg    []model.Message
+	appendMessagesErr    error
+	listMessagesRows     []model.Message
+	listMessagesErr      error
 }
 
 func (m *handlerFakeMySQL) CreateSession(_ context.Context, sess model.Session) error {
@@ -129,6 +140,21 @@ func (m *handlerFakeMySQL) AppendMessage(_ context.Context, msg model.Message) (
 	}
 	return int64(m.appendMessageCalls), nil
 }
+func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appendMessagesCalls++
+	m.appendMessagesArg = msgs
+	if m.appendMessagesErr != nil {
+		return nil, m.appendMessagesErr
+	}
+	ids := make([]int64, len(msgs))
+	for i := range msgs {
+		m.appendMessageCalls++
+		ids[i] = int64(m.appendMessageCalls)
+	}
+	return ids, nil
+}
 func (m *handlerFakeMySQL) ListMessages(_ context.Context, _ string) ([]model.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -141,14 +167,17 @@ func (m *handlerFakeMySQL) ListMessages(_ context.Context, _ string) ([]model.Me
 }
 
 type handlerFakeRedis struct {
-	mu          sync.Mutex
-	appendCalls int
-	appendErr   error
-	getCalls    int
-	getResult   [][]byte
-	getErr      error
-	setCalls    int
-	setErr      error
+	mu                  sync.Mutex
+	appendCalls         int
+	appendErr           error
+	appendMessagesCalls int
+	appendMessagesArgs  [][]byte
+	appendMessagesErr   error
+	getCalls            int
+	getResult           [][]byte
+	getErr              error
+	setCalls            int
+	setErr              error
 }
 
 func (r *handlerFakeRedis) AppendMessage(_ context.Context, _ string, _ []byte) error {
@@ -156,6 +185,16 @@ func (r *handlerFakeRedis) AppendMessage(_ context.Context, _ string, _ []byte) 
 	defer r.mu.Unlock()
 	r.appendCalls++
 	return r.appendErr
+}
+func (r *handlerFakeRedis) AppendMessages(_ context.Context, _ string, raws [][]byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.appendMessagesCalls++
+	r.appendMessagesArgs = make([][]byte, len(raws))
+	for i, b := range raws {
+		r.appendMessagesArgs[i] = append([]byte(nil), b...)
+	}
+	return r.appendMessagesErr
 }
 func (r *handlerFakeRedis) GetMessages(_ context.Context, _ string) ([][]byte, error) {
 	r.mu.Lock()
@@ -224,7 +263,6 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 				stream.TokenEvent(stream.AgentConfuse, "Hello"),
 				stream.AgentEndEvent(stream.AgentConfuse),
 			},
-			assistantReply: "Hello",
 		}
 	}
 	mysql := &handlerFakeMySQL{}
@@ -246,13 +284,13 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	return &sessionHandlerTestEnv{h: h, mysql: mysql, redis: redis, fs: fs, stub: stub, engine: r}
 }
 
-// TestSendMessage_DirectAnswer_PersistsUserAndAssistantMessages_SSE drives
-// the full SSE path with a stub orchestrator that emits a start/token/end
-// triplet then returns. The test verifies (a) the SSE body has the spec wire
-// format for every event, and (b) both the user and assistant messages are
-// persisted through SaveMessage (visible as two FS writes and two MySQL
-// appends).
-func TestSendMessage_DirectAnswer_PersistsUserAndAssistantMessages_SSE(t *testing.T) {
+// TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE drives the
+// full SSE path with a stub orchestrator that emits a start/token/end/done
+// sequence then returns. The test verifies (a) the SSE body has the spec wire
+// format for every event, (b) the user message is persisted synchronously, and
+// (c) the assistant events are persisted as a batch after the orchestrator
+// succeeds.
+func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
 			stream.AgentStartEvent(stream.AgentConfuse),
@@ -261,7 +299,6 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantMessages_SSE(t *testin
 			stream.AgentEndEvent(stream.AgentConfuse),
 			stream.DoneEvent(map[string]any{"total_tokens": 10}),
 		},
-		assistantReply: "Hello, world!",
 	}
 	env := newSessionHandlerEnv(t, stub)
 
@@ -284,7 +321,7 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantMessages_SSE(t *testin
 	require.Contains(t, body, "event: agent_end\n")
 	require.Contains(t, body, "event: done\n")
 	// Each block must end with the SSE terminator.
-	for _, block := range strings.Split(body, "\n\n") {
+	for block := range strings.SplitSeq(body, "\n\n") {
 		if block == "" {
 			continue
 		}
@@ -293,9 +330,9 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantMessages_SSE(t *testin
 		}
 		// data line must contain valid JSON.
 		dataLine := ""
-		for _, line := range strings.Split(block, "\n") {
-			if strings.HasPrefix(line, "data: ") {
-				dataLine = strings.TrimPrefix(line, "data: ")
+		for line := range strings.SplitSeq(block, "\n") {
+			if after, ok := strings.CutPrefix(line, "data: "); ok {
+				dataLine = after
 				break
 			}
 		}
@@ -311,16 +348,30 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantMessages_SSE(t *testin
 	require.Contains(t, env.stub.gotWorkspace, "user-1/workspace")
 	env.stub.mu.Unlock()
 
-	// Two SaveMessage calls happened: user message + assistant message.
+	// Two FS writes happened: one synchronous user message, one batched
+	// assistant event stream.
 	require.Eventually(t, func() bool {
 		env.fs.mu.Lock()
 		defer env.fs.mu.Unlock()
 		return env.fs.writeCalls == 2
-	}, time.Second, 10*time.Millisecond, "expected two FS writes (user + assistant)")
+	}, time.Second, 10*time.Millisecond, "expected two FS writes (user + assistant batch)")
+
+	// MySQL: two batch appends — one for the user message (batch of 1) and one
+	// for the assistant event stream (batch of 4, done excluded).
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 2
+	}, time.Second, 10*time.Millisecond, "expected user batch + assistant batch")
 
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
-	require.Equal(t, 2, env.mysql.appendMessageCalls, "user + assistant messages persisted")
+	require.Len(t, env.mysql.appendMessagesArg, 4, "assistant batch must contain all events except done")
+
+	// User batch (first call) is a single message row.
+	// We cannot observe the exact first batch args here because appendMessagesArg
+	// holds the last call, but the user message fields are asserted in the
+	// dedicated user-message tests below.
 }
 
 // TestSendMessage_BadRequest_NoBody verifies that an empty / malformed body
@@ -363,7 +414,7 @@ func TestSendMessage_BadRequest_NoBody(t *testing.T) {
 // surfaces as 500 with the unified error shape and never invokes the
 // orchestrator.
 func TestSendMessage_SessionEnsureFails_500(t *testing.T) {
-	stub := &stubOrchestrator{assistantReply: "should not run"}
+	stub := &stubOrchestrator{eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfuse, "should not run")}}
 	env := newSessionHandlerEnv(t, stub)
 	// Inject a failure into EnsureUserDirs (the first thing EnsureSession does).
 	env.fs.ensureErr = context.DeadlineExceeded
@@ -482,7 +533,10 @@ func TestSendMessage_NotFirstTurnDoesNotFireTitle(t *testing.T) {
 	// making the handler treat this as a non-first turn.
 	priorMsg := model.Message{
 		SessionID: "sess-old",
+		Agent:     model.AgentUser,
+		MsgIndex:  0,
 		Role:      model.RoleUser,
+		EventType: model.EventTypeMessage,
 		Content:   "old",
 	}
 	raw, err := json.Marshal(priorMsg)
@@ -519,7 +573,6 @@ func TestSendMessage_ProducesDeterministicSSESequence(t *testing.T) {
 			stream.AgentEndEvent(stream.AgentConfuse),
 			stream.DoneEvent(nil),
 		},
-		assistantReply: "Hello",
 	}
 	env := newSessionHandlerEnv(t, stub)
 
@@ -546,4 +599,117 @@ func TestSendMessage_ProducesDeterministicSSESequence(t *testing.T) {
 		require.True(t, strings.HasPrefix(lines[1], "data: "), "block %q", b)
 	}
 	assert.Equal(t, []string{"agent_start", "token", "agent_end", "done"}, types)
+}
+
+// TestSendMessage_EventStreamIncludesMarkersAndToolCall verifies that a turn
+// with agent lifecycle markers and a tool_call event is persisted as multiple
+// rows, with correct event_type / role / agent values, and that the done event
+// is excluded from persistence.
+func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfuse),
+			stream.TokenEvent(stream.AgentConfuse, "Thinking"),
+			stream.ToolCallEvent(stream.AgentConfuse, "invoke_chongzhi", map[string]any{"task": "compute"}),
+			stream.AgentStartEvent(stream.AgentChongzhi),
+			stream.TokenEvent(stream.AgentChongzhi, "42"),
+			stream.AgentEndEvent(stream.AgentChongzhi),
+			stream.AgentEndEvent(stream.AgentConfuse),
+			stream.DoneEvent(nil),
+		},
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-events/messages",
+		strings.NewReader(`{"content":"do it"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 2
+	}, time.Second, 10*time.Millisecond, "expected user batch + assistant batch")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+
+	// Assistant event stream: 7 events, done excluded.
+	require.Len(t, env.mysql.appendMessagesArg, 7)
+	wantTypes := []string{
+		model.EventTypeAgentStart,
+		model.EventTypeToken,
+		model.EventTypeToolCall,
+		model.EventTypeAgentStart,
+		model.EventTypeToken,
+		model.EventTypeAgentEnd,
+		model.EventTypeAgentEnd,
+	}
+	for i, want := range wantTypes {
+		assert.Equal(t, want, env.mysql.appendMessagesArg[i].EventType, "event %d", i)
+	}
+
+	// Token/tool_call rows carry the assistant role; markers have empty role.
+	for _, m := range env.mysql.appendMessagesArg {
+		switch m.EventType {
+		case model.EventTypeToken, model.EventTypeToolCall:
+			assert.Equal(t, model.RoleAssistant, m.Role, "event_type=%s", m.EventType)
+		default:
+			assert.Empty(t, m.Role, "event_type=%s", m.EventType)
+		}
+	}
+
+	// Agent column is preserved from the event.
+	assert.Equal(t, stream.AgentConfuse, env.mysql.appendMessagesArg[0].Agent)
+	assert.Equal(t, stream.AgentChongzhi, env.mysql.appendMessagesArg[4].Agent)
+
+	// Tool_call content is JSON with name and args.
+	toolMsg := env.mysql.appendMessagesArg[2]
+	require.Equal(t, model.EventTypeToolCall, toolMsg.EventType)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal([]byte(toolMsg.Content), &payload))
+	assert.Equal(t, "invoke_chongzhi", payload["name"])
+}
+
+// TestSendMessage_OrchestratorFailure_PersistsUserOnly verifies that when the
+// orchestrator returns an error, only the user message is persisted and no
+// assistant event rows are written.
+func TestSendMessage_OrchestratorFailure_PersistsUserOnly(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfuse),
+			stream.TokenEvent(stream.AgentConfuse, "oops"),
+		},
+		returnErr: errors.New("orchestrator blew up"),
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-fail/messages",
+		strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for the synchronous user save; the assistant batch must NOT run.
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected exactly one user message batch")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	require.Len(t, env.mysql.appendMessagesArg, 1)
+	userMsg := env.mysql.appendMessagesArg[0]
+	assert.Equal(t, model.AgentUser, userMsg.Agent)
+	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
+	assert.Equal(t, model.RoleUser, userMsg.Role)
+	assert.Equal(t, 0, userMsg.MsgIndex)
 }

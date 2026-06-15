@@ -16,6 +16,9 @@ const (
 	EventAgentEnd   = "agent_end"
 	EventAgentError = "agent_error"
 	EventDone       = "done"
+	// EventMessage is a sentinel used for user message rows persisted to the
+	// messages table; it is never emitted as an SSE event.
+	EventMessage = "message"
 )
 
 // Agent names. These mirror model.AgentConfuse/AgentChongzhi/AgentLiang but are
