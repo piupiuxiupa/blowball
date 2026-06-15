@@ -94,6 +94,52 @@ tools:
     enabled: true
     timeout: 30s
 
+# External MCP servers. Tools discovered from these servers are registered in
+# the process-wide tool registry and exposed through GET /api/v1/mcp/tools.
+# Only explicitly-configured servers are connected; there is no runtime
+# discovery.
+#
+# Transport types:
+#   sse   - connects to a remote MCP server over SSE + HTTP POST messages.
+#   stdio - spawns a local command and speaks JSON-RPC over stdin/stdout.
+#
+# Authentication:
+#   SSE auth uses the headers map (supports ${VAR} substitution).
+#   stdio auth uses the env map, injected into the child environment.
+#
+# Fields:
+#   name         - required, unique identifier for this server.
+#   transport    - required, "sse" or "stdio".
+#   url          - required for sse; server endpoint.
+#   command      - required for stdio; executable to spawn.
+#   args         - optional command-line arguments for stdio.
+#   env          - optional environment variables for stdio.
+#   headers      - optional HTTP headers for sse.
+#   timeout      - optional connection / initialization timeout (default 30s).
+#   call_timeout - optional per-tool-call timeout (default 30s).
+#   reconnect    - optional, attempt reconnect/restart on failure.
+#   prefix       - optional prefix applied to every discovered tool name.
+mcp:
+  servers:
+    - name: remote_search
+      transport: sse
+      url: http://localhost:3001/sse
+      headers:
+        Authorization: Bearer ${MCP_TOKEN}
+      timeout: 30s
+      call_timeout: 30s
+      reconnect: true
+
+    - name: local_calculator
+      transport: stdio
+      command: ./calculator-mcp-server
+      args: ["--stdio"]
+      env:
+        API_KEY: ${LOCAL_API_KEY}
+      timeout: 30s
+      call_timeout: 30s
+      reconnect: true
+
 logging:
   level: info
   format: json

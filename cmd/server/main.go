@@ -43,6 +43,7 @@ import (
 	"github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/store/redis"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/mcpclient"
 	"github.com/lush/blowball/internal/tool/webfetch"
 	"github.com/lush/blowball/internal/tool/xizhi"
 )
@@ -126,6 +127,19 @@ func main() {
 	reg := tool.NewRegistry()
 	xizhi.RegisterAll(reg, DataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
+
+	// 7a. External MCP servers. Connect, discover tools, and register proxy
+	// specs into the process-wide registry. Startup fails fast on connection or
+	// tool-list errors so misconfiguration is surfaced immediately.
+	mcpClose, err := mcpclient.RegisterAll(context.Background(), reg, cfg.MCP)
+	if err != nil {
+		log.Fatal("mcp client registration failed", zap.Error(err))
+	}
+	defer func() {
+		if cerr := mcpClose(); cerr != nil {
+			log.Warn("mcp client close failed", zap.Error(cerr))
+		}
+	}()
 
 	// 8. Services. SessionService owns the three-layer write path; the message
 	// service delegates saves back to SessionService.SaveMessage so writes stay

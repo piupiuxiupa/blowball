@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/stream"
+	"github.com/lush/blowball/internal/tool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -121,4 +123,81 @@ consumer:
 	assert.Contains(t, req.Messages[0].Content, "confuse")
 	assert.Equal(t, "user", req.Messages[1].Role)
 	assert.Equal(t, "hi", req.Messages[1].Content)
+}
+
+func TestOrchestrator_ExternalMCPTool(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	var toolCalled bool
+	baseReg := tool.NewRegistry()
+	require.NoError(t, baseReg.Register(
+		&tool.ToolSpec{
+			Name:           "external_greet",
+			Description:    "external greeting tool",
+			ParametersJSON: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`),
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				toolCalled = true
+				return "hello from external", nil
+			},
+		}))
+
+	client := newFake(
+		fakeResponse{
+			tokens:       []string{"call"},
+			content:      "",
+			finishReason: "tool_calls",
+			toolCalls: []ToolCall{{
+				ID: "tc_1",
+				Function: ToolCallFunction{
+					Name:      "external_greet",
+					Arguments: `{"name":"world"}`,
+				},
+			}},
+			usage: Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
+		},
+		fakeResponse{
+			tokens:       []string{"done"},
+			content:      "done",
+			finishReason: "stop",
+			usage:        Usage{PromptTokens: 5, CompletionTokens: 1, TotalTokens: 6},
+		},
+	)
+
+	cfg := &config.Config{
+		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		Agents: config.AgentsConfig{
+			Confuse: config.AgentConfig{
+				Name:         "Confuse",
+				Model:        "gpt-test",
+				SystemPrompt: "you are confuse",
+				MaxTokens:    256,
+				Tools:        []string{"external_greet"},
+			},
+			Chongzhi: config.AgentConfig{
+				Name:         "Chongzhi",
+				Model:        "gpt-test",
+				SystemPrompt: "you are chongzhi",
+				MaxTokens:    256,
+				Tools:        []string{"xizhi_write_file"},
+			},
+			Liang: config.AgentConfig{
+				Name:         "Liang",
+				Model:        "gpt-test",
+				SystemPrompt: "you are liang",
+				MaxTokens:    256,
+			},
+		},
+	}
+	o, err := NewOrchestrator(client, cfg, baseReg, nil)
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	err = o.Handle(ctx, t.TempDir(), "hi", hub)
+	require.NoError(t, err)
+	hub.Close()
+
+	require.True(t, toolCalled, "external MCP proxy tool should have been called")
 }

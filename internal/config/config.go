@@ -23,6 +23,7 @@ type Config struct {
 	JWT     JWTConfig     `yaml:"jwt"`
 	Agents  AgentsConfig  `yaml:"agents"`
 	Tools   ToolsConfig   `yaml:"tools"`
+	MCP     MCPConfig     `yaml:"mcp"`
 	Logging LoggingConfig `yaml:"logging"`
 }
 
@@ -116,6 +117,26 @@ type ToolsConfig struct {
 	Webfetch WebfetchConfig `yaml:"webfetch"`
 }
 
+// MCPConfig holds external MCP server configuration.
+type MCPConfig struct {
+	Servers []MCPServerConfig `yaml:"servers"`
+}
+
+// MCPServerConfig describes a single external MCP server.
+type MCPServerConfig struct {
+	Name           string            `yaml:"name"`
+	Transport      string            `yaml:"transport"`
+	URL            string            `yaml:"url"`
+	Command        string            `yaml:"command"`
+	Args           []string          `yaml:"args"`
+	Env            map[string]string `yaml:"env"`
+	Headers        map[string]string `yaml:"headers"`
+	Timeout        time.Duration     `yaml:"timeout"`
+	CallTimeout    time.Duration     `yaml:"call_timeout"`
+	Reconnect      bool              `yaml:"reconnect"`
+	Prefix         string            `yaml:"prefix"`
+}
+
 // LoggingConfig holds structured logging settings.
 type LoggingConfig struct {
 	Level  string `yaml:"level"`
@@ -153,6 +174,40 @@ func (c *Config) validate() error {
 	}
 	if strings.TrimSpace(c.MySQL.DSN) == "" {
 		return fmt.Errorf("config validation error: mysql.dsn must be non-empty")
+	}
+	if err := c.MCP.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	return nil
+}
+
+// validate checks every configured MCP server for required fields and
+// uniqueness.
+func (m MCPConfig) validate() error {
+	seen := make(map[string]struct{}, len(m.Servers))
+	for i, s := range m.Servers {
+		if strings.TrimSpace(s.Name) == "" {
+			return fmt.Errorf("mcp.servers[%d]: name must be non-empty", i)
+		}
+		if strings.TrimSpace(s.Transport) == "" {
+			return fmt.Errorf("mcp.servers[%d]: transport must be non-empty", i)
+		}
+		switch s.Transport {
+		case "sse":
+			if strings.TrimSpace(s.URL) == "" {
+				return fmt.Errorf("mcp.servers[%d] (name=%q): url is required for sse transport", i, s.Name)
+			}
+		case "stdio":
+			if strings.TrimSpace(s.Command) == "" {
+				return fmt.Errorf("mcp.servers[%d] (name=%q): command is required for stdio transport", i, s.Name)
+			}
+		default:
+			return fmt.Errorf("mcp.servers[%d] (name=%q): unsupported transport %q", i, s.Name, s.Transport)
+		}
+		if _, exists := seen[s.Name]; exists {
+			return fmt.Errorf("mcp.servers: duplicate server name %q", s.Name)
+		}
+		seen[s.Name] = struct{}{}
 	}
 	return nil
 }

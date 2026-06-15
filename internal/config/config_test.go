@@ -184,3 +184,197 @@ jwt:
 		t.Fatal("Load expected validation error for empty mysql.dsn, got nil")
 	}
 }
+
+func TestLoad_MCP_Valid(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: remote
+      transport: sse
+      url: http://localhost:3001/sse
+      headers:
+        Authorization: Bearer token
+      timeout: 10s
+      call_timeout: 5s
+      reconnect: true
+      prefix: remote_
+    - name: local
+      transport: stdio
+      command: ./mcp-server
+      args: ["--stdio"]
+      env:
+        KEY: value
+      timeout: 20s
+      call_timeout: 15s
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.MCP.Servers) != 2 {
+		t.Fatalf("MCP.Servers len = %d, want 2", len(cfg.MCP.Servers))
+	}
+	remote := cfg.MCP.Servers[0]
+	if remote.Name != "remote" || remote.Transport != "sse" || remote.URL != "http://localhost:3001/sse" {
+		t.Errorf("unexpected remote config: %+v", remote)
+	}
+	if remote.Timeout != 10*time.Second || remote.CallTimeout != 5*time.Second || !remote.Reconnect || remote.Prefix != "remote_" {
+		t.Errorf("unexpected remote settings: timeout=%v call_timeout=%v reconnect=%v prefix=%q", remote.Timeout, remote.CallTimeout, remote.Reconnect, remote.Prefix)
+	}
+	if remote.Headers["Authorization"] != "Bearer token" {
+		t.Errorf("remote Authorization header = %q, want %q", remote.Headers["Authorization"], "Bearer token")
+	}
+	local := cfg.MCP.Servers[1]
+	if local.Name != "local" || local.Transport != "stdio" || local.Command != "./mcp-server" {
+		t.Errorf("unexpected local config: %+v", local)
+	}
+	if len(local.Args) != 1 || local.Args[0] != "--stdio" || local.Env["KEY"] != "value" {
+		t.Errorf("unexpected local args/env: args=%v env=%v", local.Args, local.Env)
+	}
+}
+
+func TestLoad_MCP_EnvSubstitution(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "secret-token")
+	t.Setenv("MCP_CMD", "./env-mcp")
+
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: sse_server
+      transport: sse
+      url: http://localhost:3001/sse
+      headers:
+        Authorization: Bearer ${MCP_TOKEN}
+    - name: stdio_server
+      transport: stdio
+      command: ${MCP_CMD}
+      env:
+        API_KEY: ${MCP_TOKEN}
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.MCP.Servers) != 2 {
+		t.Fatalf("MCP.Servers len = %d, want 2", len(cfg.MCP.Servers))
+	}
+	if cfg.MCP.Servers[0].Headers["Authorization"] != "Bearer secret-token" {
+		t.Errorf("sse header = %q, want %q", cfg.MCP.Servers[0].Headers["Authorization"], "Bearer secret-token")
+	}
+	if cfg.MCP.Servers[1].Command != "./env-mcp" {
+		t.Errorf("stdio command = %q, want %q", cfg.MCP.Servers[1].Command, "./env-mcp")
+	}
+	if cfg.MCP.Servers[1].Env["API_KEY"] != "secret-token" {
+		t.Errorf("stdio env API_KEY = %q, want %q", cfg.MCP.Servers[1].Env["API_KEY"], "secret-token")
+	}
+}
+
+func TestLoad_MCP_Invalid(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "missing name",
+			content: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - transport: sse
+      url: http://localhost:3001/sse
+`,
+		},
+		{
+			name: "missing transport",
+			content: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: remote
+      url: http://localhost:3001/sse
+`,
+		},
+		{
+			name: "sse missing url",
+			content: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: remote
+      transport: sse
+`,
+		},
+		{
+			name: "stdio missing command",
+			content: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: local
+      transport: stdio
+`,
+		},
+		{
+			name: "unsupported transport",
+			content: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: remote
+      transport: websocket
+`,
+		},
+		{
+			name: "duplicate name",
+			content: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: remote
+      transport: sse
+      url: http://localhost:3001/sse
+    - name: remote
+      transport: stdio
+      command: ./mcp
+`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.content)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("Load expected validation error for %q, got nil", tc.name)
+			}
+		})
+	}
+}

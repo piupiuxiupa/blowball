@@ -12,6 +12,7 @@ A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API
   - `Chongzhi` — coding agent with workspace file tools.
   - `Liang` — analysis and explanation agent.
 - **Workspace file tools** (`xizhi_*`) scoped per user: read, write, modify, list, tree, glob, plus `webfetch`.
+- **External MCP client support** — connect SSE or stdio MCP servers at startup and proxy their tools into the agent tool catalogue.
 - **Per-user workspace isolation** on disk, with best-effort Linux Landlock sandboxing.
 - **Graceful shutdown**, structured JSON logging with zap, and OpenAPI 3 spec at [`api/openapi.yaml`](api/openapi.yaml).
 
@@ -131,6 +132,69 @@ make clean
 | `GET`  | `/healthz` | Health check |
 
 See [`api/openapi.yaml`](api/openapi.yaml) for full request/response schemas and examples.
+
+## External MCP servers
+
+Blowball can act as an MCP client, registering tools from external MCP servers so agents can invoke them alongside built-in tools.
+
+To enable it, add an `mcp.servers` section to `config.yaml`:
+
+```yaml
+mcp:
+  servers:
+    - name: remote_search
+      transport: sse
+      url: http://localhost:3001/sse
+      headers:
+        Authorization: Bearer ${MCP_TOKEN}
+      timeout: 30s
+      call_timeout: 30s
+      reconnect: true
+
+    - name: local_calculator
+      transport: stdio
+      command: ./calculator-mcp-server
+      args: ["--stdio"]
+      env:
+        API_KEY: ${LOCAL_API_KEY}
+      timeout: 30s
+      call_timeout: 30s
+      reconnect: true
+      prefix: calc_
+```
+
+Supported transports:
+
+- `sse` — connects over Server-Sent Events + HTTP POST messages.
+- `stdio` — spawns a local subprocess and speaks JSON-RPC over stdin/stdout.
+
+Configuration fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Unique server identifier. |
+| `transport` | yes | `sse` or `stdio`. |
+| `url` | for `sse` | Server SSE endpoint. |
+| `command` | for `stdio` | Executable to spawn. |
+| `args` | no | Command-line arguments for `stdio`. |
+| `env` | no | Environment variables injected into the `stdio` child process. |
+| `headers` | no | HTTP headers sent with every SSE request. |
+| `timeout` | no | Connection / initialization timeout (default `30s`). |
+| `call_timeout` | no | Per-tool-call timeout (default `30s`). |
+| `reconnect` | no | Reconnect (`sse`) or restart (`stdio`) on failure. |
+| `prefix` | no | Prefix applied to every discovered tool name to avoid collisions. |
+
+All string values support `${VAR}` and `${VAR:default}` environment substitution.
+
+Tool names must be unique across built-in tools and all configured MCP servers. If a remote tool name collides, startup fails unless you set a `prefix` for that server. Discovered tools are cached at startup and exposed through `GET /api/v1/mcp/tools`; agents can include them in their configured `tools` list.
+
+### Security considerations
+
+- **Allowlist only** — only servers declared in `mcp.servers` are connected. There is no runtime discovery or dynamic registration.
+- **Auth injection** — use `headers` (SSE) and `env` (stdio) for secrets; both support environment substitution so credentials never need to be hard-coded in config.
+- **Timeouts** — per-server `timeout` and `call_timeout` prevent a slow or hung remote server from blocking agent turns indefinitely.
+- **Subprocess / network sandboxing** — stdio subprocesses run with normal OS process boundaries; additional sandboxing (e.g. seccomp, Landlock, or chroot) is future work.
+- **Remote errors** — failures from an MCP server are surfaced as `tool_error` / `agent_error` stream events and do not crash the agent loop.
 
 ## Configuration
 

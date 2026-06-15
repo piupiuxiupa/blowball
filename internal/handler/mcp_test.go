@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/mcpclient"
 	"github.com/lush/blowball/internal/tool/xizhi"
 )
 
@@ -70,4 +72,93 @@ func TestMCPTools_ReturnsXizhiAndInvokeTools(t *testing.T) {
 	assert.True(t, names[xizhi.NameGlobFiles], "xizhi_glob_files must be present")
 	assert.True(t, names[agent.ToolInvokeChongzhi], "invoke_chongzhi must be present")
 	assert.True(t, names[agent.ToolInvokeLiang], "invoke_liang must be present")
+}
+
+func TestMCPTools_ReturnsExternalMCPTools(t *testing.T) {
+	reg := tool.NewRegistry()
+
+	mt := &mockMCPTransport{
+		initResult: &mcpclient.InitializeResult{ProtocolVersion: "2024-11-05"},
+		tools: []mcpclient.Tool{
+			{Name: "remote_add", Description: "adds remotely", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		},
+	}
+
+	old := mcpclient.TransportFactory
+	mcpclient.TransportFactory = func(sc config.MCPServerConfig) (mcpclient.Transport, error) {
+		return mt, nil
+	}
+	defer func() { mcpclient.TransportFactory = old }()
+
+	closeAll, err := mcpclient.RegisterAll(context.Background(), reg, config.MCPConfig{
+		Servers: []config.MCPServerConfig{{
+			Name:      "remote",
+			Transport: "sse",
+			URL:       "http://localhost:3001/sse",
+		}},
+	})
+	require.NoError(t, err)
+	defer func() { _ = closeAll() }()
+
+	h := NewMCPHandler(reg)
+	r := gin.New()
+	r.GET("/api/v1/mcp/tools", h.Tools)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/tools", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Tools []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	names := make(map[string]string, len(resp.Tools))
+	for _, t2 := range resp.Tools {
+		names[t2.Name] = t2.Description
+	}
+	assert.Contains(t, names, "remote_add")
+	assert.Equal(t, "adds remotely", names["remote_add"])
+}
+
+// mockMCPTransport is a minimal Transport double for handler tests.
+type mockMCPTransport struct {
+	initResult *mcpclient.InitializeResult
+	initErr    error
+	tools      []mcpclient.Tool
+	listErr    error
+	callResult *mcpclient.ToolsCallResult
+	callErr    error
+	closed     bool
+}
+
+func (m *mockMCPTransport) Initialize(ctx context.Context, params mcpclient.InitializeParams) (*mcpclient.InitializeResult, error) {
+	if m.initErr != nil {
+		return nil, m.initErr
+	}
+	return m.initResult, nil
+}
+
+func (m *mockMCPTransport) ListTools(ctx context.Context) (*mcpclient.ToolsListResult, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return &mcpclient.ToolsListResult{Tools: m.tools}, nil
+}
+
+func (m *mockMCPTransport) CallTool(ctx context.Context, params mcpclient.ToolsCallParams) (*mcpclient.ToolsCallResult, error) {
+	if m.callErr != nil {
+		return nil, m.callErr
+	}
+	return m.callResult, nil
+}
+
+func (m *mockMCPTransport) Close() error {
+	m.closed = true
+	return nil
 }
