@@ -17,6 +17,7 @@ import (
 
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/stream"
 )
@@ -72,30 +73,31 @@ func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userMessag
 // we re-declare minimal fakes here that satisfy service.MySQLStore /
 // service.RedisStore / service.FSStore.
 type handlerFakeMySQL struct {
-	mu                   sync.Mutex
-	createSessionCalls   int
-	createSessionErr     error
-	getSessionByIDFound  *model.Session
-	getSessionIDErr      error
-	listSessionsRows     []mysqlstore.SessionWithTitle
-	listSessionsErr      error
-	upsertTitleCalls     int
-	upsertTitleArg       model.Title
-	appendMessageCalls   int
-	appendMessageArg     model.Message
-	appendMessageErr     error
-	appendMessagesCalls  int
-	appendMessagesArg    []model.Message
-	appendMessagesErr    error
-	listMessagesRows     []model.Message
-	listMessagesErr      error
+	mu                  sync.Mutex
+	createSessionCalls  int
+	createSessionArg    model.Session
+	createSessionErr    error
+	getSessionByIDFound *model.Session
+	getSessionIDErr     error
+	listSessionsRows    []mysqlstore.SessionWithTitle
+	listSessionsErr     error
+	upsertTitleCalls    int
+	upsertTitleArg      model.Title
+	appendMessageCalls  int
+	appendMessageArg    model.Message
+	appendMessageErr    error
+	appendMessagesCalls int
+	appendMessagesArg   []model.Message
+	appendMessagesErr   error
+	listMessagesRows    []model.Message
+	listMessagesErr     error
 }
 
 func (m *handlerFakeMySQL) CreateSession(_ context.Context, sess model.Session) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createSessionCalls++
-	_ = sess
+	m.createSessionArg = sess
 	return m.createSessionErr
 }
 func (m *handlerFakeMySQL) GetSessionByID(_ context.Context, _ string) (*model.Session, error) {
@@ -164,6 +166,69 @@ func (m *handlerFakeMySQL) ListMessages(_ context.Context, _ string) ([]model.Me
 	out := make([]model.Message, len(m.listMessagesRows))
 	copy(out, m.listMessagesRows)
 	return out, nil
+}
+
+func (m *handlerFakeMySQL) ListMessagesPaged(_ context.Context, _, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.listMessagesErr != nil {
+		return nil, "", m.listMessagesErr
+	}
+	rows := make([]model.Message, len(m.listMessagesRows))
+	copy(rows, m.listMessagesRows)
+
+	less := func(i, j int) bool {
+		if rows[i].MsgTime.Equal(rows[j].MsgTime) {
+			if rows[i].MsgIndex == rows[j].MsgIndex {
+				return rows[i].ID < rows[j].ID
+			}
+			return rows[i].MsgIndex < rows[j].MsgIndex
+		}
+		return rows[i].MsgTime.Before(rows[j].MsgTime)
+	}
+	for i := 0; i < len(rows); i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if !less(i, j) {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	if order == "desc" {
+		for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+			rows[i], rows[j] = rows[j], rows[i]
+		}
+	}
+
+	start := 0
+	if cursorStr != "" {
+		for i, msg := range rows {
+			enc, err := cursorpkg.Encode(cursorpkg.Cursor{MsgTime: msg.MsgTime, MsgIndex: msg.MsgIndex, ID: msg.ID})
+			if err != nil {
+				return nil, "", err
+			}
+			if enc == cursorStr {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + pageSize
+	if end > len(rows) {
+		end = len(rows)
+	}
+	page := rows[start:end]
+	if len(page) == 0 {
+		return page, "", nil
+	}
+	if end >= len(rows) {
+		return page, "", nil
+	}
+	last := page[len(page)-1]
+	next, err := cursorpkg.Encode(cursorpkg.Cursor{MsgTime: last.MsgTime, MsgIndex: last.MsgIndex, ID: last.ID})
+	if err != nil {
+		return nil, "", err
+	}
+	return page, next, nil
 }
 
 type handlerFakeRedis struct {
@@ -265,7 +330,9 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 			},
 		}
 	}
-	mysql := &handlerFakeMySQL{}
+	mysql := &handlerFakeMySQL{
+		getSessionByIDFound: &model.Session{SessionID: "sess-1", UserID: "user-1"},
+	}
 	redis := &handlerFakeRedis{}
 	fs := newHandlerFakeFS()
 	deps := sessionDeps(mysql, redis, fs)
@@ -279,8 +346,10 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 		c.Set(middleware.TraceIDKey, "trace-1")
 		c.Next()
 	})
-	r.POST("/api/v1/sessions/:session_id/messages", h.SendMessage)
+	r.POST("/api/v1/sessions", h.CreateSession)
 	r.GET("/api/v1/sessions", h.ListSessions)
+	r.GET("/api/v1/sessions/:session_id/messages", h.GetSessionMessages)
+	r.POST("/api/v1/sessions/:session_id/messages", h.SendMessage)
 	return &sessionHandlerTestEnv{h: h, mysql: mysql, redis: redis, fs: fs, stub: stub, engine: r}
 }
 
@@ -410,14 +479,12 @@ func TestSendMessage_BadRequest_NoBody(t *testing.T) {
 	}
 }
 
-// TestSendMessage_SessionEnsureFails_500 verifies that an EnsureSession error
-// surfaces as 500 with the unified error shape and never invokes the
-// orchestrator.
-func TestSendMessage_SessionEnsureFails_500(t *testing.T) {
+// TestSendMessage_SessionNotFound_404 verifies that posting a message to a
+// non-existent session returns 404 and never invokes the orchestrator.
+func TestSendMessage_SessionNotFound_404(t *testing.T) {
 	stub := &stubOrchestrator{eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfuse, "should not run")}}
 	env := newSessionHandlerEnv(t, stub)
-	// Inject a failure into EnsureUserDirs (the first thing EnsureSession does).
-	env.fs.ensureErr = context.DeadlineExceeded
+	env.mysql.getSessionByIDFound = nil // session does not exist
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/sessions/sess-1/messages",
@@ -426,7 +493,7 @@ func TestSendMessage_SessionEnsureFails_500(t *testing.T) {
 	w := httptest.NewRecorder()
 	env.engine.ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
 	var env2 struct {
 		Error struct {
 			Code    string `json:"code"`
@@ -434,11 +501,36 @@ func TestSendMessage_SessionEnsureFails_500(t *testing.T) {
 		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env2))
-	assert.Equal(t, "INTERNAL", env2.Error.Code)
+	assert.Equal(t, "NOT_FOUND", env2.Error.Code)
 
 	env.stub.mu.Lock()
 	defer env.stub.mu.Unlock()
-	assert.Equal(t, "", env.stub.gotMessage, "orchestrator must NOT be called when session ensure fails")
+	assert.Equal(t, "", env.stub.gotMessage, "orchestrator must NOT be called when session not found")
+}
+
+// TestSendMessage_WrongOwner_404 verifies that a user cannot send messages to
+// another user's session.
+func TestSendMessage_WrongOwner_404(t *testing.T) {
+	stub := &stubOrchestrator{}
+	env := newSessionHandlerEnv(t, stub)
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-1", UserID: "other-user"}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-1/messages",
+		strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var env2 struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env2))
+	assert.Equal(t, "NOT_FOUND", env2.Error.Code)
 }
 
 // TestListSessions_ReturnsSessionsArray verifies the response shape and that
@@ -493,6 +585,69 @@ func TestListSessions_EmptyArray(t *testing.T) {
 	// The sessions array must be present (not null) and empty.
 	assert.NotNil(t, resp.Sessions)
 	assert.Empty(t, resp.Sessions)
+}
+
+// TestCreateSession_ReturnsUUIDv7SessionID verifies the new session endpoint
+// returns a 36-character UUID v7 session_id and persists the row.
+func TestCreateSession_ReturnsUUIDv7SessionID(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Len(t, resp.SessionID, 36, "session_id must be 36-char UUID")
+	assert.Equal(t, byte('7'), resp.SessionID[14], "session_id must be UUID v7")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	require.Equal(t, 1, env.mysql.createSessionCalls)
+	assert.Equal(t, resp.SessionID, env.mysql.createSessionArg.SessionID)
+	assert.Equal(t, "user-1", env.mysql.createSessionArg.UserID)
+	assert.Equal(t, "trace-1", env.mysql.createSessionArg.TraceID)
+}
+
+// TestGetSessionMessages_ReturnsPaginatedMessages verifies the messages endpoint
+// returns the page from MySQL and a next_page_token when more pages exist.
+func TestGetSessionMessages_ReturnsPaginatedMessages(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	env.mysql.listMessagesRows = []model.Message{
+		{ID: 1, SessionID: "sess-1", MsgTime: base, MsgIndex: 0, Content: "first"},
+		{ID: 2, SessionID: "sess-1", MsgTime: base.Add(time.Second), MsgIndex: 0, Content: "second"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1/messages?page_size=1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Messages      []model.Message `json:"messages"`
+		NextPageToken string          `json:"next_page_token"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, "first", resp.Messages[0].Content)
+	assert.NotEmpty(t, resp.NextPageToken, "next_page_token must be present when more pages exist")
+}
+
+// TestGetSessionMessages_WrongOwner_404 verifies that a user cannot read
+// another user's session messages.
+func TestGetSessionMessages_WrongOwner_404(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-1", UserID: "other-user"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1/messages", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
 }
 
 // TestSendMessage_FirstTurnFiresTitle verifies that when there are no prior

@@ -26,6 +26,7 @@ type MySQLStore interface {
 	AppendMessage(ctx context.Context, m model.Message) (int64, error)
 	AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error)
 	ListMessages(ctx context.Context, sessionID string) ([]model.Message, error)
+	ListMessagesPaged(ctx context.Context, sessionID, cursor string, pageSize int, order string) ([]model.Message, string, error)
 }
 
 // RedisStore is the subset of the cache layer that SessionService /

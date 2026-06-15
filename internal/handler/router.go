@@ -23,6 +23,12 @@ type RouteDeps struct {
 	// SessionList handles GET /api/v1/sessions. Required.
 	SessionList gin.HandlerFunc
 
+	// SessionCreate handles POST /api/v1/sessions. Required.
+	SessionCreate gin.HandlerFunc
+
+	// SessionMessages handles GET /api/v1/sessions/:session_id/messages. Required.
+	SessionMessages gin.HandlerFunc
+
 	// SendMessage handles POST /api/v1/sessions/:session_id/messages (SSE). Required.
 	SendMessage gin.HandlerFunc
 
@@ -55,6 +61,8 @@ const contentRouteSuffix = "/content"
 //
 //	POST /api/v1/auth/login                       (public)
 //	GET  /api/v1/sessions                         (auth)
+//	POST /api/v1/sessions                         (auth)
+//	GET  /api/v1/sessions/:session_id/messages    (auth)
 //	POST /api/v1/sessions/:session_id/messages    (auth, SSE)
 //	GET  /api/v1/workspace/files                  (auth)
 //	POST /api/v1/workspace/upload                 (auth)
@@ -81,6 +89,8 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.Use(deps.AuthMW)
 
 	authed.GET("/sessions", deps.SessionList)
+	authed.POST("/sessions", deps.SessionCreate)
+	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
 	authed.POST("/sessions/:session_id/messages", deps.SendMessage)
 
 	authed.GET("/workspace/files", deps.WorkspaceList)

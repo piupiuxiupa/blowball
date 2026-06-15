@@ -9,13 +9,13 @@ func TestNew_ReturnsNonEmptyUniqueUUID(t *testing.T) {
 	if id == "" {
 		t.Fatal("New() returned empty string")
 	}
-	// UUID v4 string is 36 chars including hyphens.
+	// UUID v7 string is 36 chars including hyphens.
 	if len(id) != 36 {
-		t.Errorf("New() length = %d, want 36 (UUID v4)", len(id))
+		t.Errorf("New() length = %d, want 36 (UUID v7)", len(id))
 	}
-	// Version nibble at position 14 must be '4'.
-	if id[14] != '4' {
-		t.Errorf("New() = %q, expected UUID v4 (version nibble '4' at position 14)", id)
+	// Version nibble at position 14 must be '7'.
+	if id[14] != '7' {
+		t.Errorf("New() = %q, expected UUID v7 (version nibble '7' at position 14)", id)
 	}
 
 	// Uniqueness across many calls.

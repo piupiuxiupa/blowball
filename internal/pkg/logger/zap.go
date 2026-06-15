@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	mu      sync.RWMutex
+	mu            sync.RWMutex
 	defaultLogger = zap.NewNop()
 )
 

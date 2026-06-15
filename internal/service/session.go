@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/model"
@@ -41,15 +42,14 @@ func NewSessionService(deps SessionDeps) *SessionService {
 	}
 }
 
-// EnsureSession makes sure a session row exists for (userID, sessionID) and
-// that the user's data/ subdirectories are present. If the session is already
-// in MySQL the call is a no-op (other than the EnsureUserDirs side effect).
-// Otherwise a fresh row is inserted with the caller's trace_id attached.
-func (s *SessionService) EnsureSession(ctx context.Context, userID, sessionID string) error {
+// CreateSession creates a new session owned by userID. It mints a UUID v7
+// session_id, ensures the user's data/ subdirectories exist, and inserts a
+// sessions row carrying the caller's trace_id. The generated session_id is
+// returned on success.
+func (s *SessionService) CreateSession(ctx context.Context, userID string) (string, error) {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
-		zap.String("op", "session.ensure"),
-		zap.String("session_id", sessionID),
+		zap.String("op", "session.create"),
 		zap.String("user_id", userID),
 	)
 	if tid != "" {
@@ -58,18 +58,15 @@ func (s *SessionService) EnsureSession(ctx context.Context, userID, sessionID st
 
 	if err := s.fs.EnsureUserDirs(ctx, userID); err != nil {
 		log.Error("ensure user dirs failed", zap.Error(err))
-		return fmt.Errorf("session.ensure: user dirs: %w", err)
+		return "", fmt.Errorf("session.create: user dirs: %w", err)
 	}
 
-	existing, err := s.mysql.GetSessionByID(ctx, sessionID)
+	id, err := uuid.NewV7()
 	if err != nil {
-		log.Error("session lookup failed", zap.Error(err))
-		return fmt.Errorf("session.ensure: lookup: %w", err)
+		log.Error("mint session_id failed", zap.Error(err))
+		return "", fmt.Errorf("session.create: mint session_id: %w", err)
 	}
-	if existing != nil {
-		log.Debug("session already exists")
-		return nil
-	}
+	sessionID := id.String()
 
 	sess := model.Session{
 		SessionID: sessionID,
@@ -78,10 +75,24 @@ func (s *SessionService) EnsureSession(ctx context.Context, userID, sessionID st
 	}
 	if err := s.mysql.CreateSession(ctx, sess); err != nil {
 		log.Error("create session failed", zap.Error(err))
-		return fmt.Errorf("session.ensure: create: %w", err)
+		return "", fmt.Errorf("session.create: persist: %w", err)
 	}
-	log.Info("session created")
-	return nil
+	log.Info("session created", zap.String("session_id", sessionID))
+	return sessionID, nil
+}
+
+// GetSessionByID returns the session matching sessionID. It is a thin wrapper
+// over the MySQL store so handlers can validate ownership without importing
+// the store package.
+func (s *SessionService) GetSessionByID(ctx context.Context, sessionID string) (*model.Session, error) {
+	return s.mysql.GetSessionByID(ctx, sessionID)
+}
+
+// GetSessionMessages returns a paginated slice of messages for sessionID from
+// MySQL, ordered by (msg_time, msg_index, id). It is a thin wrapper over the
+// store so the handler does not need to import the cursor package.
+func (s *SessionService) GetSessionMessages(ctx context.Context, sessionID, cursor string, pageSize int, order string) ([]model.Message, string, error) {
+	return s.mysql.ListMessagesPaged(ctx, sessionID, cursor, pageSize, order)
 }
 
 // ListSessions returns the caller's sessions most-recently-updated first. Each

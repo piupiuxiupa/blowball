@@ -8,6 +8,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/pkg/cursor"
 )
 
 // appendMessageSQL inserts a new message row. id is AUTO_INCREMENT and is
@@ -98,6 +99,29 @@ func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int
 	return ids, nil
 }
 
+// listMessagesPagedAscSQL returns messages after the cursor ordered by
+// (msg_time, msg_index, id) ascending. The id tie-breaker makes the cursor
+// stable when two rows share the same msg_time and msg_index.
+const listMessagesPagedAscSQL = `
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time
+FROM messages
+WHERE session_id = ?
+  AND (msg_time, msg_index, id) > (?, ?, ?)
+ORDER BY msg_time ASC, msg_index ASC, id ASC
+LIMIT ?
+`
+
+// listMessagesPagedDescSQL returns messages before the cursor ordered by
+// (msg_time, msg_index, id) descending.
+const listMessagesPagedDescSQL = `
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time
+FROM messages
+WHERE session_id = ?
+  AND (msg_time, msg_index, id) < (?, ?, ?)
+ORDER BY msg_time DESC, msg_index DESC, id DESC
+LIMIT ?
+`
+
 // ListMessages returns every message for sessionID in (msg_time, msg_index)
 // order, or an empty (non-nil) slice when the session has no messages.
 func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Message, error) {
@@ -108,4 +132,53 @@ func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Mes
 		return nil, err
 	}
 	return messages, nil
+}
+
+// ListMessagesPaged returns a page of messages for sessionID ordered by
+// (msg_time, msg_index, id). order must be "asc" or "desc"; any other value
+// defaults to "asc". pageSize is clamped to [1, 200]. An empty cursor requests
+// the first page. The returned nextCursor is empty when no further pages exist.
+func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	cur, err := cursor.Decode(cursorStr)
+	if err != nil {
+		return nil, "", fmt.Errorf("message.list_paged: decode cursor: %w", err)
+	}
+
+	var query string
+	switch order {
+	case "desc":
+		query = listMessagesPagedDescSQL
+	default:
+		query = listMessagesPagedAscSQL
+	}
+
+	logQuery(ctx, "message.list_paged", query, sessionID, cur.MsgTime, cur.MsgIndex, cur.ID, pageSize)
+
+	var messages []model.Message
+	if err := s.db.SelectContext(ctx, &messages, query, sessionID, cur.MsgTime, cur.MsgIndex, cur.ID, pageSize); err != nil {
+		return nil, "", err
+	}
+
+	if len(messages) == 0 {
+		return messages, "", nil
+	}
+
+	last := messages[len(messages)-1]
+	nextCur := cursor.Cursor{
+		MsgTime:  last.MsgTime,
+		MsgIndex: last.MsgIndex,
+		ID:       last.ID,
+	}
+	nextToken, err := cursor.Encode(nextCur)
+	if err != nil {
+		return nil, "", fmt.Errorf("message.list_paged: encode next cursor: %w", err)
+	}
+	return messages, nextToken, nil
 }

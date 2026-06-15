@@ -62,7 +62,8 @@ type sendMessageRequest struct {
 // Flow:
 //  1. Parse body. Bad JSON / missing content -> 400.
 //  2. Resolve user_id + session_id + workspace_root.
-//  3. EnsureSession (creates the row + user dirs on first contact). Error -> 500.
+//  3. Validate that the session exists and belongs to the caller. Missing or
+//     mismatched ownership -> 404.
 //  4. Recover prior messages so we know whether this is the FIRST user turn
 //     (title generation only fires on the first exchange).
 //  5. Persist the user message BEFORE invoking the agent so a crash mid-stream
@@ -94,13 +95,18 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	tid := middleware.TraceIDFromCtx(c)
 	ctx := trace.WithContext(c.Request.Context(), tid)
 
-	if err := h.sessSvc.EnsureSession(ctx, userID, sessionID); err != nil {
-		logger.L().Error("session.ensure failed",
+	sess, err := h.sessSvc.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		logger.L().Error("session lookup failed",
 			zap.String("op", "handler.send_message"),
 			zap.String("session_id", sessionID),
 			zap.String("user_id", userID),
 			zap.Error(err))
-		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "session ensure failed"))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "session lookup failed"))
+		return
+	}
+	if sess == nil || sess.UserID != userID {
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "session not found"))
 		return
 	}
 
@@ -227,6 +233,111 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 		// Fire-and-forget; TitleService.GenerateTitle has its own recover().
 		go h.titleSvc.GenerateTitle(saveCtx, sessionID, req.Content, assistantContent.String())
 	}
+}
+
+// createSessionResponse is the body for POST /api/v1/sessions.
+type createSessionResponse struct {
+	SessionID string `json:"session_id"`
+}
+
+// CreateSession handles POST /api/v1/sessions. The server mints a UUID v7
+// session_id, persists the row, and returns it to the caller.
+func (h *SessionHandler) CreateSession(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	sessionID, err := h.sessSvc.CreateSession(ctx, userID)
+	if err != nil {
+		logger.L().Error("create session failed",
+			zap.String("op", "handler.create_session"),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create session failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, createSessionResponse{SessionID: sessionID})
+}
+
+// getSessionMessagesRequest captures the query parameters for
+// GET /api/v1/sessions/:session_id/messages.
+type getSessionMessagesRequest struct {
+	PageToken string `form:"page_token"`
+	PageSize  int    `form:"page_size"`
+	Order     string `form:"order"`
+}
+
+const (
+	defaultPageSize = 50
+	maxPageSize     = 200
+)
+
+// getSessionMessagesResponse is the body for
+// GET /api/v1/sessions/:session_id/messages.
+type getSessionMessagesResponse struct {
+	Messages      []model.Message `json:"messages"`
+	NextPageToken string          `json:"next_page_token,omitempty"`
+}
+
+// GetSessionMessages handles GET /api/v1/sessions/:session_id/messages. It
+// paginates the session's event stream from MySQL, validates ownership, and
+// returns the canonical message rows.
+func (h *SessionHandler) GetSessionMessages(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	sessionID := c.Param("session_id")
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	var req getSessionMessagesRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
+		return
+	}
+
+	sess, err := h.sessSvc.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		logger.L().Error("session lookup failed",
+			zap.String("op", "handler.get_session_messages"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "session lookup failed"))
+		return
+	}
+	if sess == nil || sess.UserID != userID {
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "session not found"))
+		return
+	}
+
+	pageSize := req.PageSize
+	if pageSize <= 0 {
+		pageSize = defaultPageSize
+	}
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+
+	order := strings.ToLower(req.Order)
+	if order != "desc" {
+		order = "asc"
+	}
+
+	messages, nextCursor, err := h.sessSvc.GetSessionMessages(ctx, sessionID, req.PageToken, pageSize, order)
+	if err != nil {
+		logger.L().Error("list session messages failed",
+			zap.String("op", "handler.get_session_messages"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "list messages failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, getSessionMessagesResponse{
+		Messages:      messages,
+		NextPageToken: nextCursor,
+	})
 }
 
 // sessionListEntry is one element of the GET /api/v1/sessions response array.

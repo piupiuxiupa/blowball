@@ -172,6 +172,8 @@ func main() {
 		AuthMW:            middleware.AuthMiddleware(cfg.JWT.Secret),
 		Login:             authHandler.Login,
 		SessionList:       sessionHandler.ListSessions,
+		SessionCreate:     sessionHandler.CreateSession,
+		SessionMessages:   sessionHandler.GetSessionMessages,
 		SendMessage:       sessionHandler.SendMessage,
 		WorkspaceList:     workspaceHandler.List,
 		WorkspaceUpload:   workspaceHandler.Upload,

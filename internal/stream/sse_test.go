@@ -21,12 +21,12 @@ import (
 // Flush calls. It implements http.Flusher so WriteSSE accepts it. Header writes
 // are captured so tests can assert SSE headers were set.
 type flushRecorder struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	header    http.Header
-	status    int
-	flushes   int64
-	written   int64
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	header  http.Header
+	status  int
+	flushes int64
+	written int64
 }
 
 func newFlushRecorder() *flushRecorder {
@@ -64,9 +64,9 @@ func (f *flushRecorder) Flushes() int64 { return atomic.LoadInt64(&f.flushes) }
 // nonFlusherWriter intentionally does NOT implement http.Flusher.
 type nonFlusherWriter struct{}
 
-func (nonFlusherWriter) Header() http.Header        { return http.Header{} }
-func (nonFlusherWriter) Write([]byte) (int, error)  { return 0, nil }
-func (nonFlusherWriter) WriteHeader(int)            {}
+func (nonFlusherWriter) Header() http.Header       { return http.Header{} }
+func (nonFlusherWriter) Write([]byte) (int, error) { return 0, nil }
+func (nonFlusherWriter) WriteHeader(int)           {}
 
 // TestWriteSSE_RejectsNonFlusher verifies the writer must implement Flusher.
 func TestWriteSSE_RejectsNonFlusher(t *testing.T) {

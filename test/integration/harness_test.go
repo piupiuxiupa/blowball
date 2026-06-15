@@ -27,6 +27,7 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
 	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/service"
@@ -229,6 +230,73 @@ func (m *memoryMySQL) ListMessages(_ context.Context, sessionID string) ([]model
 	return out, nil
 }
 
+func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows := make([]model.Message, len(m.messages[sessionID]))
+	copy(rows, m.messages[sessionID])
+
+	less := func(i, j int) bool {
+		if rows[i].MsgTime.Equal(rows[j].MsgTime) {
+			if rows[i].MsgIndex == rows[j].MsgIndex {
+				return rows[i].ID < rows[j].ID
+			}
+			return rows[i].MsgIndex < rows[j].MsgIndex
+		}
+		return rows[i].MsgTime.Before(rows[j].MsgTime)
+	}
+	for i := 0; i < len(rows); i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if !less(i, j) {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	if order == "desc" {
+		for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+			rows[i], rows[j] = rows[j], rows[i]
+		}
+	}
+
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	start := 0
+	if cursorStr != "" {
+		for i, msg := range rows {
+			enc, err := cursorpkg.Encode(cursorpkg.Cursor{MsgTime: msg.MsgTime, MsgIndex: msg.MsgIndex, ID: msg.ID})
+			if err != nil {
+				return nil, "", err
+			}
+			if enc == cursorStr {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + pageSize
+	if end > len(rows) {
+		end = len(rows)
+	}
+	page := rows[start:end]
+	if len(page) == 0 {
+		return page, "", nil
+	}
+	if end >= len(rows) {
+		return page, "", nil
+	}
+	last := page[len(page)-1]
+	next, err := cursorpkg.Encode(cursorpkg.Cursor{MsgTime: last.MsgTime, MsgIndex: last.MsgIndex, ID: last.ID})
+	if err != nil {
+		return nil, "", err
+	}
+	return page, next, nil
+}
+
 // messagesFor returns the recorded messages for sessionID. Test helper.
 func (m *memoryMySQL) messagesFor(sessionID string) []model.Message {
 	m.mu.Lock()
@@ -314,6 +382,14 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	t.Cleanup(func() { _ = redisSvc.Close() })
 
 	mysqlFake := newMemoryMySQL()
+	// Seed a session for the default user so legacy message-flow tests can
+	// continue posting to the fixed defaultSessionID without first calling
+	// POST /sessions.
+	require.NoError(t, mysqlFake.CreateSession(context.Background(), model.Session{
+		SessionID: defaultSessionID,
+		UserID:    defaultUserID,
+		TraceID:   "seed-trace",
+	}))
 
 	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
 	sessSvc := service.NewSessionService(deps)
@@ -342,6 +418,8 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		AuthMW:            middleware.AuthMiddleware(integrationTestSecret),
 		Login:             func(*gin.Context) {},
 		SessionList:       sessH.ListSessions,
+		SessionCreate:     sessH.CreateSession,
+		SessionMessages:   sessH.GetSessionMessages,
 		SendMessage:       sessH.SendMessage,
 		WorkspaceList:     wsH.List,
 		WorkspaceUpload:   wsH.Upload,

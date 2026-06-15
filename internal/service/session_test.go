@@ -254,58 +254,74 @@ func TestListSessions_EmptyUser(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-func TestEnsureSession_CreatesIfMissing(t *testing.T) {
-	const (
-		userID    = "u-7"
-		sessionID = "s-7"
-	)
-	m := &fakeMySQLStore{} // GetSessionByID returns (nil, nil)
+func TestGetSessionMessages_PassesThrough(t *testing.T) {
+	const sessionID = "s-10"
+	want := []model.Message{
+		{ID: 1, SessionID: sessionID, Content: "a"},
+		{ID: 2, SessionID: sessionID, Content: "b"},
+	}
+	m := &fakeMySQLStore{listMessagesRows: want}
+	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, &fakeFSStore{}))
+
+	msgs, next, err := svc.GetSessionMessages(context.Background(), sessionID, "", 10, "asc")
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "a", msgs[0].Content)
+	assert.Equal(t, "b", msgs[1].Content)
+	assert.Empty(t, next)
+}
+
+func TestCreateSession_Success(t *testing.T) {
+	const userID = "u-7"
+	m := &fakeMySQLStore{}
 	r := &fakeRedisStore{}
 	f := &fakeFSStore{}
 
-	ctx := trace.WithContext(context.Background(), "tid-ensure")
+	ctx := trace.WithContext(context.Background(), "tid-create")
 	svc := NewSessionService(newDeps(m, r, f))
 
-	err := svc.EnsureSession(ctx, userID, sessionID)
+	sessionID, err := svc.CreateSession(ctx, userID)
 	require.NoError(t, err)
 
-	require.Equal(t, 1, m.getSessionByIDCalls)
 	require.Equal(t, 1, m.createSessionCalls)
 	require.Equal(t, 1, f.ensureCalls)
-	assert.Equal(t, sessionID, m.createSessionSession.SessionID)
 	assert.Equal(t, userID, m.createSessionSession.UserID)
-	assert.Equal(t, "tid-ensure", m.createSessionSession.TraceID, "trace_id from ctx must propagate")
+	assert.Equal(t, "tid-create", m.createSessionSession.TraceID, "trace_id from ctx must propagate")
+	assert.Len(t, sessionID, 36, "session_id must be a 36-char UUID")
+	assert.Equal(t, byte('7'), sessionID[14], "session_id must be UUID v7")
+	assert.Equal(t, m.createSessionSession.SessionID, sessionID)
 }
 
-func TestEnsureSession_AlreadyExists_NoOp(t *testing.T) {
-	const (
-		userID    = "u-8"
-		sessionID = "s-8"
-	)
-	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
+func TestCreateSession_EnsureUserDirsError_Returned(t *testing.T) {
+	m := &fakeMySQLStore{}
 	r := &fakeRedisStore{}
-	f := &fakeFSStore{}
+	f := &fakeFSStore{ensureErr: errors.New("no space")}
 	svc := NewSessionService(newDeps(m, r, f))
 
-	err := svc.EnsureSession(context.Background(), userID, sessionID)
-	require.NoError(t, err)
-
-	require.Equal(t, 1, m.getSessionByIDCalls)
-	assert.Equal(t, 0, m.createSessionCalls, "create must NOT be called when session exists")
-	require.Equal(t, 1, f.ensureCalls, "EnsureUserDirs still runs even when session exists")
-}
-
-func TestEnsureSession_GetLookupError_Returned(t *testing.T) {
-	m := &fakeMySQLStore{getSessionIDErr: errors.New("boom")}
-	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, &fakeFSStore{}))
-	err := svc.EnsureSession(context.Background(), "u", "s")
+	sessionID, err := svc.CreateSession(context.Background(), "u")
 	require.Error(t, err)
-	assert.Equal(t, 0, m.createSessionCalls)
+	assert.Empty(t, sessionID)
+	assert.Equal(t, 0, m.createSessionCalls, "mysql create must NOT be called when fs fails")
 }
 
-func TestEnsureSession_CreateError_Returned(t *testing.T) {
+func TestCreateSession_CreateError_Returned(t *testing.T) {
 	m := &fakeMySQLStore{createSessionErr: errors.New("dup")}
 	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, &fakeFSStore{}))
-	err := svc.EnsureSession(context.Background(), "u", "s")
+	sessionID, err := svc.CreateSession(context.Background(), "u")
 	require.Error(t, err)
+	assert.Empty(t, sessionID)
+}
+
+func TestGetSessionByID_PassesThrough(t *testing.T) {
+	const sessionID = "s-9"
+	want := &model.Session{SessionID: sessionID, UserID: "u-9"}
+	m := &fakeMySQLStore{getSessionByIDFound: want}
+	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, &fakeFSStore{}))
+
+	got, err := svc.GetSessionByID(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, want.SessionID, got.SessionID)
+	assert.Equal(t, want.UserID, got.UserID)
+	require.Equal(t, 1, m.getSessionByIDCalls)
 }

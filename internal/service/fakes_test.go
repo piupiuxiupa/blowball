@@ -8,6 +8,7 @@ import (
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/model"
+	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 )
 
@@ -138,13 +139,80 @@ func (f *fakeMySQLStore) ListMessages(_ context.Context, sessionID string) ([]mo
 	return out, nil
 }
 
+func (f *fakeMySQLStore) ListMessagesPaged(_ context.Context, sessionID, cursor string, pageSize int, order string) ([]model.Message, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listMessagesErr != nil {
+		return nil, "", f.listMessagesErr
+	}
+	rows := make([]model.Message, len(f.listMessagesRows))
+	copy(rows, f.listMessagesRows)
+
+	// Default stable ascending sort matching MySQL.
+	if order == "desc" {
+		for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+			rows[i], rows[j] = rows[j], rows[i]
+		}
+	} else {
+		less := func(i, j int) bool {
+			if rows[i].MsgTime.Equal(rows[j].MsgTime) {
+				if rows[i].MsgIndex == rows[j].MsgIndex {
+					return rows[i].ID < rows[j].ID
+				}
+				return rows[i].MsgIndex < rows[j].MsgIndex
+			}
+			return rows[i].MsgTime.Before(rows[j].MsgTime)
+		}
+		// Bubble sort is fine for test data.
+		for i := 0; i < len(rows); i++ {
+			for j := i + 1; j < len(rows); j++ {
+				if !less(i, j) {
+					rows[i], rows[j] = rows[j], rows[i]
+				}
+			}
+		}
+	}
+
+	start := 0
+	if cursor != "" {
+		// Find position immediately after the cursor row (matched by id).
+		for i, m := range rows {
+			enc, err := cursorpkg.Encode(cursorpkg.Cursor{MsgTime: m.MsgTime, MsgIndex: m.MsgIndex, ID: m.ID})
+			if err != nil {
+				return nil, "", err
+			}
+			if enc == cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + pageSize
+	if end > len(rows) {
+		end = len(rows)
+	}
+	page := rows[start:end]
+	if len(page) == 0 {
+		return page, "", nil
+	}
+	if end >= len(rows) {
+		return page, "", nil
+	}
+	last := page[len(page)-1]
+	next, err := cursorpkg.Encode(cursorpkg.Cursor{MsgTime: last.MsgTime, MsgIndex: last.MsgIndex, ID: last.ID})
+	if err != nil {
+		return nil, "", err
+	}
+	return page, next, nil
+}
+
 // fakeRedisStore records AppendMessage/GetMessages/SetMessages calls.
 type fakeRedisStore struct {
 	mu sync.Mutex
 
-	appendCalls  int
-	appendArg    []byte
-	appendErr    error
+	appendCalls int
+	appendArg   []byte
+	appendErr   error
 
 	appendMessagesCalls int
 	appendMessagesArgs  [][]byte

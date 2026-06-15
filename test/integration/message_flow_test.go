@@ -220,3 +220,140 @@ func TestMessageFlow_Unauthenticated_401(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.NotEqual(t, "text/event-stream", w.Result().Header.Get("Content-Type"))
 }
+
+// TestCreateSession_ExplicitCreation_ReturnsUUIDv7 verifies the new explicit
+// session creation endpoint returns a server-generated UUID v7 session_id and
+// persists it.
+func TestCreateSession_ExplicitCreation_ReturnsUUIDv7(t *testing.T) {
+	env := newTestEnv(t, newScriptedLLMClient())
+	token := authToken(t, defaultUserID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Len(t, resp.SessionID, 36)
+	assert.Equal(t, byte('7'), resp.SessionID[14])
+
+	env.mysqlFake.mu.Lock()
+	sess, ok := env.mysqlFake.sessions[resp.SessionID]
+	env.mysqlFake.mu.Unlock()
+	require.True(t, ok, "session must be persisted")
+	assert.Equal(t, defaultUserID, sess.UserID)
+}
+
+// TestMessageFlow_SessionMustExist_404 verifies that posting a message to a
+// non-existent session returns 404 instead of auto-creating it.
+func TestMessageFlow_SessionMustExist_404(t *testing.T) {
+	env := newTestEnv(t, newScriptedLLMClient())
+	token := authToken(t, defaultUserID)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/non-existent-session/messages",
+		strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	assert.NotEqual(t, "text/event-stream", w.Result().Header.Get("Content-Type"))
+}
+
+// TestGetSessionMessages_Pagination_ReturnsFullEventStream verifies that the
+// messages endpoint returns every persisted event for a session with cursor
+// pagination.
+func TestGetSessionMessages_Pagination_ReturnsFullEventStream(t *testing.T) {
+	env := newTestEnv(t, newScriptedLLMClient())
+	token := authToken(t, defaultUserID)
+
+	// First, create a session explicitly.
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createW := httptest.NewRecorder()
+	env.engine.ServeHTTP(createW, createReq)
+	require.Equal(t, http.StatusOK, createW.Code)
+	var createResp struct {
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.Unmarshal(createW.Body.Bytes(), &createResp))
+
+	// Seed some messages through the memory store (faster than running the
+	// orchestrator for this test).
+	base := time.Unix(1_700_000_000, 0).UTC()
+	env.mysqlFake.mu.Lock()
+	env.mysqlFake.messages[createResp.SessionID] = []model.Message{
+		{ID: 1, SessionID: createResp.SessionID, MsgTime: base, MsgIndex: 0, Role: model.RoleUser, EventType: model.EventTypeMessage, Agent: model.AgentUser, Content: "hello"},
+		{ID: 2, SessionID: createResp.SessionID, MsgTime: base.Add(time.Second), MsgIndex: 1, Role: model.RoleAssistant, EventType: model.EventTypeToken, Agent: stream.AgentConfuse, Content: "Hi"},
+	}
+	env.mysqlFake.mu.Unlock()
+
+	// Fetch first page with page_size=1.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/"+createResp.SessionID+"/messages?page_size=1",
+		nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var page1 struct {
+		Messages      []model.Message `json:"messages"`
+		NextPageToken string          `json:"next_page_token"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page1))
+	require.Len(t, page1.Messages, 1)
+	assert.Equal(t, "hello", page1.Messages[0].Content)
+	assert.NotEmpty(t, page1.NextPageToken)
+
+	// Fetch second page using the token.
+	req2 := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/"+createResp.SessionID+"/messages?page_size=1&page_token="+page1.NextPageToken,
+		nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	w2 := httptest.NewRecorder()
+	env.engine.ServeHTTP(w2, req2)
+
+	require.Equal(t, http.StatusOK, w2.Code, "body: %s", w2.Body.String())
+	var page2 struct {
+		Messages      []model.Message `json:"messages"`
+		NextPageToken string          `json:"next_page_token"`
+	}
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &page2))
+	require.Len(t, page2.Messages, 1)
+	assert.Equal(t, "Hi", page2.Messages[0].Content)
+	assert.Empty(t, page2.NextPageToken, "last page must have empty next_page_token")
+}
+
+// TestGetSessionMessages_WrongOwner_404 verifies that a user cannot read
+// another user's session messages.
+func TestGetSessionMessages_WrongOwner_404(t *testing.T) {
+	env := newTestEnv(t, newScriptedLLMClient())
+	ownerToken := authToken(t, "owner-user")
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+	createReq.Header.Set("Authorization", "Bearer "+ownerToken)
+	createW := httptest.NewRecorder()
+	env.engine.ServeHTTP(createW, createReq)
+	require.Equal(t, http.StatusOK, createW.Code)
+	var createResp struct {
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.Unmarshal(createW.Body.Bytes(), &createResp))
+
+	attackerToken := authToken(t, "attacker-user")
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/"+createResp.SessionID+"/messages",
+		nil)
+	req.Header.Set("Authorization", "Bearer "+attackerToken)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}

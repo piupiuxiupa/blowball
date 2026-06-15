@@ -107,10 +107,14 @@ func run(ctx context.Context, f *flags) error {
 	if err != nil {
 		return fmt.Errorf("bcrypt hashing: %w", err)
 	}
-	userID := uuid.NewString()
+	userID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generating user_id: %w", err)
+	}
+	userIDStr := userID.String()
 
 	fmt.Fprintf(os.Stderr, "username : %s\n", f.username)
-	fmt.Fprintf(os.Stderr, "user_id  : %s\n", userID)
+	fmt.Fprintf(os.Stderr, "user_id  : %s\n", userIDStr)
 	fmt.Fprintf(os.Stderr, "status   : %s\n", f.status)
 	fmt.Fprintf(os.Stderr, "bcrypt   : cost=%d len=%d\n", f.cost, len(hash))
 
@@ -142,7 +146,7 @@ func run(ctx context.Context, f *flags) error {
 	}
 
 	u := model.User{
-		UserID:   userID,
+		UserID:   userIDStr,
 		Username: f.username,
 		Password: string(hash),
 		Status:   f.status,
@@ -151,7 +155,7 @@ func run(ctx context.Context, f *flags) error {
 		return fmt.Errorf("inserting user: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "created   : ok\n")
-	fmt.Println(userID)
+	fmt.Println(userIDStr)
 	return nil
 }
 

@@ -79,6 +79,58 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SessionListEntry'
+    CreateSessionResponse:
+      type: object
+      required: [session_id]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: Server-generated UUID v7 session identifier.
+          example: 018f9b8a-7c1a-7e6a-8e6a-6c1a7c1a7c1a
+    Message:
+      type: object
+      required: [id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time]
+      properties:
+        id:
+          type: integer
+          format: int64
+        session_id:
+          type: string
+          format: uuid
+        msg_time:
+          type: string
+          format: date-time
+        agent:
+          type: string
+          enum: [user, Confuse, Chongzhi, Liang]
+        msg_index:
+          type: integer
+        role:
+          type: string
+          enum: [user, assistant, tool]
+        event_type:
+          type: string
+          enum: [message, token, tool_call, agent_start, agent_end, agent_error]
+        content:
+          type: string
+        trace_id:
+          type: string
+          format: uuid
+        update_time:
+          type: string
+          format: date-time
+    SessionMessagesResponse:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        next_page_token:
+          type: string
+          description: Opaque cursor for the next page. Absent on the final page.
     SendMessageRequest:
       type: object
       required: [content]
@@ -290,10 +342,73 @@ paths:
                 empty:     {value: {sessions: []}}
         '500':
           $ref: '#/components/responses/Internal'
+    post:
+      tags: [Session]
+      summary: Create a new session.
+      description: |
+        The server mints a UUID v7 session_id, persists the session row, and
+        returns it. Clients must create a session before sending messages.
+      responses:
+        '200':
+          description: Session created successfully.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreateSessionResponse'}
+        '500':
+          $ref: '#/components/responses/Internal'
   /api/v1/sessions/{session_id}/messages:
+    get:
+      tags: [Session]
+      summary: List the messages of a session with cursor pagination.
+      description: |
+        Returns the full event stream of a session owned by the authenticated
+        user. Messages are ordered by `(msg_time, msg_index)` ascending by
+        default; use `order=desc` to retrieve newest first. Pass
+        `page_token` from the previous response to advance pages.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: page_token
+          in: query
+          required: false
+          schema: {type: string}
+          description: Opaque cursor from the previous page's `next_page_token`.
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+          description: Number of messages per page. Values above 200 are clamped.
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
+          description: Sort order for `(msg_time, msg_index)`.
+      responses:
+        '200':
+          description: Paginated message list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionMessagesResponse'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
     post:
       tags: [Session]
       summary: Send a user message and stream the agent's response as SSE.
+      description: |
+        The session must already exist and belong to the authenticated user.
+        Sending to a non-existent session or another user's session returns 404.
       parameters:
         - name: session_id
           in: path
@@ -323,6 +438,10 @@ paths:
                   - $ref: '#/components/schemas/SSEDone'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
   /api/v1/workspace/files:
