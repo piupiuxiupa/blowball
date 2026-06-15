@@ -38,7 +38,11 @@ agents:
       Always pass enough context in the task description so the chosen
       sub-agent can complete the work independently.
     max_tokens: 2048
-    tools: []
+    tools:
+      - xizhi_list_files
+      - xizhi_tree
+      - xizhi_glob_files
+      - webfetch
 
   chongzhi:
     name: Chongzhi
@@ -53,6 +57,10 @@ agents:
       - xizhi_read_file
       - xizhi_write_file
       - xizhi_modify_file
+      - xizhi_list_files
+      - xizhi_tree
+      - xizhi_glob_files
+      - webfetch
 
   liang:
     name: Liang
@@ -62,7 +70,11 @@ agents:
       Read the provided context and produce a clear, structured analysis.
       You do not have file tools; rely on the context given to you.
     max_tokens: 2048
-    tools: []
+    tools:
+      - xizhi_list_files
+      - xizhi_tree
+      - xizhi_glob_files
+      - webfetch
 
 tools:
   xizhi:
@@ -72,6 +84,15 @@ tools:
       enabled: true
     modify:
       enabled: true
+    list_files:
+      enabled: true
+    tree:
+      enabled: true
+    glob_files:
+      enabled: true
+  webfetch:
+    enabled: true
+    timeout: 30s
 
 logging:
   level: info

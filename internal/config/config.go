@@ -94,16 +94,26 @@ type XizhiToolConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// XizhiConfig groups the three Xizhi file tools.
+// XizhiConfig groups the Xizhi workspace-scoped file tools.
 type XizhiConfig struct {
-	Read   XizhiToolConfig `yaml:"read"`
-	Write  XizhiToolConfig `yaml:"write"`
-	Modify XizhiToolConfig `yaml:"modify"`
+	Read      XizhiToolConfig `yaml:"read"`
+	Write     XizhiToolConfig `yaml:"write"`
+	Modify    XizhiToolConfig `yaml:"modify"`
+	ListFiles XizhiToolConfig `yaml:"list_files"`
+	Tree      XizhiToolConfig `yaml:"tree"`
+	GlobFiles XizhiToolConfig `yaml:"glob_files"`
+}
+
+// WebfetchConfig holds the process-level webfetch tool settings.
+type WebfetchConfig struct {
+	Enabled bool          `yaml:"enabled"`
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // ToolsConfig groups all tool configuration.
 type ToolsConfig struct {
-	Xizhi XizhiConfig `yaml:"xizhi"`
+	Xizhi    XizhiConfig    `yaml:"xizhi"`
+	Webfetch WebfetchConfig `yaml:"webfetch"`
 }
 
 // LoggingConfig holds structured logging settings.

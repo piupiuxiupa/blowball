@@ -43,6 +43,7 @@ import (
 	"github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/store/redis"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/webfetch"
 	"github.com/lush/blowball/internal/tool/xizhi"
 )
 
@@ -123,7 +124,8 @@ func main() {
 	// Real tool execution during orchestration uses a per-request registry the
 	// orchestrator's factory rebuilds scoped to the user's workspace root.
 	reg := tool.NewRegistry()
-	xizhi.RegisterAll(reg, DataDir)
+	xizhi.RegisterAll(reg, DataDir, cfg.Tools.Xizhi)
+	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
 	// 8. Services. SessionService owns the three-layer write path; the message
 	// service delegates saves back to SessionService.SaveMessage so writes stay

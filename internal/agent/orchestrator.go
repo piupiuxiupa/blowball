@@ -44,7 +44,7 @@ func (f *orchestratorFactory) Build(workspaceRoot string) (Agent, error) {
 	// Xizhi tools capture workspaceRoot at registration, so this is mandatory
 	// for per-user isolation.
 	reqReg := tool.NewRegistry()
-	xizhi.RegisterAll(reqReg, workspaceRoot)
+	xizhi.RegisterAll(reqReg, workspaceRoot, f.cfg.Tools.Xizhi)
 
 	// Carry over any tools registered against the base registry that are not
 	// workspace-scoped. Today this is empty (all production tools are Xizhi),
@@ -81,7 +81,8 @@ func (f *orchestratorFactory) Build(workspaceRoot string) (Agent, error) {
 
 func isXizhiTool(name string) bool {
 	switch name {
-	case xizhi.NameReadFile, xizhi.NameWriteFile, xizhi.NameModifyFile:
+	case xizhi.NameReadFile, xizhi.NameWriteFile, xizhi.NameModifyFile,
+		xizhi.NameListFiles, xizhi.NameTree, xizhi.NameGlobFiles:
 		return true
 	}
 	return false

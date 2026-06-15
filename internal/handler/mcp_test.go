@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/xizhi"
 )
@@ -19,9 +20,16 @@ import (
 // Xizhi tools from the registry + synthetic invoke_chongzhi / invoke_liang
 // from agent.InvokeToolSchema.
 func TestMCPTools_ReturnsXizhiAndInvokeTools(t *testing.T) {
-	// Build a registry with Xizhi tools scoped to a temp dir.
+	// Build a registry with all Xizhi tools scoped to a temp dir.
 	reg := tool.NewRegistry()
-	xizhi.RegisterAll(reg, t.TempDir())
+	xizhi.RegisterAll(reg, t.TempDir(), config.XizhiConfig{
+		Read:      config.XizhiToolConfig{Enabled: true},
+		Write:     config.XizhiToolConfig{Enabled: true},
+		Modify:    config.XizhiToolConfig{Enabled: true},
+		ListFiles: config.XizhiToolConfig{Enabled: true},
+		Tree:      config.XizhiToolConfig{Enabled: true},
+		GlobFiles: config.XizhiToolConfig{Enabled: true},
+	})
 
 	h := NewMCPHandler(reg)
 	r := gin.New()
@@ -43,8 +51,8 @@ func TestMCPTools_ReturnsXizhiAndInvokeTools(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 
-	// Must have at least the 3 Xizhi tools + 2 invoke tools = 5.
-	require.Len(t, resp.Tools, 5, "expected 3 xizhi + 2 invoke tools")
+	// 6 Xizhi tools + 2 invoke tools = 8.
+	require.Len(t, resp.Tools, 8, "expected 6 xizhi + 2 invoke tools")
 
 	names := make(map[string]bool, len(resp.Tools))
 	for _, t2 := range resp.Tools {
@@ -57,6 +65,9 @@ func TestMCPTools_ReturnsXizhiAndInvokeTools(t *testing.T) {
 	assert.True(t, names[xizhi.NameReadFile], "xizhi_read_file must be present")
 	assert.True(t, names[xizhi.NameWriteFile], "xizhi_write_file must be present")
 	assert.True(t, names[xizhi.NameModifyFile], "xizhi_modify_file must be present")
+	assert.True(t, names[xizhi.NameListFiles], "xizhi_list_files must be present")
+	assert.True(t, names[xizhi.NameTree], "xizhi_tree must be present")
+	assert.True(t, names[xizhi.NameGlobFiles], "xizhi_glob_files must be present")
 	assert.True(t, names[agent.ToolInvokeChongzhi], "invoke_chongzhi must be present")
 	assert.True(t, names[agent.ToolInvokeLiang], "invoke_liang must be present")
 }
