@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -27,8 +26,7 @@ func NewSkillHandler(fsSvc *fs.Store) *SkillHandler {
 }
 
 // skillEntry is one element of the GET /api/v1/skills response array. Name is
-// the filename without its extension (the canonical skill identifier);
-// Filename is the full on-disk name.
+// the skill directory name (the canonical skill identifier).
 type skillEntry struct {
 	Name       string `json:"name"`
 	Filename   string `json:"filename"`
@@ -38,8 +36,8 @@ type skillEntry struct {
 
 // List handles GET /api/v1/skills. Returns 200 with a (possibly empty) array
 // of skill entries sorted by name. A missing skills directory returns an empty
-// array (the user's skills/ subdir is created on first login, so this is the
-// expected steady state for new users).
+// array. Each skill is discovered as {skill-name}/SKILL.md under the user's
+// skills directory.
 func (h *SkillHandler) List(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 
@@ -56,17 +54,19 @@ func (h *SkillHandler) List(c *gin.Context) {
 
 	out := make([]skillEntry, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
+		if !e.IsDir() {
 			continue
 		}
-		info, err := e.Info()
+		info, err := os.Stat(filepath.Join(skillsDir, e.Name(), "SKILL.md"))
 		if err != nil {
 			continue
 		}
-		name := e.Name()
+		if info.IsDir() {
+			continue
+		}
 		out = append(out, skillEntry{
-			Name:       skillNameFromFilename(name),
-			Filename:   name,
+			Name:       e.Name(),
+			Filename:   e.Name(),
 			Size:       info.Size(),
 			UpdateTime: info.ModTime().UTC().Format(time.RFC3339),
 		})
@@ -74,14 +74,4 @@ func (h *SkillHandler) List(c *gin.Context) {
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 
 	c.JSON(http.StatusOK, gin.H{"skills": out})
-}
-
-// skillNameFromFilename strips the file extension to produce the canonical
-// skill identifier. Files with no extension are returned verbatim.
-func skillNameFromFilename(filename string) string {
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		return filename
-	}
-	return strings.TrimSuffix(filename, ext)
 }

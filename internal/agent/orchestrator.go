@@ -3,11 +3,15 @@ package agent
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"slices"
+	"strings"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/lush/blowball/internal/tool/xizhi"
 	"go.uber.org/zap"
 )
@@ -27,44 +31,30 @@ type AgentFactory interface {
 	// Build returns a freshly-constructed Confuse agent for the request whose
 	// user owns workspaceRoot. The returned Confuse owns its own Chongzhi /
 	// Liang sub-agents, all wired to the same LLMClient.
-	Build(workspaceRoot string) (Agent, error)
+	Build(workspaceRoot, userID string) (Agent, error)
 }
 
 // orchestratorFactory is the production AgentFactory. It clones the base
-// config and rebuilds the Chongzhi-scoped tool registry per request.
+// config and rebuilds the per-agent tool registry and system prompt per request.
 type orchestratorFactory struct {
 	cfg          *config.Config
 	client       LLMClient
-	baseRegistry *tool.Registry // holds non-workspace-scoped tools, if any
+	baseRegistry *tool.Registry      // holds process-wide tools (webfetch, MCP proxies, read_skill)
+	serverTools  map[string][]string // server name -> prefixed tool names
+	skillLoader  *skill.Loader       // discovers global and per-user skills
 }
 
 // Build implements AgentFactory.
-func (f *orchestratorFactory) Build(workspaceRoot string) (Agent, error) {
-	// Each request gets a fresh registry scoped to the user's workspace.
-	// Xizhi tools capture workspaceRoot at registration, so this is mandatory
-	// for per-user isolation.
-	reqReg := tool.NewRegistry()
-	xizhi.RegisterAll(reqReg, workspaceRoot, f.cfg.Tools.Xizhi)
-
-	// Carry over any tools registered against the base registry that are not
-	// workspace-scoped. Today this is empty (all production tools are Xizhi),
-	// but the loop keeps the factory forward-compatible.
-	for _, spec := range f.baseRegistry.List() {
-		// Skip Xizhi tools — they were re-registered above with the right
-		// workspace_root; re-registering would fail (duplicate name).
-		if isXizhiTool(spec.Name) {
-			continue
-		}
-		if err := reqReg.Register(spec); err != nil {
-			return nil, fmt.Errorf("agent factory: re-register %q: %w", spec.Name, err)
-		}
+func (f *orchestratorFactory) Build(workspaceRoot, userID string) (Agent, error) {
+	if err := f.cfg.ValidateAgentSkills(userID, f.skillLoader.HasSkill); err != nil {
+		return nil, fmt.Errorf("agent factory: validate skills: %w", err)
 	}
 
-	chongzhi, err := NewChongzhi(f.cfg.Agents.Chongzhi, f.client, reqReg)
+	chongzhi, err := f.buildChongzhi(workspaceRoot, userID)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build chongzhi: %w", err)
 	}
-	liang, err := NewLiang(f.cfg.Agents.Liang, f.client)
+	liang, err := f.buildLiang(workspaceRoot, userID)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build liang: %w", err)
 	}
@@ -72,11 +62,103 @@ func (f *orchestratorFactory) Build(workspaceRoot string) (Agent, error) {
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    liang,
 	}
-	confuse, err := NewConfuse(f.cfg.Agents.Confuse, f.client, reqReg, subAgents)
+	confuse, err := f.buildConfuse(workspaceRoot, userID, subAgents)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build confuse: %w", err)
 	}
 	return confuse, nil
+}
+
+func (f *orchestratorFactory) buildConfuse(workspaceRoot, userID string, subAgents map[string]Agent) (*Confuse, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confuse, workspaceRoot, userID)
+	if err != nil {
+		return nil, err
+	}
+	return NewConfuse(cfg, f.client, reg, subAgents)
+}
+
+func (f *orchestratorFactory) buildChongzhi(workspaceRoot, userID string) (*Chongzhi, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, userID)
+	if err != nil {
+		return nil, err
+	}
+	return NewChongzhi(cfg, f.client, reg)
+}
+
+func (f *orchestratorFactory) buildLiang(workspaceRoot, userID string) (*Liang, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, userID)
+	if err != nil {
+		return nil, err
+	}
+	return NewLiang(cfg, f.client, reg)
+}
+
+// buildAgentRegistry creates a registry scoped to workspaceRoot containing the
+// tools this agent is allowed to use: built-ins listed in cfg.Tools, MCP tools
+// allowed by cfg.MCP, and read_skill when cfg.Skills is non-empty.
+func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, userID string) (*tool.Registry, config.AgentConfig, error) {
+	mcpToolNames := f.allowedMCPTools(cfg.MCP)
+	fullToolNames := append([]string(nil), cfg.Tools...)
+	fullToolNames = append(fullToolNames, mcpToolNames...)
+	if len(cfg.Skills) > 0 {
+		fullToolNames = append(fullToolNames, skill.ToolName)
+	}
+
+	allowed := make(map[string]struct{}, len(fullToolNames))
+	for _, n := range fullToolNames {
+		allowed[n] = struct{}{}
+	}
+
+	reg := tool.NewRegistry()
+	xizhi.RegisterAll(reg, workspaceRoot, f.cfg.Tools.Xizhi)
+
+	for _, spec := range f.baseRegistry.List() {
+		// Skip Xizhi tools — they were re-registered above with the right
+		// workspace_root; re-registering would fail (duplicate name).
+		if isXizhiTool(spec.Name) {
+			continue
+		}
+		if _, ok := allowed[spec.Name]; !ok {
+			continue
+		}
+		if err := reg.Register(spec); err != nil {
+			return nil, cfg, fmt.Errorf("agent factory: re-register %q: %w", spec.Name, err)
+		}
+	}
+
+	// If the agent has skills but read_skill was not copied from baseRegistry
+	// (because it was never registered globally), register it now as a fallback.
+	if len(cfg.Skills) > 0 {
+		if _, ok := reg.Get(skill.ToolName); !ok {
+			// This should not happen when main.go registers read_skill before
+			// MCP tools, but the fallback keeps the agent functional.
+			_ = skill.RegisterReadSkill(reg, f.skillLoader)
+		}
+	}
+
+	rendered, err := f.renderSystemPrompt(cfg, userID)
+	if err != nil {
+		return nil, cfg, err
+	}
+	cfg.Tools = fullToolNames
+	cfg.SystemPrompt = rendered
+	return reg, cfg, nil
+}
+
+// allowedMCPTools returns the prefixed tool names this agent is allowed to use
+// based on its MCP configuration. A server entry with tools ["*"] allows every
+// tool discovered from that server.
+func (f *orchestratorFactory) allowedMCPTools(mcp config.AgentMCPConfig) []string {
+	var out []string
+	for _, s := range mcp.Servers {
+		known := f.serverTools[s.Name]
+		if len(s.Tools) == 1 && s.Tools[0] == "*" {
+			out = append(out, known...)
+			continue
+		}
+		out = append(out, s.Tools...)
+	}
+	return out
 }
 
 func isXizhiTool(name string) bool {
@@ -86,6 +168,108 @@ func isXizhiTool(name string) bool {
 		return true
 	}
 	return false
+}
+
+// renderSystemPrompt builds the complete system prompt for an agent.
+func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, userID string) (string, error) {
+	var b strings.Builder
+	if cfg.SystemPrompt != "" {
+		b.WriteString(strings.TrimSpace(cfg.SystemPrompt))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(renderEnvironment(userID))
+	b.WriteString("\n\n")
+
+	builtIn, mcpByServer := f.classifyTools(cfg)
+	if len(builtIn) > 0 {
+		b.WriteString("## Built-in Tools\n")
+		for _, spec := range builtIn {
+			fmt.Fprintf(&b, "- %s: %s\n", spec.Name, spec.Description)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(mcpByServer) > 0 {
+		b.WriteString("## MCP Tools\n")
+		for serverName, specs := range mcpByServer {
+			fmt.Fprintf(&b, "### %s\n", serverName)
+			for _, spec := range specs {
+				fmt.Fprintf(&b, "- %s: %s\n", spec.Name, spec.Description)
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if len(cfg.Skills) > 0 {
+		allSkills := f.skillLoader.List(userID)
+		allowed := skill.Filter(allSkills, cfg.Skills)
+		if len(allowed) > 0 {
+			b.WriteString("## Skills\n")
+			b.WriteString("Available skills:\n")
+			b.WriteString("<skills>\n")
+			for _, s := range allowed {
+				fmt.Fprintf(&b, "  <skill>\n")
+				fmt.Fprintf(&b, "    <name>%s</name>\n", s.Name)
+				fmt.Fprintf(&b, "    <description>%s</description>\n", s.Description)
+				fmt.Fprintf(&b, "    <location>%s</location>\n", s.Location)
+				fmt.Fprintf(&b, "  </skill>\n")
+			}
+			b.WriteString("</skills>\n\n")
+			b.WriteString("When a task matches a skill, call read_skill with the skill name to load its full instructions.\n")
+			b.WriteString("\n")
+		}
+	}
+
+	return strings.TrimSpace(b.String()), nil
+}
+
+// classifyTools splits the tools relevant to this agent into built-in tools and
+// MCP tools grouped by server. The classification uses the serverTools mapping
+// populated at MCP registration time.
+func (f *orchestratorFactory) classifyTools(cfg config.AgentConfig) ([]*tool.ToolSpec, map[string][]*tool.ToolSpec) {
+	allowedMCP := make(map[string]struct{})
+	for _, name := range f.allowedMCPTools(cfg.MCP) {
+		allowedMCP[name] = struct{}{}
+	}
+	toolToServer := make(map[string]string)
+	for serverName, names := range f.serverTools {
+		for _, n := range names {
+			toolToServer[n] = serverName
+		}
+	}
+
+	var builtIn []*tool.ToolSpec
+	mcpByServer := make(map[string][]*tool.ToolSpec)
+	for _, spec := range f.baseRegistry.List() {
+		if isXizhiTool(spec.Name) {
+			continue
+		}
+		if _, ok := allowedMCP[spec.Name]; ok {
+			serverName := toolToServer[spec.Name]
+			mcpByServer[serverName] = append(mcpByServer[serverName], spec)
+			continue
+		}
+		// Treat read_skill as built-in when present.
+		if spec.Name == skill.ToolName {
+			builtIn = append(builtIn, spec)
+			continue
+		}
+		// Only include built-ins that are explicitly listed in cfg.Tools so we
+		// do not leak unrelated process-wide tools.
+		if slices.Contains(cfg.Tools, spec.Name) {
+			builtIn = append(builtIn, spec)
+		}
+	}
+	return builtIn, mcpByServer
+}
+
+// renderEnvironment returns the environment paragraph for the system prompt.
+func renderEnvironment(userID string) string {
+	return fmt.Sprintf(`# Environment
+- Platform: %s
+- OS: %s
+- User ID: %s`, runtime.GOARCH, runtime.GOOS, userID)
 }
 
 // Orchestrator is the top-level entry point that the HTTP handler calls per
@@ -105,11 +289,10 @@ type Orchestrator struct {
 // NewOrchestrator constructs the production Orchestrator. workspaceRootForUser
 // is an optional convenience closure that maps a user ID to its workspace root
 // path; it is stored on the returned Orchestrator so handlers can call
-// o.WorkspaceRootForUser(userID) without recomputing the path. It may be nil
-// if the handler resolves workspaceRoot some other way. The base registry
-// holds any process-wide tools (currently none — all tools are workspace-
-// scoped Xizhi tools registered per-request).
-func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Registry, workspaceRootForUser WorkspaceRootForUser) (*Orchestrator, error) {
+// o.WorkspaceRootForUser(userID) without recomputing the path. serverTools is
+// the server-name -> tool-names mapping produced by mcpclient registration;
+// skillLoader discovers global and per-user skills for system prompt injection.
+func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Registry, serverTools map[string][]string, skillLoader *skill.Loader, workspaceRootForUser WorkspaceRootForUser) (*Orchestrator, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("agent: orchestrator requires non-nil config")
 	}
@@ -119,10 +302,15 @@ func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Re
 	if baseRegistry == nil {
 		baseRegistry = tool.NewRegistry()
 	}
+	if serverTools == nil {
+		serverTools = make(map[string][]string)
+	}
 	factory := &orchestratorFactory{
 		cfg:          cfg,
 		client:       client,
 		baseRegistry: baseRegistry,
+		serverTools:  serverTools,
+		skillLoader:  skillLoader,
 	}
 	return &Orchestrator{factory: factory, workspaceRootForUser: workspaceRootForUser}, nil
 }
@@ -139,10 +327,10 @@ type WorkspaceRootForUser = func(userID string) string
 //   - Emit a final done event with the aggregated usage breakdown.
 //
 // workspaceRoot is the absolute path to the requesting user's workspace
-// directory (data/{user_uuid}/workspace). The handler computes this and
-// passes it in.
-func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, userMessage string, hub *stream.Hub) error {
-	confuse, err := o.factory.Build(workspaceRoot)
+// directory (data/{user_uuid}/workspace). userID identifies the caller so the
+// factory can load user-specific skills and validate skill permissions.
+func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, userID, userMessage string, hub *stream.Hub) error {
+	confuse, err := o.factory.Build(workspaceRoot, userID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}

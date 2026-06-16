@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/stream"
+	"github.com/lush/blowball/internal/tool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -28,7 +30,7 @@ func TestLiang_NoTools_PassesEmptyToolsJSON(t *testing.T) {
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
 		// Tools intentionally empty.
-	}, client)
+	}, client, tool.NewRegistry())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -64,6 +66,71 @@ drain:
 	assert.Nil(t, last.Tools, "Liang's LLMRequest.Tools must be nil; got %v", last.Tools)
 }
 
+func TestLiang_ToolCall(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	reg := tool.NewRegistry()
+	require.NoError(t, reg.Register(
+		&tool.ToolSpec{
+			Name:           "ping",
+			Description:    "reply with pong",
+			ParametersJSON: json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}},"required":["msg"]}`),
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				return "pong", nil
+			},
+		},
+	))
+
+	client := newFake(
+		fakeResponse{
+			tokens:       []string{"call"},
+			content:      "",
+			finishReason: "tool_calls",
+			toolCalls: []ToolCall{{
+				ID: "tc_1",
+				Function: ToolCallFunction{
+					Name:      "ping",
+					Arguments: `{"msg":"hello"}`,
+				},
+			}},
+			usage: Usage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
+		},
+		fakeResponse{
+			tokens:       []string{"done"},
+			content:      "done",
+			finishReason: "stop",
+			usage:        Usage{PromptTokens: 8, CompletionTokens: 1, TotalTokens: 9},
+		},
+	)
+
+	liang, err := NewLiang(config.AgentConfig{
+		Name:         "Liang",
+		Model:        "gpt-test",
+		SystemPrompt: "you are liang",
+		MaxTokens:    256,
+		Tools:        []string{"ping"},
+	}, client, reg)
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	content, usage, err := liang.Run(ctx, []Message{{Role: "user", Content: "ping"}}, hub)
+	require.NoError(t, err)
+	require.Equal(t, "done", content)
+	require.Equal(t, 16, usage.TotalTokens)
+	hub.Close()
+
+	// Verify the tool call was included in the final LLM request's messages.
+	require.Equal(t, 2, client.requestCount())
+	last := client.lastRequest()
+	require.Len(t, last.Messages, 4)
+	assert.Equal(t, "tool", last.Messages[3].Role)
+	assert.Equal(t, "tc_1", last.Messages[3].ToolCallID)
+	assert.Contains(t, last.Messages[3].Content, "pong")
+}
+
 func TestLiang_StreamsTokens(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
@@ -81,7 +148,7 @@ func TestLiang_StreamsTokens(t *testing.T) {
 		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
-	}, client)
+	}, client, tool.NewRegistry())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)

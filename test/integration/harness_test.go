@@ -36,6 +36,7 @@ import (
 	redisstore "github.com/lush/blowball/internal/store/redis"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/skill"
 )
 
 const (
@@ -404,7 +405,7 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		Agents: agentConfig(),
 	}
 	baseReg := tool.NewRegistry()
-	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)

@@ -153,7 +153,7 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 		// cancels the agent loop. We close the hub when Handle returns so the
 		// SSE writer drains remaining events and exits cleanly.
 		defer hub.Close()
-		events, err := h.orch.Handle(ctx, workspaceRoot, req.Content, hub)
+		events, err := h.orch.Handle(ctx, workspaceRoot, userID, req.Content, hub)
 		resultCh <- runResult{events: events, err: err}
 	}()
 

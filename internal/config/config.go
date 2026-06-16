@@ -74,13 +74,27 @@ func (j JWTConfig) ParseDuration() (time.Duration, error) {
 	return parseDuration(raw)
 }
 
+// AgentMCPConfig holds per-agent MCP server and tool allowlists.
+type AgentMCPConfig struct {
+	Servers []AgentMCPServerConfig `yaml:"servers"`
+}
+
+// AgentMCPServerConfig declares one allowed MCP server and the tools from it
+// the agent may use. Tools ["*"] allows every tool discovered from that server.
+type AgentMCPServerConfig struct {
+	Name  string   `yaml:"name"`
+	Tools []string `yaml:"tools"`
+}
+
 // AgentConfig describes a single agent's runtime settings.
 type AgentConfig struct {
-	Name         string   `yaml:"name"`
-	Model        string   `yaml:"model"`
-	SystemPrompt string   `yaml:"system_prompt"`
-	MaxTokens    int      `yaml:"max_tokens"`
-	Tools        []string `yaml:"tools"`
+	Name         string         `yaml:"name"`
+	Model        string         `yaml:"model"`
+	SystemPrompt string         `yaml:"system_prompt"`
+	MaxTokens    int            `yaml:"max_tokens"`
+	Tools        []string       `yaml:"tools"`
+	MCP          AgentMCPConfig `yaml:"mcp"`
+	Skills       []string       `yaml:"skills"`
 }
 
 // AgentsConfig holds the three blowball agents.
@@ -88,6 +102,32 @@ type AgentsConfig struct {
 	Confuse  AgentConfig `yaml:"confuse"`
 	Chongzhi AgentConfig `yaml:"chongzhi"`
 	Liang    AgentConfig `yaml:"liang"`
+}
+
+// validate checks every agent's MCP server references point to a declared
+// global MCP server. Tool and skill existence are validated later once the
+// remote tool list and skill directories are known.
+func (a AgentsConfig) validate(serverNames map[string]struct{}) error {
+	for _, name := range []string{"confuse", "chongzhi", "liang"} {
+		var cfg AgentConfig
+		switch name {
+		case "confuse":
+			cfg = a.Confuse
+		case "chongzhi":
+			cfg = a.Chongzhi
+		case "liang":
+			cfg = a.Liang
+		}
+		for i, s := range cfg.MCP.Servers {
+			if strings.TrimSpace(s.Name) == "" {
+				return fmt.Errorf("agents.%s.mcp.servers[%d]: name must be non-empty", name, i)
+			}
+			if _, ok := serverNames[s.Name]; !ok {
+				return fmt.Errorf("agents.%s.mcp.servers[%d]: unknown mcp server %q", name, i, s.Name)
+			}
+		}
+	}
+	return nil
 }
 
 // XizhiToolConfig is the enabled flag for a single Xizhi tool.
@@ -178,6 +218,9 @@ func (c *Config) validate() error {
 	if err := c.MCP.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
+	if err := c.Agents.validate(c.MCP.serverNames()); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
 	return nil
 }
 
@@ -197,6 +240,10 @@ func (m MCPConfig) validate() error {
 			if strings.TrimSpace(s.URL) == "" {
 				return fmt.Errorf("mcp.servers[%d] (name=%q): url is required for sse transport", i, s.Name)
 			}
+		case "http":
+			if strings.TrimSpace(s.URL) == "" {
+				return fmt.Errorf("mcp.servers[%d] (name=%q): url is required for http transport", i, s.Name)
+			}
 		case "stdio":
 			if strings.TrimSpace(s.Command) == "" {
 				return fmt.Errorf("mcp.servers[%d] (name=%q): command is required for stdio transport", i, s.Name)
@@ -212,7 +259,72 @@ func (m MCPConfig) validate() error {
 	return nil
 }
 
-// expandEnv replaces ${VAR} and ${VAR:default} references in s with the
+// serverNames returns the set of declared global MCP server names.
+func (m MCPConfig) serverNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(m.Servers))
+	for _, s := range m.Servers {
+		out[s.Name] = struct{}{}
+	}
+	return out
+}
+
+// ValidateAgentMCPTools checks every concrete tool name listed in agent MCP
+// configurations against the discovered tools for the referenced server.
+// serverTools maps server name to the set of prefixed tool names discovered from
+// that server. A wildcard ("*") entry is always valid. The function is intended
+// to be called after MCP client registration has populated serverTools.
+func (c *Config) ValidateAgentMCPTools(serverTools map[string]map[string]struct{}) error {
+	for _, agentName := range []string{"confuse", "chongzhi", "liang"} {
+		var cfg AgentConfig
+		switch agentName {
+		case "confuse":
+			cfg = c.Agents.Confuse
+		case "chongzhi":
+			cfg = c.Agents.Chongzhi
+		case "liang":
+			cfg = c.Agents.Liang
+		}
+		for _, s := range cfg.MCP.Servers {
+			known, ok := serverTools[s.Name]
+			if !ok {
+				return fmt.Errorf("agents.%s.mcp.servers: unknown server %q", agentName, s.Name)
+			}
+			for _, toolName := range s.Tools {
+				if toolName == "*" {
+					continue
+				}
+				if _, exists := known[toolName]; !exists {
+					return fmt.Errorf("agents.%s.mcp.servers[%q]: unknown tool %q", agentName, s.Name, toolName)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateAgentSkills checks every skill name listed in agent configurations
+// against the union of global and per-user skill names for the supplied userID.
+// The hasSkill function should report whether a skill with the given name
+// exists. An empty userID checks only the global skill directory.
+func (c *Config) ValidateAgentSkills(userID string, hasSkill func(name, userID string) bool) error {
+	for _, agentName := range []string{"confuse", "chongzhi", "liang"} {
+		var cfg AgentConfig
+		switch agentName {
+		case "confuse":
+			cfg = c.Agents.Confuse
+		case "chongzhi":
+			cfg = c.Agents.Chongzhi
+		case "liang":
+			cfg = c.Agents.Liang
+		}
+		for _, skillName := range cfg.Skills {
+			if !hasSkill(skillName, userID) {
+				return fmt.Errorf("agents.%s.skills: unknown skill %q", agentName, skillName)
+			}
+		}
+	}
+	return nil
+}
 // corresponding environment variable values. A reference with a default is
 // left as the default when the variable is unset; a reference without a
 // default becomes empty when unset, matching os.ExpandEnv semantics while

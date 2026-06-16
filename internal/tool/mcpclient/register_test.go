@@ -110,6 +110,57 @@ func TestRegisterAll_InitFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestRegisterAllWithManager_Ownership(t *testing.T) {
+	reg := tool.NewRegistry()
+
+	mt := &mockTransport{
+		initResult: &InitializeResult{ProtocolVersion: "2024-11-05"},
+		tools: []Tool{
+			{Name: "add", Description: "adds"},
+			{Name: "sub", Description: "subs"},
+		},
+	}
+	patchTransportFactory(t, mt)
+
+	mgr, err := RegisterAllWithManager(context.Background(), reg, config.MCPConfig{
+		Servers: []config.MCPServerConfig{{
+			Name:      "calc",
+			Transport: "sse",
+			Prefix:    "remote_",
+		}},
+	})
+	require.NoError(t, err)
+	defer func() { _ = mgr.Close() }()
+
+	serverTools := mgr.ServerTools()
+	require.Len(t, serverTools["calc"], 2)
+	require.Contains(t, serverTools["calc"], "remote_add")
+	require.Contains(t, serverTools["calc"], "remote_sub")
+
+	_, ok := reg.Get("remote_add")
+	require.True(t, ok)
+}
+
+func TestRegisterAll_BackwardCompatible(t *testing.T) {
+	reg := tool.NewRegistry()
+
+	mt := &mockTransport{
+		initResult: &InitializeResult{ProtocolVersion: "2024-11-05"},
+		tools:      []Tool{{Name: "add"}},
+	}
+	patchTransportFactory(t, mt)
+
+	closeAll, err := RegisterAll(context.Background(), reg, config.MCPConfig{
+		Servers: []config.MCPServerConfig{{
+			Name:      "calc",
+			Transport: "sse",
+		}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, closeAll())
+	require.True(t, mt.closed)
+}
+
 func TestRegisterAll_ToolError(t *testing.T) {
 	reg := tool.NewRegistry()
 

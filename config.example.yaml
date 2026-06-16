@@ -43,6 +43,15 @@ agents:
       - xizhi_tree
       - xizhi_glob_files
       - webfetch
+    # Optional: declare MCP servers and tools this agent may use.
+    mcp:
+      servers:
+        - name: remote_search
+          tools:
+            - "*"
+    # Optional: declare skills this agent may use.
+    skills:
+      - coding-style
 
   chongzhi:
     name: Chongzhi
@@ -61,6 +70,9 @@ agents:
       - xizhi_tree
       - xizhi_glob_files
       - webfetch
+    mcp:
+      servers: []
+    skills: []
 
   liang:
     name: Liang
@@ -75,6 +87,9 @@ agents:
       - xizhi_tree
       - xizhi_glob_files
       - webfetch
+    mcp:
+      servers: []
+    skills: []
 
 tools:
   xizhi:
@@ -102,19 +117,21 @@ tools:
 # Transport types:
 #   sse   - connects to a remote MCP server over SSE + HTTP POST messages.
 #   stdio - spawns a local command and speaks JSON-RPC over stdin/stdout.
+#   http  - connects to a remote MCP server over Streamable HTTP with
+#           automatic Mcp-Session-Id management.
 #
 # Authentication:
-#   SSE auth uses the headers map (supports ${VAR} substitution).
+#   SSE and HTTP auth use the headers map (supports ${VAR} substitution).
 #   stdio auth uses the env map, injected into the child environment.
 #
 # Fields:
 #   name         - required, unique identifier for this server.
-#   transport    - required, "sse" or "stdio".
-#   url          - required for sse; server endpoint.
+#   transport    - required, "sse", "stdio" or "http".
+#   url          - required for sse and http; server endpoint.
 #   command      - required for stdio; executable to spawn.
 #   args         - optional command-line arguments for stdio.
 #   env          - optional environment variables for stdio.
-#   headers      - optional HTTP headers for sse.
+#   headers      - optional HTTP headers for sse and http.
 #   timeout      - optional connection / initialization timeout (default 30s).
 #   call_timeout - optional per-tool-call timeout (default 30s).
 #   reconnect    - optional, attempt reconnect/restart on failure.
@@ -136,6 +153,15 @@ mcp:
       args: ["--stdio"]
       env:
         API_KEY: ${LOCAL_API_KEY}
+      timeout: 30s
+      call_timeout: 30s
+      reconnect: true
+
+    - name: remote_http_search
+      transport: http
+      url: http://localhost:3002/mcp
+      headers:
+        Authorization: Bearer ${MCP_TOKEN}
       timeout: 30s
       call_timeout: 30s
       reconnect: true

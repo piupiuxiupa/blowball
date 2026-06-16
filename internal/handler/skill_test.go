@@ -53,8 +53,10 @@ func (e *skillTestEnv) skillsDir() string {
 func TestSkills_List(t *testing.T) {
 	env := newSkillTestEnv(t)
 	dir := env.skillsDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "coder.md"), []byte("You are a coding assistant."), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "review.yaml"), []byte("role: reviewer"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "coder"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "coder", "SKILL.md"), []byte("You are a coding assistant."), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "review"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "review", "SKILL.md"), []byte("role: reviewer"), 0o644))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/skills", nil)
 	w := httptest.NewRecorder()
@@ -75,10 +77,10 @@ func TestSkills_List(t *testing.T) {
 
 	// Sorted by name (coder < review).
 	assert.Equal(t, "coder", resp.Skills[0].Name)
-	assert.Equal(t, "coder.md", resp.Skills[0].Filename)
+	assert.Equal(t, "coder", resp.Skills[0].Filename)
 	assert.Greater(t, resp.Skills[0].Size, int64(0))
 	assert.Equal(t, "review", resp.Skills[1].Name)
-	assert.Equal(t, "review.yaml", resp.Skills[1].Filename)
+	assert.Equal(t, "review", resp.Skills[1].Filename)
 }
 
 // TestSkills_EmptyDir verifies an empty skills directory returns 200 with an

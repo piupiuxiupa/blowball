@@ -10,36 +10,70 @@ import (
 	"github.com/lush/blowball/internal/tool"
 )
 
+// Manager holds the state produced by RegisterAllWithManager: connected MCP
+// clients, the ownership mapping from server name to prefixed tool names, and
+// a closer that releases all transports.
+type Manager struct {
+	clients     []*Client
+	serverTools map[string][]string
+}
+
+// ServerTools returns a copy of the server-name -> prefixed-tool-names mapping
+// discovered at registration time.
+func (m *Manager) ServerTools() map[string][]string {
+	out := make(map[string][]string, len(m.serverTools))
+	for k, v := range m.serverTools {
+		copied := make([]string, len(v))
+		copy(copied, v)
+		out[k] = copied
+	}
+	return out
+}
+
+// Close releases all underlying transports, returning the first error encountered.
+func (m *Manager) Close() error {
+	var first error
+	for _, c := range m.clients {
+		if err := c.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 // RegisterAll connects every configured MCP server, discovers its tools, and
 // registers proxy ToolSpecs into reg. The returned closer releases all
 // underlying transports; callers should invoke it on shutdown.
 func RegisterAll(ctx context.Context, reg *tool.Registry, cfg config.MCPConfig) (func() error, error) {
-	clients := make([]*Client, 0, len(cfg.Servers))
-	closeAll := func() error {
-		var first error
-		for _, c := range clients {
-			if err := c.Close(); err != nil && first == nil {
-				first = err
-			}
-		}
-		return first
+	mgr, err := RegisterAllWithManager(ctx, reg, cfg)
+	if err != nil {
+		return nil, err
 	}
+	return mgr.Close, nil
+}
+
+// RegisterAllWithManager connects every configured MCP server, registers proxy
+// ToolSpecs into reg, and returns a Manager that tracks tool ownership and can
+// be closed on shutdown. Use this when the caller needs the server->tools
+// mapping for agent-level filtering.
+func RegisterAllWithManager(ctx context.Context, reg *tool.Registry, cfg config.MCPConfig) (*Manager, error) {
+	mgr := &Manager{serverTools: make(map[string][]string)}
 
 	for _, sc := range cfg.Servers {
 		client, err := connectServer(sc)
 		if err != nil {
-			_ = closeAll()
+			_ = mgr.Close()
 			return nil, err
 		}
-		clients = append(clients, client)
+		mgr.clients = append(mgr.clients, client)
 
-		if err := registerServerTools(reg, client); err != nil {
-			_ = closeAll()
+		if err := registerServerTools(reg, client, mgr.serverTools); err != nil {
+			_ = mgr.Close()
 			return nil, err
 		}
 	}
 
-	return closeAll, nil
+	return mgr, nil
 }
 
 // TransportFactory builds a Transport for a server config. Tests can override
@@ -50,6 +84,8 @@ var TransportFactory = func(sc config.MCPServerConfig) (Transport, error) {
 		return NewSSETransport(sc.URL, sc.Headers, sc.Timeout), nil
 	case "stdio":
 		return NewStdioTransport(sc.Command, sc.Args, sc.Env), nil
+	case "http":
+		return NewHTTPTransport(sc.URL, sc.Headers, sc.Timeout), nil
 	default:
 		return nil, fmt.Errorf("unsupported transport %q", sc.Transport)
 	}
@@ -69,12 +105,14 @@ func connectServer(sc config.MCPServerConfig) (*Client, error) {
 	return client, nil
 }
 
-func registerServerTools(reg *tool.Registry, client *Client) error {
+func registerServerTools(reg *tool.Registry, client *Client, serverTools map[string][]string) error {
 	for _, remote := range client.Tools() {
 		name := client.PrefixedName(remote.Name)
 		if name == "" {
 			continue
 		}
+
+		serverTools[client.Name()] = append(serverTools[client.Name()], name)
 
 		// Check for collisions before attempting registration so we can report
 		// the offending server and original tool name.

@@ -324,6 +324,19 @@ mcp:
 `,
 		},
 		{
+			name: "http missing url",
+			content: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: remote
+      transport: http
+`,
+		},
+		{
 			name: "stdio missing command",
 			content: `
 mysql:
@@ -376,5 +389,101 @@ mcp:
 				t.Fatalf("Load expected validation error for %q, got nil", tc.name)
 			}
 		})
+	}
+}
+
+func TestLoad_AgentMCP_UnknownServer(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+mcp:
+  servers:
+    - name: remote
+      transport: sse
+      url: http://localhost:3001/sse
+agents:
+  confuse:
+    name: Confuse
+    mcp:
+      servers:
+        - name: missing
+          tools: ["*"]
+  chongzhi: {name: Chongzhi}
+  liang: {name: Liang}
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load expected validation error for unknown agent MCP server")
+	}
+}
+
+func TestLoad_AgentMCP_EmptyServerName(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confuse:
+    name: Confuse
+    mcp:
+      servers:
+        - name: ""
+          tools: ["*"]
+  chongzhi: {name: Chongzhi}
+  liang: {name: Liang}
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load expected validation error for empty agent MCP server name")
+	}
+}
+
+func TestConfig_ValidateAgentMCPTools(t *testing.T) {
+	cfg := &Config{
+		Agents: AgentsConfig{
+			Confuse: AgentConfig{
+				MCP: AgentMCPConfig{
+					Servers: []AgentMCPServerConfig{
+						{Name: "remote", Tools: []string{"web_search", "missing"}},
+					},
+				},
+			},
+		},
+	}
+	serverTools := map[string]map[string]struct{}{
+		"remote": {"web_search": {}, "fetch_url": {}},
+	}
+	if err := cfg.ValidateAgentMCPTools(serverTools); err == nil {
+		t.Fatal("expected error for unknown tool")
+	}
+
+	cfg.Agents.Confuse.MCP.Servers[0].Tools = []string{"web_search", "*"}
+	if err := cfg.ValidateAgentMCPTools(serverTools); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConfig_ValidateAgentSkills(t *testing.T) {
+	cfg := &Config{
+		Agents: AgentsConfig{
+			Confuse: AgentConfig{Skills: []string{"coding-style"}},
+		},
+	}
+	hasSkill := func(name, userID string) bool {
+		if name == "coding-style" {
+			return true
+		}
+		return false
+	}
+	if err := cfg.ValidateAgentSkills("", hasSkill); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cfg.Agents.Confuse.Skills = []string{"unknown"}
+	if err := cfg.ValidateAgentSkills("", hasSkill); err == nil {
+		t.Fatal("expected error for unknown skill")
 	}
 }

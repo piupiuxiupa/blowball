@@ -35,7 +35,7 @@ type stubOrchestrator struct {
 	preCloseSleep time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userID, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
 	s.gotMessage = userMessage

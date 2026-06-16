@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ import (
 	"github.com/lush/blowball/internal/store/redis"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/mcpclient"
+	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/lush/blowball/internal/tool/webfetch"
 	"github.com/lush/blowball/internal/tool/xizhi"
 )
@@ -128,18 +130,43 @@ func main() {
 	xizhi.RegisterAll(reg, DataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
-	// 7a. External MCP servers. Connect, discover tools, and register proxy
+	// 7a. Skill loader. Discover skills from the project-level skills/ directory
+	// and per-user data/{userID}/skills/ directories. Register the read_skill
+	// tool globally when at least one agent enables skills or explicitly lists
+	// read_skill in its tools.
+	skillLoader := skill.NewLoader("skills", func(userID string) string {
+		return fsStore.UserSkills(userID)
+	})
+	if needsReadSkill(cfg.Agents) {
+		if err := skill.RegisterReadSkill(reg, skillLoader); err != nil {
+			log.Fatal("register read_skill failed", zap.Error(err))
+		}
+	}
+
+	// 7b. External MCP servers. Connect, discover tools, and register proxy
 	// specs into the process-wide registry. Startup fails fast on connection or
 	// tool-list errors so misconfiguration is surfaced immediately.
-	mcpClose, err := mcpclient.RegisterAll(context.Background(), reg, cfg.MCP)
+	mcpManager, err := mcpclient.RegisterAllWithManager(context.Background(), reg, cfg.MCP)
 	if err != nil {
 		log.Fatal("mcp client registration failed", zap.Error(err))
 	}
 	defer func() {
-		if cerr := mcpClose(); cerr != nil {
+		if cerr := mcpManager.Close(); cerr != nil {
 			log.Warn("mcp client close failed", zap.Error(cerr))
 		}
 	}()
+
+	// Validate agent MCP tool references against the discovered remote tools.
+	serverTools := mcpManager.ServerTools()
+	if err := cfg.ValidateAgentMCPTools(toServerToolSet(serverTools)); err != nil {
+		log.Fatal("agent mcp tool validation failed", zap.Error(err))
+	}
+
+	// Validate agent skill references against global skills. Per-user skills are
+	// validated at request time when the userID is known.
+	if err := cfg.ValidateAgentSkills("", skillLoader.HasSkill); err != nil {
+		log.Fatal("agent skill validation failed", zap.Error(err))
+	}
 
 	// 8. Services. SessionService owns the three-layer write path; the message
 	// service delegates saves back to SessionService.SaveMessage so writes stay
@@ -158,7 +185,7 @@ func main() {
 	wsFn := func(userID string) string {
 		return fsStore.UserWorkspace(userID)
 	}
-	orch, err := agent.NewOrchestrator(openAIClient, cfg, reg, wsFn)
+	orch, err := agent.NewOrchestrator(openAIClient, cfg, reg, serverTools, skillLoader, wsFn)
 	if err != nil {
 		log.Fatal("orchestrator init failed", zap.Error(err))
 	}
@@ -228,4 +255,39 @@ func main() {
 		log.Error("server shutdown error", zap.Error(err))
 	}
 	log.Info("server stopped")
+}
+
+// hasEnabledSkills reports whether any agent has a non-empty skills list.
+func hasEnabledSkills(agents config.AgentsConfig) bool {
+	return len(agents.Confuse.Skills) > 0 ||
+		len(agents.Chongzhi.Skills) > 0 ||
+		len(agents.Liang.Skills) > 0
+}
+
+// needsReadSkill reports whether any agent explicitly lists read_skill in its
+// tools or has skills configured.
+func needsReadSkill(agents config.AgentsConfig) bool {
+	if hasEnabledSkills(agents) {
+		return true
+	}
+	for _, cfg := range []config.AgentConfig{agents.Confuse, agents.Chongzhi, agents.Liang} {
+		if slices.Contains(cfg.Tools, skill.ToolName) {
+			return true
+		}
+	}
+	return false
+}
+
+// toServerToolSet converts the server-name -> tool-names mapping into the
+// map[string]map[string]struct{} shape expected by Config.ValidateAgentMCPTools.
+func toServerToolSet(serverTools map[string][]string) map[string]map[string]struct{} {
+	out := make(map[string]map[string]struct{}, len(serverTools))
+	for serverName, names := range serverTools {
+		set := make(map[string]struct{}, len(names))
+		for _, n := range names {
+			set[n] = struct{}{}
+		}
+		out[serverName] = set
+	}
+	return out
 }

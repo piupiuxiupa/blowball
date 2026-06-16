@@ -12,8 +12,10 @@ A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API
   - `Chongzhi` — coding agent with workspace file tools.
   - `Liang` — analysis and explanation agent.
 - **Workspace file tools** (`xizhi_*`) scoped per user: read, write, modify, list, tree, glob, plus `webfetch`.
-- **External MCP client support** — connect SSE or stdio MCP servers at startup and proxy their tools into the agent tool catalogue.
-- **Per-user workspace isolation** on disk, with best-effort Linux Landlock sandboxing.
+- **External MCP client support** — connect SSE, stdio, or Streamable HTTP MCP servers at startup and proxy their tools into the agent tool catalogue.
+- **Per-agent MCP and skill permissions** — each agent can be restricted to specific MCP servers/tools and skills, and the available set is injected into its system prompt.
+- **Skill directory layout** — global `skills/` and per-user `data/{userID}/skills/` directories using `{skill-name}/SKILL.md` with YAML frontmatter.
+- **`read_skill` tool** — lets an agent load skill instructions on demand by name.
 - **Graceful shutdown**, structured JSON logging with zap, and OpenAPI 3 spec at [`api/openapi.yaml`](api/openapi.yaml).
 
 ## Quick start
@@ -161,40 +163,136 @@ mcp:
       call_timeout: 30s
       reconnect: true
       prefix: calc_
+
+    - name: remote_http_search
+      transport: http
+      url: http://localhost:3002/mcp
+      headers:
+        Authorization: Bearer ${MCP_TOKEN}
+      timeout: 30s
+      call_timeout: 30s
+      reconnect: true
 ```
 
 Supported transports:
 
 - `sse` — connects over Server-Sent Events + HTTP POST messages.
 - `stdio` — spawns a local subprocess and speaks JSON-RPC over stdin/stdout.
+- `http` — Streamable HTTP with automatic `Mcp-Session-Id` management and re-initialization on session expiry.
 
 Configuration fields:
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | yes | Unique server identifier. |
-| `transport` | yes | `sse` or `stdio`. |
-| `url` | for `sse` | Server SSE endpoint. |
+| `transport` | yes | `sse`, `stdio`, or `http`. |
+| `url` | for `sse` / `http` | Server endpoint. |
 | `command` | for `stdio` | Executable to spawn. |
 | `args` | no | Command-line arguments for `stdio`. |
 | `env` | no | Environment variables injected into the `stdio` child process. |
-| `headers` | no | HTTP headers sent with every SSE request. |
+| `headers` | no | HTTP headers sent with every request (SSE / HTTP). |
 | `timeout` | no | Connection / initialization timeout (default `30s`). |
 | `call_timeout` | no | Per-tool-call timeout (default `30s`). |
-| `reconnect` | no | Reconnect (`sse`) or restart (`stdio`) on failure. |
+| `reconnect` | no | Reconnect (`sse` / `http`) or restart (`stdio`) on failure. |
 | `prefix` | no | Prefix applied to every discovered tool name to avoid collisions. |
 
 All string values support `${VAR}` and `${VAR:default}` environment substitution.
 
-Tool names must be unique across built-in tools and all configured MCP servers. If a remote tool name collides, startup fails unless you set a `prefix` for that server. Discovered tools are cached at startup and exposed through `GET /api/v1/mcp/tools`; agents can include them in their configured `tools` list.
+### Per-agent MCP permissions
+
+By default an agent sees no MCP tools. Use `agents.<name>.mcp.servers` to grant access:
+
+```yaml
+agents:
+  confuse:
+    mcp:
+      servers:
+        - name: remote_search
+          tools:
+            - web_search
+            - fetch_url
+        - name: remote_http_search
+          tools: ["*"]
+```
+
+- `tools: ["*"]` allows every tool discovered from that server.
+- Only allowed tools appear in the agent's tool list and system prompt.
+- Server names must match an entry in the global `mcp.servers` list.
+- Concrete tool names (not `"*"`) are validated against the remote `tools/list` result at startup.
 
 ### Security considerations
 
-- **Allowlist only** — only servers declared in `mcp.servers` are connected. There is no runtime discovery or dynamic registration.
-- **Auth injection** — use `headers` (SSE) and `env` (stdio) for secrets; both support environment substitution so credentials never need to be hard-coded in config.
+- **Allowlist only** — only servers declared in `mcp.servers` are connected, and only tools explicitly allowed per agent are exposed to that agent.
+- **Auth injection** — use `headers` (SSE / HTTP) and `env` (stdio) for secrets; both support environment substitution so credentials never need to be hard-coded in config.
 - **Timeouts** — per-server `timeout` and `call_timeout` prevent a slow or hung remote server from blocking agent turns indefinitely.
 - **Subprocess / network sandboxing** — stdio subprocesses run with normal OS process boundaries; additional sandboxing (e.g. seccomp, Landlock, or chroot) is future work.
 - **Remote errors** — failures from an MCP server are surfaced as `tool_error` / `agent_error` stream events and do not crash the agent loop.
+
+## Skills
+
+Skills are instruction documents stored as `{skill-name}/SKILL.md` with YAML frontmatter:
+
+```markdown
+---
+name: coding-style
+description: Project coding conventions
+---
+
+# Coding Style
+
+Always run `gofmt` before finishing Go edits...
+```
+
+Blowball discovers skills from two locations:
+
+- Global skills: `./skills/`
+- Per-user skills: `data/{userID}/skills/`
+
+User skills override global skills of the same name.
+
+### Enabling skills for an agent
+
+```yaml
+agents:
+  confuse:
+    skills:
+      - coding-style
+      - review-checklist
+```
+
+When an agent has skills:
+
+1. A skill catalogue (name, description, location) is injected into its system prompt.
+2. The `read_skill` tool is added to the agent's tool list.
+3. The model can call `read_skill(name)` to load the full skill instructions on demand.
+
+### Listing skills
+
+`GET /api/v1/skills` returns the skills visible to the authenticated user:
+
+```json
+{
+  "skills": [
+    {"name": "coding-style", "filename": "coding-style", "size": 1234, "update_time": "2026-06-16T..."}
+  ]
+}
+```
+
+### Migrating from flat skill files
+
+Previous versions stored per-user skills as flat files such as `data/{userID}/skills/coding-style.md`. To migrate:
+
+1. Create a directory for each skill: `data/{userID}/skills/{skill-name}/`.
+2. Move the file into the directory as `SKILL.md`.
+3. Add YAML frontmatter with `name` and `description`.
+
+Example:
+
+```bash
+mkdir -p data/u-123/coding-style
+mv data/u-123/coding-style.md data/u-123/coding-style/SKILL.md
+# add ---/name/description/--- frontmatter to SKILL.md
+```
 
 ## Configuration
 
@@ -204,8 +302,9 @@ Key sections in `config.yaml`:
 - `openai` — API key, base URL, and default model.
 - `mysql` / `redis` — connection settings.
 - `jwt` — signing secret and token expiry (e.g. `7d`).
-- `agents` — system prompts, models, max tokens, and tool lists for each agent.
+- `agents` — system prompts, models, max tokens, tool lists, MCP permissions, and skill lists for each agent.
 - `tools` — enable/disable tool families and set timeouts.
+- `mcp` — external MCP server declarations.
 - `logging` — level and format (`json` or `console`).
 
 ## License
