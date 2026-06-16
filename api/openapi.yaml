@@ -137,7 +137,8 @@ components:
       properties:
         content:
           type: string
-          description: User message text.
+          minLength: 1
+          description: User message text (must be non-empty).
     # ---- SSE event payloads -------------------------------------------------
     SSEAgentStart:
       type: object
@@ -229,8 +230,12 @@ components:
         size: {type: integer}
     MCPTool:
       type: object
-      required: [name, description, parameters]
+      required: [type, name, description, parameters]
       properties:
+        type:
+          type: string
+          enum: [function]
+          example: function
         name: {type: string}
         description: {type: string}
         parameters:
@@ -249,8 +254,12 @@ components:
       type: object
       required: [name, filename, size, update_time]
       properties:
-        name: {type: string, description: Skill identifier (filename without extension).}
-        filename: {type: string}
+        name:
+          type: string
+          description: Skill identifier (the subdirectory name containing SKILL.md).
+        filename:
+          type: string
+          description: Same as `name`; the skill directory name.
         size: {type: integer, format: int64}
         update_time:
           type: string
@@ -297,6 +306,23 @@ components:
 security:
   - BearerAuth: []
 paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Health check endpoint.
+      security: []
+      responses:
+        '200':
+          description: Server is healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
   /api/v1/auth/login:
     post:
       tags: [Auth]
@@ -493,7 +519,12 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '413':
-          $ref: '#/components/responses/PayloadTooLarge'
+          description: Uploaded file exceeds the 50 MiB size limit.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                fileTooLarge: {value: {error: {code: FILE_TOO_LARGE, message: "file too large"}}}
         '500':
           $ref: '#/components/responses/Internal'
   /api/v1/workspace/files/{path}:
@@ -552,6 +583,9 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                binaryFile: {value: {error: {code: BINARY_FILE, message: "binary file, use download endpoint"}}}
+                directory:  {value: {error: {code: BAD_REQUEST, message: "path is a directory"}}}
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
@@ -563,8 +597,10 @@ paths:
       tags: [MCP]
       summary: List the combined MCP tool catalogue.
       description: |
-        Returns regular Xizhi registry tools plus the synthetic
-        `invoke_chongzhi` and `invoke_liang` agent-invocation tools.
+        Returns the combined tool catalogue: regular Xizhi registry tools,
+        tools advertised by configured external MCP servers, and the synthetic
+        `invoke_chongzhi` / `invoke_liang` agent-invocation tools. Each entry
+        follows the OpenAI function-tool shape (`type: function`).
       responses:
         '200':
           description: Tool list.
