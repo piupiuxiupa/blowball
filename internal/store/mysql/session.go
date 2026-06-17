@@ -82,7 +82,7 @@ func (s *Store) GetSessionByID(ctx context.Context, sessionID string) (*model.Se
 const listSessionsWithTitleSQL = `
 SELECT s.session_id AS session_id, s.user_id AS user_id, s.trace_id AS trace_id,
        s.update_time AS update_time, s.create_time AS create_time,
-       t.title AS title
+       COALESCE(t.title, '') AS title
 FROM sessions s
 LEFT JOIN titles t ON t.session_id = s.session_id
 WHERE s.user_id = ?

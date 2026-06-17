@@ -31,7 +31,7 @@ type AgentFactory interface {
 	// Build returns a freshly-constructed Confuse agent for the request whose
 	// user owns workspaceRoot. The returned Confuse owns its own Chongzhi /
 	// Liang sub-agents, all wired to the same LLMClient.
-	Build(workspaceRoot, userID string) (Agent, error)
+	Build(workspaceRoot, skillsDir, userID string) (Agent, error)
 }
 
 // orchestratorFactory is the production AgentFactory. It clones the base
@@ -45,16 +45,16 @@ type orchestratorFactory struct {
 }
 
 // Build implements AgentFactory.
-func (f *orchestratorFactory) Build(workspaceRoot, userID string) (Agent, error) {
+func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Agent, error) {
 	if err := f.cfg.ValidateAgentSkills(userID, f.skillLoader.HasSkill); err != nil {
 		return nil, fmt.Errorf("agent factory: validate skills: %w", err)
 	}
 
-	chongzhi, err := f.buildChongzhi(workspaceRoot, userID)
+	chongzhi, err := f.buildChongzhi(workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build chongzhi: %w", err)
 	}
-	liang, err := f.buildLiang(workspaceRoot, userID)
+	liang, err := f.buildLiang(workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build liang: %w", err)
 	}
@@ -62,31 +62,31 @@ func (f *orchestratorFactory) Build(workspaceRoot, userID string) (Agent, error)
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    liang,
 	}
-	confuse, err := f.buildConfuse(workspaceRoot, userID, subAgents)
+	confuse, err := f.buildConfuse(workspaceRoot, skillsDir, userID, subAgents)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build confuse: %w", err)
 	}
 	return confuse, nil
 }
 
-func (f *orchestratorFactory) buildConfuse(workspaceRoot, userID string, subAgents map[string]Agent) (*Confuse, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confuse, workspaceRoot, userID)
+func (f *orchestratorFactory) buildConfuse(workspaceRoot, skillsDir, userID string, subAgents map[string]Agent) (*Confuse, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confuse, workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return nil, err
 	}
 	return NewConfuse(cfg, f.client, reg, subAgents)
 }
 
-func (f *orchestratorFactory) buildChongzhi(workspaceRoot, userID string) (*Chongzhi, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, userID)
+func (f *orchestratorFactory) buildChongzhi(workspaceRoot, skillsDir, userID string) (*Chongzhi, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return nil, err
 	}
 	return NewChongzhi(cfg, f.client, reg)
 }
 
-func (f *orchestratorFactory) buildLiang(workspaceRoot, userID string) (*Liang, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, userID)
+func (f *orchestratorFactory) buildLiang(workspaceRoot, skillsDir, userID string) (*Liang, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (f *orchestratorFactory) buildLiang(workspaceRoot, userID string) (*Liang, 
 // buildAgentRegistry creates a registry scoped to workspaceRoot containing the
 // tools this agent is allowed to use: built-ins listed in cfg.Tools, MCP tools
 // allowed by cfg.MCP, and read_skill when cfg.Skills is non-empty.
-func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, userID string) (*tool.Registry, config.AgentConfig, error) {
+func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, skillsDir, userID string) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
 	fullToolNames = append(fullToolNames, mcpToolNames...)
@@ -136,7 +136,7 @@ func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspa
 		}
 	}
 
-	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, userID)
+	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -171,10 +171,11 @@ func isXizhiTool(name string) bool {
 }
 
 // renderSystemPrompt builds the complete system prompt for an agent.
-func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, userID string) (string, error) {
+func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, skillsDir, userID string) (string, error) {
 	return prompt.RenderSystemPrompt(prompt.RenderInput{
 		BasePrompt: cfg.SystemPrompt,
 		Workspace:  workspaceRoot,
+		SkillsDir:  skillsDir,
 		UserID:     userID,
 		Platform:   runtime.GOARCH,
 		OS:         runtime.GOOS,
@@ -312,8 +313,8 @@ type WorkspaceRootForUser = func(userID string) string
 // workspaceRoot is the absolute path to the requesting user's workspace
 // directory (data/{user_uuid}/workspace). userID identifies the caller so the
 // factory can load user-specific skills and validate skill permissions.
-func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, userID, userMessage string, hub *stream.Hub) error {
-	confuse, err := o.factory.Build(workspaceRoot, userID)
+func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) error {
+	confuse, err := o.factory.Build(workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}

@@ -29,15 +29,17 @@ import (
 type stubOrchestrator struct {
 	mu            sync.Mutex
 	gotWorkspace  string
+	gotSkillsDir  string
 	gotMessage    string
 	eventsToEmit  []stream.StreamEvent
 	returnErr     error
 	preCloseSleep time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userID, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
+	s.gotSkillsDir = skillsDir
 	s.gotMessage = userMessage
 	s.mu.Unlock()
 

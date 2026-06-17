@@ -28,6 +28,7 @@ type SkillInfo struct {
 type RenderInput struct {
 	BasePrompt string
 	Workspace  string
+	SkillsDir  string
 	UserID     string
 	Platform   string
 	OS         string
@@ -99,10 +100,11 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 func renderEnvironment(input RenderInput) string {
 	return fmt.Sprintf(`# Environment
 - Primary working directory: %s
+- Skills directory: %s
 - Platform: %s
 - OS: %s
 - User ID: %s
-- Assistant knowledge cutoff: %s`, input.Workspace, input.Platform, input.OS, input.UserID, input.Cutoff)
+- Assistant knowledge cutoff: %s`, input.Workspace, input.SkillsDir, input.Platform, input.OS, input.UserID, input.Cutoff)
 }
 
 func classifyTools(tools []ToolInfo) ([]ToolInfo, map[string][]ToolInfo) {

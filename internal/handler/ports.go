@@ -23,7 +23,7 @@ type OrchestratorRunner interface {
 	// forwarded to hub for the SSE wire but is NOT included in the returned
 	// slice (usage metadata is not persisted as chat content). The caller owns
 	// hub and closes it after Handle returns.
-	Handle(ctx context.Context, workspaceRoot, userID, userMessage string, hub *stream.Hub) (events []stream.StreamEvent, err error)
+	Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) (events []stream.StreamEvent, err error)
 }
 
 // orchestratorAdapter wraps a *agent.Orchestrator to satisfy OrchestratorRunner.
@@ -48,7 +48,7 @@ func NewOrchestratorAdapter(o *agent.Orchestrator) OrchestratorRunner {
 }
 
 // Handle implements OrchestratorRunner.
-func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, userID, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
+func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
 	// Tap side: drain innerHub.Events() in a goroutine, forwarding to the
 	// caller's hub and accumulating the raw event stream.
 	innerHub := stream.NewHub(stream.DefaultHubBufferSize)
@@ -97,7 +97,7 @@ func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, userID,
 		}
 	}()
 
-	err := a.inner.Handle(ctx, workspaceRoot, userID, userMessage, innerHub)
+	err := a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, userMessage, innerHub)
 	innerHub.Close()
 	events := <-eventsCh
 	return events, err

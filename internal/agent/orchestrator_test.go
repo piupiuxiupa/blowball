@@ -72,7 +72,7 @@ func TestOrchestrator_Handle_FullFlow(t *testing.T) {
 	type res struct{ err error }
 	resCh := make(chan res, 1)
 	go func() {
-		resCh <- res{err: o.Handle(ctx, t.TempDir(), "user-1", "hi", hub)}
+		resCh <- res{err: o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", "hi", hub)}
 	}()
 
 	var events []stream.StreamEvent
@@ -198,7 +198,7 @@ func TestOrchestrator_ExternalMCPTool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), "user-1", "hi", hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", "hi", hub)
 	require.NoError(t, err)
 	hub.Close()
 
@@ -265,7 +265,7 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), "user-1", "hi", hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", "hi", hub)
 	require.NoError(t, err)
 	hub.Close()
 
@@ -339,7 +339,7 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), "user-1", "hi", hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", "hi", hub)
 	require.NoError(t, err)
 	hub.Close()
 
