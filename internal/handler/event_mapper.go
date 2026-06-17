@@ -9,6 +9,35 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
+// MergeEvents collapses adjacent token events from the same agent into a single
+// event whose Content is the concatenation of the merged fragments. All other
+// event boundaries (agent_start, agent_end, agent_error, tool_call, or a change
+// in Agent) start a new output event so that total ordering and semantic
+// boundaries are preserved.
+func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
+	if len(events) == 0 {
+		return nil
+	}
+
+	merged := make([]stream.StreamEvent, 0, len(events))
+	var current *stream.StreamEvent
+	for i := range events {
+		e := events[i]
+		if current != nil && e.Type == stream.EventToken && current.Type == stream.EventToken && current.Agent == e.Agent {
+			current.Content += e.Content
+			continue
+		}
+		if current != nil {
+			merged = append(merged, *current)
+		}
+		current = &e
+	}
+	if current != nil {
+		merged = append(merged, *current)
+	}
+	return merged
+}
+
 // MessageFromEvent maps a StreamEvent produced by the orchestrator into a
 // model.Message ready for persistence. Marker events (agent_start/agent_end)
 // leave Role empty; token/tool_call events carry the OpenAI assistant role;

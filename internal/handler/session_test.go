@@ -437,7 +437,8 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
-	require.Len(t, env.mysql.appendMessagesArg, 4, "assistant batch must contain all events except done")
+	// Assistant event stream is merged: agent_start, merged token, agent_end (done excluded).
+	require.Len(t, env.mysql.appendMessagesArg, 3, "assistant batch must contain merged events except done")
 
 	// User batch (first call) is a single message row.
 	// We cannot observe the exact first batch args here because appendMessagesArg

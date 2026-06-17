@@ -199,8 +199,9 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 		}()
 
 		now := time.Now().UTC()
-		msgs := make([]model.Message, 0, len(events))
-		for i, e := range events {
+		merged := MergeEvents(events)
+		msgs := make([]model.Message, 0, len(merged))
+		for i, e := range merged {
 			msg, mErr := MessageFromEvent(e, sessionID, tid, i+1, now)
 			if mErr != nil {
 				logger.L().Error("map event to message failed",

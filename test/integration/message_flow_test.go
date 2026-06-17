@@ -106,14 +106,14 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	// The assistant batch is saved AFTER the SSE response completes via a
 	// detached context, so we poll.
 	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 5 // 1 user + 4 assistant events
-	}, 2*time.Second, 10*time.Millisecond, "expected user + 4 assistant events in MySQL tier")
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 4 // 1 user + 3 merged assistant events
+	}, 2*time.Second, 10*time.Millisecond, "expected user + 3 merged assistant events in MySQL tier")
 
-	// Redis tier: 5 messages cached under msgs:{session_id}.
+	// Redis tier: 4 messages cached under msgs:{session_id}.
 	require.Eventually(t, func() bool {
 		raws, err := env.redisSvc.GetMessages(context.Background(), defaultSessionID)
-		return err == nil && len(raws) == 5
-	}, 2*time.Second, 10*time.Millisecond, "expected 5 messages cached in Redis")
+		return err == nil && len(raws) == 4
+	}, 2*time.Second, 10*time.Millisecond, "expected 4 messages cached in Redis")
 
 	// FS tier: the session file must contain all messages in order.
 	sessionFile := filepath.Join(env.dataDir, defaultUserID, "sessions", defaultSessionID+".json")
@@ -130,7 +130,7 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 		Messages  []json.RawMessage `json:"messages"`
 	}
 	require.NoError(t, json.Unmarshal(data, &doc))
-	require.Len(t, doc.Messages, 5, "FS session file must contain user + 4 assistant events")
+	require.Len(t, doc.Messages, 4, "FS session file must contain user + 3 merged assistant events")
 
 	var first model.Message
 	require.NoError(t, json.Unmarshal(doc.Messages[0], &first))
@@ -140,14 +140,13 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.Equal(t, 0, first.MsgIndex)
 	assert.Equal(t, "hello", first.Content)
 
-	// Assistant events follow in order: agent_start, token, token, agent_end.
+	// Assistant events follow in order: agent_start, merged token, agent_end.
 	wantEvents := []struct {
 		EventType string
 		Agent     string
 		Role      string
 	}{
 		{model.EventTypeAgentStart, stream.AgentConfuse, ""},
-		{model.EventTypeToken, stream.AgentConfuse, model.RoleAssistant},
 		{model.EventTypeToken, stream.AgentConfuse, model.RoleAssistant},
 		{model.EventTypeAgentEnd, stream.AgentConfuse, ""},
 	}
@@ -164,10 +163,10 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	// ordered stream (Redis hit fast-path).
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
-	require.Len(t, recovered, 5)
+	require.Len(t, recovered, 4)
 	assert.Equal(t, "hello", recovered[0].Content)
 	assert.Equal(t, model.EventTypeAgentStart, recovered[1].EventType)
-	assert.Equal(t, model.EventTypeAgentEnd, recovered[4].EventType)
+	assert.Equal(t, model.EventTypeAgentEnd, recovered[3].EventType)
 }
 
 // TestMessageFlow_OrchestratorFailure_PersistsOnlyUserMessage verifies that
