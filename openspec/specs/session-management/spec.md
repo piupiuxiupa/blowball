@@ -62,27 +62,34 @@
 - **THEN** 系统使用用户消息前 20 字符作为默认标题，记录警告日志
 
 ### Requirement: Three-layer message storage
-消息 SHALL 按顺序写入三层存储：Redis 缓存 → 用户目录文件 → MySQL。用户消息走单条同步写入；assistant 一轮产生的所有事件仅在 orchestrator 成功完成后通过 goroutine 批量写入三层存储。
 
-#### Scenario: Write user message to all layers synchronously
-- **WHEN** 用户消息需要持久化
-- **THEN** 系统在 orchestrator 启动前同步写入 Redis（带 TTL）、用户 data/{user_uuid}/sessions/{session_id}.json、MySQL messages 表
+消息 SHALL 按顺序写入三层存储：Redis 缓存 → 用户目录文件 → MySQL。同一 turn 内，用户消息与 assistant 事件在 orchestrator 成功完成后通过同一个 goroutine 作为一批消息写入三层存储；orchestrator 失败时该 turn 的全部消息均不写入。
 
-#### Scenario: Batch write assistant events after success
-- **WHEN** orchestrator 成功完成一次 turn 并返回所有 StreamEvent
-- **THEN** 系统 SHALL 通过 goroutine 将全部事件作为一批消息写入三层存储（Redis 批量 RPUSH、FS 一次 read-modify-write 追加、MySQL 一条多 VALUES INSERT）
+#### Scenario: Batch write user and assistant messages after success
+
+- **WHEN** orchestrator 成功完成一次 turn
+- **THEN** 系统 SHALL 通过 goroutine 将用户消息与全部 assistant 事件作为一批消息写入三层存储（Redis 批量 RPUSH、FS 一次 read-modify-write 追加、MySQL 一条多 VALUES INSERT）
+- **AND THEN** batch 内消息顺序为 user message（msg_index=0）后接 assistant 事件（msg_index 从 1 严格单调递增）
 
 #### Scenario: Skip persistence on orchestrator failure
+
 - **WHEN** orchestrator 返回错误
-- **THEN** 系统 SHALL 丢弃本次收集的所有 assistant 事件，不写入任何存储层；用户消息（已 sync 写入）不受影响
+- **THEN** 系统 SHALL 丢弃本次收集的所有 assistant 事件以及该 turn 的用户消息，不写入任何存储层
 
 #### Scenario: Redis write failure
+
 - **WHEN** Redis 不可用
 - **THEN** 系统跳过 Redis 直接写文件和 MySQL，记录错误日志，不阻塞响应
 
 #### Scenario: Goroutine persistence independent of request context
+
 - **WHEN** 客户端在 SSE 流结束前断开连接（取消请求 ctx）
-- **THEN** assistant 事件的批量入库 goroutine SHALL 使用派生自 `context.Background()` 的 detached ctx 继续完成写入（保留 trace_id）
+- **THEN** 批量入库 goroutine SHALL 使用派生自 `context.Background()` 的 detached ctx 继续完成写入（保留 trace_id），写入内容包含该 turn 的用户消息与 assistant 事件
+
+#### Scenario: Batch write failure after SSE completes
+
+- **WHEN** 异步批量写入发生 FS 或 MySQL 错误
+- **THEN** 系统记录错误日志，该 turn 的用户消息与 assistant 事件均不保证持久化；客户端已收到的 SSE 响应不受影响
 
 ### Requirement: Message recovery with fallback
 系统 SHALL 按优先级恢复会话消息：Redis → 用户目录文件 → MySQL，并按 `(msg_time, msg_index)` 升序排列。

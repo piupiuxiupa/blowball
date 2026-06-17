@@ -358,9 +358,8 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 // TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE drives the
 // full SSE path with a stub orchestrator that emits a start/token/end/done
 // sequence then returns. The test verifies (a) the SSE body has the spec wire
-// format for every event, (b) the user message is persisted synchronously, and
-// (c) the assistant events are persisted as a batch after the orchestrator
-// succeeds.
+// format for every event, (b) the user message and assistant events are
+// persisted together in a single batch after the orchestrator succeeds.
 func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
@@ -419,31 +418,41 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	require.Contains(t, env.stub.gotWorkspace, "user-1/workspace")
 	env.stub.mu.Unlock()
 
-	// Two FS writes happened: one synchronous user message, one batched
-	// assistant event stream.
+	// One FS write happened: the single batch containing the user message and
+	// the merged assistant event stream.
 	require.Eventually(t, func() bool {
 		env.fs.mu.Lock()
 		defer env.fs.mu.Unlock()
-		return env.fs.writeCalls == 2
-	}, time.Second, 10*time.Millisecond, "expected two FS writes (user + assistant batch)")
+		return env.fs.writeCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected one FS write for the combined batch")
 
-	// MySQL: two batch appends — one for the user message (batch of 1) and one
-	// for the assistant event stream (batch of 4, done excluded).
+	// MySQL: one batch append containing the user message + merged assistant events.
 	require.Eventually(t, func() bool {
 		env.mysql.mu.Lock()
 		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 2
-	}, time.Second, 10*time.Millisecond, "expected user batch + assistant batch")
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected single batch for user + assistant events")
 
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
-	// Assistant event stream is merged: agent_start, merged token, agent_end (done excluded).
-	require.Len(t, env.mysql.appendMessagesArg, 3, "assistant batch must contain merged events except done")
+	// Batch: user message followed by merged assistant events (agent_start, token, agent_end).
+	require.Len(t, env.mysql.appendMessagesArg, 4, "batch must contain user + 3 merged assistant events")
+	userMsg := env.mysql.appendMessagesArg[0]
+	assert.Equal(t, model.AgentUser, userMsg.Agent)
+	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
+	assert.Equal(t, model.RoleUser, userMsg.Role)
+	assert.Equal(t, 0, userMsg.MsgIndex)
+	assert.Equal(t, "hi there", userMsg.Content)
 
-	// User batch (first call) is a single message row.
-	// We cannot observe the exact first batch args here because appendMessagesArg
-	// holds the last call, but the user message fields are asserted in the
-	// dedicated user-message tests below.
+	// Assistant event stream is merged: agent_start, merged token, agent_end (done excluded).
+	wantTypes := []string{
+		model.EventTypeAgentStart,
+		model.EventTypeToken,
+		model.EventTypeAgentEnd,
+	}
+	for i, want := range wantTypes {
+		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+	}
 }
 
 // TestSendMessage_BadRequest_NoBody verifies that an empty / malformed body
@@ -790,14 +799,24 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	require.Eventually(t, func() bool {
 		env.mysql.mu.Lock()
 		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 2
-	}, time.Second, 10*time.Millisecond, "expected user batch + assistant batch")
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected single combined batch")
 
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
 
+	// Combined batch: 1 user message + 7 assistant events, done excluded.
+	require.Len(t, env.mysql.appendMessagesArg, 8)
+
+	// User message comes first.
+	userMsg := env.mysql.appendMessagesArg[0]
+	assert.Equal(t, model.AgentUser, userMsg.Agent)
+	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
+	assert.Equal(t, model.RoleUser, userMsg.Role)
+	assert.Equal(t, 0, userMsg.MsgIndex)
+	assert.Equal(t, "do it", userMsg.Content)
+
 	// Assistant event stream: 7 events, done excluded.
-	require.Len(t, env.mysql.appendMessagesArg, 7)
 	wantTypes := []string{
 		model.EventTypeAgentStart,
 		model.EventTypeToken,
@@ -808,11 +827,11 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 		model.EventTypeAgentEnd,
 	}
 	for i, want := range wantTypes {
-		assert.Equal(t, want, env.mysql.appendMessagesArg[i].EventType, "event %d", i)
+		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "event %d", i)
 	}
 
 	// Token/tool_call rows carry the assistant role; markers have empty role.
-	for _, m := range env.mysql.appendMessagesArg {
+	for _, m := range env.mysql.appendMessagesArg[1:] {
 		switch m.EventType {
 		case model.EventTypeToken, model.EventTypeToolCall:
 			assert.Equal(t, model.RoleAssistant, m.Role, "event_type=%s", m.EventType)
@@ -822,21 +841,21 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	}
 
 	// Agent column is preserved from the event.
-	assert.Equal(t, stream.AgentConfuse, env.mysql.appendMessagesArg[0].Agent)
-	assert.Equal(t, stream.AgentChongzhi, env.mysql.appendMessagesArg[4].Agent)
+	assert.Equal(t, stream.AgentConfuse, env.mysql.appendMessagesArg[1].Agent)
+	assert.Equal(t, stream.AgentChongzhi, env.mysql.appendMessagesArg[5].Agent)
 
 	// Tool_call content is JSON with name and args.
-	toolMsg := env.mysql.appendMessagesArg[2]
+	toolMsg := env.mysql.appendMessagesArg[3]
 	require.Equal(t, model.EventTypeToolCall, toolMsg.EventType)
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal([]byte(toolMsg.Content), &payload))
 	assert.Equal(t, "invoke_chongzhi", payload["name"])
 }
 
-// TestSendMessage_OrchestratorFailure_PersistsUserOnly verifies that when the
-// orchestrator returns an error, only the user message is persisted and no
-// assistant event rows are written.
-func TestSendMessage_OrchestratorFailure_PersistsUserOnly(t *testing.T) {
+// TestSendMessage_OrchestratorFailure_PersistsNothing verifies that when the
+// orchestrator returns an error, neither the user message nor any assistant
+// event rows are written.
+func TestSendMessage_OrchestratorFailure_PersistsNothing(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
 			stream.AgentStartEvent(stream.AgentConfuse),
@@ -855,19 +874,10 @@ func TestSendMessage_OrchestratorFailure_PersistsUserOnly(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the synchronous user save; the assistant batch must NOT run.
-	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
-	}, time.Second, 10*time.Millisecond, "expected exactly one user message batch")
-
+	// No persistence calls should happen when the orchestrator fails.
+	time.Sleep(50 * time.Millisecond)
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
-	require.Len(t, env.mysql.appendMessagesArg, 1)
-	userMsg := env.mysql.appendMessagesArg[0]
-	assert.Equal(t, model.AgentUser, userMsg.Agent)
-	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
-	assert.Equal(t, model.RoleUser, userMsg.Role)
-	assert.Equal(t, 0, userMsg.MsgIndex)
+	assert.Equal(t, 0, env.mysql.appendMessagesCalls, "expected zero persistence calls on orchestrator failure")
+	assert.Empty(t, env.mysql.appendMessagesArg, "expected no messages persisted on orchestrator failure")
 }

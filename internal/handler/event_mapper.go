@@ -38,6 +38,22 @@ func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
 	return merged
 }
 
+// UserMessage builds a model.Message for a user input without using StreamEvent.
+// The user message occupies msg_index=0 within its turn and carries the request
+// arrival timestamp so it sorts before the assistant events emitted later.
+func UserMessage(sessionID, traceID, content string, msgTime time.Time) model.Message {
+	return model.Message{
+		SessionID: sessionID,
+		MsgTime:   msgTime,
+		Agent:     model.AgentUser,
+		MsgIndex:  0,
+		Role:      model.RoleUser,
+		EventType: model.EventTypeMessage,
+		Content:   content,
+		TraceID:   traceID,
+	}
+}
+
 // MessageFromEvent maps a StreamEvent produced by the orchestrator into a
 // model.Message ready for persistence. Marker events (agent_start/agent_end)
 // leave Role empty; token/tool_call events carry the OpenAI assistant role;

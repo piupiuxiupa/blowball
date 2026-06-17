@@ -66,17 +66,19 @@ type sendMessageRequest struct {
 //     mismatched ownership -> 404.
 //  4. Recover prior messages so we know whether this is the FIRST user turn
 //     (title generation only fires on the first exchange).
-//  5. Persist the user message BEFORE invoking the agent so a crash mid-stream
-//     never loses it.
+//  5. Capture the user message timestamp; the actual persistence happens later,
+//     after the orchestrator succeeds, so the first token is not delayed by a
+//     three-layer storage round-trip.
 //  6. Run the orchestrator via OrchestratorRunner in a goroutine bound to the
 //     request context (so a client disconnect cancels the agent loop). The
 //     runner streams events into a fresh hub AND returns the final assistant
 //     content.
 //  7. Concurrently, stream.WriteSSE consumes from the same hub and writes the
 //     SSE response.
-//  8. After the orchestrator returns, persist the assistant reply using a
-//     detached (background-derived, trace_id-preserving) context so a client
-//     disconnect mid-stream does NOT lose the saved message.
+//  8. After the orchestrator returns successfully, persist the user message and
+//     the assistant reply together in a single batch using a detached
+//     (background-derived, trace_id-preserving) context so a client disconnect
+//     mid-stream does NOT lose the saved messages.
 //  9. If this was the first exchange, fire titleSvc.GenerateTitle in a
 //     goroutine (fire-and-forget; never blocks the response).
 func (h *SessionHandler) SendMessage(c *gin.Context) {
@@ -120,24 +122,10 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	}
 	isFirstTurn := len(prior) == 0
 
-	userMsg := model.Message{
-		SessionID: sessionID,
-		MsgTime:   time.Now().UTC(),
-		Agent:     model.AgentUser,
-		MsgIndex:  0,
-		Role:      model.RoleUser,
-		EventType: model.EventTypeMessage,
-		Content:   req.Content,
-		TraceID:   tid,
-	}
-	if err := h.sessSvc.SaveMessage(ctx, userID, userMsg); err != nil {
-		logger.L().Error("save user message failed",
-			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
-			zap.Error(err))
-		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "persist user message failed"))
-		return
-	}
+	// Capture the user message timestamp early so the persisted user row keeps
+	// the request-arrival time even though persistence is deferred until after
+	// the orchestrator succeeds.
+	userMsgTime := time.Now().UTC()
 
 	workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")
 	skillsDir := filepath.Join(h.dataDir, userID, "skills")
@@ -167,31 +155,29 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 			zap.Error(sseErr))
 	}
 
-	// Persist the assistant reply using a detached context so a client
-	// disconnect mid-stream (which cancels the request ctx) does NOT lose the
-	// saved message. We always wait for the orchestrator to finish so the
-	// event stream is complete.
+	// Persist the user message and the assistant reply together in a single
+	// batch using a detached context so a client disconnect mid-stream (which
+	// cancels the request ctx) does NOT lose the saved messages. We always wait
+	// for the orchestrator to finish so the event stream is complete.
 	res := <-resultCh
 	if res.err != nil {
-		// On failure, drop the collected assistant events. The user message is
-		// already saved above; persisting a partial or error event stream would
-		// pollute the history. The one exception is a cancellation that happened
-		// before the agent produced anything, which is already handled by
-		// returning early.
+		// On failure, drop the collected assistant events AND the user message.
+		// Both are now persisted together only after a successful turn, so an
+		// error or cancellation means nothing from this turn is written.
 		if errors.Is(res.err, context.Canceled) {
 			return
 		}
 		return
 	}
 
-	// Success path: persist the full event stream asynchronously. The response
-	// has already been sent; there is no need to block the HTTP handler on
-	// three-layer storage.
+	// Success path: persist the full turn (user message + event stream) in one
+	// asynchronous batch. The response has already been sent; there is no need
+	// to block the HTTP handler on three-layer storage.
 	saveCtx := trace.WithContext(context.Background(), tid)
 	go func(events []stream.StreamEvent) {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.L().Error("panic saving assistant event stream",
+				logger.L().Error("panic saving event stream",
 					zap.String("op", "handler.send_message"),
 					zap.String("session_id", sessionID),
 					zap.Any("recover", r))
@@ -200,7 +186,8 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 
 		now := time.Now().UTC()
 		merged := MergeEvents(events)
-		msgs := make([]model.Message, 0, len(merged))
+		msgs := make([]model.Message, 0, len(merged)+1)
+		msgs = append(msgs, UserMessage(sessionID, tid, req.Content, userMsgTime))
 		for i, e := range merged {
 			msg, mErr := MessageFromEvent(e, sessionID, tid, i+1, now)
 			if mErr != nil {
@@ -214,7 +201,7 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 		}
 
 		if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
-			logger.L().Error("save assistant event stream failed",
+			logger.L().Error("save event stream failed",
 				zap.String("op", "handler.send_message"),
 				zap.String("session_id", sessionID),
 				zap.Error(err))

@@ -2,11 +2,64 @@ package handler
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/stream"
 )
+
+func TestUserMessage(t *testing.T) {
+	msgTime := time.Unix(1_700_000_000, 0).UTC()
+	msg := UserMessage("sess-1", "trace-1", "hello", msgTime)
+
+	assert.Equal(t, "sess-1", msg.SessionID)
+	assert.Equal(t, "trace-1", msg.TraceID)
+	assert.Equal(t, "hello", msg.Content)
+	assert.Equal(t, msgTime, msg.MsgTime)
+	assert.Equal(t, model.AgentUser, msg.Agent)
+	assert.Equal(t, model.RoleUser, msg.Role)
+	assert.Equal(t, model.EventTypeMessage, msg.EventType)
+	assert.Equal(t, 0, msg.MsgIndex)
+}
+
+func TestUserMessage_PrependToAssistantBatch_Ordering(t *testing.T) {
+	userTime := time.Unix(1_700_000_000, 0).UTC()
+	assistantTime := userTime.Add(time.Second)
+
+	userMsg := UserMessage("sess-1", "trace-1", "hi", userTime)
+
+	events := []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfuse),
+		stream.TokenEvent(stream.AgentConfuse, "Hello"),
+		stream.AgentEndEvent(stream.AgentConfuse),
+	}
+	merged := MergeEvents(events)
+	require.Len(t, merged, 3)
+
+	msgs := make([]model.Message, 0, len(merged)+1)
+	msgs = append(msgs, userMsg)
+	for i, e := range merged {
+		m, err := MessageFromEvent(e, "sess-1", "trace-1", i+1, assistantTime)
+		require.NoError(t, err)
+		msgs = append(msgs, m)
+	}
+
+	require.Len(t, msgs, 4)
+	assert.Equal(t, model.AgentUser, msgs[0].Agent)
+	assert.Equal(t, 0, msgs[0].MsgIndex)
+	assert.Equal(t, userTime, msgs[0].MsgTime)
+
+	for i, m := range msgs[1:] {
+		assert.Equal(t, i+1, m.MsgIndex)
+		assert.Equal(t, assistantTime, m.MsgTime)
+	}
+	assert.Equal(t, model.EventTypeAgentStart, msgs[1].EventType)
+	assert.Equal(t, model.EventTypeToken, msgs[2].EventType)
+	assert.Equal(t, model.EventTypeAgentEnd, msgs[3].EventType)
+}
 
 func TestMergeEvents(t *testing.T) {
 	tests := []struct {

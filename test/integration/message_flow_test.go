@@ -102,9 +102,9 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	env.mysqlFake.mu.Unlock()
 	assert.True(t, ok, "session must be persisted to MySQL tier")
 
-	// Wait for the user message + assistant event batch to land in every tier.
-	// The assistant batch is saved AFTER the SSE response completes via a
-	// detached context, so we poll.
+	// Wait for the single combined batch (user message + assistant events) to
+	// land in every tier. The batch is saved AFTER the SSE response completes via
+	// a detached context, so we poll.
 	require.Eventually(t, func() bool {
 		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 4 // 1 user + 3 merged assistant events
 	}, 2*time.Second, 10*time.Millisecond, "expected user + 3 merged assistant events in MySQL tier")
@@ -169,10 +169,10 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.Equal(t, model.EventTypeAgentEnd, recovered[3].EventType)
 }
 
-// TestMessageFlow_OrchestratorFailure_PersistsOnlyUserMessage verifies that
-// when the orchestrator returns an error, only the user message survives in
-// MySQL and no assistant event rows are written.
-func TestMessageFlow_OrchestratorFailure_PersistsOnlyUserMessage(t *testing.T) {
+// TestMessageFlow_OrchestratorFailure_PersistsNothing verifies that when the
+// orchestrator returns an error, neither the user message nor any assistant
+// event rows are written.
+func TestMessageFlow_OrchestratorFailure_PersistsNothing(t *testing.T) {
 	llm := newScriptedLLMClient(
 		scriptedLLMResponse{
 			tokens:       []string{"Hello"},
@@ -191,17 +191,13 @@ func TestMessageFlow_OrchestratorFailure_PersistsOnlyUserMessage(t *testing.T) {
 	// is observed; the stream simply terminates early.
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Only the user message should be persisted.
+	// No messages should be persisted when the orchestrator fails.
 	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 1
-	}, 2*time.Second, 10*time.Millisecond, "expected exactly one user message in MySQL tier")
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 0
+	}, 2*time.Second, 10*time.Millisecond, "expected zero messages in MySQL tier on orchestrator failure")
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
-	require.Len(t, msgs, 1)
-	assert.Equal(t, model.AgentUser, msgs[0].Agent)
-	assert.Equal(t, model.EventTypeMessage, msgs[0].EventType)
-	assert.Equal(t, model.RoleUser, msgs[0].Role)
-	assert.Equal(t, 0, msgs[0].MsgIndex)
+	require.Empty(t, msgs, "expected no messages persisted on orchestrator failure")
 }
 
 // TestMessageFlow_Unauthenticated_401 verifies that the real AuthMiddleware is
