@@ -3,3 +3,7 @@ bin/
 /config.yaml
 .claude/settings.local.json
 /data/
+.claude/
+frontend/node_modules/
+frontend/dist/
+frontend/
