@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
-	"strings"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/skill"
@@ -136,7 +136,7 @@ func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspa
 		}
 	}
 
-	rendered, err := f.renderSystemPrompt(cfg, userID)
+	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, userID)
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -171,57 +171,48 @@ func isXizhiTool(name string) bool {
 }
 
 // renderSystemPrompt builds the complete system prompt for an agent.
-func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, userID string) (string, error) {
-	var b strings.Builder
-	if cfg.SystemPrompt != "" {
-		b.WriteString(strings.TrimSpace(cfg.SystemPrompt))
-		b.WriteString("\n\n")
-	}
+func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, userID string) (string, error) {
+	return prompt.RenderSystemPrompt(prompt.RenderInput{
+		BasePrompt: cfg.SystemPrompt,
+		Workspace:  workspaceRoot,
+		UserID:     userID,
+		Platform:   runtime.GOARCH,
+		OS:         runtime.GOOS,
+		Cutoff:     "August 2025",
+		Tools:      f.collectTools(cfg),
+		Skills:     f.collectSkills(cfg, userID),
+	})
+}
 
-	b.WriteString(renderEnvironment(userID))
-	b.WriteString("\n\n")
-
+// collectTools converts the tools allowed for this agent into prompt.ToolInfo
+// values, preserving the built-in / MCP-server grouping.
+func (f *orchestratorFactory) collectTools(cfg config.AgentConfig) []prompt.ToolInfo {
 	builtIn, mcpByServer := f.classifyTools(cfg)
-	if len(builtIn) > 0 {
-		b.WriteString("## Built-in Tools\n")
-		for _, spec := range builtIn {
-			fmt.Fprintf(&b, "- %s: %s\n", spec.Name, spec.Description)
-		}
-		b.WriteString("\n")
+	var tools []prompt.ToolInfo
+	for _, spec := range builtIn {
+		tools = append(tools, prompt.ToolInfo{Name: spec.Name, Description: spec.Description})
 	}
-
-	if len(mcpByServer) > 0 {
-		b.WriteString("## MCP Tools\n")
-		for serverName, specs := range mcpByServer {
-			fmt.Fprintf(&b, "### %s\n", serverName)
-			for _, spec := range specs {
-				fmt.Fprintf(&b, "- %s: %s\n", spec.Name, spec.Description)
-			}
-		}
-		b.WriteString("\n")
-	}
-
-	if len(cfg.Skills) > 0 {
-		allSkills := f.skillLoader.List(userID)
-		allowed := skill.Filter(allSkills, cfg.Skills)
-		if len(allowed) > 0 {
-			b.WriteString("## Skills\n")
-			b.WriteString("Available skills:\n")
-			b.WriteString("<skills>\n")
-			for _, s := range allowed {
-				fmt.Fprintf(&b, "  <skill>\n")
-				fmt.Fprintf(&b, "    <name>%s</name>\n", s.Name)
-				fmt.Fprintf(&b, "    <description>%s</description>\n", s.Description)
-				fmt.Fprintf(&b, "    <location>%s</location>\n", s.Location)
-				fmt.Fprintf(&b, "  </skill>\n")
-			}
-			b.WriteString("</skills>\n\n")
-			b.WriteString("When a task matches a skill, call read_skill with the skill name to load its full instructions.\n")
-			b.WriteString("\n")
+	for serverName, specs := range mcpByServer {
+		for _, spec := range specs {
+			tools = append(tools, prompt.ToolInfo{Name: spec.Name, Description: spec.Description, Server: serverName})
 		}
 	}
+	return tools
+}
 
-	return strings.TrimSpace(b.String()), nil
+// collectSkills converts the skills allowed for this agent into prompt.SkillInfo
+// values.
+func (f *orchestratorFactory) collectSkills(cfg config.AgentConfig, userID string) []prompt.SkillInfo {
+	if len(cfg.Skills) == 0 {
+		return nil
+	}
+	allSkills := f.skillLoader.List(userID)
+	allowed := skill.Filter(allSkills, cfg.Skills)
+	var skills []prompt.SkillInfo
+	for _, s := range allowed {
+		skills = append(skills, prompt.SkillInfo{Name: s.Name, Description: s.Description, Location: s.Location})
+	}
+	return skills
 }
 
 // classifyTools splits the tools relevant to this agent into built-in tools and
@@ -262,14 +253,6 @@ func (f *orchestratorFactory) classifyTools(cfg config.AgentConfig) ([]*tool.Too
 		}
 	}
 	return builtIn, mcpByServer
-}
-
-// renderEnvironment returns the environment paragraph for the system prompt.
-func renderEnvironment(userID string) string {
-	return fmt.Sprintf(`# Environment
-- Platform: %s
-- OS: %s
-- User ID: %s`, runtime.GOARCH, runtime.GOOS, userID)
 }
 
 // Orchestrator is the top-level entry point that the HTTP handler calls per
