@@ -7,10 +7,119 @@ import (
 	"io"
 
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
+	"go.uber.org/zap"
 )
+
+// previewLimit is the maximum number of characters written for content or
+// argument previews in debug logs. Longer values are truncated with an ellipsis.
+const previewLimit = 500
+
+// truncatePreview returns s truncated to previewLimit runes, appending "…" when
+// truncated. It is safe for empty strings and ASCII/Unicode content.
+func truncatePreview(s string) string {
+	if s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= previewLimit {
+		return s
+	}
+	return string(runes[:previewLimit]) + "…"
+}
+
+// toolNamePreviews extracts function names from the JSON-encoded OpenAI tools
+// payload. It tolerates malformed JSON by skipping entries it cannot parse.
+func toolNamePreviews(tools []byte) []string {
+	type rawTool struct {
+		Type     string          `json:"type"`
+		Function json.RawMessage `json:"function"`
+	}
+	var raws []rawTool
+	if err := json.Unmarshal(tools, &raws); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(raws))
+	for _, r := range raws {
+		if r.Type != "" && r.Type != "function" {
+			continue
+		}
+		var fn struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(r.Function, &fn); err != nil {
+			continue
+		}
+		if fn.Name != "" {
+			names = append(names, fn.Name)
+		}
+	}
+	return names
+}
+
+// logLLMRequest emits a structured debug entry summarizing the request sent to
+// the underlying model. It excludes the API key and Authorization header.
+func logLLMRequest(ctx context.Context, req LLMRequest) {
+	traceID := trace.FromContext(ctx)
+	logMessages := make([]map[string]string, len(req.Messages))
+	for i, m := range req.Messages {
+		logMessages[i] = map[string]string{
+			"role":            m.Role,
+			"content_preview": truncatePreview(m.Content),
+		}
+	}
+
+	fields := []zap.Field{
+		zap.String("event", "llm_request"),
+		zap.String("model", req.Model),
+		zap.Int("message_count", len(req.Messages)),
+		zap.Any("messages", logMessages),
+	}
+	if traceID != "" {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	if req.MaxTokens > 0 {
+		fields = append(fields, zap.Int("max_tokens", req.MaxTokens))
+	}
+	if len(req.Tools) > 0 {
+		names := toolNamePreviews(req.Tools)
+		fields = append(fields, zap.Int("tools_count", len(names)))
+		fields = append(fields, zap.Any("tools_preview", names))
+	}
+	logger.L().Debug("LLM request", fields...)
+}
+
+// logLLMResponse emits a structured debug entry summarizing the aggregated
+// response returned by the underlying model.
+func logLLMResponse(ctx context.Context, resp LLMResponse) {
+	traceID := trace.FromContext(ctx)
+	toolCalls := make([]map[string]string, len(resp.ToolCalls))
+	for i, tc := range resp.ToolCalls {
+		toolCalls[i] = map[string]string{
+			"name":              tc.Function.Name,
+			"arguments_preview": truncatePreview(tc.Function.Arguments),
+		}
+	}
+
+	fields := []zap.Field{
+		zap.String("event", "llm_response"),
+		zap.String("finish_reason", resp.FinishReason),
+		zap.Int("content_len", len([]rune(resp.Content))),
+		zap.String("content_preview", truncatePreview(resp.Content)),
+		zap.Any("tool_calls", toolCalls),
+		zap.Int("prompt_tokens", resp.Usage.PromptTokens),
+		zap.Int("completion_tokens", resp.Usage.CompletionTokens),
+		zap.Int("total_tokens", resp.Usage.TotalTokens),
+	}
+	if traceID != "" {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	logger.L().Debug("LLM response", fields...)
+}
 
 // OpenAIClient is the production LLMClient backed by openai-go v3. It is the
 // only file in this package that imports openai-go, so swapping SDKs (or
@@ -64,6 +173,8 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		params.Tools = tools
 	}
 
+	logLLMRequest(ctx, req)
+
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 	defer stream.Close()
 
@@ -114,6 +225,8 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		resp.FinishReason = "stop"
 	}
 	resp.ToolCalls = toolStitch.finalize()
+
+	logLLMResponse(ctx, resp)
 	return resp, nil
 }
 
