@@ -125,6 +125,7 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 			if !ok {
 				result = toolResult{content: "", isError: true}
 			}
+			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
 			round = append(round, Message{
 				Role:       "tool",
 				Content:    result.content,
@@ -165,7 +166,7 @@ func (c *Chongzhi) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub 
 // registry. invoke_* names will return "unknown tool" because the registry
 // has no such entry (sub-agent tools are never registered).
 func (c *Chongzhi) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
-	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
+	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
 	if c.toolRegistry == nil {

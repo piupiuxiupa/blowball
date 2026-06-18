@@ -57,7 +57,8 @@ func UserMessage(sessionID, traceID, content string, msgTime time.Time) model.Me
 // MessageFromEvent maps a StreamEvent produced by the orchestrator into a
 // model.Message ready for persistence. Marker events (agent_start/agent_end)
 // leave Role empty; token/tool_call events carry the OpenAI assistant role;
-// tool_call content is JSON-encoded as {"name":..., "args":...}.
+// tool_call content is JSON-encoded as {"tool_call_id":"...","name":..., "args":...};
+// tool_result content is JSON-encoded as {"tool_call_id":"...","output":...}.
 func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex int, msgTime time.Time) (model.Message, error) {
 	msg := model.Message{
 		SessionID: sessionID,
@@ -75,14 +76,29 @@ func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex 
 	case stream.EventToolCall:
 		msg.EventType = model.EventTypeToolCall
 		msg.Role = model.RoleAssistant
+		toolCallID, _ := e.Meta[stream.MetaToolCallID].(string)
 		args := e.Meta[stream.MetaArgs]
 		if args == nil {
 			args = map[string]any{}
 		}
-		payload := map[string]any{"name": e.Content, "args": args}
+		payload := map[string]any{"tool_call_id": toolCallID, "name": e.Content, "args": args}
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return model.Message{}, fmt.Errorf("marshal tool_call content: %w", err)
+		}
+		msg.Content = string(b)
+	case stream.EventToolResult:
+		msg.EventType = model.EventTypeToolResult
+		msg.Role = model.RoleTool
+		toolCallID, _ := e.Meta[stream.MetaToolCallID].(string)
+		output, err := marshalToolResultOutput(e.Content)
+		if err != nil {
+			return model.Message{}, fmt.Errorf("marshal tool_result content: %w", err)
+		}
+		payload := map[string]any{"tool_call_id": toolCallID, "output": output}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return model.Message{}, fmt.Errorf("marshal tool_result content: %w", err)
 		}
 		msg.Content = string(b)
 	case stream.EventAgentStart:
@@ -104,4 +120,18 @@ func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex 
 	}
 
 	return msg, nil
+}
+
+// marshalToolResultOutput returns the output value to serialize inside a
+// tool_result payload. If content is valid JSON, it returns the decoded value
+// so it serializes as structured data; otherwise it returns the raw string.
+func marshalToolResultOutput(content string) (any, error) {
+	if content == "" {
+		return "", nil
+	}
+	var v any
+	if err := json.Unmarshal([]byte(content), &v); err == nil {
+		return v, nil
+	}
+	return content, nil
 }

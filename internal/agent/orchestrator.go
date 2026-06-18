@@ -306,20 +306,19 @@ type WorkspaceRootForUser = func(userID string) string
 
 // Handle executes one full chat turn:
 //   - Build a per-request agent set via the factory (Chongzhi → user workspace),
-//   - Seed Confuse with the user's message,
-//   - Run the Confuse loop, streaming events to hub,
+//   - Run the Confuse loop with the provided conversation history,
+//   - Stream events to hub,
 //   - Emit a final done event with the aggregated usage breakdown.
 //
 // workspaceRoot is the absolute path to the requesting user's workspace
 // directory (data/{user_uuid}/workspace). userID identifies the caller so the
 // factory can load user-specific skills and validate skill permissions.
-func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) error {
+func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub) error {
 	confuse, err := o.factory.Build(workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}
 
-	messages := []Message{{Role: "user", Content: userMessage}}
 	content, usage, err := confuse.Run(ctx, messages, hub)
 	if err != nil {
 		// Even on error we emit done so the SSE client terminates. The

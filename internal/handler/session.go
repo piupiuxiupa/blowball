@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -122,6 +123,16 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	}
 	isFirstTurn := len(prior) == 0
 
+	messages, err := MessagesToAgentMessages(prior)
+	if err != nil {
+		logger.L().Warn("reconstruct messages failed; falling back to current message only",
+			zap.String("op", "handler.send_message"),
+			zap.String("session_id", sessionID),
+			zap.Error(err))
+		messages = nil
+	}
+	messages = append(messages, agent.Message{Role: "user", Content: req.Content})
+
 	// Capture the user message timestamp early so the persisted user row keeps
 	// the request-arrival time even though persistence is deferred until after
 	// the orchestrator succeeds.
@@ -141,7 +152,7 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 		// cancels the agent loop. We close the hub when Handle returns so the
 		// SSE writer drains remaining events and exits cleanly.
 		defer hub.Close()
-		events, err := h.orch.Handle(ctx, workspaceRoot, skillsDir, userID, req.Content, hub)
+		events, err := h.orch.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub)
 		resultCh <- runResult{events: events, err: err}
 	}()
 

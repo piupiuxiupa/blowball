@@ -127,12 +127,12 @@ func TestMergeEvents(t *testing.T) {
 			name: "tool calls remain independent",
 			in: []stream.StreamEvent{
 				stream.TokenEvent(stream.AgentConfuse, "before"),
-				stream.ToolCallEvent(stream.AgentConfuse, "web_search", map[string]any{"q": "x"}),
+				stream.ToolCallEvent(stream.AgentConfuse, "tc-1", "web_search", map[string]any{"q": "x"}),
 				stream.TokenEvent(stream.AgentConfuse, "after"),
 			},
 			expected: []stream.StreamEvent{
 				stream.TokenEvent(stream.AgentConfuse, "before"),
-				stream.ToolCallEvent(stream.AgentConfuse, "web_search", map[string]any{"q": "x"}),
+				stream.ToolCallEvent(stream.AgentConfuse, "tc-1", "web_search", map[string]any{"q": "x"}),
 				stream.TokenEvent(stream.AgentConfuse, "after"),
 			},
 		},
@@ -140,7 +140,7 @@ func TestMergeEvents(t *testing.T) {
 			name: "sub-agent hand-off preserves order",
 			in: []stream.StreamEvent{
 				stream.TokenEvent(stream.AgentConfuse, "call"),
-				stream.ToolCallEvent(stream.AgentConfuse, "invoke_chongzhi", map[string]any{"task": "compute"}),
+				stream.ToolCallEvent(stream.AgentConfuse, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
 				stream.AgentStartEvent(stream.AgentChongzhi),
 				stream.TokenEvent(stream.AgentChongzhi, "42"),
 				stream.AgentEndEvent(stream.AgentChongzhi),
@@ -148,7 +148,7 @@ func TestMergeEvents(t *testing.T) {
 			},
 			expected: []stream.StreamEvent{
 				stream.TokenEvent(stream.AgentConfuse, "call"),
-				stream.ToolCallEvent(stream.AgentConfuse, "invoke_chongzhi", map[string]any{"task": "compute"}),
+				stream.ToolCallEvent(stream.AgentConfuse, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
 				stream.AgentStartEvent(stream.AgentChongzhi),
 				stream.TokenEvent(stream.AgentChongzhi, "42"),
 				stream.AgentEndEvent(stream.AgentChongzhi),

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
@@ -30,17 +31,17 @@ type stubOrchestrator struct {
 	mu            sync.Mutex
 	gotWorkspace  string
 	gotSkillsDir  string
-	gotMessage    string
+	gotMessages   []agent.Message
 	eventsToEmit  []stream.StreamEvent
 	returnErr     error
 	preCloseSleep time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub) ([]stream.StreamEvent, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
 	s.gotSkillsDir = skillsDir
-	s.gotMessage = userMessage
+	s.gotMessages = messages
 	s.mu.Unlock()
 
 	for _, e := range s.eventsToEmit {
@@ -414,7 +415,9 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	// Orchestrator saw the user message + a workspace rooted under the user's
 	// data dir.
 	env.stub.mu.Lock()
-	require.Equal(t, "hi there", env.stub.gotMessage)
+	require.Len(t, env.stub.gotMessages, 1)
+	require.Equal(t, "user", env.stub.gotMessages[0].Role)
+	require.Equal(t, "hi there", env.stub.gotMessages[0].Content)
 	require.Contains(t, env.stub.gotWorkspace, "user-1/workspace")
 	env.stub.mu.Unlock()
 
@@ -517,7 +520,7 @@ func TestSendMessage_SessionNotFound_404(t *testing.T) {
 
 	env.stub.mu.Lock()
 	defer env.stub.mu.Unlock()
-	assert.Equal(t, "", env.stub.gotMessage, "orchestrator must NOT be called when session not found")
+	assert.Nil(t, env.stub.gotMessages, "orchestrator must NOT be called when session not found")
 }
 
 // TestSendMessage_WrongOwner_404 verifies that a user cannot send messages to
@@ -777,7 +780,7 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 		eventsToEmit: []stream.StreamEvent{
 			stream.AgentStartEvent(stream.AgentConfuse),
 			stream.TokenEvent(stream.AgentConfuse, "Thinking"),
-			stream.ToolCallEvent(stream.AgentConfuse, "invoke_chongzhi", map[string]any{"task": "compute"}),
+			stream.ToolCallEvent(stream.AgentConfuse, "tc-1", "invoke_chongzhi", map[string]any{"task": "compute"}),
 			stream.AgentStartEvent(stream.AgentChongzhi),
 			stream.TokenEvent(stream.AgentChongzhi, "42"),
 			stream.AgentEndEvent(stream.AgentChongzhi),

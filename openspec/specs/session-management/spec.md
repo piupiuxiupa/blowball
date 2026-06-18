@@ -30,7 +30,7 @@
 
 #### Scenario: SSE event format
 - **WHEN** 系统推送流式事件
-- **THEN** 每个 SSE 事件格式为 "event: <type>\ndata: <json>\n\n"，type 为 agent_start | token | tool_call | agent_end | agent_error | done
+- **THEN** 每个 SSE 事件格式为 "event: <type>\ndata: <json>\n\n"，type 为 agent_start | token | tool_call | tool_result | agent_end | agent_error | done
 
 ### Requirement: Server-generated session ID
 服务端生成 session_id 时 SHALL 使用 UUID v7，确保 ID 按时间有序且与 users.user_id、trace_id 的生成策略保持一致。
@@ -119,11 +119,15 @@
 
 #### Scenario: event_type values
 - **WHEN** 系统向 messages 表写入一行
-- **THEN** event_type 取值为下列之一：`message`（用户完整消息）、`token`（assistant 内容增量）、`tool_call`（assistant 发起的工具调用）、`agent_start`（agent 开始执行）、`agent_end`（agent 正常结束）、`agent_error`（agent 报错）
+- **THEN** event_type 取值为下列之一：`message`（用户完整消息）、`token`（assistant 内容增量）、`tool_call`（assistant 发起的工具调用）、`tool_result`（工具执行结果）、`agent_start`（agent 开始执行）、`agent_end`（agent 正常结束）、`agent_error`（agent 报错）
 
 #### Scenario: role column nullable for marker events
 - **WHEN** 写入 event_type 为 `agent_start`、`agent_end` 的 marker 行
 - **THEN** role 列 SHALL 为 NULL
+
+#### Scenario: role for tool result
+- **WHEN** 写入 event_type 为 `tool_result` 的行
+- **THEN** role 列 SHALL 为 `'tool'`
 
 #### Scenario: msg_index per-turn semantics
 - **WHEN** 用户发送一条消息触发一次 turn
@@ -150,4 +154,8 @@
 
 #### Scenario: tool_call event content shape
 - **WHEN** orchestrator 产生 `EventToolCall` 事件
-- **THEN** 入库时 content 列 SHALL 存 JSON 序列化的 `{"name":"<tool_name>","args":<args_json>}` 结构，event_type 为 `tool_call`，role 为 `'assistant'`
+- **THEN** 入库时 content 列 SHALL 存 JSON 序列化的 `{"tool_call_id":"...","name":"<tool_name>","args":<args_json>}` 结构，event_type 为 `tool_call`，role 为 `'assistant'`
+
+#### Scenario: tool_result event content shape
+- **WHEN** orchestrator 产生 `EventToolResult` 事件
+- **THEN** 入库时 content 列 SHALL 存 JSON 序列化的 `{"tool_call_id":"...","output":<output_json_or_string>}` 结构，event_type 为 `tool_result`，role 为 `'tool'`，agent 为产生该结果的 agent 名

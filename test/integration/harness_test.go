@@ -444,6 +444,89 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	}
 }
 
+// newTestEnvWithRegistry is like newTestEnv but lets the caller supply a
+// pre-populated tool registry and a list of tool names exposed to Confuse.
+// Useful for integration tests that exercise real tool-call / tool-result
+// memory across multiple turns.
+func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Registry, confuseTools []string) *testEnv {
+	t.Helper()
+
+	t.Cleanup(func() { goleak.VerifyNone(t) })
+
+	dataDir := t.TempDir()
+
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+
+	mr := miniredis.RunT(t)
+	redisSvc, err := redisstore.New(mr.Addr(), "", 0, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = redisSvc.Close() })
+
+	mysqlFake := newMemoryMySQL()
+	require.NoError(t, mysqlFake.CreateSession(context.Background(), model.Session{
+		SessionID: defaultSessionID,
+		UserID:    defaultUserID,
+		TraceID:   "seed-trace",
+	}))
+
+	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	sessSvc := service.NewSessionService(deps)
+	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+
+	cfg := &config.Config{
+		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
+		Agents: agentConfigWithTools(confuseTools),
+	}
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
+	require.NoError(t, err)
+
+	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20)
+	mcpH := handler.NewMCPHandler(baseReg)
+	skillH := handler.NewSkillHandler(fsSvc)
+
+	r := gin.New()
+	r.Use(middleware.TraceMiddleware())
+	handler.RegisterRoutes(r, handler.RouteDeps{
+		AuthMW:            middleware.AuthMiddleware(integrationTestSecret),
+		Login:             func(*gin.Context) {},
+		SessionList:       sessH.ListSessions,
+		SessionCreate:     sessH.CreateSession,
+		SessionMessages:   sessH.GetSessionMessages,
+		SendMessage:       sessH.SendMessage,
+		WorkspaceList:     wsH.List,
+		WorkspaceUpload:   wsH.Upload,
+		WorkspaceDownload: wsH.Download,
+		WorkspaceContent:  wsH.Content,
+		MCPTools:          mcpH.Tools,
+		SkillsList:        skillH.List,
+	})
+
+	return &testEnv{
+		t:         t,
+		engine:    r,
+		dataDir:   dataDir,
+		fsSvc:     fsSvc,
+		redisSvc:  redisSvc,
+		miniRedis: mr,
+		mysqlFake: mysqlFake,
+		llm:       llm,
+		sessSvc:   sessSvc,
+		msgSvc:    msgSvc,
+	}
+}
+
+// agentConfigWithTools returns the standard agent config with Confuse granted
+// the named tools.
+func agentConfigWithTools(confuseTools []string) config.AgentsConfig {
+	cfg := agentConfig()
+	cfg.Confuse.Tools = confuseTools
+	return cfg
+}
+
 // authToken returns a Bearer JWT for the default test user that the real auth
 // middleware will accept.
 func authToken(t *testing.T, userID string) string {

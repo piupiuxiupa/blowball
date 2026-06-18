@@ -46,11 +46,12 @@ func TestEventConstructors(t *testing.T) {
 
 	t.Run("ToolCallEvent", func(t *testing.T) {
 		args := map[string]any{"path": "/a/b", "mode": "rw"}
-		e := ToolCallEvent(AgentConfuse, "read_file", args)
+		e := ToolCallEvent(AgentConfuse, "tc-1", "read_file", args)
 		assert.Equal(t, EventToolCall, e.Type)
 		assert.Equal(t, AgentConfuse, e.Agent)
 		assert.Equal(t, "read_file", e.Content)
 		require.NotNil(t, e.Meta)
+		assert.Equal(t, "tc-1", e.Meta[MetaToolCallID])
 
 		// args stored as json.RawMessage so it serializes inline as a nested object.
 		raw, ok := e.Meta[MetaArgs].(json.RawMessage)
@@ -62,8 +63,9 @@ func TestEventConstructors(t *testing.T) {
 	})
 
 	t.Run("ToolCallEvent nil args", func(t *testing.T) {
-		e := ToolCallEvent(AgentConfuse, "noop", nil)
+		e := ToolCallEvent(AgentConfuse, "tc-nil", "noop", nil)
 		require.NotNil(t, e.Meta)
+		assert.Equal(t, "tc-nil", e.Meta[MetaToolCallID])
 		_, present := e.Meta[MetaArgs]
 		assert.False(t, present, "nil args must not populate Meta[args]")
 	})

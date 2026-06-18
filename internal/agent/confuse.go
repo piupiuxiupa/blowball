@@ -154,6 +154,7 @@ func (c *Confuse) Run(ctx context.Context, messages []Message, hub *stream.Hub) 
 			if !ok {
 				result = toolResult{content: "", isError: true}
 			}
+			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
 			round = append(round, Message{
 				Role:       "tool",
 				Content:    result.content,
@@ -210,7 +211,7 @@ func (c *Confuse) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *
 // Confuse's own name for plain tool errors (since the tool itself has no
 // identity in the stream model).
 func (c *Confuse) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
-	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
+	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
 

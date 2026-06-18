@@ -17,6 +17,7 @@ import (
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/stream"
+	"github.com/lush/blowball/internal/tool"
 )
 
 // TestMessageFlow_DirectAnswer_PersistsAllTiers exercises the full happy path:
@@ -351,4 +352,138 @@ func TestGetSessionMessages_WrongOwner_404(t *testing.T) {
 	env.engine.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}
+
+// TestMessageFlow_TwoTurns_PromptContainsHistory sends two user messages in the
+// same session and asserts that the second turn's LLM prompt contains the first
+// turn's user message and assistant reply.
+func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{tokens: []string{"first reply"}, content: "first reply", finishReason: "stop", usage: agent.Usage{TotalTokens: 3}},
+		scriptedLLMResponse{content: "First Title", finishReason: "stop", usage: agent.Usage{TotalTokens: 2}},
+		scriptedLLMResponse{tokens: []string{"second reply"}, content: "second reply", finishReason: "stop", usage: agent.Usage{TotalTokens: 3}},
+	)
+	env := newTestEnv(t, llm)
+	token := authToken(t, defaultUserID)
+
+	// First turn.
+	w := env.postMessage(`{"content":"first message"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for the title-generation goroutine to consume its LLM round.
+	require.Eventually(t, func() bool {
+		env.mysqlFake.mu.Lock()
+		defer env.mysqlFake.mu.Unlock()
+		return len(env.mysqlFake.titles[defaultSessionID].Title) > 0
+	}, 2*time.Second, 10*time.Millisecond, "expected title to be generated")
+
+	// Second turn.
+	w = env.postMessage(`{"content":"second message"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	client := llm
+	var secondTurn *agent.LLMRequest
+	for i := range client.calls {
+		msgs := client.calls[i].Messages
+		if len(msgs) > 0 && msgs[len(msgs)-1].Role == "user" && msgs[len(msgs)-1].Content == "second message" {
+			req := client.calls[i]
+			secondTurn = &req
+			break
+		}
+	}
+	require.NotNil(t, secondTurn, "second turn LLM request not found")
+
+	// The prompt should include the system prompt, first user message, first
+	// assistant reply, and the current user message.
+	var contents []string
+	for _, m := range secondTurn.Messages {
+		contents = append(contents, m.Content)
+	}
+	assert.Contains(t, contents, "first message")
+	assert.Contains(t, contents, "first reply")
+	assert.Contains(t, contents, "second message")
+}
+
+// TestMessageFlow_ToolCallMemory exercises a two-turn session where the first
+// turn triggers a tool call. It asserts that the reconstructed history passed
+// to the second turn contains both the tool call and its result.
+func TestMessageFlow_ToolCallMemory(t *testing.T) {
+	baseReg := tool.NewRegistry()
+	require.NoError(t, baseReg.Register(
+		&tool.ToolSpec{
+			Name:           "echo",
+			Description:    "echo the input",
+			ParametersJSON: json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`),
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a struct {
+					Input string `json:"input"`
+				}
+				if err := json.Unmarshal(args, &a); err != nil {
+					return "", err
+				}
+				return a.Input, nil
+			},
+		}))
+
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{
+			tokens:       []string{"calling tool"},
+			content:      "",
+			finishReason: "tool_calls",
+			toolCalls: []agent.ToolCall{{
+				ID:       "tc-1",
+				Function: agent.ToolCallFunction{Name: "echo", Arguments: `{"input":"hello"}`},
+			}},
+			usage: agent.Usage{TotalTokens: 3},
+		},
+		scriptedLLMResponse{content: "Tool Title", finishReason: "stop", usage: agent.Usage{TotalTokens: 2}},
+		scriptedLLMResponse{tokens: []string{"result was hello"}, content: "result was hello", finishReason: "stop", usage: agent.Usage{TotalTokens: 4}},
+		scriptedLLMResponse{tokens: []string{"I remember"}, content: "I remember", finishReason: "stop", usage: agent.Usage{TotalTokens: 3}},
+	)
+
+	env := newTestEnvWithRegistry(t, llm, baseReg, []string{"echo"})
+	token := authToken(t, defaultUserID)
+
+	// First turn: tool call + result.
+	w := env.postMessage(`{"content":"say hello"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for title generation to consume its round.
+	require.Eventually(t, func() bool {
+		env.mysqlFake.mu.Lock()
+		defer env.mysqlFake.mu.Unlock()
+		return len(env.mysqlFake.titles[defaultSessionID].Title) > 0
+	}, 2*time.Second, 10*time.Millisecond, "expected title to be generated")
+
+	// Second turn.
+	w = env.postMessage(`{"content":"what did I ask"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	client := llm
+	var secondTurn *agent.LLMRequest
+	for i := range client.calls {
+		msgs := client.calls[i].Messages
+		if len(msgs) > 0 && msgs[len(msgs)-1].Role == "user" && msgs[len(msgs)-1].Content == "what did I ask" {
+			req := client.calls[i]
+			secondTurn = &req
+			break
+		}
+	}
+	require.NotNil(t, secondTurn, "second turn LLM request not found")
+
+	var sawToolCall, sawToolResult bool
+	for _, m := range secondTurn.Messages {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				if tc.ID == "tc-1" && tc.Function.Name == "echo" {
+					sawToolCall = true
+				}
+			}
+		}
+		if m.Role == "tool" && m.ToolCallID == "tc-1" && m.Content == "hello" {
+			sawToolResult = true
+		}
+	}
+	assert.True(t, sawToolCall, "second turn prompt should contain the tool call")
+	assert.True(t, sawToolResult, "second turn prompt should contain the tool result")
 }

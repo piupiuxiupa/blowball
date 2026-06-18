@@ -24,6 +24,7 @@ const (
 	EventTypeMessage    = "message"
 	EventTypeToken      = "token"
 	EventTypeToolCall   = "tool_call"
+	EventTypeToolResult = "tool_result"
 	EventTypeAgentStart = "agent_start"
 	EventTypeAgentEnd   = "agent_end"
 	EventTypeAgentError = "agent_error"

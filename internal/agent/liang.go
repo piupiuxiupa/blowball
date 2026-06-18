@@ -124,6 +124,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub *stream.Hub) (s
 			if !ok {
 				result = toolResult{content: "", isError: true}
 			}
+			hub.SendCtx(ctx, stream.ToolResultEvent(l.Name(), tc.ID, result.content))
 			round = append(round, Message{
 				Role:       "tool",
 				Content:    result.content,
@@ -164,7 +165,7 @@ func (l *Liang) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *st
 // registry. invoke_* names will return "unknown tool" because the registry
 // has no such entry.
 func (l *Liang) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
-	if !hub.SendCtx(ctx, stream.ToolCallEvent(l.Name(), tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
+	if !hub.SendCtx(ctx, stream.ToolCallEvent(l.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
 	if l.toolRegistry == nil {

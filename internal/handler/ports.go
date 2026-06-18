@@ -17,13 +17,14 @@ import (
 // returns only error); wrap it with NewOrchestratorAdapter at wiring time.
 type OrchestratorRunner interface {
 	// Handle executes one full chat turn against workspaceRoot for userID,
-	// streaming lifecycle and token events to hub. It returns when the turn is
-	// complete (terminal stop, error, or context cancellation) and yields every
-	// event produced during the turn, in order. The EventDone terminal event is
-	// forwarded to hub for the SSE wire but is NOT included in the returned
-	// slice (usage metadata is not persisted as chat content). The caller owns
-	// hub and closes it after Handle returns.
-	Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) (events []stream.StreamEvent, err error)
+	// streaming lifecycle and token events to hub. `messages` is the complete
+	// conversation history including all prior turns and the current user
+	// message. It returns when the turn is complete (terminal stop, error, or
+	// context cancellation) and yields every event produced during the turn, in
+	// order. The EventDone terminal event is forwarded to hub for the SSE wire
+	// but is NOT included in the returned slice (usage metadata is not persisted
+	// as chat content). The caller owns hub and closes it after Handle returns.
+	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub) (events []stream.StreamEvent, err error)
 }
 
 // orchestratorAdapter wraps a *agent.Orchestrator to satisfy OrchestratorRunner.
@@ -48,7 +49,7 @@ func NewOrchestratorAdapter(o *agent.Orchestrator) OrchestratorRunner {
 }
 
 // Handle implements OrchestratorRunner.
-func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsDir, userID, userMessage string, hub *stream.Hub) ([]stream.StreamEvent, error) {
+func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub) ([]stream.StreamEvent, error) {
 	// Tap side: drain innerHub.Events() in a goroutine, forwarding to the
 	// caller's hub and accumulating the raw event stream.
 	innerHub := stream.NewHub(stream.DefaultHubBufferSize)
@@ -97,7 +98,7 @@ func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsD
 		}
 	}()
 
-	err := a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, userMessage, innerHub)
+	err := a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, messages, innerHub)
 	innerHub.Close()
 	events := <-eventsCh
 	return events, err

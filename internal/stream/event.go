@@ -13,6 +13,7 @@ const (
 	EventAgentStart = "agent_start"
 	EventToken      = "token"
 	EventToolCall   = "tool_call"
+	EventToolResult = "tool_result"
 	EventAgentEnd   = "agent_end"
 	EventAgentError = "agent_error"
 	EventDone       = "done"
@@ -32,10 +33,11 @@ const (
 
 // Meta keys used by event constructors.
 const (
-	MetaArgs   = "args"
-	MetaUsage  = "usage"
-	MetaCode   = "error_code"
-	MetaDetail = "error_detail"
+	MetaArgs       = "args"
+	MetaUsage      = "usage"
+	MetaCode       = "error_code"
+	MetaDetail     = "error_detail"
+	MetaToolCallID = "tool_call_id"
 )
 
 // StreamEvent is the unit of data exchanged between agents and the SSE consumer.
@@ -76,15 +78,16 @@ func AgentErrorEvent(agent, message, code string) StreamEvent {
 	}
 }
 
-// ToolCallEvent reports that an agent invoked a tool. `args` is marshaled to
-// Meta["args"]; if marshaling fails the raw value is stored under
-// Meta["args_raw"] and the marshal error under Meta["args_error"].
-func ToolCallEvent(agent, toolName string, args any) StreamEvent {
+// ToolCallEvent reports that an agent invoked a tool. `toolCallID` correlates
+// the call with its result event(s); `args` is marshaled to Meta["args"]; if
+// marshaling fails the raw value is stored under Meta["args_raw"] and the
+// marshal error under Meta["args_error"].
+func ToolCallEvent(agent, toolCallID, toolName string, args any) StreamEvent {
 	e := StreamEvent{
 		Type:    EventToolCall,
 		Agent:   agent,
 		Content: toolName,
-		Meta:    map[string]any{},
+		Meta:    map[string]any{MetaToolCallID: toolCallID},
 	}
 	if args != nil {
 		b, err := json.Marshal(args)
@@ -98,6 +101,18 @@ func ToolCallEvent(agent, toolName string, args any) StreamEvent {
 		e.Meta[MetaArgs] = json.RawMessage(b)
 	}
 	return e
+}
+
+// ToolResultEvent reports the outcome of a tool invocation. `toolCallID`
+// matches the ID emitted by the preceding ToolCallEvent; `output` is the
+// tool's serialized result (or error text) carried in Content.
+func ToolResultEvent(agent, toolCallID, output string) StreamEvent {
+	return StreamEvent{
+		Type:    EventToolResult,
+		Agent:   agent,
+		Content: output,
+		Meta:    map[string]any{MetaToolCallID: toolCallID},
+	}
 }
 
 // DoneEvent signals the end of the stream. `usage` (e.g. total token counts and
