@@ -250,3 +250,33 @@ func TestChongzhi_FlatTopology_NoInvokeTools(t *testing.T) {
 	// The fake xizhi tool should not have been touched.
 	assert.Equal(t, 0, fake.callCount(), "xizhi tool must not be invoked by an invoke_liang tool_call")
 }
+
+func TestChongzhi_ReasoningRequest(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	client := newFake(
+		fakeResponse{
+			tokens:       []string{"thinking", "..."},
+			content:      "thinking...",
+			finishReason: "stop",
+			usage:        Usage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
+		},
+	)
+	reg := tool.NewRegistry()
+	cfg := testChongzhiConfig()
+	cfg.Thinking = true
+	cfg.ReasoningEffort = "high"
+	c, err := NewChongzhi(cfg, client, reg)
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err = c.Run(ctx, []Message{{Role: "user", Content: "hello"}}, hub)
+	require.NoError(t, err)
+	hub.Close()
+
+	req := client.lastRequest()
+	assert.True(t, req.Thinking, "Thinking must be true")
+	assert.Equal(t, "high", req.ReasoningEffort)
+	assert.Equal(t, 1024, req.MaxTokens)
+}

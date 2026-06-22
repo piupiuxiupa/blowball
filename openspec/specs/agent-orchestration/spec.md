@@ -66,7 +66,7 @@ Confuse SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子 A
 - **THEN** 系统推送 StreamEvent{Type: "agent_error", Agent: "xxx", Content: "错误描述", Meta: {error_code: "..."}}，然后推送 agent_end 事件
 
 ### Requirement: Agent configuration from file
-每个 Agent 的 system_prompt、model、max_tokens、tools 列表、mcp 配置及 skills 配置 SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。
+每个 Agent 的 system_prompt、model、max_tokens、tools 列表、mcp 配置、skills 配置、thinking 开关及 reasoning_effort 配置 SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。
 
 #### Scenario: Load agent config on startup
 - **WHEN** 服务启动

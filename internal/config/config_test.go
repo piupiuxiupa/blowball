@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -463,6 +465,81 @@ func TestConfig_ValidateAgentMCPTools(t *testing.T) {
 	cfg.Agents.Confuse.MCP.Servers[0].Tools = []string{"web_search", "*"}
 	if err := cfg.ValidateAgentMCPTools(serverTools); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_ReasoningConfig(t *testing.T) {
+	cases := []struct {
+		name        string
+		agentBlock  string
+		wantEffort  string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:       "thinking true defaults to medium",
+			agentBlock: "confuse:\n    name: Confuse\n    thinking: true",
+			wantEffort: "medium",
+		},
+		{
+			name:       "thinking true with low effort",
+			agentBlock: "confuse:\n    name: Confuse\n    thinking: true\n    reasoning_effort: low",
+			wantEffort: "low",
+		},
+		{
+			name:       "thinking true with high effort",
+			agentBlock: "confuse:\n    name: Confuse\n    thinking: true\n    reasoning_effort: high",
+			wantEffort: "high",
+		},
+		{
+			name:        "thinking true with invalid effort fails",
+			agentBlock:  "confuse:\n    name: Confuse\n    thinking: true\n    reasoning_effort: ultra",
+			wantErr:     true,
+			errContains: "reasoning_effort",
+		},
+		{
+			name:        "reasoning_effort set without thinking fails",
+			agentBlock:  "confuse:\n    name: Confuse\n    reasoning_effort: low",
+			wantErr:     true,
+			errContains: "reasoning_effort",
+		},
+		{
+			name:       "thinking false ignores absent reasoning_effort",
+			agentBlock: "confuse:\n    name: Confuse\n    thinking: false",
+			wantEffort: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, fmt.Sprintf(`
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  %s
+  chongzhi: {name: Chongzhi}
+  liang: {name: Liang}
+`, tc.agentBlock))
+
+			cfg, err := Load(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load expected error for %q, got nil", tc.name)
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.Agents.Confuse.ReasoningEffort != tc.wantEffort {
+				t.Errorf("Agents.Confuse.ReasoningEffort = %q, want %q", cfg.Agents.Confuse.ReasoningEffort, tc.wantEffort)
+			}
+		})
 	}
 }
 

@@ -370,6 +370,12 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 	w := env.postMessage(`{"content":"first message"}`, token)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
+	// Wait for the async batch save to land before the second turn and before
+	// the temp directory is cleaned up.
+	require.Eventually(t, func() bool {
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 4
+	}, 2*time.Second, 10*time.Millisecond, "expected first turn messages to be persisted")
+
 	// Wait for the title-generation goroutine to consume its LLM round.
 	require.Eventually(t, func() bool {
 		env.mysqlFake.mu.Lock()
@@ -380,6 +386,11 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 	// Second turn.
 	w = env.postMessage(`{"content":"second message"}`, token)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for the second turn's async batch save as well.
+	require.Eventually(t, func() bool {
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 8
+	}, 2*time.Second, 10*time.Millisecond, "expected second turn messages to be persisted")
 
 	client := llm
 	var secondTurn *agent.LLMRequest
@@ -447,6 +458,12 @@ func TestMessageFlow_ToolCallMemory(t *testing.T) {
 	// First turn: tool call + result.
 	w := env.postMessage(`{"content":"say hello"}`, token)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for the async batch save to land so the second turn recovers the
+	// complete conversation history including the tool call and result.
+	require.Eventually(t, func() bool {
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 4
+	}, 2*time.Second, 10*time.Millisecond, "expected first turn messages to be persisted")
 
 	// Wait for title generation to consume its round.
 	require.Eventually(t, func() bool {

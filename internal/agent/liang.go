@@ -76,9 +76,11 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub *stream.Hub) (s
 		}
 
 		req := LLMRequest{
-			Model:     l.cfg.Model,
-			Messages:  withSystem(l.cfg.SystemPrompt, round),
-			MaxTokens: l.cfg.MaxTokens,
+			Model:           l.cfg.Model,
+			Messages:        withSystem(l.cfg.SystemPrompt, round),
+			MaxTokens:       l.cfg.MaxTokens,
+			Thinking:        l.cfg.Thinking,
+			ReasoningEffort: l.cfg.ReasoningEffort,
 		}
 		if l.toolsIsNotNil {
 			req.Tools = l.toolsJSON

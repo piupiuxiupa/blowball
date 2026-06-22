@@ -88,13 +88,15 @@ type AgentMCPServerConfig struct {
 
 // AgentConfig describes a single agent's runtime settings.
 type AgentConfig struct {
-	Name         string         `yaml:"name"`
-	Model        string         `yaml:"model"`
-	SystemPrompt string         `yaml:"system_prompt"`
-	MaxTokens    int            `yaml:"max_tokens"`
-	Tools        []string       `yaml:"tools"`
-	MCP          AgentMCPConfig `yaml:"mcp"`
-	Skills       []string       `yaml:"skills"`
+	Name           string         `yaml:"name"`
+	Model          string         `yaml:"model"`
+	SystemPrompt   string         `yaml:"system_prompt"`
+	MaxTokens      int            `yaml:"max_tokens"`
+	Tools          []string       `yaml:"tools"`
+	MCP            AgentMCPConfig `yaml:"mcp"`
+	Skills         []string       `yaml:"skills"`
+	Thinking       bool           `yaml:"thinking"`
+	ReasoningEffort string        `yaml:"reasoning_effort"`
 }
 
 // AgentsConfig holds the three blowball agents.
@@ -105,18 +107,29 @@ type AgentsConfig struct {
 }
 
 // validate checks every agent's MCP server references point to a declared
-// global MCP server. Tool and skill existence are validated later once the
-// remote tool list and skill directories are known.
-func (a AgentsConfig) validate(serverNames map[string]struct{}) error {
+// global MCP server and that reasoning_effort values are valid. Tool and skill
+// existence are validated later once the remote tool list and skill directories
+// are known.
+func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 	for _, name := range []string{"confuse", "chongzhi", "liang"} {
-		var cfg AgentConfig
+		var cfg *AgentConfig
 		switch name {
 		case "confuse":
-			cfg = a.Confuse
+			cfg = &a.Confuse
 		case "chongzhi":
-			cfg = a.Chongzhi
+			cfg = &a.Chongzhi
 		case "liang":
-			cfg = a.Liang
+			cfg = &a.Liang
+		}
+		if cfg.Thinking {
+			if cfg.ReasoningEffort == "" {
+				cfg.ReasoningEffort = "medium"
+			}
+			if cfg.ReasoningEffort != "low" && cfg.ReasoningEffort != "medium" && cfg.ReasoningEffort != "high" {
+				return fmt.Errorf("agents.%s.reasoning_effort: invalid value %q (must be low, medium, or high)", name, cfg.ReasoningEffort)
+			}
+		} else if cfg.ReasoningEffort != "" {
+			return fmt.Errorf("agents.%s.reasoning_effort: cannot be set when thinking is disabled", name)
 		}
 		for i, s := range cfg.MCP.Servers {
 			if strings.TrimSpace(s.Name) == "" {

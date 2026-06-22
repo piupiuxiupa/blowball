@@ -96,19 +96,22 @@ type LLMClient interface {
 // the OpenAI tools[] list already JSON-marshaled by tool.Registry.OpenAITools
 // (or nil/empty when the agent has no tools).
 type LLMRequest struct {
-	Model       string
-	Messages    []Message
-	Tools       []byte
-	MaxTokens   int
-	Temperature float32
+	Model           string
+	Messages        []Message
+	Tools           []byte
+	MaxTokens       int
+	Temperature     float32
+	Thinking        bool
+	ReasoningEffort string
 }
 
 // LLMResponse is the aggregated result of one streaming chat completion call.
 type LLMResponse struct {
-	FinishReason string // "stop" | "tool_calls" | "length"
-	Content      string
-	ToolCalls    []ToolCall
-	Usage        Usage
+	FinishReason     string // "stop" | "tool_calls" | "length"
+	Content          string
+	ReasoningContent string // thinking/reasoning content from OpenAI reasoning models
+	ToolCalls        []ToolCall
+	Usage            Usage
 }
 
 // Sub-agent invocation tool names. Confuse intercepts these in its dispatch

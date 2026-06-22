@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 
 // scriptedLLM is a minimal agent.LLMClient that returns canned responses.
 type scriptedLLM struct {
+	mu        sync.Mutex
 	responses []agent.LLMResponse
 	calls     int
 	lastReq   agent.LLMRequest
@@ -38,13 +40,16 @@ type scriptedLLM struct {
 }
 
 func (s *scriptedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error) (agent.LLMResponse, error) {
+	s.mu.Lock()
 	s.lastReq = req
 	s.requests = append(s.requests, req)
 	if s.calls >= len(s.responses) {
+		s.mu.Unlock()
 		return agent.LLMResponse{FinishReason: "stop", Content: "done"}, nil
 	}
 	r := s.responses[s.calls]
 	s.calls++
+	s.mu.Unlock()
 	for _, t := range r.Content {
 		_ = onToken(string(t))
 	}
@@ -52,6 +57,8 @@ func (s *scriptedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onTo
 }
 
 func (s *scriptedLLM) confuseRequest() agent.LLMRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i := len(s.requests) - 1; i >= 0; i-- {
 		if len(s.requests[i].Messages) > 0 && s.requests[i].Messages[0].Role == "system" {
 			content := s.requests[i].Messages[0].Content
@@ -123,13 +130,19 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 		},
 	}
 
-	srv := setupMCPIntegrationServer(t, llm, cfg, baseReg, map[string][]string{"remote": {"remote_search", "remote_fetch"}}, nil)
+	srv, mysqlFake := setupMCPIntegrationServer(t, llm, cfg, baseReg, map[string][]string{"remote": {"remote_search", "remote_fetch"}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-mcp/messages", jsonBody(t, map[string]string{"content": "hi"}))
 	req.Header.Set("Authorization", "Bearer "+authToken(t, defaultUserID))
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for the async batch save to finish so the temp data directory can be
+	// cleaned up without racing the FS writer.
+	require.Eventually(t, func() bool {
+		return len(mysqlFake.messagesFor("sess-mcp")) >= 4
+	}, 2*time.Second, 10*time.Millisecond, "expected sess-mcp messages to be persisted")
 
 	require.NotNil(t, llm.confuseRequest().Tools)
 	var tools []struct {
@@ -201,13 +214,19 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 		},
 	}
 
-	srv := setupMCPIntegrationServer(t, llm, cfg, baseReg, nil, loader)
+	srv, mysqlFake := setupMCPIntegrationServer(t, llm, cfg, baseReg, nil, loader)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-skills/messages", jsonBody(t, map[string]string{"content": "hi"}))
 	req.Header.Set("Authorization", "Bearer "+authToken(t, defaultUserID))
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for the async batch save to finish so the temp data directory can be
+	// cleaned up without racing the FS writer.
+	require.Eventually(t, func() bool {
+		return len(mysqlFake.messagesFor("sess-skills")) >= 4
+	}, 2*time.Second, 10*time.Millisecond, "expected sess-skills messages to be persisted")
 
 	prompt := llm.confuseRequest().Messages[0].Content
 	assert.Contains(t, prompt, "coding-style")
@@ -222,7 +241,7 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 	assert.Contains(t, last.Content, "# Style")
 }
 
-func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Config, baseReg *tool.Registry, serverTools map[string][]string, loader *skill.Loader) *gin.Engine {
+func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Config, baseReg *tool.Registry, serverTools map[string][]string, loader *skill.Loader) (*gin.Engine, *memoryMySQL) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -233,6 +252,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	mr := miniredis.RunT(t)
 	redisSvc, err := redisstore.New(mr.Addr(), "", 0, time.Hour)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = redisSvc.Close() })
 
 	mysqlFake := newMemoryMySQL()
 	require.NoError(t, mysqlFake.CreateSession(context.Background(), model.Session{SessionID: "sess-mcp", UserID: defaultUserID, TraceID: "trace-mcp"}))
@@ -267,7 +287,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 		MCPTools:          mcpH.Tools,
 		SkillsList:        skillH.List,
 	})
-	return r
+	return r, mysqlFake
 }
 
 func jsonBody(t *testing.T, v any) *strings.Reader {

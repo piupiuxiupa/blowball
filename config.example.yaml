@@ -38,6 +38,11 @@ agents:
       Always pass enough context in the task description so the chosen
       sub-agent can complete the work independently.
     max_tokens: 2048
+    # Enable OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 reasoning variants).
+    # When true, max_tokens is sent as max_completion_tokens and reasoning_effort
+    # is included in the request. Omit or set to false for standard models.
+    thinking: false
+    reasoning_effort: medium
     tools:
       - xizhi_list_files
       - xizhi_tree
@@ -62,6 +67,9 @@ agents:
       implement the requested changes inside the user's workspace.
       Return a concise summary of what you changed when done.
     max_tokens: 4096
+    # Example: enable reasoning for coding tasks using an OpenAI reasoning model.
+    # thinking: true
+    # reasoning_effort: medium
     tools:
       - xizhi_read_file
       - xizhi_write_file

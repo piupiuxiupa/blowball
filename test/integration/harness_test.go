@@ -119,6 +119,15 @@ func (c *scriptedLLMClient) callCount() int {
 	return len(c.calls)
 }
 
+// requests returns a snapshot of every LLMRequest observed by StreamChat.
+func (c *scriptedLLMClient) requests() []agent.LLMRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]agent.LLMRequest, len(c.calls))
+	copy(out, c.calls)
+	return out
+}
+
 // memoryMySQL is an in-memory service.MySQLStore. It records messages by
 // session and supports the same GetSessionByID / ListMessages calls the real
 // sqlx-backed store does, so integration tests can verify the third
@@ -525,6 +534,91 @@ func agentConfigWithTools(confuseTools []string) config.AgentsConfig {
 	cfg := agentConfig()
 	cfg.Confuse.Tools = confuseTools
 	return cfg
+}
+
+// agentConfigWithReasoning returns the standard agent config with Confuse
+// configured for OpenAI reasoning mode.
+func agentConfigWithReasoning() config.AgentsConfig {
+	cfg := agentConfig()
+	cfg.Confuse.Thinking = true
+	cfg.Confuse.ReasoningEffort = "high"
+	return cfg
+}
+
+// newTestEnvWithAgentsConfig is like newTestEnv but lets the caller supply a
+// custom agents configuration. Useful for integration tests that verify
+// per-agent settings (e.g., reasoning effort) propagate through the
+// orchestrator.
+func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg config.AgentsConfig) *testEnv {
+	t.Helper()
+
+	t.Cleanup(func() { goleak.VerifyNone(t) })
+
+	dataDir := t.TempDir()
+
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+
+	mr := miniredis.RunT(t)
+	redisSvc, err := redisstore.New(mr.Addr(), "", 0, time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = redisSvc.Close() })
+
+	mysqlFake := newMemoryMySQL()
+	require.NoError(t, mysqlFake.CreateSession(context.Background(), model.Session{
+		SessionID: defaultSessionID,
+		UserID:    defaultUserID,
+		TraceID:   "seed-trace",
+	}))
+
+	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	sessSvc := service.NewSessionService(deps)
+	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+
+	cfg := &config.Config{
+		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
+		Agents: agentsCfg,
+	}
+	baseReg := tool.NewRegistry()
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
+	require.NoError(t, err)
+
+	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20)
+	mcpH := handler.NewMCPHandler(tool.NewRegistry())
+	skillH := handler.NewSkillHandler(fsSvc)
+
+	r := gin.New()
+	r.Use(middleware.TraceMiddleware())
+	handler.RegisterRoutes(r, handler.RouteDeps{
+		AuthMW:            middleware.AuthMiddleware(integrationTestSecret),
+		Login:             func(*gin.Context) {},
+		SessionList:       sessH.ListSessions,
+		SessionCreate:     sessH.CreateSession,
+		SessionMessages:   sessH.GetSessionMessages,
+		SendMessage:       sessH.SendMessage,
+		WorkspaceList:     wsH.List,
+		WorkspaceUpload:   wsH.Upload,
+		WorkspaceDownload: wsH.Download,
+		WorkspaceContent:  wsH.Content,
+		MCPTools:          mcpH.Tools,
+		SkillsList:        skillH.List,
+	})
+
+	return &testEnv{
+		t:         t,
+		engine:    r,
+		dataDir:   dataDir,
+		fsSvc:     fsSvc,
+		redisSvc:  redisSvc,
+		miniRedis: mr,
+		mysqlFake: mysqlFake,
+		llm:       llm,
+		sessSvc:   sessSvc,
+		msgSvc:    msgSvc,
+	}
 }
 
 // authToken returns a Bearer JWT for the default test user that the real auth

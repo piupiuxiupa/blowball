@@ -77,9 +77,11 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 		}
 
 		req := LLMRequest{
-			Model:     c.cfg.Model,
-			Messages:  withSystem(c.cfg.SystemPrompt, round),
-			MaxTokens: c.cfg.MaxTokens,
+			Model:           c.cfg.Model,
+			Messages:        withSystem(c.cfg.SystemPrompt, round),
+			MaxTokens:       c.cfg.MaxTokens,
+			Thinking:        c.cfg.Thinking,
+			ReasoningEffort: c.cfg.ReasoningEffort,
 		}
 		if c.toolsIsNotNil {
 			req.Tools = c.toolsJSON

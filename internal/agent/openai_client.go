@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -85,6 +86,10 @@ func logLLMRequest(ctx context.Context, req LLMRequest) {
 	if req.MaxTokens > 0 {
 		fields = append(fields, zap.Int("max_tokens", req.MaxTokens))
 	}
+	if req.Thinking {
+		fields = append(fields, zap.Bool("thinking", true))
+		fields = append(fields, zap.String("reasoning_effort", req.ReasoningEffort))
+	}
 	if len(req.Tools) > 0 {
 		names := toolNamePreviews(req.Tools)
 		fields = append(fields, zap.Int("tools_count", len(names)))
@@ -114,6 +119,10 @@ func logLLMResponse(ctx context.Context, resp LLMResponse) {
 		zap.Int("prompt_tokens", resp.Usage.PromptTokens),
 		zap.Int("completion_tokens", resp.Usage.CompletionTokens),
 		zap.Int("total_tokens", resp.Usage.TotalTokens),
+	}
+	if resp.ReasoningContent != "" {
+		fields = append(fields, zap.Int("reasoning_content_len", len([]rune(resp.ReasoningContent))))
+		fields = append(fields, zap.String("reasoning_content_preview", truncatePreview(resp.ReasoningContent)))
 	}
 	if traceID != "" {
 		fields = append(fields, zap.String("trace_id", traceID))
@@ -159,11 +168,18 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		Model:    shared.ChatModel(req.Model),
 		Messages: toOpenAIMessages(req.Messages),
 	}
-	if req.MaxTokens > 0 {
-		params.MaxTokens = openai.Int(int64(req.MaxTokens))
-	}
-	if req.Temperature != 0 {
-		params.Temperature = openai.Float(float64(req.Temperature))
+	if req.Thinking {
+		params.ReasoningEffort = shared.ReasoningEffort(req.ReasoningEffort)
+		if req.MaxTokens > 0 {
+			params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
+		}
+	} else {
+		if req.MaxTokens > 0 {
+			params.MaxTokens = openai.Int(int64(req.MaxTokens))
+		}
+		if req.Temperature != 0 {
+			params.Temperature = openai.Float(float64(req.Temperature))
+		}
 	}
 	if len(req.Tools) > 0 {
 		tools, err := parseOpenAITools(req.Tools)
@@ -179,9 +195,10 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	defer stream.Close()
 
 	var (
-		resp       LLMResponse
-		finish     string
-		toolStitch = newToolCallStitcher()
+		resp             LLMResponse
+		finish           string
+		toolStitch       = newToolCallStitcher()
+		reasoningContent strings.Builder
 	)
 	for stream.Next() {
 		if err := ctx.Err(); err != nil {
@@ -208,6 +225,15 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 					}
 				}
 			}
+			if rcField, ok := delta.JSON.ExtraFields["reasoning_content"]; ok {
+				raw := rcField.Raw()
+				if raw != "" && raw != "null" {
+					var rc string
+					if err := json.Unmarshal([]byte(raw), &rc); err == nil {
+						reasoningContent.WriteString(rc)
+					}
+				}
+			}
 			toolStitch.ingest(delta.ToolCalls)
 		}
 	}
@@ -225,6 +251,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		resp.FinishReason = "stop"
 	}
 	resp.ToolCalls = toolStitch.finalize()
+	resp.ReasoningContent = reasoningContent.String()
 
 	logLLMResponse(ctx, resp)
 	return resp, nil

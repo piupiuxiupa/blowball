@@ -384,6 +384,39 @@ func TestConfuse_ContextCancellation_Stops(t *testing.T) {
 	}
 }
 
+func TestConfuse_ReasoningRequest(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	client := newFake(
+		fakeResponse{
+			tokens:       []string{"planning"},
+			content:      "planning",
+			finishReason: "stop",
+			usage:        Usage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
+		},
+	)
+	cfg := testConfuseConfig()
+	cfg.Thinking = true
+	cfg.ReasoningEffort = "medium"
+	reg := tool.NewRegistry()
+	c, err := NewConfuse(cfg, client, reg, map[string]Agent{
+		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
+		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+	})
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err = c.Run(ctx, []Message{{Role: "user", Content: "plan"}}, hub)
+	require.NoError(t, err)
+	hub.Close()
+
+	req := client.lastRequest()
+	assert.True(t, req.Thinking, "Thinking must be true")
+	assert.Equal(t, "medium", req.ReasoningEffort)
+	assert.Equal(t, 512, req.MaxTokens)
+}
+
 // blockingClient blocks StreamChat until unblock is closed (so the test can
 // force a mid-stream cancellation) and returns ctx.Err().
 type blockingClient struct {

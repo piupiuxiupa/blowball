@@ -206,3 +206,36 @@ consumer:
 	}
 	assert.Equal(t, 5, tokenCount, "expected exactly 5 token events")
 }
+
+func TestLiang_ReasoningRequest(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	client := newFake(
+		fakeResponse{
+			tokens:       []string{"analyzing"},
+			content:      "analyzing",
+			finishReason: "stop",
+			usage:        Usage{PromptTokens: 3, CompletionTokens: 1, TotalTokens: 4},
+		},
+	)
+	liang, err := NewLiang(config.AgentConfig{
+		Name:            "Liang",
+		Model:           "gpt-test",
+		SystemPrompt:    "you are liang",
+		MaxTokens:       512,
+		Thinking:        true,
+		ReasoningEffort: "low",
+	}, client, tool.NewRegistry())
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err = liang.Run(ctx, []Message{{Role: "user", Content: "analyze"}}, hub)
+	require.NoError(t, err)
+	hub.Close()
+
+	req := client.lastRequest()
+	assert.True(t, req.Thinking, "Thinking must be true")
+	assert.Equal(t, "low", req.ReasoningEffort)
+	assert.Equal(t, 512, req.MaxTokens)
+}
