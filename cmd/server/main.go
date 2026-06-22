@@ -44,6 +44,7 @@ import (
 	"github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/store/redis"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/luban"
 	"github.com/lush/blowball/internal/tool/mcpclient"
 	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/lush/blowball/internal/tool/webfetch"
@@ -131,12 +132,22 @@ func main() {
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
 	// 7a. Skill loader. Discover skills from the project-level skills/ directory
-	// and per-user data/{userID}/skills/ directories. Register the read_skill
-	// tool globally when at least one agent enables skills or explicitly lists
-	// read_skill in its tools.
+	// and per-user data/{userID}/skills/ directories. Register the luban skill
+	// tools globally when at least one agent lists them in its tools.
 	skillLoader := skill.NewLoader("skills", func(userID string) string {
 		return fsStore.UserSkills(userID)
 	})
+	if needsLubanTools(cfg.Agents) {
+		lubanTools := luban.NewTools(skillLoader, func(userID string) string {
+			return fsStore.UserSkills(userID)
+		})
+		if err := luban.RegisterAll(reg, lubanTools); err != nil {
+			log.Fatal("register luban tools failed", zap.Error(err))
+		}
+	}
+
+	// Keep read_skill registered for backward compatibility when an agent still
+	// explicitly references it. New configurations should use luban_read_skill.
 	if needsReadSkill(cfg.Agents) {
 		if err := skill.RegisterReadSkill(reg, skillLoader); err != nil {
 			log.Fatal("register read_skill failed", zap.Error(err))
@@ -257,19 +268,24 @@ func main() {
 	log.Info("server stopped")
 }
 
-// hasEnabledSkills reports whether any agent has a non-empty skills list.
-func hasEnabledSkills(agents config.AgentsConfig) bool {
-	return len(agents.Confuse.Skills) > 0 ||
-		len(agents.Chongzhi.Skills) > 0 ||
-		len(agents.Liang.Skills) > 0
+// needsLubanTools reports whether any agent explicitly lists one of the luban
+// skill tools in its tools list.
+func needsLubanTools(agents config.AgentsConfig) bool {
+	lubanTools := []string{luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill}
+	for _, cfg := range []config.AgentConfig{agents.Confuse, agents.Chongzhi, agents.Liang} {
+		for _, name := range lubanTools {
+			if slices.Contains(cfg.Tools, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // needsReadSkill reports whether any agent explicitly lists read_skill in its
-// tools or has skills configured.
+// tools. read_skill is kept as a backward-compatibility entry point; new
+// configurations should use luban_read_skill.
 func needsReadSkill(agents config.AgentsConfig) bool {
-	if hasEnabledSkills(agents) {
-		return true
-	}
 	for _, cfg := range []config.AgentConfig{agents.Confuse, agents.Chongzhi, agents.Liang} {
 		if slices.Contains(cfg.Tools, skill.ToolName) {
 			return true

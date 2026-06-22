@@ -90,7 +90,8 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 			fmt.Fprintf(&b, "  </skill>\n")
 		}
 		b.WriteString("</skills>\n\n")
-		b.WriteString("When a task matches a skill, call read_skill with the skill name to load its full instructions.\n")
+		b.WriteString("Use luban_list_skills to discover skills, luban_read_skill to load a skill's full instructions, and luban_install_skill to install a skill collection from a URL.\n")
+		b.WriteString("Never use xizhi_* tools to access the skills directory.\n")
 		b.WriteString("\n")
 	}
 

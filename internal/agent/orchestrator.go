@@ -11,6 +11,7 @@ import (
 	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/luban"
 	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/lush/blowball/internal/tool/xizhi"
 	"go.uber.org/zap"
@@ -39,14 +40,18 @@ type AgentFactory interface {
 type orchestratorFactory struct {
 	cfg          *config.Config
 	client       LLMClient
-	baseRegistry *tool.Registry      // holds process-wide tools (webfetch, MCP proxies, read_skill)
+	baseRegistry *tool.Registry      // holds process-wide tools (webfetch, MCP proxies, luban skill tools, optional read_skill)
 	serverTools  map[string][]string // server name -> prefixed tool names
 	skillLoader  *skill.Loader       // discovers global and per-user skills
 }
 
 // Build implements AgentFactory.
 func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Agent, error) {
-	if err := f.cfg.ValidateAgentSkills(userID, f.skillLoader.HasSkill); err != nil {
+	// agent.skills must reference global skills only; user skills are discovered
+	// at runtime via luban tools.
+	if err := f.cfg.ValidateAgentSkills(userID, func(name, _ string) bool {
+		return f.skillLoader.HasSkill(name, "")
+	}); err != nil {
 		return nil, fmt.Errorf("agent factory: validate skills: %w", err)
 	}
 
@@ -95,14 +100,11 @@ func (f *orchestratorFactory) buildLiang(workspaceRoot, skillsDir, userID string
 
 // buildAgentRegistry creates a registry scoped to workspaceRoot containing the
 // tools this agent is allowed to use: built-ins listed in cfg.Tools, MCP tools
-// allowed by cfg.MCP, and read_skill when cfg.Skills is non-empty.
+// allowed by cfg.MCP, and luban skill tools when they are configured.
 func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, skillsDir, userID string) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
 	fullToolNames = append(fullToolNames, mcpToolNames...)
-	if len(cfg.Skills) > 0 {
-		fullToolNames = append(fullToolNames, skill.ToolName)
-	}
 
 	allowed := make(map[string]struct{}, len(fullToolNames))
 	for _, n := range fullToolNames {
@@ -123,16 +125,6 @@ func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspa
 		}
 		if err := reg.Register(spec); err != nil {
 			return nil, cfg, fmt.Errorf("agent factory: re-register %q: %w", spec.Name, err)
-		}
-	}
-
-	// If the agent has skills but read_skill was not copied from baseRegistry
-	// (because it was never registered globally), register it now as a fallback.
-	if len(cfg.Skills) > 0 {
-		if _, ok := reg.Get(skill.ToolName); !ok {
-			// This should not happen when main.go registers read_skill before
-			// MCP tools, but the fallback keeps the agent functional.
-			_ = skill.RegisterReadSkill(reg, f.skillLoader)
 		}
 	}
 
@@ -170,6 +162,14 @@ func isXizhiTool(name string) bool {
 	return false
 }
 
+func isLubanTool(name string) bool {
+	switch name {
+	case luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill:
+		return true
+	}
+	return false
+}
+
 // renderSystemPrompt builds the complete system prompt for an agent.
 func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, skillsDir, userID string) (string, error) {
 	return prompt.RenderSystemPrompt(prompt.RenderInput{
@@ -181,7 +181,7 @@ func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspa
 		OS:         runtime.GOOS,
 		Cutoff:     "August 2025",
 		Tools:      f.collectTools(cfg),
-		Skills:     f.collectSkills(cfg, userID),
+		Skills:     f.collectSkills(cfg),
 	})
 }
 
@@ -201,13 +201,14 @@ func (f *orchestratorFactory) collectTools(cfg config.AgentConfig) []prompt.Tool
 	return tools
 }
 
-// collectSkills converts the skills allowed for this agent into prompt.SkillInfo
-// values.
-func (f *orchestratorFactory) collectSkills(cfg config.AgentConfig, userID string) []prompt.SkillInfo {
+// collectSkills converts the global skills allowed for this agent into
+// prompt.SkillInfo values. Only global skills are injected into the system
+// prompt; user skills are discovered at runtime via luban_list_skills.
+func (f *orchestratorFactory) collectSkills(cfg config.AgentConfig) []prompt.SkillInfo {
 	if len(cfg.Skills) == 0 {
 		return nil
 	}
-	allSkills := f.skillLoader.List(userID)
+	allSkills := f.skillLoader.ListGlobal()
 	allowed := skill.Filter(allSkills, cfg.Skills)
 	var skills []prompt.SkillInfo
 	for _, s := range allowed {
@@ -242,8 +243,9 @@ func (f *orchestratorFactory) classifyTools(cfg config.AgentConfig) ([]*tool.Too
 			mcpByServer[serverName] = append(mcpByServer[serverName], spec)
 			continue
 		}
-		// Treat read_skill as built-in when present.
-		if spec.Name == skill.ToolName {
+		// Treat luban skill tools as built-in so they appear in the system prompt
+		// regardless of whether the agent also has them in cfg.Tools.
+		if isLubanTool(spec.Name) {
 			builtIn = append(builtIn, spec)
 			continue
 		}
@@ -314,6 +316,7 @@ type WorkspaceRootForUser = func(userID string) string
 // directory (data/{user_uuid}/workspace). userID identifies the caller so the
 // factory can load user-specific skills and validate skill permissions.
 func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub) error {
+	ctx = skill.WithUserID(ctx, userID)
 	confuse, err := o.factory.Build(workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)

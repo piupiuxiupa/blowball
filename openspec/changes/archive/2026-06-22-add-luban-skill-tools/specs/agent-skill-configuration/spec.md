@@ -1,21 +1,4 @@
-# agent-skill-configuration Specification
-
-## Purpose
-
-定义 Agent 级别的 skill 配置结构、skill 目录发现、元数据解析、skill catalog 注入及引用校验。
-
-## Requirements
-
-### Requirement: Agent skill configuration structure
-`config.yaml` 的每个 agent 段 SHALL 支持 `skills` 字段，用于声明该 agent 可使用的 skill 名称列表。
-
-#### Scenario: Declare allowed skills
-- **WHEN** `agents.confuse.skills` 包含一个或多个 skill 名
-- **THEN** 系统启动时解析并校验这些配置
-
-#### Scenario: Empty skills list
-- **WHEN** `agents.confuse.skills` 为空或未配置
-- **THEN** 该 agent 的系统提示词中不出现 skill catalog
+## MODIFIED Requirements
 
 ### Requirement: Skill source directories
 系统 SHALL 从两个来源发现 skill：全局目录 `{project_root}/skills/` 和当前用户目录 `{data}/{userID}/skills/`。发现过程 SHALL 递归扫描子目录。
@@ -31,21 +14,6 @@
 #### Scenario: User skill overrides global skill
 - **WHEN** 全局目录和用户目录存在同名 skill（无论嵌套路径如何）
 - **THEN** 系统仅使用用户 skill，catalog 中只出现一次
-
-### Requirement: Skill metadata parsing
-每个 skill SHALL 采用 `{skill-name}/SKILL.md` 目录结构，且 `SKILL.md` 顶部包含 YAML frontmatter，至少包含 `name` 和 `description`。
-
-#### Scenario: Parse valid SKILL.md
-- **WHEN** `SKILL.md` 包含有效的 `name` 和 `description` frontmatter
-- **THEN** 系统成功提取其元数据
-
-#### Scenario: Reject missing description
-- **WHEN** `SKILL.md` 缺少 `description`
-- **THEN** 系统跳过该 skill 并记录警告
-
-#### Scenario: Reject unparseable frontmatter
-- **WHEN** `SKILL.md` 的 YAML frontmatter 完全无法解析
-- **THEN** 系统跳过该 skill 并记录警告
 
 ### Requirement: Skill catalog injection
 系统 SHALL 把允许的**全局** skill 以 XML 格式注入 agent 的系统提示词，包含 name、description、location。

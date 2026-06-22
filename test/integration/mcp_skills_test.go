@@ -27,6 +27,7 @@ import (
 	redisstore "github.com/lush/blowball/internal/store/redis"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/luban"
 	"github.com/lush/blowball/internal/tool/skill"
 )
 
@@ -162,22 +163,26 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 }
 
 // TestIntegration_AgentSkillCatalog verifies that an agent with skills receives
-// a skill catalog in its system prompt and can invoke read_skill.
+// a skill catalog in its system prompt and can invoke luban_read_skill.
 func TestIntegration_AgentSkillCatalog(t *testing.T) {
 	skillDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(skillDir, "coding-style"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "coding-style", "SKILL.md"), []byte("---\nname: coding-style\ndescription: Coding conventions\n---\n# Style\n"), 0o644))
 
 	baseReg := tool.NewRegistry()
-	loader := skill.NewLoader(skillDir, nil)
-	require.NoError(t, skill.RegisterReadSkill(baseReg, loader))
+	loader := skill.NewLoader(skillDir, func(userID string) string {
+		return filepath.Join(t.TempDir(), userID, "skills")
+	})
+	require.NoError(t, luban.RegisterAll(baseReg, luban.NewTools(loader, func(userID string) string {
+		return filepath.Join(t.TempDir(), userID, "skills")
+	})))
 
 	llm := &scriptedLLM{
 		responses: []agent.LLMResponse{{
 			FinishReason: "tool_calls",
 			ToolCalls: []agent.ToolCall{{
 				ID:       "tc_1",
-				Function: agent.ToolCallFunction{Name: "read_skill", Arguments: `{"name":"coding-style"}`},
+				Function: agent.ToolCallFunction{Name: "luban_read_skill", Arguments: `{"name":"coding-style"}`},
 			}},
 			Usage: agent.Usage{TotalTokens: 1},
 		}, {
@@ -197,6 +202,7 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 				SystemPrompt: "you are confuse",
 				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
+				Tools:        []string{"luban_list_skills", "luban_read_skill", "luban_install_skill"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         stream.AgentChongzhi,
@@ -231,9 +237,10 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 	prompt := llm.confuseRequest().Messages[0].Content
 	assert.Contains(t, prompt, "coding-style")
 	assert.Contains(t, prompt, "Coding conventions")
-	assert.Contains(t, prompt, "read_skill")
+	assert.Contains(t, prompt, "luban_read_skill")
+	assert.NotContains(t, prompt, "call read_skill")
 
-	// Second LLM round carries the read_skill result.
+	// Second LLM round carries the luban_read_skill result.
 	req2 := llm.confuseRequest()
 	require.GreaterOrEqual(t, len(req2.Messages), 3)
 	last := req2.Messages[len(req2.Messages)-1]

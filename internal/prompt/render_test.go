@@ -71,7 +71,11 @@ func TestRenderSystemPrompt_Skills(t *testing.T) {
 	assert.Contains(t, out, "    <description>Global coding conventions</description>")
 	assert.Contains(t, out, "    <location>skills/coding-style</location>")
 	assert.Contains(t, out, "</skills>")
-	assert.Contains(t, out, "When a task matches a skill, call read_skill with the skill name to load its full instructions.")
+	assert.Contains(t, out, "Use luban_list_skills to discover skills")
+	assert.Contains(t, out, "luban_read_skill")
+	assert.Contains(t, out, "luban_install_skill")
+	assert.Contains(t, out, "Never use xizhi_* tools to access the skills directory.")
+	assert.NotContains(t, out, "call read_skill")
 }
 
 func TestRenderSystemPrompt_OmitsEmptySections(t *testing.T) {

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/luban"
 	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -330,8 +332,12 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 		},
 	}
 	baseReg := tool.NewRegistry()
-	loader := skill.NewLoader(skillDir, nil)
-	require.NoError(t, skill.RegisterReadSkill(baseReg, loader))
+	loader := skill.NewLoader(skillDir, func(userID string) string {
+		return filepath.Join(t.TempDir(), userID, "skills")
+	})
+	require.NoError(t, luban.RegisterAll(baseReg, luban.NewTools(loader, func(userID string) string {
+		return filepath.Join(t.TempDir(), userID, "skills")
+	})))
 	o, err := NewOrchestrator(client, cfg, baseReg, nil, loader, nil)
 	require.NoError(t, err)
 
@@ -347,5 +353,75 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 	prompt := req.Messages[0].Content
 	assert.Contains(t, prompt, "coding-style")
 	assert.Contains(t, prompt, "Global coding conventions")
-	assert.Contains(t, prompt, "read_skill")
+	assert.Contains(t, prompt, "luban_list_skills")
+	assert.Contains(t, prompt, "luban_read_skill")
+	assert.False(t, regexp.MustCompile(`\bread_skill\b`).MatchString(prompt), "prompt should not reference the legacy read_skill tool")
+}
+
+func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	globalDir := t.TempDir()
+	userDir := t.TempDir()
+	userDirFn := func(userID string) string {
+		return filepath.Join(userDir, userID, "skills")
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(globalDir, "coding-style"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "coding-style", "SKILL.md"), []byte("---\nname: coding-style\ndescription: Global coding conventions\n---\n# Coding Style\n"), 0o644))
+
+	// User has an override of the same skill; the system prompt should still
+	// show the global version because only global skills are injected.
+	require.NoError(t, os.MkdirAll(filepath.Join(userDirFn("user-1"), "coding-style"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(userDirFn("user-1"), "coding-style", "SKILL.md"), []byte("---\nname: coding-style\ndescription: User override\n---\n# User Coding Style\n"), 0o644))
+
+	client := newFake(fakeResponse{
+		tokens:       []string{"done"},
+		content:      "done",
+		finishReason: "stop",
+		usage:        Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
+	})
+
+	cfg := &config.Config{
+		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		Agents: config.AgentsConfig{
+			Confuse: config.AgentConfig{
+				Name:         "Confuse",
+				Model:        "gpt-test",
+				SystemPrompt: "you are confuse",
+				MaxTokens:    256,
+				Skills:       []string{"coding-style"},
+			},
+			Chongzhi: config.AgentConfig{
+				Name:         "Chongzhi",
+				Model:        "gpt-test",
+				SystemPrompt: "you are chongzhi",
+				MaxTokens:    256,
+			},
+			Liang: config.AgentConfig{
+				Name:         "Liang",
+				Model:        "gpt-test",
+				SystemPrompt: "you are liang",
+				MaxTokens:    256,
+			},
+		},
+	}
+	baseReg := tool.NewRegistry()
+	loader := skill.NewLoader(globalDir, userDirFn)
+	require.NoError(t, luban.RegisterAll(baseReg, luban.NewTools(loader, userDirFn)))
+	o, err := NewOrchestrator(client, cfg, baseReg, nil, loader, nil)
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)
+	require.NoError(t, err)
+	hub.Close()
+
+	req := client.lastRequest()
+	prompt := req.Messages[0].Content
+	assert.Contains(t, prompt, "coding-style")
+	assert.Contains(t, prompt, "Global coding conventions")
+	assert.NotContains(t, prompt, "User override")
 }

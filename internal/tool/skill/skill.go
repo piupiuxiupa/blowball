@@ -19,6 +19,11 @@ import (
 // DefaultMaxSize is the maximum SKILL.md content size read_skill will load.
 const DefaultMaxSize int64 = 500 * 1024 // 500KB
 
+// MaxDiscoveryDepth limits how deeply discover walks when looking for
+// SKILL.md files. Nested skill collections (e.g. superpowers/skills/{name})
+// are supported, but depth is capped to avoid accidental deep scans.
+const MaxDiscoveryDepth = 5
+
 // Skill holds metadata for a discovered skill.
 type Skill struct {
 	Name        string `yaml:"name"`
@@ -59,14 +64,33 @@ func (l *Loader) MaxSize() int64 { return l.maxSize }
 // List returns all skills available to userID, with user skills overriding
 // global skills of the same name. The result is sorted by name.
 func (l *Loader) List(userID string) []Skill {
+	return l.merge(l.ListGlobal(), l.listUser(userID))
+}
+
+// ListGlobal returns only the global skills discovered from the project-level
+// skills directory. The result is sorted by name.
+func (l *Loader) ListGlobal() []Skill {
+	return l.merge(l.discover(l.globalDir, "global"), nil)
+}
+
+// listUser returns only the user skills discovered from the user's skills
+// directory. The result is sorted by name.
+func (l *Loader) listUser(userID string) []Skill {
+	if userID == "" || l.userDirFn == nil {
+		return nil
+	}
+	return l.merge(nil, l.discover(l.userDirFn(userID), "user"))
+}
+
+// merge combines global and user skills, with user skills overriding global
+// skills of the same name, and returns a sorted slice.
+func (l *Loader) merge(global, user []Skill) []Skill {
 	merged := make(map[string]Skill)
-	for _, s := range l.discover(l.globalDir, "global") {
+	for _, s := range global {
 		merged[s.Name] = s
 	}
-	if userID != "" && l.userDirFn != nil {
-		for _, s := range l.discover(l.userDirFn(userID), "user") {
-			merged[s.Name] = s
-		}
+	for _, s := range user {
+		merged[s.Name] = s
 	}
 	names := make([]string, 0, len(merged))
 	for n := range merged {
@@ -118,46 +142,58 @@ func (l *Loader) Read(name, userID string) ([]byte, error) {
 	return nil, fmt.Errorf("skill %q not found", name)
 }
 
-// discover scans dir for {name}/SKILL.md entries and parses their frontmatter.
+// discover scans dir recursively for SKILL.md entries and parses their
+// frontmatter. Directories are walked up to MaxDiscoveryDepth levels.
 func (l *Loader) discover(dir, location string) []Skill {
 	if dir == "" {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
 	var out []Skill
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	var walk func(curDir string, depth int)
+	walk = func(curDir string, depth int) {
+		if depth > MaxDiscoveryDepth {
+			return
 		}
-		path := filepath.Join(dir, e.Name(), "SKILL.md")
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(path)
+		entries, err := os.ReadDir(curDir)
 		if err != nil {
-			continue
+			return
 		}
-		meta, _, err := parseFrontmatter(data)
-		if err != nil {
-			continue
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			subDir := filepath.Join(curDir, e.Name())
+			path := filepath.Join(subDir, "SKILL.md")
+			info, err := os.Stat(path)
+			if err == nil && !info.IsDir() {
+				data, err := os.ReadFile(path)
+				if err == nil {
+					meta, _, err := parseFrontmatter(data)
+					if err == nil && meta.Name != "" && meta.Description != "" {
+						meta.Path = path
+						meta.Location = location
+						out = append(out, meta)
+					}
+				}
+			}
+			// Recurse into subdirectories regardless of whether this directory
+			// contained a SKILL.md, so nested skill collections are discovered.
+			walk(subDir, depth+1)
 		}
-		if meta.Name == "" || meta.Description == "" {
-			continue
-		}
-		meta.Path = path
-		meta.Location = location
-		out = append(out, meta)
 	}
+	walk(dir, 0)
 	return out
 }
 
 // parseFrontmatter extracts YAML frontmatter and returns the metadata plus the
 // remaining markdown body. It accepts both "---\n...\n---" delimiters.
 func parseFrontmatter(data []byte) (Skill, []byte, error) {
+	return ParseFrontmatter(data)
+}
+
+// ParseFrontmatter extracts YAML frontmatter and returns the metadata plus the
+// remaining markdown body. It accepts both "---\n...\n---" delimiters.
+func ParseFrontmatter(data []byte) (Skill, []byte, error) {
 	var meta Skill
 	trimmed := bytes.TrimSpace(data)
 	if !bytes.HasPrefix(trimmed, []byte("---")) {
@@ -234,12 +270,16 @@ func WithUserID(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, userIDKey, userID)
 }
 
-func userIDFromContext(ctx context.Context) string {
+// UserIDFromContext returns the userID previously attached by WithUserID, or
+// the empty string if none is present.
+func UserIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(userIDKey).(string); ok {
 		return v
 	}
 	return ""
 }
+
+func userIDFromContext(ctx context.Context) string { return UserIDFromContext(ctx) }
 
 // Filter filters skills by the allowed names in names, preserving order.
 func Filter(skills []Skill, names []string) []Skill {

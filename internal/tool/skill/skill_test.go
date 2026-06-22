@@ -105,6 +105,71 @@ func TestLoader_HasSkill(t *testing.T) {
 	assert.False(t, loader.HasSkill("missing", ""))
 }
 
+func TestLoader_ListGlobal(t *testing.T) {
+	globalDir := t.TempDir()
+	dataDir := t.TempDir()
+	userDirFn := func(userID string) string {
+		return filepath.Join(dataDir, userID, "skills")
+	}
+	require.NoError(t, os.MkdirAll(userDirFn("u1"), 0o755))
+
+	writeSkill(t, filepath.Join(globalDir, "coding-style"), "coding-style", "Global", "# Global")
+	writeSkill(t, filepath.Join(userDirFn("u1"), "coding-style"), "coding-style", "User", "# User")
+
+	loader := NewLoader(globalDir, userDirFn)
+	global := loader.ListGlobal()
+	require.Len(t, global, 1)
+	assert.Equal(t, "coding-style", global[0].Name)
+	assert.Equal(t, "Global", global[0].Description)
+	assert.Equal(t, "global", global[0].Location)
+}
+
+func TestLoader_Discover_Recursive(t *testing.T) {
+	globalDir := t.TempDir()
+	writeSkill(t, filepath.Join(globalDir, "collection", "skills", "nested"), "nested", "Nested skill", "# Nested")
+	writeSkill(t, filepath.Join(globalDir, "shallow"), "shallow", "Shallow skill", "# Shallow")
+
+	loader := NewLoader(globalDir, nil)
+	skills := loader.ListGlobal()
+	require.Len(t, skills, 2)
+	names := make([]string, len(skills))
+	for i, s := range skills {
+		names[i] = s.Name
+	}
+	assert.ElementsMatch(t, []string{"nested", "shallow"}, names)
+
+	// Verify the nested path is recorded correctly.
+	var nested Skill
+	for _, s := range skills {
+		if s.Name == "nested" {
+			nested = s
+			break
+		}
+	}
+	assert.Contains(t, nested.Path, filepath.Join("collection", "skills", "nested", "SKILL.md"))
+}
+
+func TestLoader_Discover_UserOverridesGlobal_Recursive(t *testing.T) {
+	globalDir := t.TempDir()
+	dataDir := t.TempDir()
+	userDirFn := func(userID string) string {
+		return filepath.Join(dataDir, userID, "skills")
+	}
+	require.NoError(t, os.MkdirAll(userDirFn("u1"), 0o755))
+
+	writeSkill(t, filepath.Join(globalDir, "collection", "skills", "s"), "s", "Global", "# Global")
+	writeSkill(t, filepath.Join(userDirFn("u1"), "s"), "s", "User", "# User")
+
+	loader := NewLoader(globalDir, userDirFn)
+	body, err := loader.Read("s", "u1")
+	require.NoError(t, err)
+	assert.Equal(t, "# User", string(body))
+
+	global := loader.ListGlobal()
+	require.Len(t, global, 1)
+	assert.Equal(t, "global", global[0].Location)
+}
+
 func TestFilter(t *testing.T) {
 	skills := []Skill{
 		{Name: "a"},
