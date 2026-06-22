@@ -109,7 +109,7 @@ func (s *TitleService) callLLM(ctx context.Context, log *zap.Logger, userMsg, as
 		},
 	}
 
-	resp, err := s.llm.StreamChat(ctx, req, nil)
+	resp, err := s.llm.StreamChat(ctx, req, nil, nil)
 	if err != nil {
 		log.Warn("llm stream chat failed; falling back", zap.Error(err))
 		return ""

@@ -94,6 +94,11 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 				return ctx.Err()
 			}
 			return nil
+		}, func(delta string) error {
+			if !hub.SendCtx(ctx, stream.ReasoningEvent(c.Name(), delta)) {
+				return ctx.Err()
+			}
+			return nil
 		})
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -106,8 +111,8 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 
 		total.Add(resp.Usage)
 
-		assistantMsg := Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls}
-		if assistantMsg.Content == "" && len(resp.ToolCalls) == 0 {
+		assistantMsg := Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
+		if assistantMsg.Content == "" && assistantMsg.ReasoningContent == "" && len(resp.ToolCalls) == 0 {
 			finalContent = assistantText
 			break
 		}

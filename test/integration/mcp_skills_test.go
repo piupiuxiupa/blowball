@@ -39,7 +39,7 @@ type scriptedLLM struct {
 	requests  []agent.LLMRequest
 }
 
-func (s *scriptedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error) (agent.LLMResponse, error) {
+func (s *scriptedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	s.mu.Lock()
 	s.lastReq = req
 	s.requests = append(s.requests, req)

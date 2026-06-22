@@ -19,19 +19,21 @@ type fakeLLMClient struct {
 }
 
 type fakeResponse struct {
-	content      string
-	tokens       []string // streamed token-by-token via onToken
-	finishReason string
-	toolCalls    []ToolCall
-	usage        Usage
-	err          error // if non-nil, StreamChat returns this without emitting
+	content          string
+	reasoningContent string
+	tokens           []string // streamed token-by-token via onToken
+	reasoningTokens  []string // streamed reasoning token-by-token via onReasoning
+	finishReason     string
+	toolCalls        []ToolCall
+	usage            Usage
+	err              error // if non-nil, StreamChat returns this without emitting
 }
 
 func newFake(responses ...fakeResponse) *fakeLLMClient {
 	return &fakeLLMClient{responses: responses}
 }
 
-func (f *fakeLLMClient) StreamChat(ctx context.Context, req LLMRequest, onToken func(string) error) (LLMResponse, error) {
+func (f *fakeLLMClient) StreamChat(ctx context.Context, req LLMRequest, onToken func(string) error, onReasoning func(string) error) (LLMResponse, error) {
 	f.mu.Lock()
 	if len(f.responses) == 0 {
 		f.mu.Unlock()
@@ -48,20 +50,32 @@ func (f *fakeLLMClient) StreamChat(ctx context.Context, req LLMRequest, onToken 
 
 	for _, tok := range resp.tokens {
 		if err := ctx.Err(); err != nil {
-			return LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+			return LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
 		}
 		if onToken != nil {
 			if err := onToken(tok); err != nil {
-				return LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+				return LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+			}
+		}
+	}
+
+	for _, tok := range resp.reasoningTokens {
+		if err := ctx.Err(); err != nil {
+			return LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+		}
+		if onReasoning != nil {
+			if err := onReasoning(tok); err != nil {
+				return LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
 			}
 		}
 	}
 
 	return LLMResponse{
-		FinishReason: resp.finishReason,
-		Content:      resp.content,
-		ToolCalls:    resp.toolCalls,
-		Usage:        resp.usage,
+		FinishReason:     resp.finishReason,
+		Content:          resp.content,
+		ReasoningContent: resp.reasoningContent,
+		ToolCalls:        resp.toolCalls,
+		Usage:            resp.usage,
 	}, nil
 }
 

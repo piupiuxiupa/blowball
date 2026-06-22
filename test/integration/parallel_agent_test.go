@@ -266,7 +266,7 @@ type trackingLLMClient struct {
 	onToken  func(agent.LLMRequest, string)
 }
 
-func (t *trackingLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error) (agent.LLMResponse, error) {
+func (t *trackingLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	if t.onStream != nil {
 		t.onStream(req)
 	}
@@ -277,5 +277,5 @@ func (t *trackingLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest
 			return onToken(delta)
 		}
 	}
-	return t.inner.StreamChat(ctx, req, wrapped)
+	return t.inner.StreamChat(ctx, req, wrapped, onReasoning)
 }

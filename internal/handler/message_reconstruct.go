@@ -15,8 +15,9 @@ import (
 // Reconstruction rules:
 //   - user message rows (event_type=message, role=user) map directly to
 //     role="user" messages.
-//   - consecutive token rows from the same agent are merged into a single
-//     role="assistant" message.
+//   - consecutive token and/or reasoning rows from the same agent are merged
+//     into a single role="assistant" message carrying both Content and
+//     ReasoningContent.
 //   - consecutive tool_call rows from the same agent are grouped into a single
 //     role="assistant" message with ToolCalls; following tool_result rows with
 //     matching tool_call_id become role="tool" messages. Unpaired tool_calls
@@ -60,18 +61,31 @@ func MessagesToAgentMessages(prior []model.Message) ([]agent.Message, error) {
 			if state.toolCallsPending() {
 				state.flushToolCalls(&out)
 			}
-			if msg.Agent != state.tokenAgent {
-				state.flushTokens(&out)
-				state.tokenAgent = msg.Agent
+			if msg.Agent != state.currentAgent {
+				state.flushTokensAndReasoning(&out)
+				state.currentAgent = msg.Agent
 			}
 			state.tokenContent += msg.Content
+
+		case model.EventTypeReasoning:
+			if msg.Role != model.RoleAssistant {
+				continue
+			}
+			if state.toolCallsPending() {
+				state.flushToolCalls(&out)
+			}
+			if msg.Agent != state.currentAgent {
+				state.flushTokensAndReasoning(&out)
+				state.currentAgent = msg.Agent
+			}
+			state.reasoningContent += msg.Content
 
 		case model.EventTypeToolCall:
 			if msg.Role != model.RoleAssistant {
 				continue
 			}
 			if state.tokensPending() {
-				state.flushTokens(&out)
+				state.flushTokensAndReasoning(&out)
 			}
 			if msg.Agent != state.toolCallAgent {
 				state.flushToolCalls(&out)
@@ -116,11 +130,12 @@ func MessagesToAgentMessages(prior []model.Message) ([]agent.Message, error) {
 // reconstructState accumulates partially-built assistant messages while scanning
 // the persisted event stream.
 type reconstructState struct {
-	tokenContent  string
-	tokenAgent    string
-	toolCalls     []agent.ToolCall
-	toolCallAgent string
-	toolResults   []toolResultEntry
+	tokenContent     string
+	reasoningContent string
+	currentAgent     string
+	toolCalls        []agent.ToolCall
+	toolCallAgent    string
+	toolResults      []toolResultEntry
 }
 
 type toolResultEntry struct {
@@ -128,24 +143,28 @@ type toolResultEntry struct {
 	output     string
 }
 
-func (s *reconstructState) tokensPending() bool    { return s.tokenContent != "" }
+func (s *reconstructState) tokensPending() bool {
+	return s.tokenContent != "" || s.reasoningContent != ""
+}
 func (s *reconstructState) toolCallsPending() bool { return len(s.toolCalls) > 0 }
 
 func (s *reconstructState) flush(out *[]agent.Message) {
 	s.flushToolCalls(out)
-	s.flushTokens(out)
+	s.flushTokensAndReasoning(out)
 }
 
-func (s *reconstructState) flushTokens(out *[]agent.Message) {
-	if s.tokenContent == "" {
+func (s *reconstructState) flushTokensAndReasoning(out *[]agent.Message) {
+	if s.tokenContent == "" && s.reasoningContent == "" {
 		return
 	}
 	*out = append(*out, agent.Message{
-		Role:    "assistant",
-		Content: s.tokenContent,
+		Role:             "assistant",
+		Content:          s.tokenContent,
+		ReasoningContent: s.reasoningContent,
 	})
 	s.tokenContent = ""
-	s.tokenAgent = ""
+	s.reasoningContent = ""
+	s.currentAgent = ""
 }
 
 func (s *reconstructState) flushToolCalls(out *[]agent.Message) {

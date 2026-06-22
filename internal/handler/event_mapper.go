@@ -9,11 +9,12 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
-// MergeEvents collapses adjacent token events from the same agent into a single
-// event whose Content is the concatenation of the merged fragments. All other
-// event boundaries (agent_start, agent_end, agent_error, tool_call, or a change
-// in Agent) start a new output event so that total ordering and semantic
-// boundaries are preserved.
+// MergeEvents collapses adjacent token or reasoning events from the same agent
+// into a single event whose Content is the concatenation of the merged fragments.
+// All other event boundaries (agent_start, agent_end, agent_error, tool_call, or
+// a change in Agent) start a new output event so that total ordering and semantic
+// boundaries are preserved. Reasoning events are merged independently from token
+// events so the reasoning/answer boundary is preserved.
 func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
 	if len(events) == 0 {
 		return nil
@@ -23,7 +24,8 @@ func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
 	var current *stream.StreamEvent
 	for i := range events {
 		e := events[i]
-		if current != nil && e.Type == stream.EventToken && current.Type == stream.EventToken && current.Agent == e.Agent {
+		if current != nil && e.Type == current.Type && current.Agent == e.Agent &&
+			(e.Type == stream.EventToken || e.Type == stream.EventReasoning) {
 			current.Content += e.Content
 			continue
 		}
@@ -71,6 +73,10 @@ func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex 
 	switch e.Type {
 	case stream.EventToken:
 		msg.EventType = model.EventTypeToken
+		msg.Role = model.RoleAssistant
+		msg.Content = e.Content
+	case stream.EventReasoning:
+		msg.EventType = model.EventTypeReasoning
 		msg.Role = model.RoleAssistant
 		msg.Content = e.Content
 	case stream.EventToolCall:

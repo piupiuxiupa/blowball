@@ -424,7 +424,7 @@ type blockingClient struct {
 	once    sync.Once
 }
 
-func (b *blockingClient) StreamChat(ctx context.Context, _ LLMRequest, _ func(string) error) (LLMResponse, error) {
+func (b *blockingClient) StreamChat(ctx context.Context, _ LLMRequest, _ func(string) error, _ func(string) error) (LLMResponse, error) {
 	<-b.unblock
 	return LLMResponse{}, ctx.Err()
 }

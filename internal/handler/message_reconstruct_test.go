@@ -192,6 +192,84 @@ func TestMessagesToAgentMessages_ToolOutputStructuredJSON(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestMessagesToAgentMessages_ReasoningOnly(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "solve"},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "Let me think..."},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "solve"},
+		{Role: "assistant", ReasoningContent: "Let me think..."},
+	}
+	assert.Equal(t, want, got)
+}
+
+func TestMessagesToAgentMessages_ReasoningAndContentMerged(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "solve"},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "thinking "},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "more"},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "Answer"},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "solve"},
+		{Role: "assistant", Content: "Answer", ReasoningContent: "thinking more"},
+	}
+	assert.Equal(t, want, got)
+}
+
+func TestMessagesToAgentMessages_ReasoningFlushedBeforeToolCall(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search"},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "I need to search."},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
+		{Agent: stream.AgentConfuse, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"ok"}`},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "search"},
+		{Role: "assistant", ReasoningContent: "I need to search."},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{
+			ID:       "tc-1",
+			Function: agent.ToolCallFunction{Name: "web_search", Arguments: `{"q":"x"}`},
+		}}},
+		{Role: "tool", Content: "ok", ToolCallID: "tc-1", Name: "web_search"},
+	}
+	assert.Equal(t, want, got)
+}
+
+func TestMessagesToAgentMessages_SubAgentReasoningIgnored(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "do it"},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "calling"},
+		{Agent: stream.AgentChongzhi, Role: "", EventType: model.EventTypeAgentStart},
+		{Agent: stream.AgentChongzhi, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "sub thought"},
+		{Agent: stream.AgentChongzhi, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "42"},
+		{Agent: stream.AgentChongzhi, Role: "", EventType: model.EventTypeAgentEnd},
+		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " done"},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "do it"},
+		{Role: "assistant", Content: "calling done"},
+	}
+	assert.Equal(t, want, got)
+}
+
 func TestMessagesToAgentMessages_MixedUserAssistantToolTurns(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "first"},

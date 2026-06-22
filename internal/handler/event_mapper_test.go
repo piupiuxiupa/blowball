@@ -61,6 +61,67 @@ func TestUserMessage_PrependToAssistantBatch_Ordering(t *testing.T) {
 	assert.Equal(t, model.EventTypeAgentEnd, msgs[3].EventType)
 }
 
+func TestMessageFromEvent_Reasoning(t *testing.T) {
+	msgTime := time.Unix(1_700_000_000, 0).UTC()
+	e := stream.ReasoningEvent(stream.AgentConfuse, "analyzing...")
+	msg, err := MessageFromEvent(e, "sess-1", "trace-1", 1, msgTime)
+	require.NoError(t, err)
+
+	assert.Equal(t, model.EventTypeReasoning, msg.EventType)
+	assert.Equal(t, model.RoleAssistant, msg.Role)
+	assert.Equal(t, "analyzing...", msg.Content)
+	assert.Equal(t, stream.AgentConfuse, msg.Agent)
+}
+
+func TestMergeEvents_Reasoning(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       []stream.StreamEvent
+		expected []stream.StreamEvent
+	}{
+		{
+			name: "pure reasoning sequence is merged",
+			in: []stream.StreamEvent{
+				stream.ReasoningEvent(stream.AgentConfuse, "Let "),
+				stream.ReasoningEvent(stream.AgentConfuse, "me "),
+				stream.ReasoningEvent(stream.AgentConfuse, "think"),
+			},
+			expected: []stream.StreamEvent{
+				stream.ReasoningEvent(stream.AgentConfuse, "Let me think"),
+			},
+		},
+		{
+			name: "reasoning and token are not merged",
+			in: []stream.StreamEvent{
+				stream.ReasoningEvent(stream.AgentConfuse, "thinking"),
+				stream.TokenEvent(stream.AgentConfuse, "answer"),
+			},
+			expected: []stream.StreamEvent{
+				stream.ReasoningEvent(stream.AgentConfuse, "thinking"),
+				stream.TokenEvent(stream.AgentConfuse, "answer"),
+			},
+		},
+		{
+			name: "different agents break reasoning merge",
+			in: []stream.StreamEvent{
+				stream.ReasoningEvent(stream.AgentConfuse, "A"),
+				stream.ReasoningEvent(stream.AgentLiang, "B"),
+			},
+			expected: []stream.StreamEvent{
+				stream.ReasoningEvent(stream.AgentConfuse, "A"),
+				stream.ReasoningEvent(stream.AgentLiang, "B"),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MergeEvents(tc.in)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
 func TestMergeEvents(t *testing.T) {
 	tests := []struct {
 		name     string

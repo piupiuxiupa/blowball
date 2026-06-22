@@ -42,6 +42,7 @@ type Usage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	ReasoningTokens  int
 }
 
 // Add merges other into u in place. Used by the agent loop to aggregate
@@ -50,6 +51,7 @@ func (u *Usage) Add(other Usage) {
 	u.PromptTokens += other.PromptTokens
 	u.CompletionTokens += other.CompletionTokens
 	u.TotalTokens += other.TotalTokens
+	u.ReasoningTokens += other.ReasoningTokens
 }
 
 // Message is the agent-package's own chat message type. It mirrors the OpenAI
@@ -57,11 +59,12 @@ func (u *Usage) Add(other Usage) {
 // openai-go, keeping the public Agent interface SDK-agnostic. Callers that
 // hold openai-go types convert at the boundary (see openai_client.go).
 type Message struct {
-	Role       string     `json:"role"` // "system" | "user" | "assistant" | "tool"
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"` // set on role="tool"
-	Name       string     `json:"name,omitempty"`         // optional, set on role="tool"
+	Role             string     `json:"role"` // "system" | "user" | "assistant" | "tool"
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"` // set on role="tool"
+	Name             string     `json:"name,omitempty"`         // optional, set on role="tool"
 }
 
 // ToolCall represents one function-calling invocation emitted by the model.
@@ -78,18 +81,18 @@ type ToolCallFunction struct {
 }
 
 // LLMClient is the per-agent LLM backend abstraction. Implementations stream
-// chat completion tokens via onToken and return the aggregated response. The
-// interface deliberately avoids any openai-go types so the agent package can
-// be tested with a fake client and so the concrete SDK-backed implementation
-// can evolve without churning the agents.
+// chat completion tokens via onToken and reasoning content via onReasoning, and
+// return the aggregated response. The interface deliberately avoids any
+// openai-go types so the agent package can be tested with a fake client and so
+// the concrete SDK-backed implementation can evolve without churning the agents.
 type LLMClient interface {
 	// StreamChat sends a streaming chat completion request and calls onToken
-	// for every content delta the model emits. It returns the final
-	// finish_reason ("stop" | "tool_calls" | "length"), any assistant content,
-	// any tool_calls, and aggregated usage. onToken must not be invoked after
-	// StreamChat returns; implementations must abort streaming when ctx is
-	// cancelled.
-	StreamChat(ctx context.Context, req LLMRequest, onToken func(string) error) (resp LLMResponse, err error)
+	// for every content delta and onReasoning for every reasoning delta the
+	// model emits. It returns the final finish_reason ("stop" | "tool_calls" |
+	// "length"), any assistant content, any tool_calls, and aggregated usage.
+	// onToken and onReasoning must not be invoked after StreamChat returns;
+	// implementations must abort streaming when ctx is cancelled.
+	StreamChat(ctx context.Context, req LLMRequest, onToken func(string) error, onReasoning func(string) error) (resp LLMResponse, err error)
 }
 
 // LLMRequest is the per-call payload handed to LLMClient.StreamChat. Tools is

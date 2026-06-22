@@ -334,7 +334,7 @@ type fakeLLMClient struct {
 	onTokens []string
 }
 
-func (c *fakeLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error) (agent.LLMResponse, error) {
+func (c *fakeLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	c.mu.Lock()
 	c.lastReq = req
 	c.gotCall = true

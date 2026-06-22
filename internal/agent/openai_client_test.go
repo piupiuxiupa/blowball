@@ -43,6 +43,7 @@ data: [DONE]
 	))
 
 	var tokens []string
+	var reasoningTokens []string
 	resp, err := client.StreamChat(context.Background(), LLMRequest{
 		Model:           "o3-mini",
 		Messages:        []Message{{Role: "user", Content: "hi"}},
@@ -51,11 +52,15 @@ data: [DONE]
 	}, func(tok string) error {
 		tokens = append(tokens, tok)
 		return nil
+	}, func(tok string) error {
+		reasoningTokens = append(reasoningTokens, tok)
+		return nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "Hello", resp.Content)
 	assert.Equal(t, "Analyzing the problem", resp.ReasoningContent)
 	assert.Equal(t, []string{"Hello"}, tokens)
+	assert.Equal(t, []string{"Analyzing", " the problem"}, reasoningTokens)
 }
 
 // TestOpenAIClient_StreamChat_ReasoningContentNullIgnored verifies that a null
@@ -98,7 +103,7 @@ data: [DONE]
 		Messages:        []Message{{Role: "user", Content: "hi"}},
 		Thinking:        true,
 		ReasoningEffort: "low",
-	}, nil)
+	}, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "Hi", resp.Content)
 	assert.Empty(t, resp.ReasoningContent)

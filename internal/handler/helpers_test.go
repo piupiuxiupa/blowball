@@ -39,7 +39,7 @@ type fakeTitleLLM struct {
 	resp    agent.LLMResponse
 }
 
-func (c *fakeTitleLLM) StreamChat(_ context.Context, _ agent.LLMRequest, _ func(string) error) (agent.LLMResponse, error) {
+func (c *fakeTitleLLM) StreamChat(_ context.Context, _ agent.LLMRequest, _ func(string) error, _ func(string) error) (agent.LLMResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gotCall = true

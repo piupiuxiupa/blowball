@@ -354,6 +354,9 @@ func emitDone(hub *stream.Hub, ctx context.Context, u doneUsage) {
 		"completion_tokens": u.confuse.CompletionTokens,
 		"total_tokens":      u.confuse.TotalTokens,
 	}
+	if u.confuse.ReasoningTokens > 0 {
+		usage["reasoning_tokens"] = u.confuse.ReasoningTokens
+	}
 	if u.err != nil {
 		usage["error"] = u.err.Error()
 		logger.L().Warn("orchestrator completed with error",

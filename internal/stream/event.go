@@ -12,6 +12,7 @@ import "encoding/json"
 const (
 	EventAgentStart = "agent_start"
 	EventToken      = "token"
+	EventReasoning  = "reasoning"
 	EventToolCall   = "tool_call"
 	EventToolResult = "tool_result"
 	EventAgentEnd   = "agent_end"
@@ -53,6 +54,11 @@ type StreamEvent struct {
 // TokenEvent builds a token streaming event for a single content chunk.
 func TokenEvent(agent, content string) StreamEvent {
 	return StreamEvent{Type: EventToken, Agent: agent, Content: content}
+}
+
+// ReasoningEvent builds a reasoning streaming event for a single reasoning chunk.
+func ReasoningEvent(agent, content string) StreamEvent {
+	return StreamEvent{Type: EventReasoning, Agent: agent, Content: content}
 }
 
 // AgentStartEvent marks the start of an agent's execution. Frontends use this to

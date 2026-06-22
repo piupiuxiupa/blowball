@@ -23,6 +23,7 @@ const (
 const (
 	EventTypeMessage    = "message"
 	EventTypeToken      = "token"
+	EventTypeReasoning  = "reasoning"
 	EventTypeToolCall   = "tool_call"
 	EventTypeToolResult = "tool_result"
 	EventTypeAgentStart = "agent_start"

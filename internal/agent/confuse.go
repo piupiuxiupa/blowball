@@ -104,13 +104,18 @@ func (c *Confuse) Run(ctx context.Context, messages []Message, hub *stream.Hub) 
 			req.Tools = c.toolsJSON
 		}
 
-		// Capture streamed tokens into finalContent as the model emits them.
+		// Capture streamed tokens into assistantText as the model emits them.
 		var assistantText string
 		resp, err := c.client.StreamChat(ctx, req, func(delta string) error {
 			assistantText += delta
 			// SendCtx returns false on ctx cancel or hub close; we surface
 			// the cancel so StreamChat aborts.
 			if !hub.SendCtx(ctx, stream.TokenEvent(c.Name(), delta)) {
+				return ctx.Err()
+			}
+			return nil
+		}, func(delta string) error {
+			if !hub.SendCtx(ctx, stream.ReasoningEvent(c.Name(), delta)) {
 				return ctx.Err()
 			}
 			return nil
@@ -128,8 +133,8 @@ func (c *Confuse) Run(ctx context.Context, messages []Message, hub *stream.Hub) 
 
 		// Append the assistant turn (with any tool_calls) to the conversation
 		// so the next round sees the model's reasoning + planned calls.
-		assistantMsg := Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls}
-		if assistantMsg.Content == "" && len(resp.ToolCalls) == 0 {
+		assistantMsg := Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
+		if assistantMsg.Content == "" && assistantMsg.ReasoningContent == "" && len(resp.ToolCalls) == 0 {
 			// Nothing to do; treat as terminal.
 			finalContent = assistantText
 			break

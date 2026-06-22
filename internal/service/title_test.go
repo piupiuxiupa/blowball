@@ -133,6 +133,6 @@ func TestGenerateTitle_PanicRecovered(t *testing.T) {
 // panicLLMClient is an agent.LLMClient whose StreamChat always panics.
 type panicLLMClient struct{}
 
-func (panicLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error) (agent.LLMResponse, error) {
+func (panicLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	panic("boom")
 }

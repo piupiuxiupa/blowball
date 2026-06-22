@@ -119,6 +119,7 @@ func logLLMResponse(ctx context.Context, resp LLMResponse) {
 		zap.Int("prompt_tokens", resp.Usage.PromptTokens),
 		zap.Int("completion_tokens", resp.Usage.CompletionTokens),
 		zap.Int("total_tokens", resp.Usage.TotalTokens),
+		zap.Int("reasoning_tokens", resp.Usage.ReasoningTokens),
 	}
 	if resp.ReasoningContent != "" {
 		fields = append(fields, zap.Int("reasoning_content_len", len([]rune(resp.ReasoningContent))))
@@ -159,7 +160,7 @@ func NewOpenAIClientFromClient(c openai.Client) *OpenAIClient {
 // usage. Tool-call fragments arrive incrementally across chunks (id, name,
 // and arguments split into many deltas); they are stitched back together
 // here keyed by the chunk's tool-call Index.
-func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken func(string) error) (LLMResponse, error) {
+func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken func(string) error, onReasoning func(string) error) (LLMResponse, error) {
 	if c == nil {
 		return LLMResponse{}, fmt.Errorf("openai client: nil receiver")
 	}
@@ -211,6 +212,9 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 				CompletionTokens: int(chunk.Usage.CompletionTokens),
 				TotalTokens:      int(chunk.Usage.TotalTokens),
 			}
+			if chunk.Usage.JSON.CompletionTokensDetails.Valid() {
+				resp.Usage.ReasoningTokens = int(chunk.Usage.CompletionTokensDetails.ReasoningTokens)
+			}
 		}
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != "" {
@@ -231,6 +235,11 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 					var rc string
 					if err := json.Unmarshal([]byte(raw), &rc); err == nil {
 						reasoningContent.WriteString(rc)
+						if onReasoning != nil {
+							if err := onReasoning(rc); err != nil {
+								return resp, err
+							}
+						}
 					}
 				}
 			}
@@ -302,6 +311,9 @@ func toOpenAIMessage(m Message) openai.ChatCompletionMessageParamUnion {
 		}
 		if len(m.ToolCalls) > 0 {
 			a.ToolCalls = toOpenAIToolCalls(m.ToolCalls)
+		}
+		if m.ReasoningContent != "" {
+			a.SetExtraFields(map[string]any{"reasoning_content": m.ReasoningContent})
 		}
 		return openai.ChatCompletionMessageParamUnion{OfAssistant: a}
 	}

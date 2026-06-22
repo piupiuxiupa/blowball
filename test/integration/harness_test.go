@@ -56,12 +56,14 @@ func init() {
 // pops these FIFO across StreamChat calls, emitting tokens via onToken before
 // returning the aggregated response. err short-circuits StreamChat if set.
 type scriptedLLMResponse struct {
-	tokens       []string
-	content      string
-	finishReason string
-	toolCalls    []agent.ToolCall
-	usage        agent.Usage
-	err          error
+	tokens           []string
+	reasoningTokens  []string
+	reasoningContent string
+	content          string
+	finishReason     string
+	toolCalls        []agent.ToolCall
+	usage            agent.Usage
+	err              error
 }
 
 // scriptedLLMClient is a fake agent.LLMClient shared across the agent tree.
@@ -79,7 +81,7 @@ func newScriptedLLMClient(responses ...scriptedLLMResponse) *scriptedLLMClient {
 	return &scriptedLLMClient{responses: responses}
 }
 
-func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error) (agent.LLMResponse, error) {
+func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	c.mu.Lock()
 	if len(c.responses) == 0 {
 		c.mu.Unlock()
@@ -94,21 +96,33 @@ func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest
 		return agent.LLMResponse{}, resp.err
 	}
 
+	for _, tok := range resp.reasoningTokens {
+		if err := ctx.Err(); err != nil {
+			return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+		}
+		if onReasoning != nil {
+			if err := onReasoning(tok); err != nil {
+				return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+			}
+		}
+	}
+
 	for _, tok := range resp.tokens {
 		if err := ctx.Err(); err != nil {
-			return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+			return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
 		}
 		if onToken != nil {
 			if err := onToken(tok); err != nil {
-				return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+				return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
 			}
 		}
 	}
 	return agent.LLMResponse{
-		FinishReason: resp.finishReason,
-		Content:      resp.content,
-		ToolCalls:    resp.toolCalls,
-		Usage:        resp.usage,
+		FinishReason:     resp.finishReason,
+		Content:          resp.content,
+		ReasoningContent: resp.reasoningContent,
+		ToolCalls:        resp.toolCalls,
+		Usage:            resp.usage,
 	}, nil
 }
 
