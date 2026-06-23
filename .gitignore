@@ -4,7 +4,4 @@ bin/
 .claude/settings.local.json
 /data/
 .claude/
-frontend/node_modules/
-frontend/dist/
-frontend/
 /skills/

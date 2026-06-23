@@ -108,10 +108,10 @@ components:
           type: integer
         role:
           type: string
-          enum: [user, assistant, tool]
+          enum: [user, assistant, tool, ""]
         event_type:
           type: string
-          enum: [message, token, tool_call, agent_start, agent_end, agent_error]
+          enum: [message, token, tool_call, agent_start, agent_end, agent_error, reasoning]
         content:
           type: string
         trace_id:
@@ -153,6 +153,13 @@ components:
         type: {type: string, enum: [token]}
         agent: {type: string}
         content: {type: string, description: Incremental text token.}
+    SSEReasoning:
+      type: object
+      required: [type, agent, content]
+      properties:
+        type: {type: string, enum: [reasoning]}
+        agent: {type: string}
+        content: {type: string, description: Incremental reasoning/thinking token.}
     SSEToolCall:
       type: object
       required: [type, agent, content]
@@ -450,7 +457,7 @@ paths:
           description: |
             Server-Sent Events stream. Each event is two lines:
             `event: <type>` and `data: <json>` followed by a blank line.
-            Event types: `agent_start`, `token`, `tool_call`, `agent_end`,
+            Event types: `agent_start`, `token`, `reasoning`, `tool_call`, `agent_end`,
             `agent_error`, `done`. The `done` event is always the final event.
           content:
             text/event-stream:
@@ -458,6 +465,7 @@ paths:
                 oneOf:
                   - $ref: '#/components/schemas/SSEAgentStart'
                   - $ref: '#/components/schemas/SSEToken'
+                  - $ref: '#/components/schemas/SSEReasoning'
                   - $ref: '#/components/schemas/SSEToolCall'
                   - $ref: '#/components/schemas/SSEAgentEnd'
                   - $ref: '#/components/schemas/SSEAgentError'
