@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from
 import { useAuthStore } from '@/stores/auth-store';
 import { LoginPage } from '@/pages/login-page';
 import { MainPage } from '@/pages/main-page';
+import { getRouterBasename } from '@/lib/config';
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, expire, hydrated, finishHydration } = useAuthStore();
@@ -34,7 +35,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 
 export function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={getRouterBasename()}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route
