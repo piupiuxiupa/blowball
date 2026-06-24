@@ -90,6 +90,7 @@ HTTP routes live in `internal/handler/router.go`. Protected routes use `middlewa
 - `GET|POST /api/v1/workspace/*` — list/upload/download/read workspace files.
 - `GET /api/v1/mcp/tools` — list discovered MCP tools.
 - `GET /api/v1/skills` — list skills visible to the authenticated user.
+- `GET /healthz` — unauthenticated health check.
 
 A chat request flows: `SessionHandler.SendMessage` → `MessageService.RecoverMessages` (load history) + `AppendMessage` → `OrchestratorRunner.Handle` → SSE writer `stream.WriteSSE`. Title generation runs asynchronously after the first assistant response.
 
@@ -118,20 +119,22 @@ Built-in tool families:
 
 - `internal/tool/xizhi/` — workspace file tools (`xizhi_read_file`, `xizhi_write_file`, `xizhi_modify_file`, `xizhi_list_files`, `xizhi_tree`, `xizhi_glob_files`). Each closure is scoped to the requesting user's workspace root (`data/{userID}/workspace`). `validatePath` rejects absolute paths, `..`, and symlink escapes. `modify_file` requires a unique old-content match. Landlock provides defense-in-depth on Linux.
 - `internal/tool/webfetch/` — `webfetch` HTTP fetch tool.
-- `internal/tool/skill/` — skill discovery and the `read_skill` on-demand skill loader.
+- `internal/tool/luban/` — skill management tools: `luban_list_skills`, `luban_read_skill`, and `luban_install_skill`. `luban_install_skill` `git clone`s a GitHub repo (`--depth 1`) or downloads a single `SKILL.md` (≤500KB) into the requesting user's `data/{userID}/skills/` dir. These are registered only when an agent's config references one of them (`needsLubanTools` in `main.go`).
+- `internal/tool/skill/` — legacy `read_skill` loader plus the shared `skill.Loader` (used by luban). `read_skill` is registered only for backward compatibility when an agent explicitly lists it; new configs should use `luban_read_skill`.
 - `internal/tool/mcpclient/` — external MCP client. Supports `sse`, `stdio`, and Streamable `http` transports. Discovered tools are registered with an optional prefix to avoid collisions.
 
 Agent tool visibility is strictly configured:
 
 - `agents.<name>.tools` lists built-in tools the agent may use.
 - `agents.<name>.mcp.servers` grants access to specific MCP servers/tools (`["*"]` for all tools from that server).
-- `agents.<name>.skills` lists skill names injected into the system prompt and enables `read_skill`.
+- `agents.<name>.skills` lists skill names injected into the system prompt and enables `read_skill`/`luban_read_skill`.
+- `agents.<name>.thinking` enables OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 variants): `max_tokens` is sent as `max_completion_tokens` and `reasoning_effort` (`low`/`medium`/`high`) is included. `reasoning_effort` may only be set when `thinking: true` — config validation in `internal/config/config.go` rejects it otherwise.
 
 Skills are `{skill-name}/SKILL.md` files with YAML frontmatter (`name`, `description`). Global skills live in `./skills/`; per-user skills live in `data/{userID}/skills/`. User skills override global skills of the same name.
 
 ### SSE streaming
 
-`internal/stream/event.go` defines `StreamEvent` and event types: `agent_start`, `token`, `tool_call`, `tool_result`, `agent_end`, `agent_error`, `done`.
+`internal/stream/event.go` defines `StreamEvent` and event types: `agent_start`, `token`, `reasoning`, `tool_call`, `tool_result`, `agent_end`, `agent_error`, `done`. `reasoning` carries thinking-mode chunks (emitted when an agent runs with `thinking: true`). `message` is a sentinel type used only for persisted user-message rows; it is never emitted over SSE.
 
 - `stream.Hub` (`hub.go`) is a single-consumer buffered channel. Agents produce events via `Send`/`SendCtx`; `Send` is non-blocking and drops on full buffer.
 - `stream.WriteSSE` (`sse.go`) consumes the hub and writes `event:` + `data:` SSE frames to the HTTP response, flushing after each event.
@@ -149,6 +152,8 @@ Writes to Redis are best-effort; writes to FS are synchronous; writes to MySQL a
 
 `internal/store/mysql/message.go` implements cursor-based pagination with a composite cursor `(msg_time, msg_index, id)` clamped to `[1, 200]` items per page.
 
+Each message row carries an `event_type` column. Reasoning/thinking output is persisted as ordinary rows with `event_type='reasoning'` (no separate column), so it survives reloads and is replayed into multi-turn context. SQL migrations live in `migrations/`; `docker compose` mounts the whole directory into MySQL's `/docker-entrypoint-initdb.d`, so files run alphabetically on first init. `migrations/007_doris_schema.sql` is a standalone Apache Doris translation of migrations 001–006 (UNIQUE KEY model, no FKs, app-set `update_time`) meant to run against a Doris cluster — its DDL is **not** valid MySQL, so keep it out of the MySQL init path (it shares the mounted `migrations/` dir; move it elsewhere before bringing MySQL up from a clean volume).
+
 ### Frontend
 
 The frontend is a React 19 + Vite + TypeScript app in `frontend/`.
@@ -159,6 +164,7 @@ The frontend is a React 19 + Vite + TypeScript app in `frontend/`.
   - Zustand `ui-store` holds transient UI state (active session/file, streaming tokens, agent status).
   - TanStack Query caches server state (sessions, messages, workspace files).
 - API: `src/lib/api.ts` reads `VITE_API_BASE_URL` and injects the bearer token. `src/lib/sse.ts` parses SSE streams.
+- Env: `frontend/.env.example` documents `VITE_API_BASE_URL` (backend origin) and `VITE_BASE_PATH` (deploy sub-path; `vite.config.ts` feeds it to Vite's `base`, surfaced at runtime as `BASE_PATH` in `src/lib/config.ts` for the router and asset URLs).
 - Hooks in `src/hooks/` are the only place components should call the API.
 - Streaming: `useSendMessage` dispatches SSE events into `ui-store`; `message-list.tsx` groups raw events into logical assistant/user blocks.
 - Workspace files: `useWorkspace` lists files; `file-renderer.tsx` dispatches by extension to markdown/code/image/PDF/binary viewers.
