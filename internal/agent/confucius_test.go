@@ -16,32 +16,32 @@ import (
 	"go.uber.org/goleak"
 )
 
-func testConfuseConfig() config.AgentConfig {
+func testConfuciusConfig() config.AgentConfig {
 	return config.AgentConfig{
-		Name:         "Confuse",
+		Name:         "Confucius",
 		Model:        "gpt-test",
-		SystemPrompt: "you are confuse",
+		SystemPrompt: "you are confucius",
 		MaxTokens:    512,
 		Tools:        []string{},
 	}
 }
 
-// newTestConfuse builds a Confuse with a registry holding no real tools and
+// newTestConfucius builds a Confucius with a registry holding no real tools and
 // the provided sub-agent implementations. Tests supply fakes for the
 // sub-agents they want to exercise.
-func newTestConfuse(t *testing.T, client LLMClient, subAgents map[string]Agent) *Confuse {
+func newTestConfucius(t *testing.T, client LLMClient, subAgents map[string]Agent) *Confucius {
 	t.Helper()
 	reg := tool.NewRegistry()
-	c, err := NewConfuse(testConfuseConfig(), client, reg, subAgents)
+	c, err := NewConfucius(testConfuciusConfig(), client, reg, subAgents)
 	require.NoError(t, err)
 	return c
 }
 
-// runConfuseAndCollect runs c.Run against a fresh hub, drains the hub after
+// runConfuciusAndCollect runs c.Run against a fresh hub, drains the hub after
 // Run returns (so close + drain ordering is deterministic), and returns the
 // collected events plus the run outputs. The consumer mirrors stream.WriteSSE's
 // "drain-first" pattern so events buffered at Close time are not lost.
-func runConfuseAndCollect(t *testing.T, c *Confuse, messages []Message) ([]stream.StreamEvent, string, Usage, error) {
+func runConfuciusAndCollect(t *testing.T, c *Confucius, messages []Message) ([]stream.StreamEvent, string, Usage, error) {
 	t.Helper()
 	hub := stream.NewHub(0)
 
@@ -103,7 +103,7 @@ func runConfuseAndCollect(t *testing.T, c *Confuse, messages []Message) ([]strea
 	select {
 	case r = <-resCh:
 	case <-time.After(6 * time.Second):
-		t.Fatal("confuse.Run did not complete in time")
+		t.Fatal("confucius.Run did not complete in time")
 	}
 	hub.Close()
 	select {
@@ -117,7 +117,7 @@ func runConfuseAndCollect(t *testing.T, c *Confuse, messages []Message) ([]strea
 	return out, r.content, r.usage, r.err
 }
 
-func TestConfuse_HandlesDirectly(t *testing.T) {
+func TestConfucius_HandlesDirectly(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -127,12 +127,12 @@ func TestConfuse_HandlesDirectly(t *testing.T) {
 			usage:        Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
 		},
 	)
-	c := newTestConfuse(t, client, map[string]Agent{
+	c := newTestConfucius(t, client, map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
 	})
 
-	events, content, usage, err := runConfuseAndCollect(t, c, []Message{
+	events, content, usage, err := runConfuciusAndCollect(t, c, []Message{
 		{Role: "user", Content: "hi"},
 	})
 	require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestConfuse_HandlesDirectly(t *testing.T) {
 	}
 }
 
-func TestConfuse_CallsSubAgent_ThenSummarizes(t *testing.T) {
+func TestConfucius_CallsSubAgent_ThenSummarizes(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	chongzhi := &fakeAgent{
 		name:    "Chongzhi",
@@ -173,12 +173,12 @@ func TestConfuse_CallsSubAgent_ThenSummarizes(t *testing.T) {
 			usage:        Usage{PromptTokens: 20, CompletionTokens: 2, TotalTokens: 22},
 		},
 	)
-	c := newTestConfuse(t, client, map[string]Agent{
+	c := newTestConfucius(t, client, map[string]Agent{
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
 	})
 
-	events, content, _, err := runConfuseAndCollect(t, c, []Message{
+	events, content, _, err := runConfuciusAndCollect(t, c, []Message{
 		{Role: "user", Content: "do thing"},
 	})
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestConfuse_CallsSubAgent_ThenSummarizes(t *testing.T) {
 	assert.Contains(t, subMsgs[0].Content, "context-x")
 	assert.Equal(t, "user", subMsgs[0].Role)
 
-	// Event sequence: confuse start -> tool_call -> chongzhi start -> chongzhi tokens -> chongzhi end -> confuse tokens -> confuse end.
+	// Event sequence: confucius start -> tool_call -> chongzhi start -> chongzhi tokens -> chongzhi end -> confucius tokens -> confucius end.
 	assert.Contains(t, eventTypes(events), stream.EventAgentStart)
 	assert.Contains(t, eventTypes(events), stream.EventAgentEnd)
 	var sawChongzhiStart, sawChongzhiEnd, sawToolCall bool
@@ -227,7 +227,7 @@ func TestConfuse_CallsSubAgent_ThenSummarizes(t *testing.T) {
 	assert.Equal(t, "call_1", toolMsg.ToolCallID)
 }
 
-func TestConfuse_ParallelToolCalls(t *testing.T) {
+func TestConfucius_ParallelToolCalls(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	chongzhi := &fakeAgent{
 		name:    "Chongzhi",
@@ -254,12 +254,12 @@ func TestConfuse_ParallelToolCalls(t *testing.T) {
 			finishReason: "stop",
 		},
 	)
-	c := newTestConfuse(t, client, map[string]Agent{
+	c := newTestConfucius(t, client, map[string]Agent{
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    liang,
 	})
 
-	events, content, _, err := runConfuseAndCollect(t, c, []Message{
+	events, content, _, err := runConfuciusAndCollect(t, c, []Message{
 		{Role: "user", Content: "go"},
 	})
 	require.NoError(t, err)
@@ -293,7 +293,7 @@ func TestConfuse_ParallelToolCalls(t *testing.T) {
 	assert.True(t, toolIDs["c2"], "round 2 must include tool result for call c2")
 }
 
-func TestConfuse_SubAgentFailure_StreamsError(t *testing.T) {
+func TestConfucius_SubAgentFailure_StreamsError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	chongzhi := &fakeAgent{
 		name:   "Chongzhi",
@@ -313,12 +313,12 @@ func TestConfuse_SubAgentFailure_StreamsError(t *testing.T) {
 			finishReason: "stop",
 		},
 	)
-	c := newTestConfuse(t, client, map[string]Agent{
+	c := newTestConfucius(t, client, map[string]Agent{
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
 	})
 
-	events, content, _, err := runConfuseAndCollect(t, c, []Message{
+	events, content, _, err := runConfuciusAndCollect(t, c, []Message{
 		{Role: "user", Content: "go"},
 	})
 	require.NoError(t, err)
@@ -345,7 +345,7 @@ func TestConfuse_SubAgentFailure_StreamsError(t *testing.T) {
 	assert.Contains(t, toolContent, "boom", "tool result must carry the error message back to the LLM")
 }
 
-func TestConfuse_ContextCancellation_Stops(t *testing.T) {
+func TestConfucius_ContextCancellation_Stops(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	// StreamChat blocks until the token slice is exhausted; with an empty
 	// token slice and a finishReason it would return immediately. Instead we
@@ -355,7 +355,7 @@ func TestConfuse_ContextCancellation_Stops(t *testing.T) {
 	client := newFake()
 	client.responses = nil // we will not use the queue; slow client short-circuits
 
-	c := newTestConfuse(t, slow, map[string]Agent{
+	c := newTestConfucius(t, slow, map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
 	})
@@ -384,7 +384,7 @@ func TestConfuse_ContextCancellation_Stops(t *testing.T) {
 	}
 }
 
-func TestConfuse_ReasoningRequest(t *testing.T) {
+func TestConfucius_ReasoningRequest(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -394,11 +394,11 @@ func TestConfuse_ReasoningRequest(t *testing.T) {
 			usage:        Usage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
 		},
 	)
-	cfg := testConfuseConfig()
+	cfg := testConfuciusConfig()
 	cfg.Thinking = true
 	cfg.ReasoningEffort = "medium"
 	reg := tool.NewRegistry()
-	c, err := NewConfuse(cfg, client, reg, map[string]Agent{
+	c, err := NewConfucius(cfg, client, reg, map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
 	})

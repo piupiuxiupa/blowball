@@ -33,7 +33,7 @@ import (
 //   - service.MessageService (RecoverMessages, Redis hit on the assistant turn)
 //   - real fs.Store, real redis.Store (miniredis), in-memory MySQL fake
 //   - agent.NewOrchestrator + handler.NewOrchestratorAdapter
-//   - agent.Confuse direct-answer loop (no tool calls)
+//   - agent.Confucius direct-answer loop (no tool calls)
 //   - stream.Hub + stream.WriteSSE
 func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	llm := newScriptedLLMClient(
@@ -73,14 +73,14 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 		stream.EventDone,
 	})
 
-	// At least one token event came from Confuse.
-	var confuseTokenSeen bool
+	// At least one token event came from Confucius.
+	var confuciusTokenSeen bool
 	for _, p := range payloads {
-		if p["type"] == stream.EventToken && p["agent"] == stream.AgentConfuse {
-			confuseTokenSeen = true
+		if p["type"] == stream.EventToken && p["agent"] == stream.AgentConfucius {
+			confuciusTokenSeen = true
 		}
 	}
-	assert.True(t, confuseTokenSeen, "expected a Confuse token event")
+	assert.True(t, confuciusTokenSeen, "expected a Confucius token event")
 
 	// The done event must carry a non-nil usage map.
 	var donePayload map[string]any
@@ -147,9 +147,9 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 		Agent     string
 		Role      string
 	}{
-		{model.EventTypeAgentStart, stream.AgentConfuse, ""},
-		{model.EventTypeToken, stream.AgentConfuse, model.RoleAssistant},
-		{model.EventTypeAgentEnd, stream.AgentConfuse, ""},
+		{model.EventTypeAgentStart, stream.AgentConfucius, ""},
+		{model.EventTypeToken, stream.AgentConfucius, model.RoleAssistant},
+		{model.EventTypeAgentEnd, stream.AgentConfucius, ""},
 	}
 	for i, want := range wantEvents {
 		var m model.Message
@@ -286,7 +286,7 @@ func TestGetSessionMessages_Pagination_ReturnsFullEventStream(t *testing.T) {
 	env.mysqlFake.mu.Lock()
 	env.mysqlFake.messages[createResp.SessionID] = []model.Message{
 		{ID: 1, SessionID: createResp.SessionID, MsgTime: base, MsgIndex: 0, Role: model.RoleUser, EventType: model.EventTypeMessage, Agent: model.AgentUser, Content: "hello"},
-		{ID: 2, SessionID: createResp.SessionID, MsgTime: base.Add(time.Second), MsgIndex: 1, Role: model.RoleAssistant, EventType: model.EventTypeToken, Agent: stream.AgentConfuse, Content: "Hi"},
+		{ID: 2, SessionID: createResp.SessionID, MsgTime: base.Add(time.Second), MsgIndex: 1, Role: model.RoleAssistant, EventType: model.EventTypeToken, Agent: stream.AgentConfucius, Content: "Hi"},
 	}
 	env.mysqlFake.mu.Unlock()
 

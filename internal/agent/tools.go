@@ -7,13 +7,13 @@ import (
 	"github.com/lush/blowball/internal/tool"
 )
 
-// buildConfuseToolsJSON returns the OpenAI tools[] JSON for the Confuse agent.
+// buildConfuciusToolsJSON returns the OpenAI tools[] JSON for the Confucius agent.
 // It merges the regular tools listed in cfg.Tools (resolved via the registry)
-// with the synthetic invoke_chongzhi / invoke_liang entries that Confuse uses
+// with the synthetic invoke_chongzhi / invoke_liang entries that Confucius uses
 // to dispatch sub-agents. The invoke_* tools are NOT registered in the tool
-// registry — they are intercepted by the Confuse Run loop. Returns nil when
+// registry — they are intercepted by the Confucius Run loop. Returns nil when
 // the agent has no tools at all so callers can omit the field from the request.
-func buildConfuseToolsJSON(reg *tool.Registry, regularToolNames []string) ([]byte, error) {
+func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string) ([]byte, error) {
 	regularJSON, err := buildRegularToolsJSON(reg, regularToolNames)
 	if err != nil {
 		return nil, err

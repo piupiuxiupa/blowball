@@ -31,7 +31,7 @@ func TestSendAndReceive(t *testing.T) {
 	h := NewHub(8)
 	defer h.Close()
 
-	want := TokenEvent(AgentConfuse, "hello")
+	want := TokenEvent(AgentConfucius, "hello")
 	require.True(t, h.Send(want))
 
 	select {
@@ -47,7 +47,7 @@ func TestSend_AfterClose(t *testing.T) {
 	h := NewHub(8)
 	h.Close()
 
-	ok := h.Send(TokenEvent(AgentConfuse, "x"))
+	ok := h.Send(TokenEvent(AgentConfucius, "x"))
 	assert.False(t, ok, "Send after Close must return false")
 }
 
@@ -57,13 +57,13 @@ func TestSendCtx_RespectsContextCancel(t *testing.T) {
 	defer h.Close()
 
 	// Fill the buffer so the next send must block.
-	require.True(t, h.Send(TokenEvent(AgentConfuse, "fill")))
+	require.True(t, h.Send(TokenEvent(AgentConfucius, "fill")))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancelled
 
 	start := time.Now()
-	ok := h.SendCtx(ctx, TokenEvent(AgentConfuse, "drop"))
+	ok := h.SendCtx(ctx, TokenEvent(AgentConfucius, "drop"))
 	elapsed := time.Since(start)
 
 	assert.False(t, ok, "SendCtx with cancelled ctx must return false")
@@ -76,7 +76,7 @@ func TestSendCtx_RunsToCompletion(t *testing.T) {
 	defer h.Close()
 
 	ctx := context.Background()
-	require.True(t, h.SendCtx(ctx, TokenEvent(AgentConfuse, "ok")))
+	require.True(t, h.SendCtx(ctx, TokenEvent(AgentConfucius, "ok")))
 
 	select {
 	case got := <-h.Events():
@@ -90,7 +90,7 @@ func TestSendCtx_RunsToCompletion(t *testing.T) {
 func TestSendCtx_HubClosed(t *testing.T) {
 	h := NewHub(1)
 	// Fill buffer so SendCtx will block.
-	require.True(t, h.Send(TokenEvent(AgentConfuse, "fill")))
+	require.True(t, h.Send(TokenEvent(AgentConfucius, "fill")))
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -99,7 +99,7 @@ func TestSendCtx_HubClosed(t *testing.T) {
 
 	ctx := context.Background()
 	start := time.Now()
-	ok := h.SendCtx(ctx, TokenEvent(AgentConfuse, "drop"))
+	ok := h.SendCtx(ctx, TokenEvent(AgentConfucius, "drop"))
 	elapsed := time.Since(start)
 	assert.False(t, ok, "SendCtx must return false when hub closes")
 	assert.Less(t, elapsed, time.Second)
@@ -130,8 +130,8 @@ func TestHub_Close_IsIdempotent(t *testing.T) {
 // consumers must drain non-blockingly and observe Done() to know they're done.
 func TestHub_Close_DrainsAndPreservesBuffered(t *testing.T) {
 	h := NewHub(8)
-	require.True(t, h.Send(TokenEvent(AgentConfuse, "a")))
-	require.True(t, h.Send(TokenEvent(AgentConfuse, "b")))
+	require.True(t, h.Send(TokenEvent(AgentConfucius, "a")))
+	require.True(t, h.Send(TokenEvent(AgentConfucius, "b")))
 	h.Close()
 
 	// Done() is signaled immediately.
@@ -172,7 +172,7 @@ func TestHub_SendConcurrent(t *testing.T) {
 		go func() {
 			<-ready
 			for j := 0; j < perProducer; j++ {
-				if h.Send(TokenEvent(AgentConfuse, "x")) {
+				if h.Send(TokenEvent(AgentConfucius, "x")) {
 					atomic.AddInt64(&sent, 1)
 				}
 			}

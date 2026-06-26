@@ -348,14 +348,14 @@ type testEnv struct {
 
 // agentConfig builds the per-agent config used by the orchestrator. Chongzhi
 // is granted the Xizhi file tools so file_ops_test can drive a real
-// xizhi_write_file invocation; Confuse carries no plain tools (it dispatches
+// xizhi_write_file invocation; Confucius carries no plain tools (it dispatches
 // via the synthetic invoke_* entries the orchestrator injects automatically).
 func agentConfig() config.AgentsConfig {
 	return config.AgentsConfig{
-		Confuse: config.AgentConfig{
-			Name:         stream.AgentConfuse,
+		Confucius: config.AgentConfig{
+			Name:         stream.AgentConfucius,
 			Model:        "gpt-test",
-			SystemPrompt: "you are confuse",
+			SystemPrompt: "you are confucius",
 			MaxTokens:    512,
 			Tools:        []string{},
 		},
@@ -468,10 +468,10 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 }
 
 // newTestEnvWithRegistry is like newTestEnv but lets the caller supply a
-// pre-populated tool registry and a list of tool names exposed to Confuse.
+// pre-populated tool registry and a list of tool names exposed to Confucius.
 // Useful for integration tests that exercise real tool-call / tool-result
 // memory across multiple turns.
-func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Registry, confuseTools []string) *testEnv {
+func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Registry, confuciusTools []string) *testEnv {
 	t.Helper()
 
 	t.Cleanup(func() { goleak.VerifyNone(t) })
@@ -501,7 +501,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
-		Agents: agentConfigWithTools(confuseTools),
+		Agents: agentConfigWithTools(confuciusTools),
 	}
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
@@ -542,20 +542,20 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	}
 }
 
-// agentConfigWithTools returns the standard agent config with Confuse granted
+// agentConfigWithTools returns the standard agent config with Confucius granted
 // the named tools.
-func agentConfigWithTools(confuseTools []string) config.AgentsConfig {
+func agentConfigWithTools(confuciusTools []string) config.AgentsConfig {
 	cfg := agentConfig()
-	cfg.Confuse.Tools = confuseTools
+	cfg.Confucius.Tools = confuciusTools
 	return cfg
 }
 
-// agentConfigWithReasoning returns the standard agent config with Confuse
+// agentConfigWithReasoning returns the standard agent config with Confucius
 // configured for OpenAI reasoning mode.
 func agentConfigWithReasoning() config.AgentsConfig {
 	cfg := agentConfig()
-	cfg.Confuse.Thinking = true
-	cfg.Confuse.ReasoningEffort = "high"
+	cfg.Confucius.Thinking = true
+	cfg.Confucius.ReasoningEffort = "high"
 	return cfg
 }
 

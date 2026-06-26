@@ -14,7 +14,7 @@ const (
 // produced by the end user rather than an assistant agent.
 const (
 	AgentUser     = "user"
-	AgentConfuse  = "Confuse"
+	AgentConfucius  = "Confucius"
 	AgentChongzhi = "Chongzhi"
 	AgentLiang    = "Liang"
 )

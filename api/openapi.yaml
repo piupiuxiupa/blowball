@@ -103,7 +103,7 @@ components:
           format: date-time
         agent:
           type: string
-          enum: [user, Confuse, Chongzhi, Liang]
+          enum: [user, Confucius, Chongzhi, Liang]
         msg_index:
           type: integer
         role:

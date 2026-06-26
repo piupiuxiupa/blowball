@@ -610,10 +610,10 @@ export interface components {
             /** Format: date-time */
             msg_time: string;
             /** @enum {string} */
-            agent: "user" | "Confuse" | "Chongzhi" | "Liang";
+            agent: "user" | "Confucius" | "Chongzhi" | "Liang";
             msg_index: number;
             /** @enum {string} */
-            role: "user" | "assistant" | "tool";
+            role: "user" | "assistant" | "tool" | "";
             /** @enum {string} */
             event_type: "message" | "token" | "tool_call" | "agent_start" | "agent_end" | "agent_error" | "reasoning";
             content: string;

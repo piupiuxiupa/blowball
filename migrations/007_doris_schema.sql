@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS `messages` (
     `id`          BIGINT       NOT NULL AUTO_INCREMENT COMMENT 'Surrogate PK',
     `session_id`  CHAR(36)     NOT NULL COMMENT 'Logical FK sessions.session_id',
     `msg_time`    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT 'When the message/event was produced (millisecond precision)',
-    `agent`       VARCHAR(32)  NOT NULL COMMENT 'user | Confuse | Chongzhi | Liang; the producer of this row',
+    `agent`       VARCHAR(32)  NOT NULL COMMENT 'user | Confucius | Chongzhi | Liang; the producer of this row',
     `msg_index`   INT          NOT NULL COMMENT 'Per-turn sequence number (0 for user message, 1+ for assistant events)',
     `role`        VARCHAR(16)  NULL     COMMENT 'OpenAI role (user/assistant/tool); NULL for marker events',
     `event_type`  VARCHAR(16)  NOT NULL DEFAULT 'token' COMMENT 'message | token | tool_call | agent_start | agent_end | agent_error | reasoning',

@@ -13,7 +13,7 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
-// TestMessageFlow_ReasoningConfig_Propagated verifies that when Confuse is
+// TestMessageFlow_ReasoningConfig_Propagated verifies that when Confucius is
 // configured with thinking=true and reasoning_effort=high, the orchestrator
 // forwards those fields on the LLMRequest, streams reasoning events, persists
 // reasoning content, and echoes it back in multi-turn context.

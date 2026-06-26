@@ -28,10 +28,10 @@ func newTestOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		Agents: config.AgentsConfig{
-			Confuse: config.AgentConfig{
-				Name:         "Confuse",
+			Confucius: config.AgentConfig{
+				Name:         "Confucius",
 				Model:        "gpt-test",
-				SystemPrompt: "you are confuse",
+				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Tools:        []string{},
 			},
@@ -101,8 +101,8 @@ consumer:
 	}
 	hub.Close()
 
-	// Event sequence: agent_start (Confuse), token (Confuse), agent_end
-	// (Confuse), done.
+	// Event sequence: agent_start (Confucius), token (Confucius), agent_end
+	// (Confucius), done.
 	types := eventTypes(events)
 	assert.Equal(t, stream.EventAgentStart, types[0])
 	assert.Equal(t, stream.EventDone, types[len(types)-1])
@@ -121,11 +121,11 @@ consumer:
 	assert.Equal(t, 10, usage["prompt_tokens"])
 	assert.Equal(t, 1, usage["completion_tokens"])
 
-	// Round 1 must have included Confuse's system prompt + user message.
+	// Round 1 must have included Confucius's system prompt + user message.
 	req := client.lastRequest()
 	require.NotEmpty(t, req.Messages)
 	assert.Equal(t, "system", req.Messages[0].Role)
-	assert.Contains(t, req.Messages[0].Content, "confuse")
+	assert.Contains(t, req.Messages[0].Content, "confucius")
 	assert.Equal(t, "user", req.Messages[1].Role)
 	assert.Equal(t, "hi", req.Messages[1].Content)
 }
@@ -171,10 +171,10 @@ func TestOrchestrator_ExternalMCPTool(t *testing.T) {
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		Agents: config.AgentsConfig{
-			Confuse: config.AgentConfig{
-				Name:         "Confuse",
+			Confucius: config.AgentConfig{
+				Name:         "Confucius",
 				Model:        "gpt-test",
-				SystemPrompt: "you are confuse",
+				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Tools:        []string{"external_greet"},
 			},
@@ -232,10 +232,10 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		Agents: config.AgentsConfig{
-			Confuse: config.AgentConfig{
-				Name:         "Confuse",
+			Confucius: config.AgentConfig{
+				Name:         "Confucius",
 				Model:        "gpt-test",
-				SystemPrompt: "you are confuse",
+				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				MCP: config.AgentMCPConfig{
 					Servers: []config.AgentMCPServerConfig{{
@@ -310,10 +310,10 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		Agents: config.AgentsConfig{
-			Confuse: config.AgentConfig{
-				Name:         "Confuse",
+			Confucius: config.AgentConfig{
+				Name:         "Confucius",
 				Model:        "gpt-test",
-				SystemPrompt: "you are confuse",
+				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 			},
@@ -384,10 +384,10 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		Agents: config.AgentsConfig{
-			Confuse: config.AgentConfig{
-				Name:         "Confuse",
+			Confucius: config.AgentConfig{
+				Name:         "Confucius",
 				Model:        "gpt-test",
-				SystemPrompt: "you are confuse",
+				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 			},

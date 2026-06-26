@@ -24,7 +24,7 @@ make test
 go test ./internal/agent/...
 
 # Run a single test
-go test ./internal/agent/ -run TestConfuseDispatchesSubAgent
+go test ./internal/agent/ -run TestConfuciusDispatchesSubAgent
 
 # Run integration tests (uses fakes for MySQL/LLM, real orchestrator + handlers)
 go test ./test/integration/...
@@ -101,15 +101,15 @@ The agent layer is in `internal/agent/`.
 - `Agent` interface: `Run(ctx, messages, hub)` returns usage.
 - `LLMClient` interface: `StreamChat(ctx, req, onToken)`.
 - `OpenAIClient` (`openai_client.go`) implements `LLMClient` with `openai-go/v3`, structured debug logging, and a `toolCallStitcher` that reassembles fragmented tool-call deltas.
-- `Orchestrator` (`orchestrator.go`) is the per-request entry point. It builds a fresh agent graph via `AgentFactory.Build`, runs `Confuse`, and emits the final `done` event with aggregated token usage.
+- `Orchestrator` (`orchestrator.go`) is the per-request entry point. It builds a fresh agent graph via `AgentFactory.Build`, runs `Confucius`, and emits the final `done` event with aggregated token usage.
 
 Three agents are configured in `config.yaml`:
 
-- `Confuse` — central orchestrator. Runs a tool-calling loop and can dispatch `invoke_chongzhi` / `invoke_liang` sub-agent calls.
+- `Confucius` — central orchestrator. Runs a tool-calling loop and can dispatch `invoke_chongzhi` / `invoke_liang` sub-agent calls.
 - `Chongzhi` — coding agent with workspace file tools (`xizhi_*`).
 - `Liang` — analysis agent without file tools.
 
-`Confuse` dispatches tool calls in parallel. Sub-agents receive only the `task` and `context` passed by `Confuse`, stream through the same `stream.Hub`, and cannot recursively invoke other agents. Round limits are hard-coded in the agent implementations.
+`Confucius` dispatches tool calls in parallel. Sub-agents receive only the `task` and `context` passed by `Confucius`, stream through the same `stream.Hub`, and cannot recursively invoke other agents. Round limits are hard-coded in the agent implementations.
 
 ### Tools, MCP, and skills
 

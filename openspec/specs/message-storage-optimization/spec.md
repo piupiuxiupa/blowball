@@ -16,8 +16,8 @@ The system SHALL merge adjacent `EventToken` events that share the same `Agent` 
 - **THEN** the system persists four rows: `agent_start`, one merged `token`, `agent_end`
 
 #### Scenario: Tokens from different agents are not merged
-- **WHEN** the event sequence is `token` from Confuse, `agent_start` Liang, `token` from Liang, `agent_end` Liang, `token` from Confuse
-- **THEN** the system persists five rows: Confuse token block, Liang agent_start, Liang token block, Liang agent_end, Confuse token block
+- **WHEN** the event sequence is `token` from Confucius, `agent_start` Liang, `token` from Liang, `agent_end` Liang, `token` from Confucius
+- **THEN** the system persists five rows: Confucius token block, Liang agent_start, Liang token block, Liang agent_end, Confucius token block
 
 #### Scenario: Tool calls remain independent
 - **WHEN** an agent emits `token`, `tool_call`, `token`
@@ -27,7 +27,7 @@ The system SHALL merge adjacent `EventToken` events that share the same `Agent` 
 The system SHALL assign monotonic `MsgIndex` values to merged message rows such that the original event order is recoverable when messages are ordered by `(MsgTime, MsgIndex)`.
 
 #### Scenario: Sub-agent hand-off keeps order
-- **WHEN** the event sequence is Confuse token, Confuse tool_call invoking Liang, Liang agent_start, Liang token, Liang agent_end, Confuse token
+- **WHEN** the event sequence is Confucius token, Confucius tool_call invoking Liang, Liang agent_start, Liang token, Liang agent_end, Confucius token
 - **THEN** the persisted rows appear in the same order with indices 1, 2, 3, 4, 5, 6
 
 ### Requirement: Live SSE stream remains unmerged

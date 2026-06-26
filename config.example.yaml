@@ -27,11 +27,11 @@ jwt:
   expire: 7d
 
 agents:
-  confuse:
-    name: Confuse
+  confucius:
+    name: Confucius
     model: gpt-4o-mini
     system_prompt: |
-      You are Confuse, the central orchestrator agent.
+      You are Confucius, the central orchestrator agent.
       You decide which sub-agent to dispatch based on the user's request:
         - Chongzhi: for coding and file editing tasks
         - Liang: for analysis and explanation tasks

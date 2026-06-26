@@ -13,7 +13,7 @@ import (
 // MCPHandler owns the /api/v1/mcp/* routes. Today only Tools is exposed; the
 // route returns the combined tool catalogue (regular Xizhi tools registered in
 // the registry plus the synthetic invoke_chongzhi / invoke_liang entries the
-// Confuse loop dispatches).
+// Confucius loop dispatches).
 type MCPHandler struct {
 	reg *tool.Registry
 }
@@ -66,7 +66,7 @@ func (h *MCPHandler) Tools(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"tools": tools})
 }
 
-// invokeDescription returns the human-readable description Confuse uses for the
+// invokeDescription returns the human-readable description Confucius uses for the
 // named sub-agent invocation tool. It mirrors the strings in
 // internal/agent/tools.go so the MCP catalogue matches what the agent loop
 // actually presents to the model.

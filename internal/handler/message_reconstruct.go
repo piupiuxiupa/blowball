@@ -40,7 +40,7 @@ func MessagesToAgentMessages(prior []model.Message) ([]agent.Message, error) {
 			continue
 		}
 
-		// Ignore sub-agent events; only the top-level agent (Confuse) conversation
+		// Ignore sub-agent events; only the top-level agent (Confucius) conversation
 		// belongs in the main prompt history.
 		if msg.Agent == model.AgentChongzhi || msg.Agent == model.AgentLiang {
 			continue

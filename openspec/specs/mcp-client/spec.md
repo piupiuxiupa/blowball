@@ -159,5 +159,5 @@ HTTP transport SHALL 缓存服务端返回的 `Mcp-Session-Id`，并在后续请
 外部 MCP 代理工具 SHALL 注册在进程级 `baseRegistry` 中，并由 `Orchestrator.AgentFactory` 复制到每次请求的 `reqReg`，使 agent 可以调用。系统 SHALL 同时维护每个 server 到其工具名称列表的映射，以支持按 agent 的 MCP 配置过滤工具。
 
 #### Scenario: Agent sees external MCP tools
-- **WHEN** `agents.confuse.mcp.servers` 中声明了一个外部 MCP server 及其允许的工具
-- **THEN** Confuse 的工具列表和系统提示词中仅包含这些允许的工具
+- **WHEN** `agents.confucius.mcp.servers` 中声明了一个外部 MCP server 及其允许的工具
+- **THEN** Confucius 的工具列表和系统提示词中仅包含这些允许的工具

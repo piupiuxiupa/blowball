@@ -1,12 +1,12 @@
 // Package agent implements the multi-agent orchestration engine.
 //
-// The package exposes an Agent interface that all agents (Confuse, Chongzhi,
+// The package exposes an Agent interface that all agents (Confucius, Chongzhi,
 // Liang) satisfy. The LLMClient interface decouples agent logic from any
 // concrete LLM SDK so the agents are unit-testable with a fake client; the
 // real openai-go-backed implementation lives in openai_client.go.
 //
-// Topology is flat: only Confuse may dispatch to other agents. Sub-agents
-// (Chongzhi, Liang) see only the task description Confuse passes them, never
+// Topology is flat: only Confucius may dispatch to other agents. Sub-agents
+// (Chongzhi, Liang) see only the task description Confucius passes them, never
 // the user's full conversation history.
 package agent
 
@@ -20,8 +20,8 @@ import (
 // complete agent loop, streaming lifecycle and token events to hub and
 // returning the final assistant content and aggregated token usage.
 type Agent interface {
-	// Name returns the agent's display name (Confuse | Chongzhi | Liang),
-	// matching model.AgentConfuse/AgentChongzhi/AgentLiang and StreamEvent.Agent.
+	// Name returns the agent's display name (Confucius | Chongzhi | Liang),
+	// matching model.AgentConfucius/AgentChongzhi/AgentLiang and StreamEvent.Agent.
 	Name() string
 
 	// SystemPrompt returns the system prompt used to seed the agent's first
@@ -117,7 +117,7 @@ type LLMResponse struct {
 	Usage            Usage
 }
 
-// Sub-agent invocation tool names. Confuse intercepts these in its dispatch
+// Sub-agent invocation tool names. Confucius intercepts these in its dispatch
 // loop BEFORE consulting tool.Registry; they never reach the registry. The
 // JSON schema for each is exported via InvokeToolSchema for the MCP handler
 // (Phase 9) and unit tests.
@@ -126,7 +126,7 @@ const (
 	ToolInvokeLiang    = "invoke_liang"
 )
 
-// InvokeToolSchema returns the JSON Schema describing the parameters Confuse
+// InvokeToolSchema returns the JSON Schema describing the parameters Confucius
 // must emit when invoking the named sub-agent via function calling. The
 // schema is identical for both sub-agents: a required `task` and an optional
 // `context`. Returns nil if name is not a recognized sub-agent invocation.
@@ -139,7 +139,7 @@ func InvokeToolSchema(name string) []byte {
 }
 
 // IsInvokeTool reports whether name is a sub-agent invocation tool recognized
-// by the Confuse dispatch loop.
+// by the Confucius dispatch loop.
 func IsInvokeTool(name string) bool {
 	return name == ToolInvokeChongzhi || name == ToolInvokeLiang
 }

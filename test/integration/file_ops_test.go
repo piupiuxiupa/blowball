@@ -23,7 +23,7 @@ import (
 // round-trip:
 //  1. POST /api/v1/workspace/upload writes a small file to the user's
 //     workspace via the real multipart handler; the file must exist on disk.
-//  2. POST /api/v1/sessions/:id/messages triggers a Confuse turn that
+//  2. POST /api/v1/sessions/:id/messages triggers a Confucius turn that
 //     dispatches to Chongzhi, which calls xizhi_write_file to create a NEW
 //     file inside the workspace. The SSE stream must complete and the file
 //     must appear on disk under the user's workspace.
@@ -38,7 +38,7 @@ import (
 //   - xizhi.ValidatePath security primitive (exercised on every WS route)
 //   - real xizhi.WriteFile invoked through the tool registry by Chongzhi's
 //     tool-calling loop
-//   - agent.Confuse → invoke_chongzhi dispatch with isolated context
+//   - agent.Confucius → invoke_chongzhi dispatch with isolated context
 //   - agent.Chongzhi tool-calling loop with finish_reason="tool_calls" then
 //     finish_reason="stop"
 func TestFileOps_UploadThenAgentWritesThenListAndRead(t *testing.T) {
@@ -51,10 +51,10 @@ func TestFileOps_UploadThenAgentWritesThenListAndRead(t *testing.T) {
 	)
 
 	// Script:
-	//  1. Confuse round 1: invoke_chongzhi with a task asking to write the file.
+	//  1. Confucius round 1: invoke_chongzhi with a task asking to write the file.
 	//  2. Chongzhi round 1: emit xizhi_write_file tool_call.
 	//  3. Chongzhi round 2: confirm with a stop summary.
-	//  4. Confuse round 2: produce the final summary.
+	//  4. Confucius round 2: produce the final summary.
 	//  5. TitleService round (fires asynchronously).
 	llm := newScriptedLLMClient(
 		scriptedLLMResponse{

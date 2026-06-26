@@ -12,9 +12,9 @@ import (
 // Type/Agent/Content/Meta fields.
 func TestEventConstructors(t *testing.T) {
 	t.Run("TokenEvent", func(t *testing.T) {
-		e := TokenEvent(AgentConfuse, "hello")
+		e := TokenEvent(AgentConfucius, "hello")
 		assert.Equal(t, EventToken, e.Type)
-		assert.Equal(t, AgentConfuse, e.Agent)
+		assert.Equal(t, AgentConfucius, e.Agent)
 		assert.Equal(t, "hello", e.Content)
 		assert.Nil(t, e.Meta)
 	})
@@ -46,9 +46,9 @@ func TestEventConstructors(t *testing.T) {
 
 	t.Run("ToolCallEvent", func(t *testing.T) {
 		args := map[string]any{"path": "/a/b", "mode": "rw"}
-		e := ToolCallEvent(AgentConfuse, "tc-1", "read_file", args)
+		e := ToolCallEvent(AgentConfucius, "tc-1", "read_file", args)
 		assert.Equal(t, EventToolCall, e.Type)
-		assert.Equal(t, AgentConfuse, e.Agent)
+		assert.Equal(t, AgentConfucius, e.Agent)
 		assert.Equal(t, "read_file", e.Content)
 		require.NotNil(t, e.Meta)
 		assert.Equal(t, "tc-1", e.Meta[MetaToolCallID])
@@ -63,7 +63,7 @@ func TestEventConstructors(t *testing.T) {
 	})
 
 	t.Run("ToolCallEvent nil args", func(t *testing.T) {
-		e := ToolCallEvent(AgentConfuse, "tc-nil", "noop", nil)
+		e := ToolCallEvent(AgentConfucius, "tc-nil", "noop", nil)
 		require.NotNil(t, e.Meta)
 		assert.Equal(t, "tc-nil", e.Meta[MetaToolCallID])
 		_, present := e.Meta[MetaArgs]
@@ -74,7 +74,7 @@ func TestEventConstructors(t *testing.T) {
 		usage := map[string]any{
 			"total_tokens": 1234,
 			"agents": map[string]any{
-				AgentConfuse: map[string]any{"prompt": 100, "completion": 200},
+				AgentConfucius: map[string]any{"prompt": 100, "completion": 200},
 			},
 		}
 		e := DoneEvent(usage)
@@ -98,7 +98,7 @@ func TestEventConstructors(t *testing.T) {
 func TestStreamEvent_JSONShape(t *testing.T) {
 	e := StreamEvent{
 		Type:    EventToken,
-		Agent:   AgentConfuse,
+		Agent:   AgentConfucius,
 		Content: "hi",
 		Meta:    map[string]any{"k": "v"},
 	}
@@ -108,7 +108,7 @@ func TestStreamEvent_JSONShape(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(b, &got))
 	assert.Equal(t, EventToken, got["type"])
-	assert.Equal(t, AgentConfuse, got["agent"])
+	assert.Equal(t, AgentConfucius, got["agent"])
 	assert.Equal(t, "hi", got["content"])
 	assert.Equal(t, "v", got["meta"].(map[string]any)["k"])
 }
@@ -116,7 +116,7 @@ func TestStreamEvent_JSONShape(t *testing.T) {
 // TestStreamEvent_OmitEmptyMeta ensures events with nil Meta do not serialize a
 // "meta": null field — keeping payloads compact for the high-frequency token case.
 func TestStreamEvent_OmitEmptyMeta(t *testing.T) {
-	e := TokenEvent(AgentConfuse, "x")
+	e := TokenEvent(AgentConfucius, "x")
 	b, err := json.Marshal(e)
 	require.NoError(t, err)
 

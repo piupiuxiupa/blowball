@@ -120,11 +120,11 @@ func TestSaveMessagesBatch_AllLayersSucceed(t *testing.T) {
 	}
 	// Make the second and third rows assistant events so the batch exercises
 	// mixed event types.
-	msgs[1].Agent = model.AgentConfuse
+	msgs[1].Agent = model.AgentConfucius
 	msgs[1].Role = model.RoleAssistant
 	msgs[1].EventType = model.EventTypeToken
 	msgs[1].MsgIndex = 1
-	msgs[2].Agent = model.AgentConfuse
+	msgs[2].Agent = model.AgentConfucius
 	msgs[2].Role = model.RoleAssistant
 	msgs[2].EventType = model.EventTypeAgentEnd
 	msgs[2].MsgIndex = 2

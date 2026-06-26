@@ -8,7 +8,7 @@ A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API
 - **Session management** — create sessions, list them, and fetch paginated message history.
 - **Server-Sent Events (SSE)** streaming for agent responses with fine-grained event types:
   `agent_start`, `token`, `tool_call`, `agent_end`, `agent_error`, `done`.
-- **Multi-agent orchestration** — a central `Confuse` agent dispatches to specialist agents:
+- **Multi-agent orchestration** — a central `Confucius` agent dispatches to specialist agents:
   - `Chongzhi` — coding agent with workspace file tools.
   - `Liang` — analysis and explanation agent.
 - **Workspace file tools** (`xizhi_*`) scoped per user: read, write, modify, list, tree, glob, plus `webfetch`.
@@ -204,7 +204,7 @@ By default an agent sees no MCP tools. Use `agents.<name>.mcp.servers` to grant 
 
 ```yaml
 agents:
-  confuse:
+  confucius:
     mcp:
       servers:
         - name: remote_search
@@ -254,7 +254,7 @@ User skills override global skills of the same name.
 
 ```yaml
 agents:
-  confuse:
+  confucius:
     skills:
       - coding-style
       - review-checklist

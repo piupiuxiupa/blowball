@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS `messages` (
     `id`          BIGINT       NOT NULL AUTO_INCREMENT COMMENT 'Surrogate PK',
     `session_id`  CHAR(36)     NOT NULL COMMENT 'FK sessions.session_id',
     `msg_time`    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'When the message was produced',
-    `agent`       VARCHAR(32)  NOT NULL COMMENT 'user | Confuse | Chongzhi | Liang; the producer of this row',
+    `agent`       VARCHAR(32)  NOT NULL COMMENT 'user | Confucius | Chongzhi | Liang; the producer of this row',
     `msg_index`   INT          NOT NULL COMMENT 'Per-turn sequence number (0 for user message, 1+ for assistant events)',
     `role`        VARCHAR(16)  NOT NULL COMMENT 'OpenAI role: user | assistant | tool (kept NOT NULL here for compatibility; 005 makes it NULLable)',
     `content`     MEDIUMTEXT   NOT NULL COMMENT 'Message body (text or JSON for tool calls)',

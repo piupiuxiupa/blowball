@@ -145,7 +145,7 @@
 - **THEN** `OrchestratorRunner.Handle` SHALL 返回 `([]StreamEvent, error)`，切片中每个元素对应 orchestrator 流式输出的一个事件（token / tool_call / agent_start / agent_end / agent_error），顺序与事件实际产生顺序一致
 
 #### Scenario: Sub-agent events included
-- **WHEN** Confuse 通过 tool_call 调用 Chongzhi 或 Liang
+- **WHEN** Confucius 通过 tool_call 调用 Chongzhi 或 Liang
 - **THEN** 子 agent 产生的 token、agent_start、agent_end、agent_error 事件 SHALL 一并进入收集切片，并在 agent 列保留对应的子 agent 名（`Chongzhi` / `Liang`）
 
 #### Scenario: done event excluded from persistence

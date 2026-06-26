@@ -272,7 +272,7 @@ func main() {
 // skill tools in its tools list.
 func needsLubanTools(agents config.AgentsConfig) bool {
 	lubanTools := []string{luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill}
-	for _, cfg := range []config.AgentConfig{agents.Confuse, agents.Chongzhi, agents.Liang} {
+	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Chongzhi, agents.Liang} {
 		for _, name := range lubanTools {
 			if slices.Contains(cfg.Tools, name) {
 				return true
@@ -286,7 +286,7 @@ func needsLubanTools(agents config.AgentsConfig) bool {
 // tools. read_skill is kept as a backward-compatibility entry point; new
 // configurations should use luban_read_skill.
 func needsReadSkill(agents config.AgentsConfig) bool {
-	for _, cfg := range []config.AgentConfig{agents.Confuse, agents.Chongzhi, agents.Liang} {
+	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Chongzhi, agents.Liang} {
 		if slices.Contains(cfg.Tools, skill.ToolName) {
 			return true
 		}

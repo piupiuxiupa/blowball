@@ -327,9 +327,9 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	if stub == nil {
 		stub = &stubOrchestrator{
 			eventsToEmit: []stream.StreamEvent{
-				stream.AgentStartEvent(stream.AgentConfuse),
-				stream.TokenEvent(stream.AgentConfuse, "Hello"),
-				stream.AgentEndEvent(stream.AgentConfuse),
+				stream.AgentStartEvent(stream.AgentConfucius),
+				stream.TokenEvent(stream.AgentConfucius, "Hello"),
+				stream.AgentEndEvent(stream.AgentConfucius),
 			},
 		}
 	}
@@ -364,10 +364,10 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
-			stream.AgentStartEvent(stream.AgentConfuse),
-			stream.TokenEvent(stream.AgentConfuse, "Hello, "),
-			stream.TokenEvent(stream.AgentConfuse, "world!"),
-			stream.AgentEndEvent(stream.AgentConfuse),
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "Hello, "),
+			stream.TokenEvent(stream.AgentConfucius, "world!"),
+			stream.AgentEndEvent(stream.AgentConfucius),
 			stream.DoneEvent(map[string]any{"total_tokens": 10}),
 		},
 	}
@@ -497,7 +497,7 @@ func TestSendMessage_BadRequest_NoBody(t *testing.T) {
 // TestSendMessage_SessionNotFound_404 verifies that posting a message to a
 // non-existent session returns 404 and never invokes the orchestrator.
 func TestSendMessage_SessionNotFound_404(t *testing.T) {
-	stub := &stubOrchestrator{eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfuse, "should not run")}}
+	stub := &stubOrchestrator{eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "should not run")}}
 	env := newSessionHandlerEnv(t, stub)
 	env.mysql.getSessionByIDFound = nil // session does not exist
 
@@ -738,9 +738,9 @@ func TestSendMessage_NotFirstTurnDoesNotFireTitle(t *testing.T) {
 func TestSendMessage_ProducesDeterministicSSESequence(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
-			stream.AgentStartEvent(stream.AgentConfuse),
-			stream.TokenEvent(stream.AgentConfuse, "Hello"),
-			stream.AgentEndEvent(stream.AgentConfuse),
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "Hello"),
+			stream.AgentEndEvent(stream.AgentConfucius),
 			stream.DoneEvent(nil),
 		},
 	}
@@ -778,13 +778,13 @@ func TestSendMessage_ProducesDeterministicSSESequence(t *testing.T) {
 func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
-			stream.AgentStartEvent(stream.AgentConfuse),
-			stream.TokenEvent(stream.AgentConfuse, "Thinking"),
-			stream.ToolCallEvent(stream.AgentConfuse, "tc-1", "invoke_chongzhi", map[string]any{"task": "compute"}),
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "Thinking"),
+			stream.ToolCallEvent(stream.AgentConfucius, "tc-1", "invoke_chongzhi", map[string]any{"task": "compute"}),
 			stream.AgentStartEvent(stream.AgentChongzhi),
 			stream.TokenEvent(stream.AgentChongzhi, "42"),
 			stream.AgentEndEvent(stream.AgentChongzhi),
-			stream.AgentEndEvent(stream.AgentConfuse),
+			stream.AgentEndEvent(stream.AgentConfucius),
 			stream.DoneEvent(nil),
 		},
 	}
@@ -844,7 +844,7 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	}
 
 	// Agent column is preserved from the event.
-	assert.Equal(t, stream.AgentConfuse, env.mysql.appendMessagesArg[1].Agent)
+	assert.Equal(t, stream.AgentConfucius, env.mysql.appendMessagesArg[1].Agent)
 	assert.Equal(t, stream.AgentChongzhi, env.mysql.appendMessagesArg[5].Agent)
 
 	// Tool_call content is JSON with name and args.
@@ -861,8 +861,8 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 func TestSendMessage_OrchestratorFailure_PersistsNothing(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
-			stream.AgentStartEvent(stream.AgentConfuse),
-			stream.TokenEvent(stream.AgentConfuse, "oops"),
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "oops"),
 		},
 		returnErr: errors.New("orchestrator blew up"),
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 // maxChongzhiRounds bounds Chongzhi's tool-calling loop. Coding tasks tend to
-// need more rounds than Confuse (read → write → verify), so the cap is more
+// need more rounds than Confucius (read → write → verify), so the cap is more
 // generous than the orchestrator's.
 const maxChongzhiRounds = 32
 
@@ -148,7 +148,7 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 	return finalContent, total, nil
 }
 
-// dispatchToolCalls runs every tool_call in parallel. Unlike Confuse, there
+// dispatchToolCalls runs every tool_call in parallel. Unlike Confucius, there
 // is NO sub-agent interception — invoke_* tool names fall through to the
 // registry and error as "unknown tool", enforcing the flat topology.
 func (c *Chongzhi) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub) map[string]toolResult {

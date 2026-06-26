@@ -10,11 +10,11 @@
 `config.yaml` 的每个 agent 段 SHALL 支持 `skills` 字段，用于声明该 agent 可使用的 skill 名称列表。
 
 #### Scenario: Declare allowed skills
-- **WHEN** `agents.confuse.skills` 包含一个或多个 skill 名
+- **WHEN** `agents.confucius.skills` 包含一个或多个 skill 名
 - **THEN** 系统启动时解析并校验这些配置
 
 #### Scenario: Empty skills list
-- **WHEN** `agents.confuse.skills` 为空或未配置
+- **WHEN** `agents.confucius.skills` 为空或未配置
 - **THEN** 该 agent 的系统提示词中不出现 skill catalog
 
 ### Requirement: Skill source directories

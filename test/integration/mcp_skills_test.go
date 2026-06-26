@@ -57,13 +57,13 @@ func (s *scriptedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onTo
 	return r, nil
 }
 
-func (s *scriptedLLM) confuseRequest() agent.LLMRequest {
+func (s *scriptedLLM) confuciusRequest() agent.LLMRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := len(s.requests) - 1; i >= 0; i-- {
 		if len(s.requests[i].Messages) > 0 && s.requests[i].Messages[0].Role == "system" {
 			content := s.requests[i].Messages[0].Content
-			if contains(content, "you are confuse") {
+			if contains(content, "you are confucius") {
 				return s.requests[i]
 			}
 		}
@@ -103,10 +103,10 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: config.AgentsConfig{
-			Confuse: config.AgentConfig{
-				Name:         stream.AgentConfuse,
+			Confucius: config.AgentConfig{
+				Name:         stream.AgentConfucius,
 				Model:        "gpt-test",
-				SystemPrompt: "you are confuse",
+				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				MCP: config.AgentMCPConfig{
 					Servers: []config.AgentMCPServerConfig{{
@@ -145,11 +145,11 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 		return len(mysqlFake.messagesFor("sess-mcp")) >= 4
 	}, 2*time.Second, 10*time.Millisecond, "expected sess-mcp messages to be persisted")
 
-	require.NotNil(t, llm.confuseRequest().Tools)
+	require.NotNil(t, llm.confuciusRequest().Tools)
 	var tools []struct {
 		Function struct{ Name string `json:"name"` } `json:"function"`
 	}
-	require.NoError(t, json.Unmarshal(llm.confuseRequest().Tools, &tools))
+	require.NoError(t, json.Unmarshal(llm.confuciusRequest().Tools, &tools))
 	names := make(map[string]bool, len(tools))
 	for _, t2 := range tools {
 		names[t2.Function.Name] = true
@@ -157,7 +157,7 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 	assert.True(t, names["remote_search"])
 	assert.False(t, names["remote_fetch"])
 
-	prompt := llm.confuseRequest().Messages[0].Content
+	prompt := llm.confuciusRequest().Messages[0].Content
 	assert.Contains(t, prompt, "remote_search")
 	assert.NotContains(t, prompt, "remote_fetch")
 }
@@ -196,10 +196,10 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: config.AgentsConfig{
-			Confuse: config.AgentConfig{
-				Name:         stream.AgentConfuse,
+			Confucius: config.AgentConfig{
+				Name:         stream.AgentConfucius,
 				Model:        "gpt-test",
-				SystemPrompt: "you are confuse",
+				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 				Tools:        []string{"luban_list_skills", "luban_read_skill", "luban_install_skill"},
@@ -234,14 +234,14 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 		return len(mysqlFake.messagesFor("sess-skills")) >= 4
 	}, 2*time.Second, 10*time.Millisecond, "expected sess-skills messages to be persisted")
 
-	prompt := llm.confuseRequest().Messages[0].Content
+	prompt := llm.confuciusRequest().Messages[0].Content
 	assert.Contains(t, prompt, "coding-style")
 	assert.Contains(t, prompt, "Coding conventions")
 	assert.Contains(t, prompt, "luban_read_skill")
 	assert.NotContains(t, prompt, "call read_skill")
 
 	// Second LLM round carries the luban_read_skill result.
-	req2 := llm.confuseRequest()
+	req2 := llm.confuciusRequest()
 	require.GreaterOrEqual(t, len(req2.Messages), 3)
 	last := req2.Messages[len(req2.Messages)-1]
 	assert.Equal(t, "tool", last.Role)

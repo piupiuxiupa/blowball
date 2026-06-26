@@ -88,7 +88,7 @@ func TestWriteSSE_HeadersSet(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- WriteSSE(context.Background(), rec, h) }()
 
-	require.True(t, h.Send(TokenEvent(AgentConfuse, "hi")))
+	require.True(t, h.Send(TokenEvent(AgentConfucius, "hi")))
 	time.Sleep(30 * time.Millisecond)
 	h.Close()
 
@@ -115,7 +115,7 @@ func TestWriteSSE_EventFormat(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- WriteSSE(context.Background(), rec, h) }()
 
-	orig := TokenEvent(AgentConfuse, "hello world")
+	orig := TokenEvent(AgentConfucius, "hello world")
 	require.True(t, h.Send(orig))
 
 	// Drain + close so WriteSSE returns and we can inspect the buffer.
@@ -167,10 +167,10 @@ func TestWriteSSE_MultipleEvents(t *testing.T) {
 	go func() { done <- WriteSSE(context.Background(), rec, h) }()
 
 	events := []StreamEvent{
-		AgentStartEvent(AgentConfuse),
-		TokenEvent(AgentConfuse, "a"),
-		TokenEvent(AgentConfuse, "b"),
-		AgentEndEvent(AgentConfuse),
+		AgentStartEvent(AgentConfucius),
+		TokenEvent(AgentConfucius, "a"),
+		TokenEvent(AgentConfucius, "b"),
+		AgentEndEvent(AgentConfucius),
 		DoneEvent(nil),
 	}
 	for _, e := range events {
@@ -230,7 +230,7 @@ func TestHub_Close_StopsWriteSSE(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- WriteSSE(context.Background(), rec, h) }()
 
-	require.True(t, h.Send(TokenEvent(AgentConfuse, "last")))
+	require.True(t, h.Send(TokenEvent(AgentConfucius, "last")))
 	time.Sleep(20 * time.Millisecond)
 	h.Close()
 
@@ -275,7 +275,7 @@ func TestWriteSSE_DoneEventJSON(t *testing.T) {
 	usage := map[string]any{
 		"total_tokens": 42,
 		"agents": map[string]any{
-			AgentConfuse: map[string]any{"prompt_tokens": 10, "completion_tokens": 32},
+			AgentConfucius: map[string]any{"prompt_tokens": 10, "completion_tokens": 32},
 		},
 	}
 	require.True(t, h.Send(DoneEvent(usage)))

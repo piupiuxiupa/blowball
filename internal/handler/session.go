@@ -221,11 +221,11 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 
 	if isFirstTurn && h.titleSvc != nil {
 		// Title generation still needs a single assistant content string. We
-		// derive it from the token events emitted by Confuse so the title
+		// derive it from the token events emitted by Confucius so the title
 		// service contract remains unchanged.
 		var assistantContent strings.Builder
 		for _, e := range res.events {
-			if e.Type == stream.EventToken && e.Agent == stream.AgentConfuse {
+			if e.Type == stream.EventToken && e.Agent == stream.AgentConfucius {
 				assistantContent.WriteString(e.Content)
 			}
 		}

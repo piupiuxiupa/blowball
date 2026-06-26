@@ -23,8 +23,8 @@ func TestMessagesToAgentMessages_Empty(t *testing.T) {
 func TestMessagesToAgentMessages_PlainTextConversation(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hello"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "Hi"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " there"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "Hi"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " there"},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -40,9 +40,9 @@ func TestMessagesToAgentMessages_PlainTextConversation(t *testing.T) {
 func TestMessagesToAgentMessages_UserMessagesPreserved(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "first"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "one"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "one"},
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "second"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "two"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "two"},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -60,9 +60,9 @@ func TestMessagesToAgentMessages_UserMessagesPreserved(t *testing.T) {
 func TestMessagesToAgentMessages_MarkersIgnored(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hello"},
-		{Agent: stream.AgentConfuse, Role: "", EventType: model.EventTypeAgentStart},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "hi"},
-		{Agent: stream.AgentConfuse, Role: "", EventType: model.EventTypeAgentEnd},
+		{Agent: stream.AgentConfucius, Role: "", EventType: model.EventTypeAgentStart},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "hi"},
+		{Agent: stream.AgentConfucius, Role: "", EventType: model.EventTypeAgentEnd},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -78,11 +78,11 @@ func TestMessagesToAgentMessages_MarkersIgnored(t *testing.T) {
 func TestMessagesToAgentMessages_SubAgentEventsIgnored(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "do it"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "calling"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "calling"},
 		{Agent: stream.AgentChongzhi, Role: "", EventType: model.EventTypeAgentStart},
 		{Agent: stream.AgentChongzhi, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "42"},
 		{Agent: stream.AgentChongzhi, Role: "", EventType: model.EventTypeAgentEnd},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " done"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " done"},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -98,8 +98,8 @@ func TestMessagesToAgentMessages_SubAgentEventsIgnored(t *testing.T) {
 func TestMessagesToAgentMessages_SingleToolCallAndResult(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"results"}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"results"}`},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -119,10 +119,10 @@ func TestMessagesToAgentMessages_SingleToolCallAndResult(t *testing.T) {
 func TestMessagesToAgentMessages_ParallelToolCalls(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search both"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-a","name":"web_search","args":{"q":"a"}}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-b","name":"web_search","args":{"q":"b"}}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-a","output":"A results"}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-b","output":"B results"}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-a","name":"web_search","args":{"q":"a"}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-b","name":"web_search","args":{"q":"b"}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-a","output":"A results"}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-b","output":"B results"}`},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -143,7 +143,7 @@ func TestMessagesToAgentMessages_ParallelToolCalls(t *testing.T) {
 func TestMessagesToAgentMessages_MissingToolResultOmitsCall(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
 		// No matching tool_result.
 	}
 
@@ -159,7 +159,7 @@ func TestMessagesToAgentMessages_MissingToolResultOmitsCall(t *testing.T) {
 func TestMessagesToAgentMessages_OldToolCallWithoutIDIsIgnored(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"name":"web_search","args":{"q":"x"}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"name":"web_search","args":{"q":"x"}}`},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -174,8 +174,8 @@ func TestMessagesToAgentMessages_OldToolCallWithoutIDIsIgnored(t *testing.T) {
 func TestMessagesToAgentMessages_ToolOutputStructuredJSON(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":{"items":[{"title":"R"}]}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":{"items":[{"title":"R"}]}}`},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -195,7 +195,7 @@ func TestMessagesToAgentMessages_ToolOutputStructuredJSON(t *testing.T) {
 func TestMessagesToAgentMessages_ReasoningOnly(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "solve"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "Let me think..."},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "Let me think..."},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -211,9 +211,9 @@ func TestMessagesToAgentMessages_ReasoningOnly(t *testing.T) {
 func TestMessagesToAgentMessages_ReasoningAndContentMerged(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "solve"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "thinking "},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "more"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "Answer"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "thinking "},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "more"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "Answer"},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -229,9 +229,9 @@ func TestMessagesToAgentMessages_ReasoningAndContentMerged(t *testing.T) {
 func TestMessagesToAgentMessages_ReasoningFlushedBeforeToolCall(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "I need to search."},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"ok"}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "I need to search."},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{"q":"x"}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"ok"}`},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -252,12 +252,12 @@ func TestMessagesToAgentMessages_ReasoningFlushedBeforeToolCall(t *testing.T) {
 func TestMessagesToAgentMessages_SubAgentReasoningIgnored(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "do it"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "calling"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "calling"},
 		{Agent: stream.AgentChongzhi, Role: "", EventType: model.EventTypeAgentStart},
 		{Agent: stream.AgentChongzhi, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "sub thought"},
 		{Agent: stream.AgentChongzhi, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "42"},
 		{Agent: stream.AgentChongzhi, Role: "", EventType: model.EventTypeAgentEnd},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " done"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " done"},
 	}
 
 	got, err := MessagesToAgentMessages(prior)
@@ -273,10 +273,10 @@ func TestMessagesToAgentMessages_SubAgentReasoningIgnored(t *testing.T) {
 func TestMessagesToAgentMessages_MixedUserAssistantToolTurns(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "first"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "thinking"},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{}}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"ok"}`},
-		{Agent: stream.AgentConfuse, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "done"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "thinking"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"tc-1","name":"web_search","args":{}}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"ok"}`},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "done"},
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "second"},
 	}
 

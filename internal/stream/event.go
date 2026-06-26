@@ -23,11 +23,11 @@ const (
 	EventMessage = "message"
 )
 
-// Agent names. These mirror model.AgentConfuse/AgentChongzhi/AgentLiang but are
+// Agent names. These mirror model.AgentConfucius/AgentChongzhi/AgentLiang but are
 // declared locally to avoid an import cycle (model depends on packages that may
 // eventually depend on stream). Keep these in sync with internal/model/message.go.
 const (
-	AgentConfuse  = "Confuse"
+	AgentConfucius  = "Confucius"
 	AgentChongzhi = "Chongzhi"
 	AgentLiang    = "Liang"
 )

@@ -18,7 +18,7 @@ import (
 const maxLiangRounds = 16
 
 // Liang is the analysis agent. It runs a tool-calling loop for the tools listed
-// in its config (built-ins and MCP proxies), but unlike Confuse it never
+// in its config (built-ins and MCP proxies), but unlike Confucius it never
 // dispatches sub-agents.
 type Liang struct {
 	cfg           config.AgentConfig

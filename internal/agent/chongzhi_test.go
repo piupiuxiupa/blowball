@@ -81,7 +81,7 @@ func newChongzhiRegistryWithFake(t *testing.T, fake *fakeExecutor) *tool.Registr
 	return reg
 }
 
-// runChongzhiAndCollect mirrors runConfuseAndCollect for Chongzhi.
+// runChongzhiAndCollect mirrors runConfuciusAndCollect for Chongzhi.
 func runChongzhiAndCollect(t *testing.T, c *Chongzhi, messages []Message) ([]stream.StreamEvent, string, Usage, error) {
 	t.Helper()
 	hub := stream.NewHub(0)

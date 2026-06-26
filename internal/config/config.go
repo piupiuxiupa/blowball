@@ -101,7 +101,7 @@ type AgentConfig struct {
 
 // AgentsConfig holds the three blowball agents.
 type AgentsConfig struct {
-	Confuse  AgentConfig `yaml:"confuse"`
+	Confucius  AgentConfig `yaml:"confucius"`
 	Chongzhi AgentConfig `yaml:"chongzhi"`
 	Liang    AgentConfig `yaml:"liang"`
 }
@@ -111,11 +111,11 @@ type AgentsConfig struct {
 // existence are validated later once the remote tool list and skill directories
 // are known.
 func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
-	for _, name := range []string{"confuse", "chongzhi", "liang"} {
+	for _, name := range []string{"confucius", "chongzhi", "liang"} {
 		var cfg *AgentConfig
 		switch name {
-		case "confuse":
-			cfg = &a.Confuse
+		case "confucius":
+			cfg = &a.Confucius
 		case "chongzhi":
 			cfg = &a.Chongzhi
 		case "liang":
@@ -287,11 +287,11 @@ func (m MCPConfig) serverNames() map[string]struct{} {
 // that server. A wildcard ("*") entry is always valid. The function is intended
 // to be called after MCP client registration has populated serverTools.
 func (c *Config) ValidateAgentMCPTools(serverTools map[string]map[string]struct{}) error {
-	for _, agentName := range []string{"confuse", "chongzhi", "liang"} {
+	for _, agentName := range []string{"confucius", "chongzhi", "liang"} {
 		var cfg AgentConfig
 		switch agentName {
-		case "confuse":
-			cfg = c.Agents.Confuse
+		case "confucius":
+			cfg = c.Agents.Confucius
 		case "chongzhi":
 			cfg = c.Agents.Chongzhi
 		case "liang":
@@ -320,11 +320,11 @@ func (c *Config) ValidateAgentMCPTools(serverTools map[string]map[string]struct{
 // The hasSkill function should report whether a skill with the given name
 // exists. An empty userID checks only the global skill directory.
 func (c *Config) ValidateAgentSkills(userID string, hasSkill func(name, userID string) bool) error {
-	for _, agentName := range []string{"confuse", "chongzhi", "liang"} {
+	for _, agentName := range []string{"confucius", "chongzhi", "liang"} {
 		var cfg AgentConfig
 		switch agentName {
-		case "confuse":
-			cfg = c.Agents.Confuse
+		case "confucius":
+			cfg = c.Agents.Confucius
 		case "chongzhi":
 			cfg = c.Agents.Chongzhi
 		case "liang":

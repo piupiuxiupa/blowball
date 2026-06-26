@@ -19,8 +19,8 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
-// TestParallelAgent_ConfuseDispatchesBothSubAgents drives the full
-// Confuse round-1 parallel dispatch path: a single LLM response with both
+// TestParallelAgent_ConfuciusDispatchesBothSubAgents drives the full
+// Confucius round-1 parallel dispatch path: a single LLM response with both
 // invoke_chongzhi and invoke_liang tool_calls fires both sub-agents
 // concurrently. The test asserts the SSE stream carries lifecycle + token
 // events from BOTH sub-agents, the final done event aggregates usage, and the
@@ -33,12 +33,12 @@ import (
 // asserts both contributed, not the interleaving.
 //
 // Components on the critical path (in addition to those in message_flow_test):
-//   - agent.Confuse dispatchToolCalls (errgroup parallel path)
+//   - agent.Confucius dispatchToolCalls (errgroup parallel path)
 //   - agent.Chongzhi (isolated context + Xizhi tool registry bound to workspace)
 //   - agent.Liang (isolated context, no tools)
 //   - per-request agent factory rebuilds Chongzhi with the requesting user's
 //     workspace root so the Xizhi tools are properly scoped
-func TestParallelAgent_ConfuseDispatchesBothSubAgents(t *testing.T) {
+func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 	// Track which agent each call originated from so we can verify both fired
 	// even though we cannot predict their order against the shared mutex.
 	var (
@@ -87,7 +87,7 @@ func TestParallelAgent_ConfuseDispatchesBothSubAgents(t *testing.T) {
 	}
 
 	// Queue:
-	//  1. Confuse round 1: emit both invoke_* tool calls.
+	//  1. Confucius round 1: emit both invoke_* tool calls.
 	scripted.responses = append(scripted.responses, scriptedLLMResponse{
 		finishReason: "tool_calls",
 		toolCalls: []agent.ToolCall{
@@ -127,11 +127,11 @@ func TestParallelAgent_ConfuseDispatchesBothSubAgents(t *testing.T) {
 		usage:        agent.Usage{PromptTokens: 8, CompletionTokens: 1, TotalTokens: 9},
 	})
 
-	// 4. Confuse round 2: emit the final summary, finish_reason=stop. The
+	// 4. Confucius round 2: emit the final summary, finish_reason=stop. The
 	//    orchestrator's per-request agent loop consumes this immediately
 	//    after the two sub-agent rounds return. The persisted assistant
 	//    content is built from the STREAMED TOKENS (the orchestrator
-	//    adapter accumulates Confuse token deltas), so the streamed tokens
+	//    adapter accumulates Confucius token deltas), so the streamed tokens
 	//    and the persisted content match.
 	summaryTokens := []string{"I dispatched ", "both sub-agents."}
 	scripted.responses = append(scripted.responses, scriptedLLMResponse{
@@ -214,17 +214,17 @@ func TestParallelAgent_ConfuseDispatchesBothSubAgents(t *testing.T) {
 	mu.Unlock()
 
 	// With event-stream storage, every assistant event is persisted. The
-	// assistant summary is reconstructed from Confuse round-2 token events.
+	// assistant summary is reconstructed from Confucius round-2 token events.
 	require.Eventually(t, func() bool {
 		msgs := env.mysqlFake.messagesFor(defaultSessionID)
 		var summaryBuf string
 		for _, m := range msgs {
-			if m.Agent == stream.AgentConfuse && m.EventType == model.EventTypeToken {
+			if m.Agent == stream.AgentConfucius && m.EventType == model.EventTypeToken {
 				summaryBuf += m.Content
 			}
 		}
 		return summaryBuf == summary
-	}, 2*time.Second, 10*time.Millisecond, "Confuse round-2 token events must reconstruct the summary")
+	}, 2*time.Second, 10*time.Millisecond, "Confucius round-2 token events must reconstruct the summary")
 
 	// Sanity: many rows persisted (user + all assistant events).
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)

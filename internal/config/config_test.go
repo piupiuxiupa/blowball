@@ -43,10 +43,10 @@ jwt:
   secret: "super-secret"
   expire: 7d
 agents:
-  confuse:
-    name: Confuse
+  confucius:
+    name: Confucius
     model: gpt-4o-mini
-    system_prompt: "you are confuse"
+    system_prompt: "you are confucius"
     max_tokens: 2048
     tools: [chongzhi, liang]
   chongzhi:
@@ -82,8 +82,8 @@ logging:
 	if cfg.JWT.Secret != "super-secret" {
 		t.Errorf("JWT.Secret = %q, want %q", cfg.JWT.Secret, "super-secret")
 	}
-	if cfg.Agents.Confuse.Name != "Confuse" {
-		t.Errorf("Agents.Confuse.Name = %q", cfg.Agents.Confuse.Name)
+	if cfg.Agents.Confucius.Name != "Confucius" {
+		t.Errorf("Agents.Confucius.Name = %q", cfg.Agents.Confucius.Name)
 	}
 	if len(cfg.Agents.Chongzhi.Tools) != 2 {
 		t.Errorf("Agents.Chongzhi.Tools len = %d, want 2", len(cfg.Agents.Chongzhi.Tools))
@@ -114,7 +114,7 @@ jwt:
   secret: ${JWT_SECRET}
   expire: 1d
 agents:
-  confuse: {name: Confuse}
+  confucius: {name: Confucius}
   chongzhi: {name: Chongzhi}
   liang: {name: Liang}
 `)
@@ -406,8 +406,8 @@ mcp:
       transport: sse
       url: http://localhost:3001/sse
 agents:
-  confuse:
-    name: Confuse
+  confucius:
+    name: Confucius
     mcp:
       servers:
         - name: missing
@@ -428,8 +428,8 @@ mysql:
 jwt:
   secret: "ok"
 agents:
-  confuse:
-    name: Confuse
+  confucius:
+    name: Confucius
     mcp:
       servers:
         - name: ""
@@ -446,7 +446,7 @@ agents:
 func TestConfig_ValidateAgentMCPTools(t *testing.T) {
 	cfg := &Config{
 		Agents: AgentsConfig{
-			Confuse: AgentConfig{
+			Confucius: AgentConfig{
 				MCP: AgentMCPConfig{
 					Servers: []AgentMCPServerConfig{
 						{Name: "remote", Tools: []string{"web_search", "missing"}},
@@ -462,7 +462,7 @@ func TestConfig_ValidateAgentMCPTools(t *testing.T) {
 		t.Fatal("expected error for unknown tool")
 	}
 
-	cfg.Agents.Confuse.MCP.Servers[0].Tools = []string{"web_search", "*"}
+	cfg.Agents.Confucius.MCP.Servers[0].Tools = []string{"web_search", "*"}
 	if err := cfg.ValidateAgentMCPTools(serverTools); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -478,34 +478,34 @@ func TestLoad_ReasoningConfig(t *testing.T) {
 	}{
 		{
 			name:       "thinking true defaults to medium",
-			agentBlock: "confuse:\n    name: Confuse\n    thinking: true",
+			agentBlock: "confucius:\n    name: Confucius\n    thinking: true",
 			wantEffort: "medium",
 		},
 		{
 			name:       "thinking true with low effort",
-			agentBlock: "confuse:\n    name: Confuse\n    thinking: true\n    reasoning_effort: low",
+			agentBlock: "confucius:\n    name: Confucius\n    thinking: true\n    reasoning_effort: low",
 			wantEffort: "low",
 		},
 		{
 			name:       "thinking true with high effort",
-			agentBlock: "confuse:\n    name: Confuse\n    thinking: true\n    reasoning_effort: high",
+			agentBlock: "confucius:\n    name: Confucius\n    thinking: true\n    reasoning_effort: high",
 			wantEffort: "high",
 		},
 		{
 			name:        "thinking true with invalid effort fails",
-			agentBlock:  "confuse:\n    name: Confuse\n    thinking: true\n    reasoning_effort: ultra",
+			agentBlock:  "confucius:\n    name: Confucius\n    thinking: true\n    reasoning_effort: ultra",
 			wantErr:     true,
 			errContains: "reasoning_effort",
 		},
 		{
 			name:        "reasoning_effort set without thinking fails",
-			agentBlock:  "confuse:\n    name: Confuse\n    reasoning_effort: low",
+			agentBlock:  "confucius:\n    name: Confucius\n    reasoning_effort: low",
 			wantErr:     true,
 			errContains: "reasoning_effort",
 		},
 		{
 			name:       "thinking false ignores absent reasoning_effort",
-			agentBlock: "confuse:\n    name: Confuse\n    thinking: false",
+			agentBlock: "confucius:\n    name: Confucius\n    thinking: false",
 			wantEffort: "",
 		},
 	}
@@ -536,8 +536,8 @@ agents:
 			if err != nil {
 				t.Fatalf("Load returned error: %v", err)
 			}
-			if cfg.Agents.Confuse.ReasoningEffort != tc.wantEffort {
-				t.Errorf("Agents.Confuse.ReasoningEffort = %q, want %q", cfg.Agents.Confuse.ReasoningEffort, tc.wantEffort)
+			if cfg.Agents.Confucius.ReasoningEffort != tc.wantEffort {
+				t.Errorf("Agents.Confucius.ReasoningEffort = %q, want %q", cfg.Agents.Confucius.ReasoningEffort, tc.wantEffort)
 			}
 		})
 	}
@@ -546,7 +546,7 @@ agents:
 func TestConfig_ValidateAgentSkills(t *testing.T) {
 	cfg := &Config{
 		Agents: AgentsConfig{
-			Confuse: AgentConfig{Skills: []string{"coding-style"}},
+			Confucius: AgentConfig{Skills: []string{"coding-style"}},
 		},
 	}
 	hasSkill := func(name, userID string) bool {
@@ -559,7 +559,7 @@ func TestConfig_ValidateAgentSkills(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	cfg.Agents.Confuse.Skills = []string{"unknown"}
+	cfg.Agents.Confucius.Skills = []string{"unknown"}
 	if err := cfg.ValidateAgentSkills("", hasSkill); err == nil {
 		t.Fatal("expected error for unknown skill")
 	}

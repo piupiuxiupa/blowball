@@ -104,7 +104,7 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 		{
 			name: "Message",
 			target: Message{
-				ID: 42, SessionID: "s-1", Agent: AgentConfuse,
+				ID: 42, SessionID: "s-1", Agent: AgentConfucius,
 				MsgIndex: 3, Role: RoleUser, EventType: EventTypeMessage,
 				Content: "hi", TraceID: "t-1",
 				MsgTime:    time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
@@ -146,7 +146,7 @@ func TestConstants_RolesAndAgents(t *testing.T) {
 			t.Fatal("role constant must be non-empty")
 		}
 	}
-	agents := []string{AgentUser, AgentConfuse, AgentChongzhi, AgentLiang}
+	agents := []string{AgentUser, AgentConfucius, AgentChongzhi, AgentLiang}
 	for _, a := range agents {
 		if a == "" {
 			t.Fatal("agent constant must be non-empty")

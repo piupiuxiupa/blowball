@@ -32,9 +32,9 @@ func TestUserMessage_PrependToAssistantBatch_Ordering(t *testing.T) {
 	userMsg := UserMessage("sess-1", "trace-1", "hi", userTime)
 
 	events := []stream.StreamEvent{
-		stream.AgentStartEvent(stream.AgentConfuse),
-		stream.TokenEvent(stream.AgentConfuse, "Hello"),
-		stream.AgentEndEvent(stream.AgentConfuse),
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "Hello"),
+		stream.AgentEndEvent(stream.AgentConfucius),
 	}
 	merged := MergeEvents(events)
 	require.Len(t, merged, 3)
@@ -63,14 +63,14 @@ func TestUserMessage_PrependToAssistantBatch_Ordering(t *testing.T) {
 
 func TestMessageFromEvent_Reasoning(t *testing.T) {
 	msgTime := time.Unix(1_700_000_000, 0).UTC()
-	e := stream.ReasoningEvent(stream.AgentConfuse, "analyzing...")
+	e := stream.ReasoningEvent(stream.AgentConfucius, "analyzing...")
 	msg, err := MessageFromEvent(e, "sess-1", "trace-1", 1, msgTime)
 	require.NoError(t, err)
 
 	assert.Equal(t, model.EventTypeReasoning, msg.EventType)
 	assert.Equal(t, model.RoleAssistant, msg.Role)
 	assert.Equal(t, "analyzing...", msg.Content)
-	assert.Equal(t, stream.AgentConfuse, msg.Agent)
+	assert.Equal(t, stream.AgentConfucius, msg.Agent)
 }
 
 func TestMergeEvents_Reasoning(t *testing.T) {
@@ -82,33 +82,33 @@ func TestMergeEvents_Reasoning(t *testing.T) {
 		{
 			name: "pure reasoning sequence is merged",
 			in: []stream.StreamEvent{
-				stream.ReasoningEvent(stream.AgentConfuse, "Let "),
-				stream.ReasoningEvent(stream.AgentConfuse, "me "),
-				stream.ReasoningEvent(stream.AgentConfuse, "think"),
+				stream.ReasoningEvent(stream.AgentConfucius, "Let "),
+				stream.ReasoningEvent(stream.AgentConfucius, "me "),
+				stream.ReasoningEvent(stream.AgentConfucius, "think"),
 			},
 			expected: []stream.StreamEvent{
-				stream.ReasoningEvent(stream.AgentConfuse, "Let me think"),
+				stream.ReasoningEvent(stream.AgentConfucius, "Let me think"),
 			},
 		},
 		{
 			name: "reasoning and token are not merged",
 			in: []stream.StreamEvent{
-				stream.ReasoningEvent(stream.AgentConfuse, "thinking"),
-				stream.TokenEvent(stream.AgentConfuse, "answer"),
+				stream.ReasoningEvent(stream.AgentConfucius, "thinking"),
+				stream.TokenEvent(stream.AgentConfucius, "answer"),
 			},
 			expected: []stream.StreamEvent{
-				stream.ReasoningEvent(stream.AgentConfuse, "thinking"),
-				stream.TokenEvent(stream.AgentConfuse, "answer"),
+				stream.ReasoningEvent(stream.AgentConfucius, "thinking"),
+				stream.TokenEvent(stream.AgentConfucius, "answer"),
 			},
 		},
 		{
 			name: "different agents break reasoning merge",
 			in: []stream.StreamEvent{
-				stream.ReasoningEvent(stream.AgentConfuse, "A"),
+				stream.ReasoningEvent(stream.AgentConfucius, "A"),
 				stream.ReasoningEvent(stream.AgentLiang, "B"),
 			},
 			expected: []stream.StreamEvent{
-				stream.ReasoningEvent(stream.AgentConfuse, "A"),
+				stream.ReasoningEvent(stream.AgentConfucius, "A"),
 				stream.ReasoningEvent(stream.AgentLiang, "B"),
 			},
 		},
@@ -135,98 +135,98 @@ func TestMergeEvents(t *testing.T) {
 		},
 		{
 			name: "single event",
-			in:   []stream.StreamEvent{stream.TokenEvent(stream.AgentConfuse, "hi")},
+			in:   []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "hi")},
 			expected: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "hi"),
+				stream.TokenEvent(stream.AgentConfucius, "hi"),
 			},
 		},
 		{
 			name: "pure token sequence is merged",
 			in: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "H"),
-				stream.TokenEvent(stream.AgentConfuse, "e"),
-				stream.TokenEvent(stream.AgentConfuse, "l"),
-				stream.TokenEvent(stream.AgentConfuse, "l"),
-				stream.TokenEvent(stream.AgentConfuse, "o"),
+				stream.TokenEvent(stream.AgentConfucius, "H"),
+				stream.TokenEvent(stream.AgentConfucius, "e"),
+				stream.TokenEvent(stream.AgentConfucius, "l"),
+				stream.TokenEvent(stream.AgentConfucius, "l"),
+				stream.TokenEvent(stream.AgentConfucius, "o"),
 			},
 			expected: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "Hello"),
+				stream.TokenEvent(stream.AgentConfucius, "Hello"),
 			},
 		},
 		{
 			name: "lifecycle events break token merge",
 			in: []stream.StreamEvent{
-				stream.AgentStartEvent(stream.AgentConfuse),
-				stream.TokenEvent(stream.AgentConfuse, "He"),
-				stream.TokenEvent(stream.AgentConfuse, "llo"),
-				stream.AgentEndEvent(stream.AgentConfuse),
+				stream.AgentStartEvent(stream.AgentConfucius),
+				stream.TokenEvent(stream.AgentConfucius, "He"),
+				stream.TokenEvent(stream.AgentConfucius, "llo"),
+				stream.AgentEndEvent(stream.AgentConfucius),
 			},
 			expected: []stream.StreamEvent{
-				stream.AgentStartEvent(stream.AgentConfuse),
-				stream.TokenEvent(stream.AgentConfuse, "Hello"),
-				stream.AgentEndEvent(stream.AgentConfuse),
+				stream.AgentStartEvent(stream.AgentConfucius),
+				stream.TokenEvent(stream.AgentConfucius, "Hello"),
+				stream.AgentEndEvent(stream.AgentConfucius),
 			},
 		},
 		{
 			name: "different agents are not merged",
 			in: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "A"),
+				stream.TokenEvent(stream.AgentConfucius, "A"),
 				stream.AgentStartEvent(stream.AgentLiang),
 				stream.TokenEvent(stream.AgentLiang, "B"),
 				stream.AgentEndEvent(stream.AgentLiang),
-				stream.TokenEvent(stream.AgentConfuse, "C"),
+				stream.TokenEvent(stream.AgentConfucius, "C"),
 			},
 			expected: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "A"),
+				stream.TokenEvent(stream.AgentConfucius, "A"),
 				stream.AgentStartEvent(stream.AgentLiang),
 				stream.TokenEvent(stream.AgentLiang, "B"),
 				stream.AgentEndEvent(stream.AgentLiang),
-				stream.TokenEvent(stream.AgentConfuse, "C"),
+				stream.TokenEvent(stream.AgentConfucius, "C"),
 			},
 		},
 		{
 			name: "tool calls remain independent",
 			in: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "before"),
-				stream.ToolCallEvent(stream.AgentConfuse, "tc-1", "web_search", map[string]any{"q": "x"}),
-				stream.TokenEvent(stream.AgentConfuse, "after"),
+				stream.TokenEvent(stream.AgentConfucius, "before"),
+				stream.ToolCallEvent(stream.AgentConfucius, "tc-1", "web_search", map[string]any{"q": "x"}),
+				stream.TokenEvent(stream.AgentConfucius, "after"),
 			},
 			expected: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "before"),
-				stream.ToolCallEvent(stream.AgentConfuse, "tc-1", "web_search", map[string]any{"q": "x"}),
-				stream.TokenEvent(stream.AgentConfuse, "after"),
+				stream.TokenEvent(stream.AgentConfucius, "before"),
+				stream.ToolCallEvent(stream.AgentConfucius, "tc-1", "web_search", map[string]any{"q": "x"}),
+				stream.TokenEvent(stream.AgentConfucius, "after"),
 			},
 		},
 		{
 			name: "sub-agent hand-off preserves order",
 			in: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "call"),
-				stream.ToolCallEvent(stream.AgentConfuse, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
+				stream.TokenEvent(stream.AgentConfucius, "call"),
+				stream.ToolCallEvent(stream.AgentConfucius, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
 				stream.AgentStartEvent(stream.AgentChongzhi),
 				stream.TokenEvent(stream.AgentChongzhi, "42"),
 				stream.AgentEndEvent(stream.AgentChongzhi),
-				stream.TokenEvent(stream.AgentConfuse, "done"),
+				stream.TokenEvent(stream.AgentConfucius, "done"),
 			},
 			expected: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "call"),
-				stream.ToolCallEvent(stream.AgentConfuse, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
+				stream.TokenEvent(stream.AgentConfucius, "call"),
+				stream.ToolCallEvent(stream.AgentConfucius, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
 				stream.AgentStartEvent(stream.AgentChongzhi),
 				stream.TokenEvent(stream.AgentChongzhi, "42"),
 				stream.AgentEndEvent(stream.AgentChongzhi),
-				stream.TokenEvent(stream.AgentConfuse, "done"),
+				stream.TokenEvent(stream.AgentConfucius, "done"),
 			},
 		},
 		{
 			name: "agent error breaks merge",
 			in: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "abc"),
-				stream.AgentErrorEvent(stream.AgentConfuse, "boom", "err"),
-				stream.TokenEvent(stream.AgentConfuse, "def"),
+				stream.TokenEvent(stream.AgentConfucius, "abc"),
+				stream.AgentErrorEvent(stream.AgentConfucius, "boom", "err"),
+				stream.TokenEvent(stream.AgentConfucius, "def"),
 			},
 			expected: []stream.StreamEvent{
-				stream.TokenEvent(stream.AgentConfuse, "abc"),
-				stream.AgentErrorEvent(stream.AgentConfuse, "boom", "err"),
-				stream.TokenEvent(stream.AgentConfuse, "def"),
+				stream.TokenEvent(stream.AgentConfucius, "abc"),
+				stream.AgentErrorEvent(stream.AgentConfucius, "boom", "err"),
+				stream.TokenEvent(stream.AgentConfucius, "def"),
 			},
 		},
 	}

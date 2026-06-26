@@ -10,15 +10,15 @@
 `config.yaml` 的每个 agent 段 SHALL 支持 `mcp` 字段，用于声明该 agent 可访问的 MCP server 及工具。
 
 #### Scenario: Declare allowed MCP servers
-- **WHEN** `agents.confuse.mcp.servers` 包含一个或多个 server 配置
+- **WHEN** `agents.confucius.mcp.servers` 包含一个或多个 server 配置
 - **THEN** 系统启动时解析并校验这些配置
 
 #### Scenario: Declare allowed tools per server
-- **WHEN** `agents.confuse.mcp.servers[].tools` 包含具体工具名
+- **WHEN** `agents.confucius.mcp.servers[].tools` 包含具体工具名
 - **THEN** 系统仅允许该 agent 使用这些工具
 
 #### Scenario: Use wildcard for all tools
-- **WHEN** `agents.confuse.mcp.servers[].tools` 为 `["*"]`
+- **WHEN** `agents.confucius.mcp.servers[].tools` 为 `["*"]`
 - **THEN** 该 agent 可以使用对应 server 的全部工具
 
 ### Requirement: MCP server reference validation

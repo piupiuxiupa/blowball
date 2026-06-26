@@ -20,7 +20,7 @@ import (
 // AgentFactory builds a fresh set of agents for a single request. The Chongzhi
 // agent binds Xizhi tools against the requesting user's workspace_root, which
 // varies per request, so a new Chongzhi (and therefore a new tool registry
-// scoped to that workspace) is required per request. Confuse and Liang have
+// scoped to that workspace) is required per request. Confucius and Liang have
 // no per-request state but are rebuilt alongside Chongzhi for symmetry.
 //
 // Per-request construction is the documented choice. The alternative —
@@ -29,8 +29,8 @@ import (
 // cannot be rebound via context, and (b) it would couple the tool layer to
 // context plumbing it does not currently understand.
 type AgentFactory interface {
-	// Build returns a freshly-constructed Confuse agent for the request whose
-	// user owns workspaceRoot. The returned Confuse owns its own Chongzhi /
+	// Build returns a freshly-constructed Confucius agent for the request whose
+	// user owns workspaceRoot. The returned Confucius owns its own Chongzhi /
 	// Liang sub-agents, all wired to the same LLMClient.
 	Build(workspaceRoot, skillsDir, userID string) (Agent, error)
 }
@@ -67,19 +67,19 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    liang,
 	}
-	confuse, err := f.buildConfuse(workspaceRoot, skillsDir, userID, subAgents)
+	confucius, err := f.buildConfucius(workspaceRoot, skillsDir, userID, subAgents)
 	if err != nil {
-		return nil, fmt.Errorf("agent factory: build confuse: %w", err)
+		return nil, fmt.Errorf("agent factory: build confucius: %w", err)
 	}
-	return confuse, nil
+	return confucius, nil
 }
 
-func (f *orchestratorFactory) buildConfuse(workspaceRoot, skillsDir, userID string, subAgents map[string]Agent) (*Confuse, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confuse, workspaceRoot, skillsDir, userID)
+func (f *orchestratorFactory) buildConfucius(workspaceRoot, skillsDir, userID string, subAgents map[string]Agent) (*Confucius, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confucius, workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return nil, err
 	}
-	return NewConfuse(cfg, f.client, reg, subAgents)
+	return NewConfucius(cfg, f.client, reg, subAgents)
 }
 
 func (f *orchestratorFactory) buildChongzhi(workspaceRoot, skillsDir, userID string) (*Chongzhi, error) {
@@ -260,7 +260,7 @@ func (f *orchestratorFactory) classifyTools(cfg config.AgentConfig) ([]*tool.Too
 
 // Orchestrator is the top-level entry point that the HTTP handler calls per
 // chat request. It builds a per-request agent set via the AgentFactory (so
-// Chongzhi binds to the right user workspace), seeds the Confuse loop with
+// Chongzhi binds to the right user workspace), seeds the Confucius loop with
 // the user message, runs the loop, and emits a final done event with the
 // aggregated token-usage breakdown.
 type Orchestrator struct {
@@ -308,7 +308,7 @@ type WorkspaceRootForUser = func(userID string) string
 
 // Handle executes one full chat turn:
 //   - Build a per-request agent set via the factory (Chongzhi → user workspace),
-//   - Run the Confuse loop with the provided conversation history,
+//   - Run the Confucius loop with the provided conversation history,
 //   - Stream events to hub,
 //   - Emit a final done event with the aggregated usage breakdown.
 //
@@ -317,54 +317,54 @@ type WorkspaceRootForUser = func(userID string) string
 // factory can load user-specific skills and validate skill permissions.
 func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub) error {
 	ctx = skill.WithUserID(ctx, userID)
-	confuse, err := o.factory.Build(workspaceRoot, skillsDir, userID)
+	confucius, err := o.factory.Build(workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}
 
-	content, usage, err := confuse.Run(ctx, messages, hub)
+	content, usage, err := confucius.Run(ctx, messages, hub)
 	if err != nil {
 		// Even on error we emit done so the SSE client terminates. The
-		// Confuse loop already emitted agent_error + agent_end for the
+		// Confucius loop already emitted agent_error + agent_end for the
 		// failing turn.
 		emitDone(hub, ctx, doneUsage{
-			confuse: usage,
+			confucius: usage,
 			content: content,
 			err:     err,
 		})
-		return fmt.Errorf("orchestrator: confuse run: %w", err)
+		return fmt.Errorf("orchestrator: confucius run: %w", err)
 	}
 
-	emitDone(hub, ctx, doneUsage{confuse: usage, content: content})
+	emitDone(hub, ctx, doneUsage{confucius: usage, content: content})
 	return nil
 }
 
 // doneUsage is the payload assembled into the final done event's Meta.usage.
 type doneUsage struct {
-	confuse Usage
+	confucius Usage
 	content string
 	err     error
 }
 
 // emitDone builds the per-agent usage breakdown map and emits the terminal
 // done event. Per-agent sub-totals (Chongzhi / Liang) are folded into the
-// Confuse usage returned by Run via sub-agent Run aggregation, so the
-// top-level Confuse usage already represents the whole turn. We still emit
+// Confucius usage returned by Run via sub-agent Run aggregation, so the
+// top-level Confucius usage already represents the whole turn. We still emit
 // the standard per-agent shape so the frontend can render a breakdown table.
 func emitDone(hub *stream.Hub, ctx context.Context, u doneUsage) {
 	usage := map[string]any{
-		"prompt_tokens":     u.confuse.PromptTokens,
-		"completion_tokens": u.confuse.CompletionTokens,
-		"total_tokens":      u.confuse.TotalTokens,
+		"prompt_tokens":     u.confucius.PromptTokens,
+		"completion_tokens": u.confucius.CompletionTokens,
+		"total_tokens":      u.confucius.TotalTokens,
 	}
-	if u.confuse.ReasoningTokens > 0 {
-		usage["reasoning_tokens"] = u.confuse.ReasoningTokens
+	if u.confucius.ReasoningTokens > 0 {
+		usage["reasoning_tokens"] = u.confucius.ReasoningTokens
 	}
 	if u.err != nil {
 		usage["error"] = u.err.Error()
 		logger.L().Warn("orchestrator completed with error",
 			zap.Error(u.err),
-			zap.Int("total_tokens", u.confuse.TotalTokens))
+			zap.Int("total_tokens", u.confucius.TotalTokens))
 	}
 	if !hub.SendCtx(ctx, stream.DoneEvent(usage)) {
 		return

@@ -12,17 +12,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// maxConfuseRounds bounds the agent loop to prevent runaway tool-call chains
-// from looping forever. 16 is generous; a healthy Confuse finishes in 1-3
+// maxConfuciusRounds bounds the agent loop to prevent runaway tool-call chains
+// from looping forever. 16 is generous; a healthy Confucius finishes in 1-3
 // rounds.
-const maxConfuseRounds = 16
+const maxConfuciusRounds = 16
 
-// Confuse is the central orchestrator agent. It owns its own tool-calling
+// Confucius is the central orchestrator agent. It owns its own tool-calling
 // loop and is the only agent permitted to dispatch sub-agents (Chongzhi,
 // Liang). Sub-agent invocation is intercepted in the dispatch switch before
 // the tool registry is consulted; the synthetic invoke_chongzhi /
 // invoke_liang tools therefore never reach the registry.
-type Confuse struct {
+type Confucius struct {
 	cfg           config.AgentConfig
 	client        LLMClient
 	toolRegistry  *tool.Registry
@@ -31,22 +31,22 @@ type Confuse struct {
 	toolsIsNotNil bool
 }
 
-// NewConfuse builds a Confuse agent. subAgents maps invoke_chongzhi /
+// NewConfucius builds a Confucius agent. subAgents maps invoke_chongzhi /
 // invoke_liang to their respective Agent implementations; it must contain at
 // least those keys. The tools[] JSON is rendered once at construction time
 // from cfg.Tools plus the two synthetic invoke_* tools.
-func NewConfuse(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]Agent) (*Confuse, error) {
+func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]Agent) (*Confucius, error) {
 	if _, ok := subAgents[ToolInvokeChongzhi]; !ok {
-		return nil, fmt.Errorf("agent: confuse sub-agents missing %q", ToolInvokeChongzhi)
+		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeChongzhi)
 	}
 	if _, ok := subAgents[ToolInvokeLiang]; !ok {
-		return nil, fmt.Errorf("agent: confuse sub-agents missing %q", ToolInvokeLiang)
+		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeLiang)
 	}
-	toolsJSON, err := buildConfuseToolsJSON(reg, cfg.Tools)
+	toolsJSON, err := buildConfuciusToolsJSON(reg, cfg.Tools)
 	if err != nil {
-		return nil, fmt.Errorf("agent: build confuse tools: %w", err)
+		return nil, fmt.Errorf("agent: build confucius tools: %w", err)
 	}
-	return &Confuse{
+	return &Confucius{
 		cfg:           cfg,
 		client:        client,
 		toolRegistry:  reg,
@@ -57,21 +57,21 @@ func NewConfuse(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, su
 }
 
 // Name implements Agent.
-func (c *Confuse) Name() string { return c.cfg.Name }
+func (c *Confucius) Name() string { return c.cfg.Name }
 
 // SystemPrompt implements Agent.
-func (c *Confuse) SystemPrompt() string { return c.cfg.SystemPrompt }
+func (c *Confucius) SystemPrompt() string { return c.cfg.SystemPrompt }
 
-// Run executes the Confuse agent loop. It streams lifecycle events to hub
+// Run executes the Confucius agent loop. It streams lifecycle events to hub
 // and returns the final assistant content + aggregated usage. The loop
 // terminates when:
 //   - the model returns finish_reason="stop" (or no tool_calls and no content),
 //   - ctx is cancelled,
-//   - maxConfuseRounds is exceeded (defensive guard against infinite loops).
+//   - maxConfuciusRounds is exceeded (defensive guard against infinite loops).
 //
 // On sub-agent or tool failure, an agent_error event is streamed and the
 // error text is fed back to the model as the tool result so the LLM can react.
-func (c *Confuse) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, error) {
+func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, error) {
 	select {
 	case <-ctx.Done():
 		return "", Usage{}, ctx.Err()
@@ -86,7 +86,7 @@ func (c *Confuse) Run(ctx context.Context, messages []Message, hub *stream.Hub) 
 	var total Usage
 	var finalContent string
 
-	for i := 0; i < maxConfuseRounds; i++ {
+	for i := 0; i < maxConfuciusRounds; i++ {
 		select {
 		case <-ctx.Done():
 			return finalContent, total, ctx.Err()
@@ -126,7 +126,7 @@ func (c *Confuse) Run(ctx context.Context, messages []Message, hub *stream.Hub) 
 			}
 			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), err.Error(), "llm_error"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
-			return finalContent, total, fmt.Errorf("confuse: stream chat: %w", err)
+			return finalContent, total, fmt.Errorf("confucius: stream chat: %w", err)
 		}
 
 		total.Add(resp.Usage)
@@ -161,6 +161,12 @@ func (c *Confuse) Run(ctx context.Context, messages []Message, hub *stream.Hub) 
 			if !ok {
 				result = toolResult{content: "", isError: true}
 			}
+			// Fold sub-agent token usage into the turn total so the done
+			// event reports the full cost including dispatched sub-agents.
+			// Registry tools incur no LLM usage, so subUsage is nil for them.
+			if result.subUsage != nil {
+				total.Add(*result.subUsage)
+			}
 			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
 			round = append(round, Message{
 				Role:       "tool",
@@ -191,7 +197,7 @@ type toolResult struct {
 // Agent; everything else goes through toolRegistry.Call. Errors are streamed
 // as agent_error events and turned into error-string tool results so the LLM
 // can react. Returns a map keyed by tool_call.ID.
-func (c *Confuse) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub) map[string]toolResult {
+func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub) map[string]toolResult {
 	results := make(map[string]toolResult, len(calls))
 	var mu sync.Mutex
 
@@ -215,9 +221,9 @@ func (c *Confuse) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *
 
 // dispatchOne resolves a single tool_call. The agent name used for error
 // events is the sub-agent's own name when dispatching to a sub-agent, and
-// Confuse's own name for plain tool errors (since the tool itself has no
+// Confucius's own name for plain tool errors (since the tool itself has no
 // identity in the stream model).
-func (c *Confuse) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
 	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
@@ -233,11 +239,11 @@ func (c *Confuse) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hub)
 // invoke tool's {task, context} arguments. The sub-agent's events propagate
 // up through the shared hub (already wired — same hub, the sub-agent's Run
 // emits its own agent_start/token/agent_end). Its usage is folded back into
-// the result so Confuse can aggregate.
-func (c *Confuse) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+// the result so Confucius can aggregate.
+func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
 	sub, ok := c.subAgents[tc.Function.Name]
 	if !ok {
-		// Should not happen — NewConfuse validates presence — but defensive.
+		// Should not happen — NewConfucius validates presence — but defensive.
 		msg := fmt.Sprintf("unknown sub-agent tool %q", tc.Function.Name)
 		streamAgentError(hub, ctx, subAgentNameFor(tc.Function.Name), msg, "unknown_tool")
 		return toolResult{content: msg, isError: true}
@@ -269,7 +275,7 @@ func (c *Confuse) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stream
 	return toolResult{content: content, subUsage: &u}
 }
 
-func (c *Confuse) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+func (c *Confucius) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
 	if c.toolRegistry == nil {
 		msg := fmt.Sprintf("tool %q not available: no tool registry", tc.Function.Name)
 		streamAgentError(hub, ctx, c.Name(), msg, "unknown_tool")
