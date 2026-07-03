@@ -251,6 +251,59 @@ func (h *WorkspaceHandler) Content(c *gin.Context) {
 	})
 }
 
+// Delete handles DELETE /api/v1/workspace/files/*path. It removes a file or,
+// for a directory, recursively removes the directory and everything beneath it.
+// Path validation reuses xizhi.ValidatePath so traversal / symlink escape is
+// rejected with 403 exactly as the read endpoints enforce. Workspace files have
+// no database source table, so nothing is archived — the entry is removed from
+// the filesystem only.
+//
+// The workspace root itself is never deleted: a path that cleans to "." (e.g.
+// ".", "./", "foo/..") resolves to the root and would irreversibly wipe the
+// entire workspace, so it is rejected with 400. Individual files and
+// subdirectories remain fully deletable.
+func (h *WorkspaceHandler) Delete(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	rel := c.Param("path")
+
+	abs, err := xizhi.ValidatePath(wsRoot, strings.TrimPrefix(rel, "/"))
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "file not found"))
+			return
+		}
+		logWS(ctx, "workspace.delete.stat", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat file failed"))
+		return
+	}
+
+	// Refuse to delete the workspace root. SameFile compares device/inode so the
+	// check holds even when wsRoot sits behind a symlink (e.g. /var → /private/var
+	// on macOS) or is expressed as a relative path.
+	if rootInfo, rerr := os.Stat(wsRoot); rerr == nil && os.SameFile(info, rootInfo) {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "cannot delete the workspace root"))
+		return
+	}
+
+	if err := os.RemoveAll(abs); err != nil {
+		logWS(ctx, "workspace.delete.remove", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "delete failed"))
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 // maxUploadBytesMemory returns the in-memory threshold for multipart parsing.
 // We buffer at most 32 MiB in memory; anything larger spills to disk where the
 // MaxBytesReader still caps the total size. The 32 MiB default is generous for

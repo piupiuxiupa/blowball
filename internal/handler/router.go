@@ -32,6 +32,9 @@ type RouteDeps struct {
 	// SendMessage handles POST /api/v1/sessions/:session_id/messages (SSE). Required.
 	SendMessage gin.HandlerFunc
 
+	// SessionDelete handles DELETE /api/v1/sessions/:session_id. Required.
+	SessionDelete gin.HandlerFunc
+
 	// WorkspaceList handles GET /api/v1/workspace/files. Required.
 	WorkspaceList gin.HandlerFunc
 
@@ -43,6 +46,9 @@ type RouteDeps struct {
 
 	// WorkspaceContent handles GET /api/v1/workspace/files/*path/content. Required.
 	WorkspaceContent gin.HandlerFunc
+
+	// WorkspaceDelete handles DELETE /api/v1/workspace/files/*path. Required.
+	WorkspaceDelete gin.HandlerFunc
 
 	// MCPTools handles GET /api/v1/mcp/tools. Required.
 	MCPTools gin.HandlerFunc
@@ -64,10 +70,12 @@ const contentRouteSuffix = "/content"
 //	POST /api/v1/sessions                         (auth)
 //	GET  /api/v1/sessions/:session_id/messages    (auth)
 //	POST /api/v1/sessions/:session_id/messages    (auth, SSE)
+//	DELETE /api/v1/sessions/:session_id           (auth)
 //	GET  /api/v1/workspace/files                  (auth)
 //	POST /api/v1/workspace/upload                 (auth)
 //	GET  /api/v1/workspace/files/*path            (auth, download)
 //	GET  /api/v1/workspace/files/*path/content    (auth, text content)
+//	DELETE /api/v1/workspace/files/*path          (auth, delete file/dir)
 //	GET  /api/v1/mcp/tools                        (auth)
 //	GET  /api/v1/skills                           (auth)
 //
@@ -92,11 +100,15 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.POST("/sessions", deps.SessionCreate)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
 	authed.POST("/sessions/:session_id/messages", deps.SendMessage)
+	authed.DELETE("/sessions/:session_id", deps.SessionDelete)
 
 	authed.GET("/workspace/files", deps.WorkspaceList)
 	authed.POST("/workspace/upload", deps.WorkspaceUpload)
 	// Single catch-all for both download and content; dispatch on the suffix.
 	authed.GET("/workspace/files/*path", dispatchWorkspaceFile(deps))
+	// DELETE shares the same catch-all path under a different method; gin
+	// routes per method so this coexists with the GET catch-all above.
+	authed.DELETE("/workspace/files/*path", deps.WorkspaceDelete)
 
 	authed.GET("/mcp/tools", deps.MCPTools)
 	authed.GET("/skills", deps.SkillsList)

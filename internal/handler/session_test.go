@@ -82,6 +82,9 @@ type handlerFakeMySQL struct {
 	createSessionErr    error
 	getSessionByIDFound *model.Session
 	getSessionIDErr     error
+	deleteSessionCalls  int
+	deleteSessionArg    string
+	deleteSessionErr    error
 	listSessionsRows    []mysqlstore.SessionWithTitle
 	listSessionsErr     error
 	upsertTitleCalls    int
@@ -114,6 +117,13 @@ func (m *handlerFakeMySQL) GetSessionByID(_ context.Context, _ string) (*model.S
 	}
 	cp := *m.getSessionByIDFound
 	return &cp, nil
+}
+func (m *handlerFakeMySQL) DeleteSession(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteSessionCalls++
+	m.deleteSessionArg = sessionID
+	return m.deleteSessionErr
 }
 func (m *handlerFakeMySQL) ListSessionsWithTitle(_ context.Context, _ string) ([]mysqlstore.SessionWithTitle, error) {
 	m.mu.Lock()
@@ -353,6 +363,7 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	r.GET("/api/v1/sessions", h.ListSessions)
 	r.GET("/api/v1/sessions/:session_id/messages", h.GetSessionMessages)
 	r.POST("/api/v1/sessions/:session_id/messages", h.SendMessage)
+	r.DELETE("/api/v1/sessions/:session_id", h.DeleteSession)
 	return &sessionHandlerTestEnv{h: h, mysql: mysql, redis: redis, fs: fs, stub: stub, engine: r}
 }
 
@@ -883,4 +894,92 @@ func TestSendMessage_OrchestratorFailure_PersistsNothing(t *testing.T) {
 	defer env.mysql.mu.Unlock()
 	assert.Equal(t, 0, env.mysql.appendMessagesCalls, "expected zero persistence calls on orchestrator failure")
 	assert.Empty(t, env.mysql.appendMessagesArg, "expected no messages persisted on orchestrator failure")
+}
+
+// TestDeleteSession_Success_204 verifies the owner deleting their own session
+// returns 204 and drives the service purge exactly once.
+func TestDeleteSession_Success_204(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 1, env.mysql.deleteSessionCalls, "MySQL purge must run once")
+	assert.Equal(t, "sess-1", env.mysql.deleteSessionArg)
+}
+
+// TestDeleteSession_SessionMissing_404 verifies a non-existent session returns
+// 404 and never reaches the purge.
+func TestDeleteSession_SessionMissing_404(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionByIDFound = nil
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 0, env.mysql.deleteSessionCalls)
+}
+
+// TestDeleteSession_WrongOwner_404 verifies deleting another user's session is
+// reported as not-found (no existence leak) and is not purged.
+func TestDeleteSession_WrongOwner_404(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-1", UserID: "other-user"}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 0, env.mysql.deleteSessionCalls)
+}
+
+// TestDeleteSession_LookupError_500 verifies a store error during the ownership
+// lookup surfaces as 500 (not 404).
+func TestDeleteSession_LookupError_500(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionIDErr = errors.New("db down")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 0, env.mysql.deleteSessionCalls)
+}
+
+// TestDeleteSession_PurgeError_500 verifies a purge failure surfaces as 500.
+func TestDeleteSession_PurgeError_500(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.deleteSessionErr = errors.New("archive blew up")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 1, env.mysql.deleteSessionCalls, "purge must be attempted before failing")
 }

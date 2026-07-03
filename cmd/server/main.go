@@ -229,10 +229,12 @@ func main() {
 		SessionCreate:     sessionHandler.CreateSession,
 		SessionMessages:   sessionHandler.GetSessionMessages,
 		SendMessage:       sessionHandler.SendMessage,
+		SessionDelete:     sessionHandler.DeleteSession,
 		WorkspaceList:     workspaceHandler.List,
 		WorkspaceUpload:   workspaceHandler.Upload,
 		WorkspaceDownload: workspaceHandler.Download,
 		WorkspaceContent:  workspaceHandler.Content,
+		WorkspaceDelete:   workspaceHandler.Delete,
 		MCPTools:          mcpHandler.Tools,
 		SkillsList:        skillHandler.List,
 	}

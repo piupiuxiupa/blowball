@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,6 +59,7 @@ func newWSTestEnv(t *testing.T) *wsTestEnv {
 		}
 		h.Download(c)
 	})
+	r.DELETE("/api/v1/workspace/files/*path", h.Delete)
 	return &wsTestEnv{handler: h, engine: r, dataDir: dataDir, fsSvc: fsSvc}
 }
 
@@ -379,4 +381,155 @@ func TestUpload_Subdirectory(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(env.wsRoot(), "sub", "dir", "nested.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "nested content", string(data))
+}
+
+// TestDelete_File_204 deletes a single file and verifies it is gone.
+func TestDelete_File_204(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "note.txt")
+	require.NoError(t, os.WriteFile(target, []byte("bye"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/note.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(target)
+	require.ErrorIs(t, err, os.ErrNotExist, "file must be removed from disk")
+}
+
+// TestDelete_Directory_Recursive deletes a directory and verifies its contents
+// are removed with it.
+func TestDelete_Directory_Recursive(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	dir := filepath.Join(ws, "project")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("package main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# hi"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/project", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(dir)
+	require.ErrorIs(t, err, os.ErrNotExist, "directory and its contents must be removed")
+}
+
+// TestDelete_NestedPath_EncodedSlashes deletes a deeply nested file addressed
+// by a catch-all path with URL-encoded slashes — the exact wire form the React
+// frontend emits (encodeURIComponent("sub/deep/note.md") -> "sub%2Fdeep%2Fnote.md").
+// It asserts the encoded slashes round-trip through gin's catch-all to the
+// nested file, AND that a distinct same-named file at the workspace root is
+// left untouched (no wrong-file deletion).
+func TestDelete_NestedPath_EncodedSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	// A nested file plus a decoy at the root sharing the basename.
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub", "deep"), 0o755))
+	nested := filepath.Join(ws, "sub", "deep", "note.md")
+	require.NoError(t, os.WriteFile(nested, []byte("nested"), 0o644))
+	rootDecoy := filepath.Join(ws, "note.md")
+	require.NoError(t, os.WriteFile(rootDecoy, []byte("root"), 0o644))
+
+	// Frontend encoding: encodeURIComponent on the full relative path. Go's
+	// url.PathEscape escapes "/" the same way (to %2F), reproducing the wire form.
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/workspace/files/"+url.PathEscape("sub/deep/note.md"), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(nested)
+	require.ErrorIs(t, err, os.ErrNotExist, "nested file must be removed")
+	_, err = os.Stat(rootDecoy)
+	require.NoError(t, err, "root decoy must NOT be deleted (wrong-file regression)")
+}
+
+// TestDelete_NestedPath_LiteralSlashes is the same scenario but with literal
+// (unencoded) slashes in the catch-all, which the router must also accept.
+func TestDelete_NestedPath_LiteralSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "a", "b"), 0o755))
+	nested := filepath.Join(ws, "a", "b", "c.txt")
+	require.NoError(t, os.WriteFile(nested, []byte("c"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/a/b/c.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(nested)
+	require.ErrorIs(t, err, os.ErrNotExist, "nested file must be removed")
+}
+
+// TestDelete_PathOutsideWorkspace_403 verifies a traversal attempt is rejected.
+func TestDelete_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/../../etc/passwd", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
+// TestDelete_NotFound_404 verifies deleting a missing target returns 404.
+func TestDelete_NotFound_404(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/nope.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+}
+
+// TestDelete_WorkspaceRoot_400 verifies a path that resolves to the workspace
+// root (".", "./", "foo/..") is refused — never wiping the whole workspace —
+// and that the root survives.
+func TestDelete_WorkspaceRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "keep.txt"), []byte("survive"), 0o644))
+
+	for _, p := range []string{".", "./", "foo/.."} {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/"+p, nil)
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code, "path %q: body: %s", p, w.Body.String())
+		var resp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "BAD_REQUEST", resp.Error.Code, "path %q", p)
+	}
+
+	// The workspace root and its contents are intact.
+	_, err := os.Stat(ws)
+	require.NoError(t, err, "workspace root must not be deleted")
+	data, err := os.ReadFile(filepath.Join(ws, "keep.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "survive", string(data))
 }

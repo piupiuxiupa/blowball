@@ -389,6 +389,34 @@ paths:
               schema: {$ref: '#/components/schemas/CreateSessionResponse'}
         '500':
           $ref: '#/components/responses/Internal'
+  /api/v1/sessions/{session_id}:
+    delete:
+      tags: [Session]
+      summary: Delete a session owned by the authenticated user.
+      description: |
+        Archives the session and all of its titles/messages verbatim into the
+        `*_deleted` mirror tables, purges the live rows (archive + purge is a
+        single atomic transaction), and removes the warm-tier session file.
+        Redis cache entries (`session:{id}`, `msgs:{id}`) are intentionally not
+        cleared; every read path re-validates ownership against MySQL first, so
+        stale cache keys are unreachable until they expire on TTL. Deleting a
+        session that does not exist or belongs to another user returns 404; the
+        existence of another user's session is never disclosed.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+          description: ID of the session to delete.
+      responses:
+        '204':
+          description: Session deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
   /api/v1/sessions/{session_id}/messages:
     get:
       tags: [Session]
@@ -564,6 +592,34 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+    delete:
+      tags: [Workspace]
+      summary: Delete a workspace file or directory.
+      description: |
+        Removes a file or, when the path targets a directory, recursively
+        removes the directory and everything beneath it. The path is validated
+        with the same traversal / symlink-escape check as the read endpoints,
+        so anything resolving outside the workspace is rejected with 403.
+        Workspace files have no database source table, so nothing is archived —
+        the entry is removed from the filesystem only.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Workspace-relative file or directory path (catch-all, may include `/`).
+          example: reports/old
+      responses:
+        '204':
+          description: File or directory deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':

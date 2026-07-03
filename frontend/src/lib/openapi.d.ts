@@ -164,6 +164,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a session owned by the authenticated user.
+         * @description Archives the session and all of its titles/messages verbatim into the
+         *     `*_deleted` mirror tables, purges the live rows (archive + purge is a
+         *     single atomic transaction), and removes the warm-tier session file.
+         *     Redis cache entries (`session:{id}`, `msgs:{id}`) are intentionally not
+         *     cleared; every read path re-validates ownership against MySQL first, so
+         *     stale cache keys are unreachable until they expire on TTL. Deleting a
+         *     session that does not exist or belongs to another user returns 404; the
+         *     existence of another user's session is never disclosed.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description ID of the session to delete. */
+                    session_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Session deleted. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["Internal"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/messages": {
         parameters: {
             query?: never;
@@ -409,7 +459,43 @@ export interface paths {
         };
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete a workspace file or directory.
+         * @description Removes a file or, when the path targets a directory, recursively
+         *     removes the directory and everything beneath it. The path is validated
+         *     with the same traversal / symlink-escape check as the read endpoints,
+         *     so anything resolving outside the workspace is rejected with 403.
+         *     Workspace files have no database source table, so nothing is archived —
+         *     the entry is removed from the filesystem only.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description Workspace-relative file or directory path (catch-all, may include `/`).
+                     * @example reports/old
+                     */
+                    path: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description File or directory deleted. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["Internal"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;

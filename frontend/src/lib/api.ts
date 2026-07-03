@@ -96,6 +96,22 @@ export async function apiPost<T>(
   return handleResponse<T>(response);
 }
 
+export async function apiDelete<T = void>(
+  path: string,
+  options: { token?: string | null } = {}
+): Promise<T> {
+  const token = options.token ?? getToken();
+  const response = await fetch(getApiBase() + path, {
+    method: 'DELETE',
+    headers: {
+      Accept: 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+
+  return handleResponse<T>(response);
+}
+
 export async function apiPostStream(
   path: string,
   options: { body?: unknown; token?: string | null } = {}

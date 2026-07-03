@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -86,6 +87,59 @@ func (s *SessionService) CreateSession(ctx context.Context, userID string) (stri
 // the store package.
 func (s *SessionService) GetSessionByID(ctx context.Context, sessionID string) (*model.Session, error) {
 	return s.mysql.GetSessionByID(ctx, sessionID)
+}
+
+// ErrSessionNotFound is returned by DeleteSession when the session does not
+// exist or does not belong to the caller. Both cases map to the same sentinel
+// (and the same HTTP 404) so existence of another user's session is never
+// leaked. Handlers MUST distinguish this with errors.Is rather than
+// string-matching.
+var ErrSessionNotFound = errors.New("session not found")
+
+// DeleteSession archives a session (and its titles/messages) into the *_deleted
+// mirror tables, purges the live rows, then removes the warm-tier FS session
+// JSON. Ownership is validated first via GetSessionByID; a missing or
+// non-owned session returns ErrSessionNotFound without touching any tier.
+//
+// The MySQL archive+purge is atomic (single transaction). The FS cleanup is
+// best-effort: a failure there is logged but does NOT undo the successful MySQL
+// delete — the session is already gone from the source of truth, and a stale
+// warm-tier file simply falls through to MySQL (which 404s) on the next read.
+// Redis is intentionally not touched: every read path re-validates ownership
+// against MySQL first, so stale session:{id} / msgs:{id} keys are unreachable
+// until they expire on TTL.
+func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID string) error {
+	tid := trace.FromContext(ctx)
+	log := logger.L().With(
+		zap.String("op", "session.delete"),
+		zap.String("user_id", userID),
+		zap.String("session_id", sessionID),
+	)
+	if tid != "" {
+		log = log.With(zap.String("trace_id", tid))
+	}
+
+	sess, err := s.mysql.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		log.Error("session lookup failed", zap.Error(err))
+		return fmt.Errorf("session.delete: lookup: %w", err)
+	}
+	if sess == nil || sess.UserID != userID {
+		return ErrSessionNotFound
+	}
+
+	if err := s.mysql.DeleteSession(ctx, sessionID); err != nil {
+		log.Error("archive and purge failed", zap.Error(err))
+		return fmt.Errorf("session.delete: purge: %w", err)
+	}
+
+	// Best-effort FS cleanup: never block or fail the request on a warm-tier
+	// miss. fs.DeleteSession is itself idempotent (missing file = success).
+	if err := s.fs.DeleteSession(ctx, userID, sessionID); err != nil {
+		log.Warn("fs session cleanup failed; proceeding", zap.Error(err))
+	}
+	log.Info("session deleted")
+	return nil
 }
 
 // GetSessionMessages returns a paginated slice of messages for sessionID from

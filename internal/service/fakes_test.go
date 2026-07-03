@@ -26,6 +26,10 @@ type fakeMySQLStore struct {
 	getSessionByIDFound *model.Session
 	getSessionIDErr     error
 
+	deleteSessionCalls int
+	deleteSessionArg   string
+	deleteSessionErr   error
+
 	listSessionsWithTitleRows []mysqlstore.SessionWithTitle
 	listSessionsWithTitleErr  error
 
@@ -71,6 +75,14 @@ func (f *fakeMySQLStore) GetSessionByID(_ context.Context, sessionID string) (*m
 	}
 	cp := *f.getSessionByIDFound
 	return &cp, nil
+}
+
+func (f *fakeMySQLStore) DeleteSession(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteSessionCalls++
+	f.deleteSessionArg = sessionID
+	return f.deleteSessionErr
 }
 
 func (f *fakeMySQLStore) ListSessionsWithTitle(_ context.Context, userID string) ([]mysqlstore.SessionWithTitle, error) {

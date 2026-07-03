@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { apiGet, apiPost } from '@/lib/api';
+import { apiDelete, apiGet, apiPost, ApiRequestError } from '@/lib/api';
 import type { SessionListResponse, CreateSessionResponse } from '@/lib/api';
 import { useUIStore } from '@/stores/ui-store';
 
@@ -27,4 +27,40 @@ export function useSessions() {
     createSession: createMutation.mutateAsync,
     isCreating: createMutation.isPending,
   };
+}
+
+// Delete is a dedicated hook so each SessionItem owns its own mutation instance
+// (per-item pending state) without re-subscribing the whole list.
+//
+// A 404 is treated as "already gone": the backend returns NOT_FOUND when the
+// session is missing or belongs to another user (its existence is never
+// disclosed), which also covers the case where it was deleted from another tab
+// since this list was fetched. In that case we still purge local state so the
+// row does not linger in the sidebar, pinned as active, with stale streaming
+// buffers — only genuine failures (500/network) leave the entry in place.
+export function useDeleteSession() {
+  const queryClient = useQueryClient();
+
+  const purgeSession = (sessionId: string) => {
+    queryClient.removeQueries({ queryKey: ['messages', sessionId] });
+    queryClient.invalidateQueries({ queryKey: ['sessions'] });
+
+    const ui = useUIStore.getState();
+    if (ui.activeSessionId === sessionId) {
+      ui.setActiveSession(null);
+      ui.clearStreaming(sessionId);
+      ui.clearStreamingReasoning(sessionId);
+    }
+  };
+
+  return useMutation({
+    mutationFn: (sessionId: string) =>
+      apiDelete<void>(`/api/v1/sessions/${encodeURIComponent(sessionId)}`),
+    onSuccess: (_data, sessionId) => purgeSession(sessionId),
+    onError: (err, sessionId) => {
+      if (err instanceof ApiRequestError && err.code === 'NOT_FOUND') {
+        purgeSession(sessionId);
+      }
+    },
+  });
 }

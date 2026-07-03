@@ -19,6 +19,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
@@ -152,13 +153,24 @@ type memoryMySQL struct {
 	titles   map[string]model.Title
 	messages map[string][]model.Message
 	nextID   int64
+
+	// Archive mirrors, populated by DeleteSession so integration tests can
+	// assert the source rows landed in the *_deleted tier alongside the purge.
+	deletedSessions map[string]model.Session
+	deletedTitles   map[string]model.Title
+	deletedMessages map[string][]model.Message
+	deletionIDs     map[string]string // sessionID -> deletion_id of its delete
 }
 
 func newMemoryMySQL() *memoryMySQL {
 	return &memoryMySQL{
-		sessions: map[string]*model.Session{},
-		titles:   map[string]model.Title{},
-		messages: map[string][]model.Message{},
+		sessions:        map[string]*model.Session{},
+		titles:          map[string]model.Title{},
+		messages:        map[string][]model.Message{},
+		deletedSessions: map[string]model.Session{},
+		deletedTitles:   map[string]model.Title{},
+		deletedMessages: map[string][]model.Message{},
+		deletionIDs:     map[string]string{},
 	}
 }
 
@@ -181,6 +193,33 @@ func (m *memoryMySQL) GetSessionByID(_ context.Context, sessionID string) (*mode
 		return &cp, nil
 	}
 	return nil, nil
+}
+
+func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Idempotent: a missing session archives nothing and purges nothing,
+	// mirroring the real store's behaviour.
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	m.deletionIDs[sessionID] = uuid.NewString()
+	// Snapshot verbatim into the archive mirrors.
+	m.deletedSessions[sessionID] = *sess
+	if t, ok := m.titles[sessionID]; ok {
+		m.deletedTitles[sessionID] = t
+	}
+	if msgs, ok := m.messages[sessionID]; ok {
+		cp := make([]model.Message, len(msgs))
+		copy(cp, msgs)
+		m.deletedMessages[sessionID] = cp
+	}
+	// Purge the live rows (mirrors the source tables' ON DELETE CASCADE).
+	delete(m.sessions, sessionID)
+	delete(m.titles, sessionID)
+	delete(m.messages, sessionID)
+	return nil
 }
 
 func (m *memoryMySQL) ListSessionsWithTitle(_ context.Context, userID string) ([]mysqlstore.SessionWithTitle, error) {
@@ -445,10 +484,12 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		SessionCreate:     sessH.CreateSession,
 		SessionMessages:   sessH.GetSessionMessages,
 		SendMessage:       sessH.SendMessage,
+		SessionDelete:     sessH.DeleteSession,
 		WorkspaceList:     wsH.List,
 		WorkspaceUpload:   wsH.Upload,
 		WorkspaceDownload: wsH.Download,
 		WorkspaceContent:  wsH.Content,
+		WorkspaceDelete:   wsH.Delete,
 		MCPTools:          mcpH.Tools,
 		SkillsList:        skillH.List,
 	})
@@ -520,10 +561,12 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		SessionCreate:     sessH.CreateSession,
 		SessionMessages:   sessH.GetSessionMessages,
 		SendMessage:       sessH.SendMessage,
+		SessionDelete:     sessH.DeleteSession,
 		WorkspaceList:     wsH.List,
 		WorkspaceUpload:   wsH.Upload,
 		WorkspaceDownload: wsH.Download,
 		WorkspaceContent:  wsH.Content,
+		WorkspaceDelete:   wsH.Delete,
 		MCPTools:          mcpH.Tools,
 		SkillsList:        skillH.List,
 	})
@@ -613,10 +656,12 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		SessionCreate:     sessH.CreateSession,
 		SessionMessages:   sessH.GetSessionMessages,
 		SendMessage:       sessH.SendMessage,
+		SessionDelete:     sessH.DeleteSession,
 		WorkspaceList:     wsH.List,
 		WorkspaceUpload:   wsH.Upload,
 		WorkspaceDownload: wsH.Download,
 		WorkspaceContent:  wsH.Content,
+		WorkspaceDelete:   wsH.Delete,
 		MCPTools:          mcpH.Tools,
 		SkillsList:        skillH.List,
 	})

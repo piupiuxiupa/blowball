@@ -339,6 +339,32 @@ func (h *SessionHandler) GetSessionMessages(c *gin.Context) {
 	})
 }
 
+// DeleteSession handles DELETE /api/v1/sessions/:session_id. Ownership is
+// validated inside the service (missing or non-owned -> ErrSessionNotFound);
+// success returns 204, not-found returns 404, any other failure returns 500.
+func (h *SessionHandler) DeleteSession(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	sessionID := c.Param("session_id")
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	if err := h.sessSvc.DeleteSession(ctx, userID, sessionID); err != nil {
+		if errors.Is(err, service.ErrSessionNotFound) {
+			c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "session not found"))
+			return
+		}
+		logger.L().Error("delete session failed",
+			zap.String("op", "handler.delete_session"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "delete session failed"))
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 // sessionListEntry is one element of the GET /api/v1/sessions response array.
 type sessionListEntry struct {
 	SessionID  string `json:"session_id"`

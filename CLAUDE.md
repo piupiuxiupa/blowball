@@ -87,7 +87,8 @@ HTTP routes live in `internal/handler/router.go`. Protected routes use `middlewa
 - `GET|POST /api/v1/sessions` — list/create sessions.
 - `GET /api/v1/sessions/:session_id/messages` — paginated history.
 - `POST /api/v1/sessions/:session_id/messages` — send a message, returns SSE stream.
-- `GET|POST /api/v1/workspace/*` — list/upload/download/read workspace files.
+- `DELETE /api/v1/sessions/:session_id` — archive + purge a session (404 if missing/non-owner).
+- `GET|POST|DELETE /api/v1/workspace/*` — list/upload/download/read/delete workspace files.
 - `GET /api/v1/mcp/tools` — list discovered MCP tools.
 - `GET /api/v1/skills` — list skills visible to the authenticated user.
 - `GET /healthz` — unauthenticated health check.
@@ -152,7 +153,8 @@ Writes to Redis are best-effort; writes to FS are synchronous; writes to MySQL a
 
 `internal/store/mysql/message.go` implements cursor-based pagination with a composite cursor `(msg_time, msg_index, id)` clamped to `[1, 200]` items per page.
 
-Each message row carries an `event_type` column. Reasoning/thinking output is persisted as ordinary rows with `event_type='reasoning'` (no separate column), so it survives reloads and is replayed into multi-turn context. SQL migrations live in `migrations/`; `docker compose` mounts the whole directory into MySQL's `/docker-entrypoint-initdb.d`, so files run alphabetically on first init. `migrations/007_doris_schema.sql` is a standalone Apache Doris translation of migrations 001–006 (UNIQUE KEY model, no FKs, app-set `update_time`) meant to run against a Doris cluster — its DDL is **not** valid MySQL, so keep it out of the MySQL init path (it shares the mounted `migrations/` dir; move it elsewhere before bringing MySQL up from a clean volume).
+Each message row carries an `event_type` column. Reasoning/thinking output is persisted as ordinary rows with `event_type='reasoning'` (no separate column), so it survives reloads and is replayed into multi-turn context. SQL migrations live in `migrations/`; `docker compose` mounts the whole directory into MySQL's `/docker-entrypoint-initdb.d`, so files run alphabetically on first init. `migrations/008_deletion_archive.sql` creates `*_deleted` mirror tables (`users_deleted`, `sessions_deleted`, `titles_deleted`, `messages_deleted`) that archive rows verbatim before a session is purged — `SessionService.DeleteSession` copies the session/titles/messages into them in a single transaction, then deletes the live `sessions` row (cascade clears titles/messages) and removes the warm-tier FS file. The mirrors carry no foreign keys and `messages_deleted.id` is a plain `BIGINT` preserving the source id; `users_deleted` is scaffolding, not yet written. Redis cache is intentionally not cleared on delete (reads re-validate ownership against MySQL first, so stale keys are unreachable until TTL).
+
 
 ### Frontend
 
