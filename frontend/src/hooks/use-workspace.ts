@@ -46,8 +46,6 @@ export function useDeleteFile() {
 
   const syncDeleted = (path: string) => {
     queryClient.removeQueries({ queryKey: ['file-content', path] });
-    queryClient.removeQueries({ queryKey: ['image-blob', path] });
-    queryClient.removeQueries({ queryKey: ['download-url', path] });
     queryClient.invalidateQueries({ queryKey: ['workspace'] });
 
     const ui = useUIStore.getState();

@@ -164,10 +164,6 @@ export async function apiUpload<T>(
   return handleResponse<T>(response);
 }
 
-export function getDownloadUrl(path: string): string {
-  return `${getApiBase()}/api/v1/workspace/files/${encodeURIComponent(path)}`;
-}
-
 // Re-export generated types for convenience
 export type LoginRequest = paths['/api/v1/auth/login']['post']['requestBody']['content']['application/json'];
 export type LoginResponse = paths['/api/v1/auth/login']['post']['responses']['200']['content']['application/json'];

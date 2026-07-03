@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist';
-import { useDownloadUrl } from '@/hooks/use-file-content';
+import { getPreviewUrl } from '@/hooks/use-file-content';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
@@ -18,10 +18,9 @@ export function PdfViewer({ path }: PdfViewerProps) {
   const [numPages, setNumPages] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { data: url } = useDownloadUrl(path);
+  const url = getPreviewUrl(path);
 
   useEffect(() => {
-    if (!url) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -77,7 +76,7 @@ export function PdfViewer({ path }: PdfViewerProps) {
     return <Skeleton className="m-4 h-[600px] w-full max-w-3xl" />;
   }
 
-  if (error || !url) {
+  if (error) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-destructive">
         {error || '无法加载 PDF'}

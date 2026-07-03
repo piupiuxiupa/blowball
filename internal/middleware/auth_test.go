@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -67,6 +68,96 @@ func sign(t *testing.T, userID string, expire time.Duration) string {
 	tok, err := jwt.Sign(mwTestSecret, userID, expire)
 	require.NoError(t, err)
 	return tok
+}
+
+// newEngineWithQueryTokenAuth builds a gin engine whose handler runs behind
+// QueryTokenAuthMiddleware; it returns the user_id extracted from the token.
+func newEngineWithQueryTokenAuth(t *testing.T) *gin.Engine {
+	t.Helper()
+	r := gin.New()
+	r.Use(TraceMiddleware())
+	r.GET("/secure", QueryTokenAuthMiddleware(mwTestSecret), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"user_id": UserIDFromCtx(c)})
+	})
+	return r
+}
+
+// doGetWithQuery fires a GET at engine with the supplied token in the query
+// string. An empty token omits the query parameter entirely.
+func doGetWithQuery(t *testing.T, engine *gin.Engine, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	path := "/secure"
+	if token != "" {
+		path = "/secure?token=" + url.QueryEscape(token)
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	return w
+}
+
+func TestQueryTokenAuthMiddleware_ValidToken(t *testing.T) {
+	const userID = "user-token-456"
+	engine := newEngineWithQueryTokenAuth(t)
+
+	w := doGetWithQuery(t, engine, sign(t, userID, time.Hour))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		UserID string `json:"user_id"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, userID, resp.UserID)
+}
+
+func TestQueryTokenAuthMiddleware_MissingToken(t *testing.T) {
+	engine := newEngineWithQueryTokenAuth(t)
+
+	w := doGetWithQuery(t, engine, "")
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, "missing token", decodeErr(t, w).Error.Message)
+}
+
+func TestQueryTokenAuthMiddleware_ExpiredToken(t *testing.T) {
+	engine := newEngineWithQueryTokenAuth(t)
+
+	expired := sign(t, "user-expired", -1*time.Minute)
+	w := doGetWithQuery(t, engine, expired)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, "token expired", decodeErr(t, w).Error.Message)
+}
+
+func TestQueryTokenAuthMiddleware_InvalidToken(t *testing.T) {
+	engine := newEngineWithQueryTokenAuth(t)
+
+	cases := []string{
+		"not-a-real-token",
+		"eyJhbGciOiJIUzI1NiJ9.bogus.signature",
+		"a.b.c",
+	}
+	for _, tok := range cases {
+		w := doGetWithQuery(t, engine, tok)
+		require.Equalf(t, http.StatusUnauthorized, w.Code, "token=%q", tok)
+		assert.Equalf(t, "invalid token", decodeErr(t, w).Error.Message, "token=%q", tok)
+	}
+
+	other, err := jwt.Sign("different-secret", "user-y", time.Hour)
+	require.NoError(t, err)
+	w := doGetWithQuery(t, engine, other)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, "invalid token", decodeErr(t, w).Error.Message)
+}
+
+func TestQueryTokenAuthMiddleware_IgnoresAuthorizationHeader(t *testing.T) {
+	engine := newEngineWithQueryTokenAuth(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/secure?token=bad-token", nil)
+	req.Header.Set("Authorization", "Bearer "+sign(t, "user-header", time.Hour))
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, "invalid token", decodeErr(t, w).Error.Message)
 }
 
 func TestAuthMiddleware_ValidToken(t *testing.T) {

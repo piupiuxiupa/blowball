@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -197,6 +198,86 @@ func (h *WorkspaceHandler) Download(c *gin.Context) {
 	}
 
 	c.File(abs)
+}
+
+// TokenDownload handles GET /api/v1/workspace/files/download?token=<jwt>&path=<rel>[&inline=1].
+// It authenticates via the URL token query parameter and serves the requested
+// file with Content-Disposition. This endpoint exists so browser-native
+// elements (<a download>, <img>, PDF.js) can access workspace files without
+// custom Authorization headers.
+func (h *WorkspaceHandler) TokenDownload(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	rel := strings.TrimSpace(c.Query("path"))
+	if rel == "" {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "path is required"))
+		return
+	}
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	abs, err := xizhi.ValidatePath(wsRoot, rel)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "file not found"))
+			return
+		}
+		logWS(ctx, "workspace.token_download.stat", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat file failed"))
+		return
+	}
+	if info.IsDir() {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "path is a directory"))
+		return
+	}
+
+	inline := c.Query("inline") == "1"
+	name := filepath.Base(abs)
+
+	c.Header("Content-Disposition", contentDisposition(name, inline))
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("Referrer-Policy", "no-referrer")
+
+	c.File(abs)
+}
+
+// contentDisposition builds a Content-Disposition header with both an ASCII
+// filename fallback and an RFC 5987 filename* value for Unicode names.
+func contentDisposition(name string, inline bool) string {
+	disp := "attachment"
+	if inline {
+		disp = "inline"
+	}
+	return disp + `; filename="` + asciiFilenameFallback(name) + `"; filename*=utf-8''` + rfc5987Encode(name)
+}
+
+// asciiFilenameFallback returns an ASCII-only fallback for the filename=
+// parameter. Non-ASCII characters are replaced with underscores so legacy
+// clients receive a renderable name.
+func asciiFilenameFallback(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r >= 32 && r <= 126 {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// rfc5987Encode percent-encodes name for the filename*= parameter using
+// UTF-8. Every byte that is not an unreserved URI character is encoded so
+// non-ASCII filenames round-trip correctly through browsers.
+func rfc5987Encode(name string) string {
+	return url.PathEscape(name)
 }
 
 // Content handles GET /api/v1/workspace/files/*path/content. Returns the file's

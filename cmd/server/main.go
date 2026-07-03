@@ -223,20 +223,22 @@ func main() {
 	engine.Use(middleware.CORS())
 
 	routeDeps := handler.RouteDeps{
-		AuthMW:            middleware.AuthMiddleware(cfg.JWT.Secret),
-		Login:             authHandler.Login,
-		SessionList:       sessionHandler.ListSessions,
-		SessionCreate:     sessionHandler.CreateSession,
-		SessionMessages:   sessionHandler.GetSessionMessages,
-		SendMessage:       sessionHandler.SendMessage,
-		SessionDelete:     sessionHandler.DeleteSession,
-		WorkspaceList:     workspaceHandler.List,
-		WorkspaceUpload:   workspaceHandler.Upload,
-		WorkspaceDownload: workspaceHandler.Download,
-		WorkspaceContent:  workspaceHandler.Content,
-		WorkspaceDelete:   workspaceHandler.Delete,
-		MCPTools:          mcpHandler.Tools,
-		SkillsList:        skillHandler.List,
+		AuthMW:               middleware.AuthMiddleware(cfg.JWT.Secret),
+		QueryTokenAuthMW:     middleware.QueryTokenAuthMiddleware(cfg.JWT.Secret),
+		Login:                authHandler.Login,
+		SessionList:          sessionHandler.ListSessions,
+		SessionCreate:        sessionHandler.CreateSession,
+		SessionMessages:      sessionHandler.GetSessionMessages,
+		SendMessage:          sessionHandler.SendMessage,
+		SessionDelete:        sessionHandler.DeleteSession,
+		WorkspaceList:        workspaceHandler.List,
+		WorkspaceUpload:      workspaceHandler.Upload,
+		WorkspaceDownload:    workspaceHandler.Download,
+		WorkspaceTokenDownload: workspaceHandler.TokenDownload,
+		WorkspaceContent:     workspaceHandler.Content,
+		WorkspaceDelete:      workspaceHandler.Delete,
+		MCPTools:             mcpHandler.Tools,
+		SkillsList:           skillHandler.List,
 	}
 	handler.RegisterRoutes(engine, routeDeps)
 

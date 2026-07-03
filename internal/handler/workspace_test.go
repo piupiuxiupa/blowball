@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/middleware"
+	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/store/fs"
 )
 
@@ -268,6 +270,285 @@ func TestDownload_NonExistent_404(t *testing.T) {
 }
 
 // TestContent_TextFile returns text content as JSON.
+// tokenDownloadTestEnv is a test harness for the query-token download endpoint.
+// It wires WorkspaceHandler.TokenDownload behind the real
+// QueryTokenAuthMiddleware so both auth and file-serving logic are exercised.
+type tokenDownloadTestEnv struct {
+	handler *WorkspaceHandler
+	engine  *gin.Engine
+	dataDir string
+	secret  string
+}
+
+func newTokenDownloadTestEnv(t *testing.T) *tokenDownloadTestEnv {
+	t.Helper()
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-td", "workspace"), 0o755))
+
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes)
+	secret := "ws-token-secret"
+
+	r := gin.New()
+	r.Use(middleware.TraceMiddleware())
+	r.GET("/api/v1/workspace/files/download", middleware.QueryTokenAuthMiddleware(secret), h.TokenDownload)
+	return &tokenDownloadTestEnv{handler: h, engine: r, dataDir: dataDir, secret: secret}
+}
+
+func (e *tokenDownloadTestEnv) wsRoot() string {
+	return filepath.Join(e.dataDir, "user-td", "workspace")
+}
+
+func (e *tokenDownloadTestEnv) sign(t *testing.T, userID string, expire time.Duration) string {
+	t.Helper()
+	tok, err := jwt.Sign(e.secret, userID, expire)
+	require.NoError(t, err)
+	return tok
+}
+
+func (e *tokenDownloadTestEnv) downloadURL(path, token string, inline bool) string {
+	q := url.Values{}
+	q.Set("token", token)
+	q.Set("path", path)
+	if inline {
+		q.Set("inline", "1")
+	}
+	return "/api/v1/workspace/files/download?" + q.Encode()
+}
+
+func TestTokenDownload_ExistingFile_Attachment(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "report.md"), []byte("# report"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("report.md", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "# report", w.Body.String())
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "attachment")
+	assert.Contains(t, w.Header().Get("Content-Disposition"), `filename="report.md"`)
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "filename*=utf-8''report.md")
+	assert.Equal(t, "private, no-store", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
+}
+
+func TestTokenDownload_Inline(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "pic.png"), []byte("png"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("pic.png", token, true), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "inline")
+	assert.Contains(t, w.Header().Get("Content-Disposition"), `filename="pic.png"`)
+}
+
+func TestTokenDownload_ChineseFilename(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	name := "中文报告.md"
+	require.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte("content"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL(name, token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	disp := w.Header().Get("Content-Disposition")
+	assert.Contains(t, disp, "filename*=utf-8''%E4%B8%AD%E6%96%87%E6%8A%A5%E5%91%8A.md")
+}
+
+func TestTokenDownload_MissingPath(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?token="+url.QueryEscape(token), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BAD_REQUEST", resp.Error.Code)
+}
+
+func TestTokenDownload_MissingToken(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?path=report.md", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "missing token", resp.Error.Message)
+}
+
+func TestTokenDownload_InvalidToken(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?token=bad-token&path=report.md", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "invalid token", resp.Error.Message)
+}
+
+func TestTokenDownload_ExpiredToken(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", -time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("report.md", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "token expired", resp.Error.Message)
+}
+
+func TestTokenDownload_PathOutsideWorkspace_403(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("../../../etc/passwd", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
+func TestTokenDownload_Directory_400(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "folder"), 0o755))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("folder", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BAD_REQUEST", resp.Error.Code)
+}
+
+func TestTokenDownload_NotFound_404(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("missing.txt", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+}
+
+// TestTokenDownload_ProductionRouting verifies that the production route
+// registration (catch-all /*path with workspaceFileAuthMW) correctly dispatches
+// /workspace/files/download to TokenDownload using the query token. This is a
+// regression guard for the gin static/wildcard sibling limitation.
+func TestTokenDownload_ProductionRouting(t *testing.T) {
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-prod", "workspace"), 0o755))
+
+	secret := "prod-routing-secret"
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes)
+	ws := filepath.Join(dataDir, "user-prod", "workspace")
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "multiply_1_to_100.py"), []byte("print(1)"), 0o644))
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(middleware.TraceIDKey, "trace-prod")
+		c.Next()
+	})
+	RegisterRoutes(r, RouteDeps{
+		AuthMW:                 func(c *gin.Context) { c.AbortWithStatusJSON(401, gin.H{"error": gin.H{"code": "UNAUTHORIZED", "message": "header auth required"}}) },
+		QueryTokenAuthMW:       middleware.QueryTokenAuthMiddleware(secret),
+		WorkspaceTokenDownload: h.TokenDownload,
+		Login:                  func(*gin.Context) {},
+		SessionList:            func(*gin.Context) {},
+		SessionCreate:          func(*gin.Context) {},
+		SessionMessages:        func(*gin.Context) {},
+		SendMessage:            func(*gin.Context) {},
+		SessionDelete:          func(*gin.Context) {},
+		WorkspaceList:          h.List,
+		WorkspaceUpload:        h.Upload,
+		WorkspaceDownload:      h.Download,
+		WorkspaceContent:       h.Content,
+		WorkspaceDelete:        h.Delete,
+		MCPTools:               func(*gin.Context) {},
+		SkillsList:             func(*gin.Context) {},
+	})
+
+	token, err := jwt.Sign(secret, "user-prod", time.Hour)
+	require.NoError(t, err)
+
+	q := url.Values{}
+	q.Set("token", token)
+	q.Set("path", "multiply_1_to_100.py")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?"+q.Encode(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "print(1)", w.Body.String())
+	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "filename*=utf-8''multiply_1_to_100.py")
+}
+
 func TestContent_TextFile(t *testing.T) {
 	env := newWSTestEnv(t)
 	ws := env.wsRoot()

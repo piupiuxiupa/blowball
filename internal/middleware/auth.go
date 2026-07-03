@@ -41,24 +41,51 @@ func AuthMiddleware(secret string) gin.HandlerFunc {
 			return
 		}
 
-		userID, err := jwt.Verify(secret, token)
-		if err != nil {
+		if err := authenticate(c, secret, token); err != nil {
 			abortUnauthorized(c, verifyReason(err))
+		}
+	}
+}
+
+// QueryTokenAuthMiddleware returns a gin middleware that validates a JWT from
+// the URL query parameter "token". It is intentionally separate from
+// AuthMiddleware so only explicitly opted-in routes accept URL tokens; this
+// keeps the rest of the API strictly header-authenticated.
+func QueryTokenAuthMiddleware(secret string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.Query("token")
+		if token == "" {
+			abortUnauthorized(c, reasonMissingToken)
 			return
 		}
 
-		c.Set(UserIDKey, userID)
-
-		// Backstop: if TraceMiddleware did not run upstream, mint a trace_id
-		// so authenticated requests still carry one through the call chain.
-		if _, exists := c.Get(TraceIDKey); !exists {
-			id := traceIDOrNew(c)
-			c.Set(TraceIDKey, id)
-			c.Header("X-Trace-Id", id)
+		if err := authenticate(c, secret, token); err != nil {
+			abortUnauthorized(c, verifyReason(err))
 		}
-
-		c.Next()
 	}
+}
+
+// authenticate verifies the token, publishes user_id, backstops the trace_id,
+// and continues the gin chain. A verification error is returned to the caller
+// so each middleware can keep its source-specific 401 message.
+func authenticate(c *gin.Context, secret, token string) error {
+	userID, err := jwt.Verify(secret, token)
+	if err != nil {
+		return err
+	}
+
+	c.Set(UserIDKey, userID)
+
+	// Backstop: if TraceMiddleware did not run upstream, mint a trace_id
+	// so authenticated requests still carry one through the call chain.
+	if _, exists := c.Get(TraceIDKey); !exists {
+		id := traceIDOrNew(c)
+		c.Set(TraceIDKey, id)
+		c.Header("X-Trace-Id", id)
+	}
+
+	c.Next()
+	return nil
 }
 
 // bearerToken extracts the credential portion of a "Bearer <token>" header.

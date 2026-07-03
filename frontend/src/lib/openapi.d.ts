@@ -348,6 +348,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspace/files/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a workspace file using a URL token.
+         * @description Authenticates via the `token` query parameter instead of the
+         *     `Authorization` header. Designed for browser-native elements such as
+         *     `<a download>`, `<img src>`, and PDF.js that cannot set custom headers.
+         *     Returns `Content-Disposition: attachment` by default; pass `inline=1`
+         *     for preview contexts. The response also carries
+         *     `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`
+         *     to mitigate the risk of the JWT leaking through caches or Referer headers.
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description JWT access token issued by POST /api/v1/auth/login. */
+                    token: string;
+                    /**
+                     * @description Workspace-relative file path.
+                     * @example reports/2026-q2.md
+                     */
+                    path: string;
+                    /** @description Set to 1 to return Content-Disposition: inline for previews. */
+                    inline?: 1;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description File bytes; content-type reflects the file extension. */
+                200: {
+                    headers: {
+                        /** @description attachment or inline, with ASCII and RFC 5987 filename values. */
+                        "Content-Disposition"?: string;
+                        "Cache-Control"?: string;
+                        "Referrer-Policy"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/octet-stream": string;
+                    };
+                };
+                /** @description Missing/empty `path`, or `path` resolves to a directory. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Missing, invalid, or expired query token. */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["Internal"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspace/upload": {
         parameters: {
             query?: never;

@@ -24,67 +24,35 @@ export function useFileContent(path: string | null) {
   });
 }
 
-export function useImageBlob(path: string | null) {
-  return useQuery({
-    queryKey: ['image-blob', path],
-    queryFn: async () => {
-      if (!path) return null;
-      const token = getToken();
-      const response = await fetch(
-        `${getApiBase()}/api/v1/workspace/files/${encodeURIComponent(path)}`,
-        {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        }
-      );
-      if (!response.ok) throw new Error('Failed to load image');
-      const blob = await response.blob();
-      return URL.createObjectURL(blob);
-    },
-    enabled: !!path,
-    staleTime: Infinity,
-  });
+// getDownloadUrl returns a workspace file URL authenticated by the JWT in the
+// query string. Use this for `<a download>` triggers and shared links.
+export function getDownloadUrl(path: string): string {
+  const token = getToken();
+  const params = new URLSearchParams();
+  if (token) params.set('token', token);
+  params.set('path', path);
+  return `${getApiBase()}/api/v1/workspace/files/download?${params.toString()}`;
+}
+
+// getPreviewUrl returns the same endpoint as getDownloadUrl but with inline=1,
+// suitable for `<img src>`, PDF.js, and other browser-native preview elements.
+export function getPreviewUrl(path: string): string {
+  const token = getToken();
+  const params = new URLSearchParams();
+  if (token) params.set('token', token);
+  params.set('path', path);
+  params.set('inline', '1');
+  return `${getApiBase()}/api/v1/workspace/files/download?${params.toString()}`;
 }
 
 export function useDownloadFile(path: string | null) {
-  return async () => {
+  return () => {
     if (!path) return;
-    const token = getToken();
-    const response = await fetch(
-      `${getApiBase()}/api/v1/workspace/files/${encodeURIComponent(path)}`,
-      {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      }
-    );
-    if (!response.ok) throw new Error('Failed to download file');
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = getDownloadUrl(path);
     a.download = path.split('/').pop() || 'download';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   };
-}
-
-export function useDownloadUrl(path: string | null) {
-  return useQuery({
-    queryKey: ['download-url', path],
-    queryFn: async () => {
-      if (!path) return null;
-      const token = getToken();
-      const response = await fetch(
-        `${getApiBase()}/api/v1/workspace/files/${encodeURIComponent(path)}`,
-        {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        }
-      );
-      if (!response.ok) throw new Error('Failed to fetch file');
-      const blob = await response.blob();
-      return URL.createObjectURL(blob);
-    },
-    enabled: !!path,
-    staleTime: Infinity,
-  });
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useDownloadUrl } from '@/hooks/use-file-content';
+import { getPreviewUrl } from '@/hooks/use-file-content';
 import { getFileExtension } from '@/lib/file-type';
 import { Skeleton } from '@/components/ui/skeleton';
 import { BinaryPlaceholder } from './binary-placeholder';
@@ -9,19 +9,19 @@ interface WordViewerProps {
 }
 
 export function WordViewer({ path }: WordViewerProps) {
-  const { data: url, isLoading, isError } = useDownloadUrl(path);
+  const url = getPreviewUrl(path);
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const ext = getFileExtension(path);
 
   useEffect(() => {
-    if (!url) return;
     if (ext === 'doc') {
       setHtml(null);
       setError(false);
       return;
     }
     let cancelled = false;
+    setError(false);
     fetch(url)
       .then((res) => res.arrayBuffer())
       .then(async (buf) => {
@@ -37,7 +37,7 @@ export function WordViewer({ path }: WordViewerProps) {
     };
   }, [url, ext]);
 
-  if (isLoading || (url && ext === 'docx' && html === null && !error)) {
+  if (ext === 'docx' && html === null && !error) {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-4 w-3/4" />
@@ -47,7 +47,7 @@ export function WordViewer({ path }: WordViewerProps) {
     );
   }
 
-  if (isError || error) {
+  if (error) {
     return <BinaryPlaceholder path={path} />;
   }
 

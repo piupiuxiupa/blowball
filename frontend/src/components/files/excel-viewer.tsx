@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useDownloadUrl } from '@/hooks/use-file-content';
+import { getPreviewUrl } from '@/hooks/use-file-content';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { BinaryPlaceholder } from './binary-placeholder';
@@ -9,15 +9,15 @@ interface ExcelViewerProps {
 }
 
 export function ExcelViewer({ path }: ExcelViewerProps) {
-  const { data: url, isLoading, isError } = useDownloadUrl(path);
+  const url = getPreviewUrl(path);
   const [sheets, setSheets] = useState<string[]>([]);
   const [activeSheet, setActiveSheet] = useState<string>('');
   const [rows, setRows] = useState<unknown[][]>([]);
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!url) return;
     let cancelled = false;
+    setError(false);
     fetch(url)
       .then((res) => res.arrayBuffer())
       .then(async (buf) => {
@@ -43,7 +43,7 @@ export function ExcelViewer({ path }: ExcelViewerProps) {
   }, [url]);
 
   const handleSwitchSheet = async (name: string) => {
-    if (!url || name === activeSheet) return;
+    if (name === activeSheet) return;
     setRows([]);
     setActiveSheet(name);
     try {
@@ -59,7 +59,7 @@ export function ExcelViewer({ path }: ExcelViewerProps) {
     }
   };
 
-  if (isLoading || (url && rows.length === 0 && !error)) {
+  if (rows.length === 0 && !error) {
     return (
       <div className="space-y-3 p-4">
         <Skeleton className="h-4 w-3/4" />
@@ -69,7 +69,7 @@ export function ExcelViewer({ path }: ExcelViewerProps) {
     );
   }
 
-  if (isError || error) {
+  if (error) {
     return <BinaryPlaceholder path={path} />;
   }
 
