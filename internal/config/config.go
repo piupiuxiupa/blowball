@@ -164,10 +164,54 @@ type WebfetchConfig struct {
 	Timeout time.Duration `yaml:"timeout"`
 }
 
+// ExecutorToolConfig holds the per-tool settings for bash/python executors.
+type ExecutorToolConfig struct {
+	Enabled            bool          `yaml:"enabled"`
+	Timeout            time.Duration `yaml:"timeout"`
+	MaxOutputBytes     int           `yaml:"max_output_bytes"`
+	AllowedEnvPatterns []string      `yaml:"allowed_env_patterns"`
+	Network            bool          `yaml:"network"`
+}
+
+// ExecutorConfig groups the sandboxed command execution tools.
+type ExecutorConfig struct {
+	Bash   ExecutorToolConfig `yaml:"bash"`
+	Python ExecutorToolConfig `yaml:"python"`
+}
+
+// DefaultExecutorToolConfig returns the recommended defaults for an executor
+// tool. It is used when a tool block is omitted or fields are zero-valued.
+func DefaultExecutorToolConfig() ExecutorToolConfig {
+	return ExecutorToolConfig{
+		Enabled:            false,
+		Timeout:            30 * time.Second,
+		MaxOutputBytes:     65536,
+		AllowedEnvPatterns: []string{"PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"},
+		Network:            false,
+	}
+}
+
+// ApplyDefaults fills zero-valued executor fields with the recommended defaults.
+// A negative MaxOutputBytes is left as-is so the caller can reject it;
+// a zero value is replaced with the default.
+func (e *ExecutorToolConfig) ApplyDefaults() {
+	def := DefaultExecutorToolConfig()
+	if e.Timeout == 0 {
+		e.Timeout = def.Timeout
+	}
+	if e.MaxOutputBytes == 0 {
+		e.MaxOutputBytes = def.MaxOutputBytes
+	}
+	if len(e.AllowedEnvPatterns) == 0 {
+		e.AllowedEnvPatterns = def.AllowedEnvPatterns
+	}
+}
+
 // ToolsConfig groups all tool configuration.
 type ToolsConfig struct {
 	Xizhi    XizhiConfig    `yaml:"xizhi"`
 	Webfetch WebfetchConfig `yaml:"webfetch"`
+	Executor ExecutorConfig `yaml:"executor"`
 }
 
 // MCPConfig holds external MCP server configuration.
@@ -216,6 +260,9 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+
+	cfg.Tools.Executor.Bash.ApplyDefaults()
+	cfg.Tools.Executor.Python.ApplyDefaults()
 
 	return &cfg, nil
 }

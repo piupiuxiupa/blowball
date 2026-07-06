@@ -543,6 +543,97 @@ agents:
 	}
 }
 
+func TestLoad_ExecutorConfig(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+tools:
+  executor:
+    bash:
+      enabled: true
+      timeout: 45s
+      max_output_bytes: 8192
+      allowed_env_patterns: ["PATH", "HOME"]
+      network: true
+    python:
+      enabled: false
+      timeout: 20s
+      max_output_bytes: 4096
+      allowed_env_patterns: ["PATH", "PYTHON*"]
+      network: false
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	bash := cfg.Tools.Executor.Bash
+	if !bash.Enabled {
+		t.Error("Tools.Executor.Bash.Enabled = false, want true")
+	}
+	if bash.Timeout != 45*time.Second {
+		t.Errorf("Tools.Executor.Bash.Timeout = %v, want 45s", bash.Timeout)
+	}
+	if bash.MaxOutputBytes != 8192 {
+		t.Errorf("Tools.Executor.Bash.MaxOutputBytes = %d, want 8192", bash.MaxOutputBytes)
+	}
+	if len(bash.AllowedEnvPatterns) != 2 || bash.AllowedEnvPatterns[0] != "PATH" {
+		t.Errorf("unexpected bash env patterns: %v", bash.AllowedEnvPatterns)
+	}
+	if !bash.Network {
+		t.Error("Tools.Executor.Bash.Network = false, want true")
+	}
+
+	python := cfg.Tools.Executor.Python
+	if python.Enabled {
+		t.Error("Tools.Executor.Python.Enabled = true, want false")
+	}
+	if python.Timeout != 20*time.Second {
+		t.Errorf("Tools.Executor.Python.Timeout = %v, want 20s", python.Timeout)
+	}
+	if python.MaxOutputBytes != 4096 {
+		t.Errorf("Tools.Executor.Python.MaxOutputBytes = %d, want 4096", python.MaxOutputBytes)
+	}
+	if python.Network {
+		t.Error("Tools.Executor.Python.Network = true, want false")
+	}
+}
+
+func TestLoad_ExecutorConfigDefaults(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+tools:
+  executor:
+    bash:
+      enabled: true
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	bash := cfg.Tools.Executor.Bash
+	if bash.Timeout != 30*time.Second {
+		t.Errorf("Tools.Executor.Bash.Timeout default = %v, want 30s", bash.Timeout)
+	}
+	if bash.MaxOutputBytes != 65536 {
+		t.Errorf("Tools.Executor.Bash.MaxOutputBytes default = %d, want 65536", bash.MaxOutputBytes)
+	}
+	if bash.Network {
+		t.Error("Tools.Executor.Bash.Network default = true, want false")
+	}
+	if len(bash.AllowedEnvPatterns) == 0 {
+		t.Error("Tools.Executor.Bash.AllowedEnvPatterns should have defaults")
+	}
+}
+
 func TestConfig_ValidateAgentSkills(t *testing.T) {
 	cfg := &Config{
 		Agents: AgentsConfig{

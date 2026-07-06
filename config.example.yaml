@@ -42,7 +42,7 @@ agents:
     # When true, max_tokens is sent as max_completion_tokens and reasoning_effort
     # is included in the request. Omit or set to false for standard models.
     thinking: false
-    reasoning_effort: medium
+    # reasoning_effort: medium  # only valid when thinking: true
     tools:
       - xizhi_list_files
       - xizhi_tree
@@ -116,6 +116,31 @@ tools:
   webfetch:
     enabled: true
     timeout: 30s
+
+  # Sandboxed command execution via bubblewrap (Linux only).
+  # Requires bwrap to be installed and unprivileged user namespaces available.
+  #
+  # Fields:
+  #   enabled              - required; set to true to register the tool.
+  #   timeout              - optional; per-command timeout (default 30s).
+  #   max_output_bytes     - optional; combined stdout/stderr cap (default 65536).
+  #   allowed_env_patterns - optional; host env vars passed to the sandbox (default
+  #                          PATH, HOME, LANG, USER, TERM, PYTHON*).
+  #   network              - optional; when false the sandbox has no network access
+  #                          via --unshare-net (default false).
+  executor:
+    bash:
+      enabled: false
+      timeout: 30s
+      max_output_bytes: 65536
+      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM"]
+      network: false
+    python:
+      enabled: false
+      timeout: 30s
+      max_output_bytes: 65536
+      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"]
+      network: false
 
 # External MCP servers. Tools discovered from these servers are registered in
 # the process-wide tool registry and exposed through GET /api/v1/mcp/tools.

@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"syscall"
 	"time"
@@ -44,6 +45,7 @@ import (
 	"github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/store/redis"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/executor"
 	"github.com/lush/blowball/internal/tool/luban"
 	"github.com/lush/blowball/internal/tool/mcpclient"
 	"github.com/lush/blowball/internal/tool/skill"
@@ -130,6 +132,22 @@ func main() {
 	reg := tool.NewRegistry()
 	xizhi.RegisterAll(reg, DataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
+
+	// 7b. Sandboxed bash/python execution. Only registered on Linux where bwrap
+	// is available; on other platforms enabled tools are ignored. If a tool is
+	// explicitly enabled but bwrap is missing on Linux, startup fails fast.
+	if cfg.Tools.Executor.Bash.Enabled || cfg.Tools.Executor.Python.Enabled {
+		if !executor.IsAvailable() {
+			log.Fatal("executor tools enabled but bubblewrap (bwrap) is not available",
+				zap.String("platform", runtime.GOOS))
+		}
+		executorTools := executor.NewTools(cfg.Tools.Executor, func(userID string) string {
+			return fsStore.UserWorkspace(userID)
+		})
+		if err := executor.RegisterAll(reg, executorTools); err != nil {
+			log.Fatal("register executor tools failed", zap.Error(err))
+		}
+	}
 
 	// 7a. Skill loader. Discover skills from the project-level skills/ directory
 	// and per-user data/{userID}/skills/ directories. Register the luban skill
