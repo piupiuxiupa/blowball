@@ -30,8 +30,7 @@ export function getDownloadUrl(path: string): string {
   const token = getToken();
   const params = new URLSearchParams();
   if (token) params.set('token', token);
-  params.set('path', path);
-  return `${getApiBase()}/api/v1/workspace/files/download?${params.toString()}`;
+  return `${getApiBase()}/api/v1/workspace/files/download/${encodeURIComponent(path)}?${params.toString()}`;
 }
 
 // getPreviewUrl returns the same endpoint as getDownloadUrl but with inline=1,
@@ -40,9 +39,8 @@ export function getPreviewUrl(path: string): string {
   const token = getToken();
   const params = new URLSearchParams();
   if (token) params.set('token', token);
-  params.set('path', path);
   params.set('inline', '1');
-  return `${getApiBase()}/api/v1/workspace/files/download?${params.toString()}`;
+  return `${getApiBase()}/api/v1/workspace/files/download/${encodeURIComponent(path)}?${params.toString()}`;
 }
 
 export function useDownloadFile(path: string | null) {

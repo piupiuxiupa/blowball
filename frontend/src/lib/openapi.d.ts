@@ -348,7 +348,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/workspace/files/download": {
+    "/api/v1/workspace/files/download/{path}": {
         parameters: {
             query?: never;
             header?: never;
@@ -370,16 +370,17 @@ export interface paths {
                 query: {
                     /** @description JWT access token issued by POST /api/v1/auth/login. */
                     token: string;
-                    /**
-                     * @description Workspace-relative file path.
-                     * @example reports/2026-q2.md
-                     */
-                    path: string;
                     /** @description Set to 1 to return Content-Disposition: inline for previews. */
                     inline?: 1;
                 };
                 header?: never;
-                path?: never;
+                path: {
+                    /**
+                     * @description Workspace-relative file path (catch-all, may include `/`).
+                     * @example reports/2026-q2.md
+                     */
+                    path: string;
+                };
                 cookie?: never;
             };
             requestBody?: never;

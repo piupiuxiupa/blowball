@@ -200,7 +200,7 @@ func (h *WorkspaceHandler) Download(c *gin.Context) {
 	c.File(abs)
 }
 
-// TokenDownload handles GET /api/v1/workspace/files/download?token=<jwt>&path=<rel>[&inline=1].
+// TokenDownload handles GET /api/v1/workspace/files/download/{path}?token=<jwt>[&inline=1].
 // It authenticates via the URL token query parameter and serves the requested
 // file with Content-Disposition. This endpoint exists so browser-native
 // elements (<a download>, <img>, PDF.js) can access workspace files without
@@ -210,7 +210,7 @@ func (h *WorkspaceHandler) TokenDownload(c *gin.Context) {
 	tid := middleware.TraceIDFromCtx(c)
 	ctx := trace.WithContext(c.Request.Context(), tid)
 
-	rel := strings.TrimSpace(c.Query("path"))
+	rel := strings.TrimSpace(c.Param("path"))
 	if rel == "" {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "path is required"))
 		return

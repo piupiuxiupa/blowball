@@ -72,11 +72,11 @@ type RouteDeps struct {
 // single catch-all route and dispatch internally on this suffix.
 const contentRouteSuffix = "/content"
 
-// tokenDownloadPath is the special catch-all value that selects the
+// tokenDownloadPath is the special catch-all prefix that selects the
 // query-token download handler. gin does not allow a static
-// /workspace/files/download route to coexist with /workspace/files/*path, so
-// the single catch-all dispatches to WorkspaceTokenDownload when the captured
-// path is exactly this value.
+// /workspace/files/download/*path route to coexist with /workspace/files/*path,
+// so the single catch-all dispatches to WorkspaceTokenDownload when the captured
+// path equals this value or starts with "download/".
 const tokenDownloadPath = "download"
 
 // RegisterRoutes wires every route onto r per the api-server spec:
@@ -89,9 +89,9 @@ const tokenDownloadPath = "download"
 //	DELETE /api/v1/sessions/:session_id           (auth)
 //	GET  /api/v1/workspace/files                  (auth)
 //	POST /api/v1/workspace/upload                 (auth)
-//	GET  /api/v1/workspace/files/download         (query token auth)
-//	GET  /api/v1/workspace/files/*path            (auth, download)
-//	GET  /api/v1/workspace/files/*path/content    (auth, text content)
+//	GET  /api/v1/workspace/files/download/*path    (query token auth)
+//	GET  /api/v1/workspace/files/*path             (auth, download)
+//	GET  /api/v1/workspace/files/*path/content     (auth, text content)
 //	DELETE /api/v1/workspace/files/*path          (auth, delete file/dir)
 //	GET  /api/v1/mcp/tools                        (auth)
 //	GET  /api/v1/skills                           (auth)
@@ -126,8 +126,8 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.POST("/workspace/upload", deps.WorkspaceUpload)
 
 	// GET workspace files uses a single catch-all. Auth is route-specific:
-	// /workspace/files/download uses the query token; everything else uses the
-	// Authorization header. This keeps the URL space identical while working
+	// /workspace/files/download/*path uses the query token; everything else uses
+	// the Authorization header. This keeps the URL space identical while working
 	// around gin's refusal to register a static /download sibling alongside
 	// the /*path wildcard.
 	v1.GET("/workspace/files/*path", workspaceFileAuthMW(deps), dispatchWorkspaceFile(deps))
@@ -141,11 +141,13 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 }
 
 // workspaceFileAuthMW selects the appropriate auth middleware for the
-// workspace file catch-all. The token-download pseudo-path uses
-// QueryTokenAuthMW; all other paths require the Bearer header.
+// workspace file catch-all. The token-download pseudo-path
+// (/workspace/files/download/*path) uses QueryTokenAuthMW; all other paths
+// require the Bearer header.
 func workspaceFileAuthMW(deps RouteDeps) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if strings.TrimPrefix(c.Param("path"), "/") == tokenDownloadPath {
+		raw := strings.TrimPrefix(c.Param("path"), "/")
+		if raw == tokenDownloadPath || strings.HasPrefix(raw, tokenDownloadPath+"/") {
 			deps.QueryTokenAuthMW(c)
 			return
 		}
@@ -155,12 +157,17 @@ func workspaceFileAuthMW(deps RouteDeps) gin.HandlerFunc {
 
 // dispatchWorkspaceFile returns a gin handler that forwards to
 // WorkspaceContent when the captured *path ends with "/content", to
-// WorkspaceTokenDownload when the captured path is "download", and to
-// WorkspaceDownload otherwise.
+// WorkspaceTokenDownload when the captured path equals "download" or starts
+// with "download/", and to WorkspaceDownload otherwise.
 func dispatchWorkspaceFile(deps RouteDeps) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := strings.TrimPrefix(c.Param("path"), "/")
-		if raw == tokenDownloadPath {
+		if raw == tokenDownloadPath || strings.HasPrefix(raw, tokenDownloadPath+"/") {
+			// Strip the "download/" prefix so TokenDownload reads the file path
+			// from c.Param("path") just like the regular download handler.
+			filePath := strings.TrimPrefix(raw, tokenDownloadPath)
+			filePath = strings.TrimPrefix(filePath, "/")
+			c.Params = setPathParam(c.Params, filePath)
 			deps.WorkspaceTokenDownload(c)
 			return
 		}
@@ -183,6 +190,22 @@ func stripContentSuffix(params gin.Params, trimmed string) gin.Params {
 	for _, p := range params {
 		if p.Key == "path" {
 			out = append(out, gin.Param{Key: "path", Value: trimmed})
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// setPathParam returns a copy of params with the "path" key replaced by value.
+// It mirrors stripContentSuffix but uses a more general name for the download
+// dispatcher, which needs to rewrite the catch-all value from "download/foo" to
+// "foo" before invoking TokenDownload.
+func setPathParam(params gin.Params, value string) gin.Params {
+	out := make(gin.Params, 0, len(params))
+	for _, p := range params {
+		if p.Key == "path" {
+			out = append(out, gin.Param{Key: "path", Value: value})
 			continue
 		}
 		out = append(out, p)

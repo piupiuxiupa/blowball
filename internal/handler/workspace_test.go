@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,7 +293,19 @@ func newTokenDownloadTestEnv(t *testing.T) *tokenDownloadTestEnv {
 
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())
-	r.GET("/api/v1/workspace/files/download", middleware.QueryTokenAuthMiddleware(secret), h.TokenDownload)
+	// Replicate production routing: a single catch-all dispatches
+	// /workspace/files/download/*path to TokenDownload.
+	r.GET("/api/v1/workspace/files/*path", middleware.QueryTokenAuthMiddleware(secret), func(c *gin.Context) {
+		raw := strings.TrimPrefix(c.Param("path"), "/")
+		if raw != tokenDownloadPath && !strings.HasPrefix(raw, tokenDownloadPath+"/") {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": "not found"}})
+			return
+		}
+		filePath := strings.TrimPrefix(raw, tokenDownloadPath)
+		filePath = strings.TrimPrefix(filePath, "/")
+		c.Params = []gin.Param{{Key: "path", Value: filePath}}
+		h.TokenDownload(c)
+	})
 	return &tokenDownloadTestEnv{handler: h, engine: r, dataDir: dataDir, secret: secret}
 }
 
@@ -310,11 +323,10 @@ func (e *tokenDownloadTestEnv) sign(t *testing.T, userID string, expire time.Dur
 func (e *tokenDownloadTestEnv) downloadURL(path, token string, inline bool) string {
 	q := url.Values{}
 	q.Set("token", token)
-	q.Set("path", path)
 	if inline {
 		q.Set("inline", "1")
 	}
-	return "/api/v1/workspace/files/download?" + q.Encode()
+	return "/api/v1/workspace/files/download/" + url.PathEscape(path) + "?" + q.Encode()
 }
 
 func TestTokenDownload_ExistingFile_Attachment(t *testing.T) {
@@ -367,6 +379,28 @@ func TestTokenDownload_ChineseFilename(t *testing.T) {
 	assert.Contains(t, disp, "filename*=utf-8''%E4%B8%AD%E6%96%87%E6%8A%A5%E5%91%8A.md")
 }
 
+// TestTokenDownload_NestedPath_EncodedSlashes verifies that a deeply nested file
+// addressed by URL-encoded slashes (the wire form the React frontend emits via
+// encodeURIComponent) round-trips through the catch-all to the correct file.
+func TestTokenDownload_NestedPath_EncodedSlashes(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub", "deep"), 0o755))
+	nested := filepath.Join(ws, "sub", "deep", "note.md")
+	rootDecoy := filepath.Join(ws, "note.md")
+	require.NoError(t, os.WriteFile(nested, []byte("nested"), 0o644))
+	require.NoError(t, os.WriteFile(rootDecoy, []byte("root"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("sub/deep/note.md", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "nested", w.Body.String())
+}
+
 func TestTokenDownload_MissingPath(t *testing.T) {
 	env := newTokenDownloadTestEnv(t)
 	token := env.sign(t, "user-td", time.Hour)
@@ -389,7 +423,7 @@ func TestTokenDownload_MissingPath(t *testing.T) {
 func TestTokenDownload_MissingToken(t *testing.T) {
 	env := newTokenDownloadTestEnv(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?path=report.md", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download/report.md", nil)
 	w := httptest.NewRecorder()
 	env.engine.ServeHTTP(w, req)
 
@@ -538,8 +572,7 @@ func TestTokenDownload_ProductionRouting(t *testing.T) {
 
 	q := url.Values{}
 	q.Set("token", token)
-	q.Set("path", "multiply_1_to_100.py")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?"+q.Encode(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download/multiply_1_to_100.py?"+q.Encode(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
