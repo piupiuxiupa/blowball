@@ -1,21 +1,22 @@
 # blowball
 
-A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API built with [Gin](https://gin-gonic.com/), persists sessions and messages in MySQL, caches session state in Redis, and orchestrates a small team of LLM agents backed by OpenAI.
+A Go backend for a multi-agent chat workspace with a React frontend. It exposes a JWT-secured HTTP API built with [Gin](https://gin-gonic.com/), persists sessions and messages in MySQL, caches session state in Redis, and orchestrates a small team of LLM agents backed by OpenAI.
 
 ## Features
 
 - **JWT authentication** with bcrypt-hashed passwords.
-- **Session management** — create sessions, list them, and fetch paginated message history.
+- **Session management** — create sessions, list them, fetch paginated message history, and delete sessions (deleted sessions are archived to mirror tables).
 - **Server-Sent Events (SSE)** streaming for agent responses with fine-grained event types:
-  `agent_start`, `token`, `tool_call`, `agent_end`, `agent_error`, `done`.
+  `agent_start`, `token`, `reasoning`, `tool_call`, `tool_result`, `agent_end`, `agent_error`, `done`.
 - **Multi-agent orchestration** — a central `Confucius` agent dispatches to specialist agents:
   - `Chongzhi` — coding agent with workspace file tools.
   - `Liang` — analysis and explanation agent.
 - **Workspace file tools** (`xizhi_*`) scoped per user: read, write, modify, list, tree, glob, plus `webfetch`.
+- **Sandboxed command execution** (`bash`, `python`) via bubblewrap on Linux.
+- **Skill management** (`luban_*`) — list, read, and install skills from GitHub or a remote `SKILL.md`.
 - **External MCP client support** — connect SSE, stdio, or Streamable HTTP MCP servers at startup and proxy their tools into the agent tool catalogue.
 - **Per-agent MCP and skill permissions** — each agent can be restricted to specific MCP servers/tools and skills, and the available set is injected into its system prompt.
-- **Skill directory layout** — global `skills/` and per-user `data/{userID}/skills/` directories using `{skill-name}/SKILL.md` with YAML frontmatter.
-- **`read_skill` tool** — lets an agent load skill instructions on demand by name.
+- **OpenAI reasoning mode** support (`thinking: true`) for o1/o3/o4-mini/GPT-5 reasoning variants.
 - **Graceful shutdown**, structured JSON logging with zap, and OpenAPI 3 spec at [`api/openapi.yaml`](api/openapi.yaml).
 
 ## Quick start
@@ -26,6 +27,7 @@ A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API
 - MySQL 8.0
 - Redis 7
 - An OpenAI API key
+- Node.js 20+ (for the frontend)
 
 ### 2. Start dependencies
 
@@ -74,6 +76,16 @@ make run
 
 The server listens on the port configured in `config.yaml` (default `8080`).
 
+### 6. Run the frontend (optional)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite dev server starts on port `5173` and proxies `/api` to `http://localhost:8080`.
+
 ## Development
 
 ```bash
@@ -83,12 +95,30 @@ make build
 # Run all tests with race detection
 make test
 
+# Run a single package's tests
+go test ./internal/agent/...
+
+# Run a single test
+go test ./internal/agent/ -run TestConfuciusDispatchesSubAgent
+
+# Run integration tests (fakes for MySQL/LLM, real orchestrator + handlers)
+go test ./test/integration/...
+
 # Static analysis
 make lint
 
 # Clean build artifacts
 make clean
+
+# Frontend (from frontend/)
+npm install
+npm run dev
+npm run build
+npm run lint
+npm run generate-api
 ```
+
+See [`CLAUDE.md`](CLAUDE.md) for the full architecture, conventions, and tool configuration details.
 
 ## Project layout
 
@@ -98,6 +128,7 @@ make clean
 ├── cmd/
 │   ├── seed/                 # CLI to create users
 │   └── server/               # HTTP server entry point
+├── frontend/                 # React 19 + Vite + TypeScript app
 ├── internal/
 │   ├── agent/                # Agents, orchestrator, OpenAI client
 │   ├── config/               # YAML config loader
@@ -110,10 +141,12 @@ make clean
 │   ├── stream/               # SSE event stream types and hub
 │   └── tool/                 # Tool registry and tool implementations
 ├── migrations/               # SQL schema migrations
+├── skills/                   # Global skills directory
 ├── test/integration/         # Integration tests
 ├── config.example.yaml       # Example configuration
 ├── docker-compose.yaml       # MySQL + Redis
-└── Makefile                  # Common tasks
+├── Makefile                  # Common tasks
+└── CLAUDE.md                 # Detailed developer guide
 ```
 
 ## API overview
@@ -125,10 +158,13 @@ make clean
 | `POST` | `/api/v1/sessions` | Create a session |
 | `GET`  | `/api/v1/sessions/{session_id}/messages` | Paginated message history |
 | `POST` | `/api/v1/sessions/{session_id}/messages` | Send a message, stream SSE |
+| `DELETE` | `/api/v1/sessions/{session_id}` | Delete and archive a session |
 | `GET`  | `/api/v1/workspace/files` | List workspace files |
 | `POST` | `/api/v1/workspace/upload` | Upload a file |
 | `GET`  | `/api/v1/workspace/files/{path}` | Download a file |
 | `GET`  | `/api/v1/workspace/files/{path}/content` | Read file text content |
+| `GET`  | `/api/v1/workspace/files/download/{path}?token=<jwt>` | Token-authenticated download |
+| `DELETE` | `/api/v1/workspace/files/{path}` | Delete a file or directory |
 | `GET`  | `/api/v1/mcp/tools` | List available tools |
 | `GET`  | `/api/v1/skills` | List available skills |
 | `GET`  | `/healthz` | Health check |
@@ -260,11 +296,12 @@ agents:
       - review-checklist
 ```
 
-When an agent has skills:
+When an agent has skills configured, the skill catalogue is injected into its system prompt. Agents can load skill instructions on demand via:
 
-1. A skill catalogue (name, description, location) is injected into its system prompt.
-2. The `read_skill` tool is added to the agent's tool list.
-3. The model can call `read_skill(name)` to load the full skill instructions on demand.
+- `luban_read_skill(name)` — recommended for new configs.
+- `read_skill(name)` — legacy tool kept for backward compatibility.
+
+The `luban_*` tools (`luban_list_skills`, `luban_read_skill`, `luban_install_skill`) are registered only when an agent explicitly lists them in its `tools`.
 
 ### Listing skills
 
@@ -294,6 +331,31 @@ mv data/u-123/coding-style.md data/u-123/coding-style/SKILL.md
 # add ---/name/description/--- frontmatter to SKILL.md
 ```
 
+## Sandboxed command execution
+
+On Linux, Blowball can register `bash` and `python` tools that run commands inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. Each invocation gets its own user/mount/pid/network namespaces, the user's workspace is bound to `/workspace`, and the environment is restricted to an allow-list.
+
+```yaml
+tools:
+  executor:
+    bash:
+      enabled: true
+      timeout: 30s
+      max_output_bytes: 65536
+      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM"]
+      network: false
+    python:
+      enabled: true
+      timeout: 30s
+      max_output_bytes: 65536
+      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"]
+      network: false
+```
+
+- Network access is disabled by default (`network: false` adds `--unshare-net`).
+- If a tool is enabled but `bwrap` is not installed, the server exits with a fatal error.
+- On macOS and Windows the tools are silently unavailable regardless of config.
+
 ## Configuration
 
 Key sections in `config.yaml`:
@@ -302,8 +364,8 @@ Key sections in `config.yaml`:
 - `openai` — API key, base URL, and default model.
 - `mysql` / `redis` — connection settings.
 - `jwt` — signing secret and token expiry (e.g. `7d`).
-- `agents` — system prompts, models, max tokens, tool lists, MCP permissions, and skill lists for each agent.
-- `tools` — enable/disable tool families and set timeouts.
+- `agents` — system prompts, models, max tokens, tool lists, MCP permissions, skill lists, and `thinking` / `reasoning_effort` for each agent.
+- `tools` — enable/disable tool families (xizhi, webfetch, executor) and set timeouts.
 - `mcp` — external MCP server declarations.
 - `logging` — level and format (`json` or `console`).
 

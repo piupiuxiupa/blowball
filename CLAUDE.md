@@ -53,6 +53,9 @@ npm run build
 # Type-check only
 npm run lint
 
+# Preview the production build locally
+npm run preview
+
 # Regenerate TypeScript types from ../api/openapi.yaml
 npm run generate-api
 ```
@@ -102,17 +105,37 @@ If an executor tool is enabled but `bwrap` is missing, the server exits with a f
 
 HTTP routes live in `internal/handler/router.go`. Protected routes use `middleware.AuthMiddleware` (JWT Bearer validation) after `TraceMiddleware` and CORS. Key endpoints:
 
-- `POST /api/v1/auth/login` — returns a JWT.
-- `GET|POST /api/v1/sessions` — list/create sessions.
-- `GET /api/v1/sessions/:session_id/messages` — paginated history.
-- `POST /api/v1/sessions/:session_id/messages` — send a message, returns SSE stream.
-- `DELETE /api/v1/sessions/:session_id` — archive + purge a session (404 if missing/non-owner).
-- `GET|POST|DELETE /api/v1/workspace/*` — list/upload/download/read/delete workspace files.
-- `GET /api/v1/mcp/tools` — list discovered MCP tools.
-- `GET /api/v1/skills` — list skills visible to the authenticated user.
-- `GET /healthz` — unauthenticated health check.
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/v1/auth/login` | Public; returns JWT. |
+| `GET`  | `/api/v1/sessions` | List sessions. |
+| `POST` | `/api/v1/sessions` | Create session. |
+| `GET`  | `/api/v1/sessions/:session_id/messages` | Paginated history. |
+| `POST` | `/api/v1/sessions/:session_id/messages` | Send a message; returns SSE stream. |
+| `DELETE` | `/api/v1/sessions/:session_id` | Archive + purge; 404 if missing/non-owner. |
+| `GET`  | `/api/v1/workspace/files` | List workspace files. |
+| `POST` | `/api/v1/workspace/upload` | Multipart upload. |
+| `GET`  | `/api/v1/workspace/files/*path` | Download file. |
+| `GET`  | `/api/v1/workspace/files/*path/content` | Read file text content. |
+| `GET`  | `/api/v1/workspace/files/download/*path?token=<jwt>` | Token-authenticated download for browser-native elements. |
+| `DELETE` | `/api/v1/workspace/files/*path` | Delete file or directory. |
+| `GET`  | `/api/v1/mcp/tools` | List discovered MCP tools. |
+| `GET`  | `/api/v1/skills` | List skills visible to the authenticated user. |
+| `GET`  | `/healthz` | Unauthenticated health check. |
+
+See `api/openapi.yaml` for full request/response schemas.
 
 A chat request flows: `SessionHandler.SendMessage` → `MessageService.RecoverMessages` (load history) + `AppendMessage` → `OrchestratorRunner.Handle` → SSE writer `stream.WriteSSE`. Title generation runs asynchronously after the first assistant response.
+
+### Workspace file routing
+
+Because gin does not allow a static `/download` segment alongside a `/*path` wildcard at the same tree node, workspace file GET routes share a single catch-all at `/api/v1/workspace/files/*path`. The handler dispatches internally:
+
+- `.../files/download/*path` → `WorkspaceHandler.TokenDownload` (query-token auth via `QueryTokenAuthMW`).
+- `.../files/*path/content` → `WorkspaceHandler.Content` (text content; rejects binary files).
+- `.../files/*path` → `WorkspaceHandler.Download` (header auth).
+
+DELETE uses the same wildcard pattern under a different method. The token-download endpoint exists so browser-native elements (`<a download>`, `<img>`, PDF.js) can access workspace files without custom `Authorization` headers.
 
 ### Agent orchestration
 
@@ -140,7 +163,7 @@ Built-in tool families:
 - `internal/tool/xizhi/` — workspace file tools (`xizhi_read_file`, `xizhi_write_file`, `xizhi_modify_file`, `xizhi_list_files`, `xizhi_tree`, `xizhi_glob_files`). Each closure is scoped to the requesting user's workspace root (`data/{userID}/workspace`). `validatePath` rejects absolute paths, `..`, and symlink escapes. `modify_file` requires a unique old-content match. Landlock provides defense-in-depth on Linux.
 - `internal/tool/webfetch/` — `webfetch` HTTP fetch tool.
 - `internal/tool/executor/` — sandboxed command execution (`bash`, `python`). Only available on Linux when `bwrap` (bubblewrap) is installed. Each invocation runs in a fresh user/mount/pid/network namespace, binds `data/{userID}/workspace` to `/workspace`, clears the environment and re-injects only variables matching `allowed_env_patterns`, and subjects commands to a configured timeout and `max_output_bytes` cap. Network access is disabled by default (`--unshare-net`). Every execution emits an audit log entry; dangerous keywords (`rm`, `curl`, `wget`, `sudo`, `sshd`) trigger a warning log but do not block execution.
-- `internal/tool/luban/` — skill management tools: `luban_list_skills`, `luban_read_skill`, and `luban_install_skill`. `luban_install_skill` `git clone`s a GitHub repo (`--depth 1`) or downloads a single `SKILL.md` (≤500KB) into the requesting user's `data/{userID}/skills/` dir. These are registered only when an agent's config references one of them (`needsLubanTools` in `main.go`).
+- `internal/tool/luban/` — skill management tools: `luban_list_skills`, `luban_read_skill`, and `luban_install_skill`. `luban_install_skill` `git clone`s a GitHub repo (`--depth 1`) or downloads a single `SKILL.md` (≤500KB) into the requesting user's `data/{userID}/skills/` dir. These are registered only when an agent's config explicitly lists one of them (`needsLubanTools` in `main.go`).
 - `internal/tool/skill/` — legacy `read_skill` loader plus the shared `skill.Loader` (used by luban). `read_skill` is registered only for backward compatibility when an agent explicitly lists it; new configs should use `luban_read_skill`.
 - `internal/tool/mcpclient/` — external MCP client. Supports `sse`, `stdio`, and Streamable `http` transports. Discovered tools are registered with an optional prefix to avoid collisions.
 
@@ -174,7 +197,6 @@ Writes to Redis are best-effort; writes to FS are synchronous; writes to MySQL a
 `internal/store/mysql/message.go` implements cursor-based pagination with a composite cursor `(msg_time, msg_index, id)` clamped to `[1, 200]` items per page.
 
 Each message row carries an `event_type` column. Reasoning/thinking output is persisted as ordinary rows with `event_type='reasoning'` (no separate column), so it survives reloads and is replayed into multi-turn context. SQL migrations live in `migrations/`; `docker compose` mounts the whole directory into MySQL's `/docker-entrypoint-initdb.d`, so files run alphabetically on first init. `migrations/008_deletion_archive.sql` creates `*_deleted` mirror tables (`users_deleted`, `sessions_deleted`, `titles_deleted`, `messages_deleted`) that archive rows verbatim before a session is purged — `SessionService.DeleteSession` copies the session/titles/messages into them in a single transaction, then deletes the live `sessions` row (cascade clears titles/messages) and removes the warm-tier FS file. The mirrors carry no foreign keys and `messages_deleted.id` is a plain `BIGINT` preserving the source id; `users_deleted` is scaffolding, not yet written. Redis cache is intentionally not cleared on delete (reads re-validate ownership against MySQL first, so stale keys are unreachable until TTL).
-
 
 ### Frontend
 
