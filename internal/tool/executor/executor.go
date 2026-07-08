@@ -26,14 +26,24 @@ const (
 
 // Tools bundles the dependencies required by the executor tools.
 type Tools struct {
-	cfg         config.ExecutorConfig
-	workspaceFn func(userID string) string
+	cfg             config.ExecutorConfig
+	workspaceFn     func(userID string) string
+	globalSkillsDir string
+	userSkillsFn    func(userID string) string
 }
 
-// NewTools creates an executor tool bundle backed by cfg and workspaceFn.
-// workspaceFn maps a userID to the absolute path of that user's workspace.
-func NewTools(cfg config.ExecutorConfig, workspaceFn func(userID string) string) *Tools {
-	return &Tools{cfg: cfg, workspaceFn: workspaceFn}
+// NewTools creates an executor tool bundle backed by cfg, workspaceFn,
+// globalSkillsDir and userSkillsFn. workspaceFn and userSkillsFn map a userID
+// to the absolute path of that user's workspace and skills directory,
+// respectively. globalSkillsDir is the project-level skills directory shared
+// across all users.
+func NewTools(cfg config.ExecutorConfig, workspaceFn, userSkillsFn func(userID string) string, globalSkillsDir string) *Tools {
+	return &Tools{
+		cfg:             cfg,
+		workspaceFn:     workspaceFn,
+		globalSkillsDir: globalSkillsDir,
+		userSkillsFn:    userSkillsFn,
+	}
 }
 
 // RegisterAll registers the bash and python tools into r when they are enabled
@@ -70,4 +80,18 @@ func (t *Tools) userWorkspace(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("executor: workspace resolver not configured")
 	}
 	return t.workspaceFn(userID), nil
+}
+
+// userSkillsDir resolves the per-user skills directory for the user attached
+// to ctx. It returns an error when no userID is present or the configured
+// userSkillsFn is nil.
+func (t *Tools) userSkillsDir(ctx context.Context) (string, error) {
+	userID := skill.UserIDFromContext(ctx)
+	if userID == "" {
+		return "", fmt.Errorf("executor: userID missing from context")
+	}
+	if t.userSkillsFn == nil {
+		return "", fmt.Errorf("executor: user skills resolver not configured")
+	}
+	return t.userSkillsFn(userID), nil
 }

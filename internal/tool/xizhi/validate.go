@@ -76,14 +76,14 @@ func validatePath(workspaceRoot, relPath string) (string, error) {
 		return "", fmt.Errorf("%w: path is empty", ErrPathOutsideWorkspace)
 	}
 	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("%w: absolute paths are not allowed", ErrPathOutsideWorkspace)
+		return "", fmt.Errorf("%w: absolute paths are not allowed; use a relative path such as tmp/hello.txt or src/main.go", ErrPathOutsideWorkspace)
 	}
 
 	cleaned := filepath.Clean(relPath)
 	// Reject any leading ".." segment. filepath.Clean collapses "../foo" into
 	// "../foo" and "/../" into "/", so a leading ".." is the traversal signal.
 	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: path traversal rejected", ErrPathOutsideWorkspace)
+		return "", fmt.Errorf("%w: path traversal rejected; use a relative path such as src/main.go", ErrPathOutsideWorkspace)
 	}
 
 	// Absolute form of the requested path; returned to the caller untouched.
@@ -128,7 +128,7 @@ func validatePath(workspaceRoot, relPath string) (string, error) {
 	}
 
 	if !isWithin(resolvedAbs, resolvedRoot) {
-		return "", fmt.Errorf("%w: %q resolves outside workspace", ErrPathOutsideWorkspace, relPath)
+		return "", fmt.Errorf("%w: %q resolves outside workspace; use a relative path such as tmp/hello.txt or src/main.go", ErrPathOutsideWorkspace, relPath)
 	}
 	return returnPath, nil
 }

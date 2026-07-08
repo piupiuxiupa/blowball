@@ -13,7 +13,9 @@ package agent
 import (
 	"context"
 
+	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/stream"
+	"go.uber.org/zap"
 )
 
 // Agent is the runtime contract every agent satisfies. Run executes one
@@ -115,6 +117,28 @@ type LLMResponse struct {
 	ReasoningContent string // thinking/reasoning content from OpenAI reasoning models
 	ToolCalls        []ToolCall
 	Usage            Usage
+}
+
+// shouldDispatchToolCalls reports whether a model response that carries tool_calls
+// should trigger a tool round. OpenAI's native API uses finish_reason="tool_calls"
+// when emitting tool_calls, but some OpenAI-compatible endpoints report
+// finish_reason="stop" (or an empty reason) even though tool_calls are present.
+// We dispatch whenever tool_calls are present and the finish_reason is either
+// "tool_calls" or "stop"; other reasons (length, content_filter, etc.) indicate
+// truncation or filtering and are treated as terminal.
+func shouldDispatchToolCalls(resp LLMResponse) bool {
+	if len(resp.ToolCalls) == 0 {
+		return false
+	}
+	switch resp.FinishReason {
+	case "tool_calls", "stop":
+		return true
+	}
+	logger.L().Warn("model returned tool_calls with unexpected finish_reason; treating as terminal",
+		zap.String("finish_reason", resp.FinishReason),
+		zap.Int("tool_calls", len(resp.ToolCalls)),
+	)
+	return false
 }
 
 // Sub-agent invocation tool names. Confucius intercepts these in its dispatch

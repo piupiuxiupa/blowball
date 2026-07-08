@@ -227,6 +227,69 @@ func TestConfucius_CallsSubAgent_ThenSummarizes(t *testing.T) {
 	assert.Equal(t, "call_1", toolMsg.ToolCallID)
 }
 
+// TestConfucius_DispatchesToolCallsOnStopFinishReason verifies that Confucius
+// continues the tool round even when an OpenAI-compatible endpoint reports
+// finish_reason="stop" while still emitting tool_calls. Some third-party APIs
+// do not set finish_reason="tool_calls" correctly.
+func TestConfucius_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	chongzhi := &fakeAgent{
+		name:    "Chongzhi",
+		content: "C_RESULT",
+		tokens:  []string{"C"},
+		usage:   Usage{PromptTokens: 3, CompletionTokens: 1, TotalTokens: 4},
+	}
+	client := newFake(
+		fakeResponse{
+			content:      "让我先派一个子代理。",
+			tokens:       []string{"让我", "先派", "一个", "子代理", "。"},
+			finishReason: "stop", // non-compliant endpoint
+			toolCalls: []ToolCall{{
+				ID:       "call_stop",
+				Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"do it"}`},
+			}},
+			usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+		},
+		fakeResponse{
+			content:      "combined result",
+			tokens:       []string{"combined", " result"},
+			finishReason: "stop",
+			usage:        Usage{PromptTokens: 20, CompletionTokens: 2, TotalTokens: 22},
+		},
+	)
+	c := newTestConfucius(t, client, map[string]Agent{
+		ToolInvokeChongzhi: chongzhi,
+		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+	})
+
+	events, content, usage, err := runConfuciusAndCollect(t, c, []Message{
+		{Role: "user", Content: "go"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "combined result", content)
+	assert.Equal(t, 1, chongzhi.callCount(), "Chongzhi must be invoked despite finish_reason=stop")
+	assert.Equal(t, 41, usage.TotalTokens)
+
+	sawToolCall := false
+	for _, e := range events {
+		if e.Type == stream.EventToolCall && e.Content == ToolInvokeChongzhi {
+			sawToolCall = true
+		}
+	}
+	assert.True(t, sawToolCall, "expected tool_call event for invoke_chongzhi")
+
+	// Round 2 must include the prior assistant content plus the tool result.
+	last := client.lastRequest()
+	var toolMsg *Message
+	for i := range last.Messages {
+		if last.Messages[i].Role == "tool" && last.Messages[i].ToolCallID == "call_stop" {
+			toolMsg = &last.Messages[i]
+		}
+	}
+	require.NotNil(t, toolMsg)
+	assert.Equal(t, "C_RESULT", toolMsg.Content)
+}
+
 func TestConfucius_ParallelToolCalls(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	chongzhi := &fakeAgent{

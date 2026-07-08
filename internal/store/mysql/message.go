@@ -117,7 +117,7 @@ const listMessagesPagedDescSQL = `
 SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time
 FROM messages
 WHERE session_id = ?
-  AND (msg_time, msg_index, id) < (?, ?, ?)
+  AND (msg_time, msg_index, id) > (?, ?, ?)
 ORDER BY msg_time DESC, msg_index DESC, id DESC
 LIMIT ?
 `

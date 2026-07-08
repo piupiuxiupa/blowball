@@ -61,6 +61,11 @@ func (l *Loader) WithMaxSize(size int64) *Loader {
 // MaxSize returns the configured size limit.
 func (l *Loader) MaxSize() int64 { return l.maxSize }
 
+// GlobalDir returns the project-level skills directory configured at loader
+// construction time. It is used by callers that need to expose the global
+// skills path to agents or to sandbox mounts.
+func (l *Loader) GlobalDir() string { return l.globalDir }
+
 // List returns all skills available to userID, with user skills overriding
 // global skills of the same name. The result is sorted by name.
 func (l *Loader) List(userID string) []Skill {

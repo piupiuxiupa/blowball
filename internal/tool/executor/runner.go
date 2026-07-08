@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -42,7 +44,17 @@ func (t *Tools) run(ctx context.Context, toolName string, cfg config.ExecutorToo
 		return nil, err
 	}
 
-	bwrapArgs := buildBwrapArgs(workspaceRoot, cfg)
+	userSkillsDir, err := t.userSkillsDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	workspaceTmp := filepath.Join(workspaceRoot, "tmp")
+	if err := os.MkdirAll(workspaceTmp, 0o755); err != nil {
+		return nil, fmt.Errorf("executor: create workspace tmp: %w", err)
+	}
+
+	bwrapArgs := buildBwrapArgs(workspaceRoot, workspaceTmp, t.globalSkillsDir, userSkillsDir, cfg)
 	bwrapArgs = append(bwrapArgs, sandboxArgs...)
 
 	if toolName == ToolBash {

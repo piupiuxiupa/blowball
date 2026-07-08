@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,9 @@ func TestValidate_PathTraversal_Blocked(t *testing.T) {
 			if !errors.Is(err, ErrPathOutsideWorkspace) {
 				t.Fatalf("validatePath(%q) err = %v, want wrapping ErrPathOutsideWorkspace", rel, err)
 			}
+			if !strings.Contains(err.Error(), "use a relative path") {
+				t.Fatalf("validatePath(%q) err = %q, want guidance text", rel, err.Error())
+			}
 		})
 	}
 }
@@ -41,6 +45,9 @@ func TestValidate_AbsolutePath_Blocked(t *testing.T) {
 	}
 	if !errors.Is(err, ErrPathOutsideWorkspace) {
 		t.Fatalf("err = %v, want ErrPathOutsideWorkspace", err)
+	}
+	if !strings.Contains(err.Error(), "use a relative path") {
+		t.Fatalf("err = %q, want guidance text", err.Error())
 	}
 }
 

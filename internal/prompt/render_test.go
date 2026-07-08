@@ -10,22 +10,45 @@ import (
 
 func TestRenderSystemPrompt_EnvironmentOnly(t *testing.T) {
 	out, err := RenderSystemPrompt(RenderInput{
-		BasePrompt: "You are a helpful assistant.",
-		Workspace:  "/data/u-1/workspace",
-		UserID:     "u-1",
-		Platform:   "arm64",
-		OS:         "darwin",
-		Cutoff:     "August 2025",
+		BasePrompt:      "You are a helpful assistant.",
+		Workspace:       "/data/u-1/workspace",
+		GlobalSkillsDir: "/skills/global",
+		UserSkillsDir:   "/skills/user",
+		UserID:          "u-1",
+		Platform:        "arm64",
+		OS:              "darwin",
+		Cutoff:          "August 2025",
 	})
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "You are a helpful assistant.")
 	assert.Contains(t, out, "# Environment")
-	assert.Contains(t, out, "- Primary working directory: /data/u-1/workspace")
+	assert.Contains(t, out, "- Global skills directory: /skills/global")
+	assert.Contains(t, out, "- User skills directory: /skills/user")
 	assert.Contains(t, out, "- Platform: arm64")
 	assert.Contains(t, out, "- OS: darwin")
 	assert.Contains(t, out, "- User ID: u-1")
 	assert.Contains(t, out, "- Assistant knowledge cutoff: August 2025")
+	assert.NotContains(t, out, "- Workspace root: /data/u-1/workspace")
+}
+
+func TestRenderSystemPrompt_WorkspacePathConvention(t *testing.T) {
+	out, err := RenderSystemPrompt(RenderInput{
+		BasePrompt: "You are a helpful assistant.",
+		Workspace:  "/data/u-1/workspace",
+		UserID:     "u-1",
+		Platform:   "amd64",
+		OS:         "linux",
+		Cutoff:     "August 2025",
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "## Workspace path convention")
+	assert.Contains(t, out, "All `xizhi_*` paths must be relative to the workspace root")
+	assert.Contains(t, out, "`tmp/hello.txt`")
+	assert.Contains(t, out, "`/workspace`")
+	assert.Contains(t, out, "`xizhi_read_file`")
+	assert.NotContains(t, out, "/data/u-1/workspace")
 }
 
 func TestRenderSystemPrompt_Tools(t *testing.T) {
@@ -74,7 +97,9 @@ func TestRenderSystemPrompt_Skills(t *testing.T) {
 	assert.Contains(t, out, "Use luban_list_skills to discover skills")
 	assert.Contains(t, out, "luban_read_skill")
 	assert.Contains(t, out, "luban_install_skill")
-	assert.Contains(t, out, "Never use xizhi_* tools to access the skills directory.")
+	assert.Contains(t, out, "You may use the bash or python tools to read and execute files under the exposed skill directories.")
+	assert.Contains(t, out, "Skill directories are read-only")
+	assert.Contains(t, out, "never use xizhi_* tools to access or modify skill directories")
 	assert.NotContains(t, out, "call read_skill")
 }
 

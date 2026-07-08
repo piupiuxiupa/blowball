@@ -12,7 +12,7 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 		Network:            false,
 		AllowedEnvPatterns: []string{"PATH"},
 	}
-	args := buildBwrapArgs("/data/u1/workspace", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
 
 	required := []string{
 		"--unshare-user",
@@ -23,13 +23,15 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 		"--new-session",
 		"--proc", "/proc",
 		"--dev", "/dev",
-		"--tmpfs", "/tmp",
+		"--bind", "/data/u1/workspace/tmp", "/tmp",
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/lib", "/lib",
 		"--ro-bind", "/lib64", "/lib64",
 		"--ro-bind", "/etc", "/etc",
 		"--bind", "/data/u1/workspace", "/workspace",
+		"--ro-bind", "/skills/global", "/skills/global",
+		"--ro-bind", "/data/u1/skills", "/skills/user",
 		"--chdir", "/workspace",
 		"--unshare-net",
 		"--clearenv",
@@ -48,7 +50,7 @@ func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 		Network:            true,
 		AllowedEnvPatterns: []string{"PATH"},
 	}
-	args := buildBwrapArgs("/data/u1/workspace", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
 	if slices.Contains(args, "--unshare-net") {
 		t.Error("expected --unshare-net to be absent when network is enabled")
 	}
@@ -56,20 +58,52 @@ func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 
 func TestBuildBwrapArgsWorkspaceBinding(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/data/u1/workspace", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
 
-	idx := slices.Index(args, "--bind")
-	if idx == -1 || idx+2 >= len(args) {
-		t.Fatal("expected --bind flag with source and target")
+	found := false
+	for i := 0; i < len(args)-2; i++ {
+		if args[i] == "--bind" && args[i+1] == "/data/u1/workspace" && args[i+2] == "/workspace" {
+			found = true
+			break
+		}
 	}
-	if args[idx+1] != "/data/u1/workspace" || args[idx+2] != "/workspace" {
-		t.Errorf("expected workspace bind /data/u1/workspace /workspace, got %v", args[idx:idx+3])
+	if !found {
+		t.Errorf("expected workspace bind /data/u1/workspace /workspace in args, got %v", args)
+	}
+}
+
+func TestBuildBwrapArgsSkillDirectoryBindings(t *testing.T) {
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
+
+	cases := []struct {
+		flag, source, target string
+	}{
+		{"--ro-bind", "/skills/global", "/skills/global"},
+		{"--ro-bind", "/data/u1/skills", "/skills/user"},
+	}
+	for _, c := range cases {
+		idx := slices.Index(args, c.flag)
+		if idx == -1 || idx+2 >= len(args) {
+			t.Fatalf("expected %s flag with source and target", c.flag)
+		}
+		// Skip earlier ro-bind flags (host system dirs) to find the skill mounts.
+		found := false
+		for i := idx; i < len(args)-2; i++ {
+			if args[i] == c.flag && args[i+1] == c.source && args[i+2] == c.target {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s %s %s in args, got %v", c.flag, c.source, c.target, args)
+		}
 	}
 }
 
 func TestBuildBwrapArgsClearsEnv(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH", "HOME"}}
-	args := buildBwrapArgs("/data/u1/workspace", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
 
 	if !slices.Contains(args, "--clearenv") {
 		t.Error("expected --clearenv flag")

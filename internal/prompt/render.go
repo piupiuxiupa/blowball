@@ -26,13 +26,14 @@ type SkillInfo struct {
 
 // RenderInput is the plain-data input to RenderSystemPrompt.
 type RenderInput struct {
-	BasePrompt string
-	Workspace  string
-	SkillsDir  string
-	UserID     string
-	Platform   string
-	OS         string
-	Cutoff     string
+	BasePrompt      string
+	Workspace       string
+	GlobalSkillsDir string
+	UserSkillsDir   string
+	UserID          string
+	Platform        string
+	OS              string
+	Cutoff          string
 
 	Tools  []ToolInfo
 	Skills []SkillInfo
@@ -48,6 +49,9 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 		b.WriteString(strings.TrimSpace(input.BasePrompt))
 		b.WriteString("\n\n")
 	}
+
+	b.WriteString(renderWorkspaceConvention())
+	b.WriteString("\n\n")
 
 	b.WriteString(renderEnvironment(input))
 	b.WriteString("\n\n")
@@ -91,7 +95,7 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 		}
 		b.WriteString("</skills>\n\n")
 		b.WriteString("Use luban_list_skills to discover skills, luban_read_skill to load a skill's full instructions, and luban_install_skill to install a skill collection from a URL.\n")
-		b.WriteString("Never use xizhi_* tools to access the skills directory.\n")
+		b.WriteString("You may use the bash or python tools to read and execute files under the exposed skill directories. Skill directories are read-only; never use xizhi_* tools to access or modify skill directories.\n")
 		b.WriteString("\n")
 	}
 
@@ -100,11 +104,19 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 
 func renderEnvironment(input RenderInput) string {
 	return fmt.Sprintf(`# Environment
-- Skills directory: %s
+- Global skills directory: %s
+- User skills directory: %s
 - Platform: %s
 - OS: %s
 - User ID: %s
-- Assistant knowledge cutoff: %s`, input.SkillsDir, input.Platform, input.OS, input.UserID, input.Cutoff)
+- Assistant knowledge cutoff: %s`, input.GlobalSkillsDir, input.UserSkillsDir, input.Platform, input.OS, input.UserID, input.Cutoff)
+}
+
+func renderWorkspaceConvention() string {
+	return "## Workspace path convention\n" +
+		"- All `xizhi_*` paths must be relative to the workspace root. Use paths like `tmp/hello.txt` or `src/main.go`, not `/workspace/...` or absolute paths.\n" +
+		"- The `bash` and `python` sandboxes run with `/workspace` as the working directory.\n" +
+		"- The sandbox's `/tmp` is mapped to the workspace's `./tmp/` directory. Files written to `/tmp` persist at `tmp/` and can be read with `xizhi_read_file` using a relative path such as `tmp/hello.txt`."
 }
 
 func classifyTools(tools []ToolInfo) ([]ToolInfo, map[string][]ToolInfo) {

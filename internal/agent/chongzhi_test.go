@@ -208,6 +208,58 @@ func TestChongzhi_RunsXizhiTool(t *testing.T) {
 	assert.True(t, sawTool, "expected tool_call event for xizhi_write_file")
 }
 
+// TestChongzhi_DispatchesToolCallsOnStopFinishReason verifies that Chongzhi
+// dispatches tool_calls even when the finish_reason is "stop" rather than the
+// native "tool_calls" value.
+func TestChongzhi_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	fake := &fakeExecutor{name: "xizhi_write_file", result: map[string]any{"ok": true}}
+	reg := newChongzhiRegistryWithFake(t, fake)
+
+	client := newFake(
+		fakeResponse{
+			content:      "让我先写文件。",
+			tokens:       []string{"让我", "先写", "文件", "。"},
+			finishReason: "stop", // non-compliant endpoint
+			toolCalls: []ToolCall{{
+				ID:       "t1",
+				Function: ToolCallFunction{Name: "xizhi_write_file", Arguments: `{"path":"a.txt","content":"hi"}`},
+			}},
+		},
+		fakeResponse{
+			content:      "wrote the file",
+			finishReason: "stop",
+			tokens:       []string{"wrote", " file"},
+		},
+	)
+	c := newTestChongzhi(t, client, reg)
+
+	events, content, _, err := runChongzhiAndCollect(t, c, []Message{
+		{Role: "user", Content: "write a.txt"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "wrote the file", content)
+	require.Equal(t, 1, fake.callCount(), "xizhi_write_file must be invoked despite finish_reason=stop")
+
+	sawTool := false
+	for _, e := range events {
+		if e.Type == stream.EventToolCall && e.Content == "xizhi_write_file" {
+			sawTool = true
+		}
+	}
+	assert.True(t, sawTool, "expected tool_call event for xizhi_write_file")
+
+	// Round 2 must include the tool result fed back.
+	last := client.lastRequest()
+	var toolContent string
+	for _, m := range last.Messages {
+		if m.Role == "tool" && m.ToolCallID == "t1" {
+			toolContent = m.Content
+		}
+	}
+	assert.Contains(t, toolContent, `"ok":true`, "tool result must be JSON-marshaled into the tool message")
+}
+
 func TestChongzhi_FlatTopology_NoInvokeTools(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	fake := &fakeExecutor{name: "xizhi_read_file", result: ""}

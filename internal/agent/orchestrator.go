@@ -55,11 +55,13 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 		return nil, fmt.Errorf("agent factory: validate skills: %w", err)
 	}
 
-	chongzhi, err := f.buildChongzhi(workspaceRoot, skillsDir, userID)
+	globalSkillsDir := f.skillLoader.GlobalDir()
+
+	chongzhi, err := f.buildChongzhi(workspaceRoot, globalSkillsDir, skillsDir, userID)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build chongzhi: %w", err)
 	}
-	liang, err := f.buildLiang(workspaceRoot, skillsDir, userID)
+	liang, err := f.buildLiang(workspaceRoot, globalSkillsDir, skillsDir, userID)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build liang: %w", err)
 	}
@@ -67,31 +69,31 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    liang,
 	}
-	confucius, err := f.buildConfucius(workspaceRoot, skillsDir, userID, subAgents)
+	confucius, err := f.buildConfucius(workspaceRoot, globalSkillsDir, skillsDir, userID, subAgents)
 	if err != nil {
 		return nil, fmt.Errorf("agent factory: build confucius: %w", err)
 	}
 	return confucius, nil
 }
 
-func (f *orchestratorFactory) buildConfucius(workspaceRoot, skillsDir, userID string, subAgents map[string]Agent) (*Confucius, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confucius, workspaceRoot, skillsDir, userID)
+func (f *orchestratorFactory) buildConfucius(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]Agent) (*Confucius, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confucius, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
 	if err != nil {
 		return nil, err
 	}
 	return NewConfucius(cfg, f.client, reg, subAgents)
 }
 
-func (f *orchestratorFactory) buildChongzhi(workspaceRoot, skillsDir, userID string) (*Chongzhi, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, skillsDir, userID)
+func (f *orchestratorFactory) buildChongzhi(workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (*Chongzhi, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
 	if err != nil {
 		return nil, err
 	}
 	return NewChongzhi(cfg, f.client, reg)
 }
 
-func (f *orchestratorFactory) buildLiang(workspaceRoot, skillsDir, userID string) (*Liang, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, skillsDir, userID)
+func (f *orchestratorFactory) buildLiang(workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (*Liang, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +103,7 @@ func (f *orchestratorFactory) buildLiang(workspaceRoot, skillsDir, userID string
 // buildAgentRegistry creates a registry scoped to workspaceRoot containing the
 // tools this agent is allowed to use: built-ins listed in cfg.Tools, MCP tools
 // allowed by cfg.MCP, and luban skill tools when they are configured.
-func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, skillsDir, userID string) (*tool.Registry, config.AgentConfig, error) {
+func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
 	fullToolNames = append(fullToolNames, mcpToolNames...)
@@ -128,7 +130,7 @@ func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspa
 		}
 	}
 
-	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, skillsDir, userID)
+	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -171,17 +173,18 @@ func isLubanTool(name string) bool {
 }
 
 // renderSystemPrompt builds the complete system prompt for an agent.
-func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, skillsDir, userID string) (string, error) {
+func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (string, error) {
 	return prompt.RenderSystemPrompt(prompt.RenderInput{
-		BasePrompt: cfg.SystemPrompt,
-		Workspace:  workspaceRoot,
-		SkillsDir:  skillsDir,
-		UserID:     userID,
-		Platform:   runtime.GOARCH,
-		OS:         runtime.GOOS,
-		Cutoff:     "August 2025",
-		Tools:      f.collectTools(cfg),
-		Skills:     f.collectSkills(cfg),
+		BasePrompt:      cfg.SystemPrompt,
+		Workspace:       workspaceRoot,
+		GlobalSkillsDir: "/skills/global",
+		UserSkillsDir:   "/skills/user",
+		UserID:          userID,
+		Platform:        runtime.GOARCH,
+		OS:              runtime.GOOS,
+		Cutoff:          "August 2025",
+		Tools:           f.collectTools(cfg),
+		Skills:          f.collectSkills(cfg),
 	})
 }
 
@@ -290,6 +293,9 @@ func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Re
 	}
 	if serverTools == nil {
 		serverTools = make(map[string][]string)
+	}
+	if skillLoader == nil {
+		skillLoader = skill.NewLoader("", nil)
 	}
 	factory := &orchestratorFactory{
 		cfg:          cfg,

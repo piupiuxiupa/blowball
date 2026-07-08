@@ -143,7 +143,9 @@ func main() {
 		}
 		executorTools := executor.NewTools(cfg.Tools.Executor, func(userID string) string {
 			return fsStore.UserWorkspace(userID)
-		})
+		}, func(userID string) string {
+			return fsStore.UserSkills(userID)
+		}, "skills")
 		if err := executor.RegisterAll(reg, executorTools); err != nil {
 			log.Fatal("register executor tools failed", zap.Error(err))
 		}

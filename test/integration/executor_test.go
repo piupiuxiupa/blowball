@@ -34,9 +34,13 @@ func newRegistryWithExecutor(t *testing.T, tools *executor.Tools) *tool.Registry
 func newExecutorTools(t *testing.T, cfg config.ExecutorConfig) (*executor.Tools, string) {
 	t.Helper()
 	ws := t.TempDir()
+	globalSkills := t.TempDir()
+	userSkills := t.TempDir()
 	return executor.NewTools(cfg, func(userID string) string {
 		return ws
-	}), ws
+	}, func(userID string) string {
+		return userSkills
+	}, globalSkills), ws
 }
 
 func executorCtx(userID string) context.Context {
@@ -93,6 +97,33 @@ func TestExecutorPythonFile(t *testing.T) {
 	require.NoError(t, err)
 	m := res.(*executor.ExecutionResult)
 	require.Equal(t, "from file\n", m.Output)
+}
+
+func TestExecutorSkillDirectoryAccess(t *testing.T) {
+	if !executor.IsAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	ws := t.TempDir()
+	globalSkills := t.TempDir()
+	userSkills := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(globalSkills, "marker.txt"), []byte("global\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(userSkills, "marker.txt"), []byte("user\n"), 0o644))
+
+	tools := executor.NewTools(config.ExecutorConfig{
+		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
+	}, func(string) string { return ws }, func(string) string { return userSkills }, globalSkills)
+	reg := newRegistryWithExecutor(t, tools)
+
+	res, err := reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"cat /skills/global/marker.txt /skills/user/marker.txt"}`))
+	require.NoError(t, err)
+	m := res.(*executor.ExecutionResult)
+	require.Equal(t, "global\nuser\n", m.Output)
+
+	res, err = reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"touch /skills/global/forbidden.txt 2>/dev/null; echo $?"}`))
+	require.NoError(t, err)
+	m = res.(*executor.ExecutionResult)
+	require.Equal(t, "1\n", m.Output, "global skills directory should be read-only")
 }
 
 func TestExecutorWorkspaceIsolation(t *testing.T) {

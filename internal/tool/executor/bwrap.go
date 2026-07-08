@@ -34,9 +34,11 @@ func detectBwrap() bool {
 }
 
 // buildBwrapArgs constructs the bubblewrap argument list for a sandbox whose
-// root filesystem exposes the minimum required host directories read-only and
-// the user's workspace read-write at /workspace.
-func buildBwrapArgs(workspaceRoot string, cfg config.ExecutorToolConfig) []string {
+// root filesystem exposes the minimum required host directories read-only, the
+// user's workspace read-write at /workspace, the workspace's tmp directory
+// bound to /tmp, and the global and per-user skill directories read-only at
+// /skills/global and /skills/user.
+func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir string, cfg config.ExecutorToolConfig) []string {
 	args := []string{
 		"--unshare-user",
 		"--unshare-ipc",
@@ -46,13 +48,15 @@ func buildBwrapArgs(workspaceRoot string, cfg config.ExecutorToolConfig) []strin
 		"--new-session",
 		"--proc", "/proc",
 		"--dev", "/dev",
-		"--tmpfs", "/tmp",
+		"--bind", workspaceTmp, "/tmp",
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/lib", "/lib",
 		"--ro-bind", "/lib64", "/lib64",
 		"--ro-bind", "/etc", "/etc",
 		"--bind", workspaceRoot, "/workspace",
+		"--ro-bind", globalSkillsDir, "/skills/global",
+		"--ro-bind", userSkillsDir, "/skills/user",
 		"--chdir", "/workspace",
 	}
 

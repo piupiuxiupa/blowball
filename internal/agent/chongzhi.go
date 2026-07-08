@@ -118,7 +118,7 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 		}
 		round = append(round, assistantMsg)
 
-		if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) == 0 {
+		if !shouldDispatchToolCalls(resp) {
 			finalContent = resp.Content
 			if finalContent == "" {
 				finalContent = assistantText
