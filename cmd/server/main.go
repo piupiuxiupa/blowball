@@ -133,10 +133,10 @@ func main() {
 	xizhi.RegisterAll(reg, DataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
-	// 7b. Sandboxed bash/python execution. Only registered on Linux where bwrap
-	// is available; on other platforms enabled tools are ignored. If a tool is
-	// explicitly enabled but bwrap is missing on Linux, startup fails fast.
-	if cfg.Tools.Executor.Bash.Enabled || cfg.Tools.Executor.Python.Enabled {
+	// 7b. Sandboxed bash/python/pip execution. Only registered on Linux where
+	// bwrap is available; on other platforms enabled tools are ignored. If a tool
+	// is explicitly enabled but bwrap is missing on Linux, startup fails fast.
+	if cfg.Tools.Executor.Bash.Enabled || cfg.Tools.Executor.Python.Enabled || cfg.Tools.Executor.Pip.Enabled {
 		if !executor.IsAvailable() {
 			log.Fatal("executor tools enabled but bubblewrap (bwrap) is not available",
 				zap.String("platform", runtime.GOOS))

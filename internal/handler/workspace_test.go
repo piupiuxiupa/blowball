@@ -128,6 +128,95 @@ func TestList_Subdirectory(t *testing.T) {
 	assert.Equal(t, "main.go", resp.Files[0].Name)
 }
 
+// TestList_HiddenExcludedByDefault verifies hidden files and directories are
+// omitted when include_hidden is absent.
+func TestList_HiddenExcludedByDefault(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".hidden-dir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".hidden-file"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "visible.txt"), []byte("hello"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 1)
+	assert.Equal(t, "visible.txt", resp.Files[0].Name)
+}
+
+// TestList_IncludeHidden verifies hidden files and directories are returned
+// when include_hidden=true.
+func TestList_IncludeHidden(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".hidden-dir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".hidden-file"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "visible.txt"), []byte("hello"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?include_hidden=true", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 3)
+
+	names := make([]string, len(resp.Files))
+	for i, f := range resp.Files {
+		names[i] = f.Name
+	}
+	assert.ElementsMatch(t, []string{".hidden-dir", ".hidden-file", "visible.txt"}, names)
+
+	// Directories still sort before files.
+	assert.Equal(t, ".hidden-dir", resp.Files[0].Name)
+	assert.Equal(t, "dir", resp.Files[0].Type)
+}
+
+// TestList_IncludeHiddenOne verifies the numeric truthy form include_hidden=1
+// is accepted and returns hidden entries.
+func TestList_IncludeHiddenOne(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".hidden-file"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "visible.txt"), []byte("hello"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?include_hidden=1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 2)
+
+	names := make([]string, len(resp.Files))
+	for i, f := range resp.Files {
+		names[i] = f.Name
+	}
+	assert.ElementsMatch(t, []string{".hidden-file", "visible.txt"}, names)
+}
+
 // TestList_PathOutsideWorkspace_403 verifies that a path traversal attempt is
 // rejected with 403.
 func TestList_PathOutsideWorkspace_403(t *testing.T) {

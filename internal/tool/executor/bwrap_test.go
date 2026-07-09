@@ -101,6 +101,56 @@ func TestBuildBwrapArgsSkillDirectoryBindings(t *testing.T) {
 	}
 }
 
+func TestBuildBwrapArgsSetsPYTHONPATH(t *testing.T) {
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
+
+	found := false
+	for i := 0; i < len(args)-2; i++ {
+		if args[i] == "--setenv" && args[i+1] == "PYTHONPATH" && args[i+2] == "/workspace/.pip" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --setenv PYTHONPATH /workspace/.pip in args, got %v", args)
+	}
+}
+
+func TestBuildBwrapArgsAppendsPYTHONPATH(t *testing.T) {
+	t.Setenv("PYTHONPATH", "/usr/lib/python")
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH", "PYTHON*"}}
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
+
+	found := false
+	for i := 0; i < len(args)-2; i++ {
+		if args[i] == "--setenv" && args[i+1] == "PYTHONPATH" && args[i+2] == "/workspace/.pip:/usr/lib/python" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --setenv PYTHONPATH /workspace/.pip:/usr/lib/python in args, got %v", args)
+	}
+}
+
+func TestBuildBwrapArgsPrependsWhenPYTHONPATHAllowedButEmpty(t *testing.T) {
+	t.Setenv("PYTHONPATH", "")
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PYTHON*"}}
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)
+
+	found := false
+	for i := 0; i < len(args)-2; i++ {
+		if args[i] == "--setenv" && args[i+1] == "PYTHONPATH" && args[i+2] == "/workspace/.pip" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --setenv PYTHONPATH /workspace/.pip in args, got %v", args)
+	}
+}
+
 func TestBuildBwrapArgsClearsEnv(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH", "HOME"}}
 	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", cfg)

@@ -1,4 +1,4 @@
-// Package executor registers sandboxed bash and python command execution tools.
+// Package executor registers sandboxed bash, python and pip command execution tools.
 //
 // Each invocation runs inside a bubblewrap (bwrap) sandbox on Linux. The sandbox
 // isolates the command in its own user, mount, pid and (by default) network
@@ -22,6 +22,7 @@ import (
 const (
 	ToolBash   = "bash"
 	ToolPython = "python"
+	ToolPip    = "pip_install"
 )
 
 // Tools bundles the dependencies required by the executor tools.
@@ -46,10 +47,10 @@ func NewTools(cfg config.ExecutorConfig, workspaceFn, userSkillsFn func(userID s
 	}
 }
 
-// RegisterAll registers the bash and python tools into r when they are enabled
-// in cfg and the current platform supports bubblewrap. An error is returned if
-// a tool is enabled but cannot be registered (for example, bwrap is missing on
-// Linux).
+// RegisterAll registers the bash, python and pip_install tools into r when they
+// are enabled in cfg and the current platform supports bubblewrap. An error is
+// returned if a tool is enabled but cannot be registered (for example, bwrap is
+// missing on Linux).
 func RegisterAll(r *tool.Registry, tools *Tools) error {
 	if !available {
 		return nil
@@ -62,6 +63,11 @@ func RegisterAll(r *tool.Registry, tools *Tools) error {
 	}
 	if tools.cfg.Python.Enabled {
 		if err := registerPython(r, tools); err != nil {
+			return err
+		}
+	}
+	if tools.cfg.Pip.Enabled {
+		if err := registerPip(r, tools); err != nil {
 			return err
 		}
 	}

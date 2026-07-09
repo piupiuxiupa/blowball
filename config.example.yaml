@@ -78,6 +78,9 @@ agents:
       - xizhi_tree
       - xizhi_glob_files
       - webfetch
+      # - bash
+      # - python
+      # - pip_install   # requires tools.executor.pip.enabled: true
     mcp:
       servers: []
     skills: []
@@ -141,6 +144,34 @@ tools:
       max_output_bytes: 65536
       allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"]
       network: false
+    # Sandboxed Python package installation via pip (Linux only).
+    # Requires bwrap and network access. Installed packages are persisted under
+    # data/{userID}/workspace/.pip and are automatically available to the python
+    # tool via PYTHONPATH.
+    #
+    # Fields:
+    #   enabled              - required; set to true to register pip_install.
+    #   timeout              - optional; per-command timeout (default 120s).
+    #   max_output_bytes     - optional; combined stdout/stderr cap (default 65536).
+    #   allowed_env_patterns - optional; host env vars passed to the sandbox.
+    #   network              - optional; default true. Set to false to disable
+    #                          network access (--unshare-net).
+    #   index_url            - optional; PyPI mirror, e.g.
+    #                          https://pypi.tuna.tsinghua.edu.cn/simple
+    #   extra_index_urls     - optional; additional package indexes.
+    #   trusted_hosts        - optional; hostnames passed to --trusted-host for
+    #                          HTTP mirrors or self-signed HTTPS.
+    pip:
+      enabled: false
+      timeout: 120s
+      max_output_bytes: 65536
+      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"]
+      network: true
+      # index_url: https://pypi.tuna.tsinghua.edu.cn/simple
+      # extra_index_urls:
+      #   - https://extra.example.com/simple
+      # trusted_hosts:
+      #   - pypi.tuna.tsinghua.edu.cn
 
 # External MCP servers. Tools discovered from these servers are registered in
 # the process-wide tool registry and exposed through GET /api/v1/mcp/tools.

@@ -80,7 +80,7 @@ make run
 
 ### Executor tools (Linux only)
 
-The `bash` and `python` tools require [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) and an environment that allows unprivileged user namespaces. They are automatically skipped on macOS and Windows. To enable them on Linux:
+The `bash`, `python` and `pip_install` tools require [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) and an environment that allows unprivileged user namespaces. They are automatically skipped on macOS and Windows. To enable them on Linux:
 
 ```bash
 # Install bubblewrap (Debian/Ubuntu example)
@@ -93,9 +93,15 @@ sudo apt install bubblewrap
 #       enabled: true
 #     python:
 #       enabled: true
+#     pip:
+#       enabled: true
+#       # pip defaults to network: true because it needs to reach PyPI.
+#       # index_url: https://pypi.tuna.tsinghua.edu.cn/simple
+#       # trusted_hosts:
+#       #   - pypi.tuna.tsinghua.edu.cn
 ```
 
-If an executor tool is enabled but `bwrap` is missing, the server exits with a fatal error. Keep `enabled: false` (the default) to run without bubblewrap.
+`pip_install` runs `python3 -m pip install --target /workspace/.pip` inside the sandbox and adds `/workspace/.pip` to `PYTHONPATH`, so packages installed by the agent are immediately available to the `python` tool without manipulating `sys.path`. If an executor tool is enabled but `bwrap` is missing, the server exits with a fatal error. Keep `enabled: false` (the default) to run without bubblewrap.
 
 ## High-level architecture
 
@@ -162,7 +168,7 @@ Built-in tool families:
 
 - `internal/tool/xizhi/` — workspace file tools (`xizhi_read_file`, `xizhi_write_file`, `xizhi_modify_file`, `xizhi_list_files`, `xizhi_tree`, `xizhi_glob_files`). Each closure is scoped to the requesting user's workspace root (`data/{userID}/workspace`). `validatePath` rejects absolute paths, `..`, and symlink escapes. `modify_file` requires a unique old-content match. Landlock provides defense-in-depth on Linux.
 - `internal/tool/webfetch/` — `webfetch` HTTP fetch tool.
-- `internal/tool/executor/` — sandboxed command execution (`bash`, `python`). Only available on Linux when `bwrap` (bubblewrap) is installed. Each invocation runs in a fresh user/mount/pid/network namespace, binds `data/{userID}/workspace` to `/workspace`, clears the environment and re-injects only variables matching `allowed_env_patterns`, and subjects commands to a configured timeout and `max_output_bytes` cap. Network access is disabled by default (`--unshare-net`). Every execution emits an audit log entry; dangerous keywords (`rm`, `curl`, `wget`, `sudo`, `sshd`) trigger a warning log but do not block execution.
+- `internal/tool/executor/` — sandboxed command execution (`bash`, `python`, `pip_install`). Only available on Linux when `bwrap` (bubblewrap) is installed. Each invocation runs in a fresh user/mount/pid/network namespace, binds `data/{userID}/workspace` to `/workspace`, clears the environment and re-injects only variables matching `allowed_env_patterns`, and subjects commands to a configured timeout and `max_output_bytes` cap. Network access is disabled by default for `bash` and `python` (`--unshare-net`) but enabled by default for `pip_install`. Installed packages are written to `/workspace/.pip` and exposed to the `python` tool through `PYTHONPATH`. Every execution emits an audit log entry; dangerous keywords (`rm`, `curl`, `wget`, `sudo`, `sshd`) trigger a warning log but do not block execution.
 - `internal/tool/luban/` — skill management tools: `luban_list_skills`, `luban_read_skill`, and `luban_install_skill`. `luban_install_skill` `git clone`s a GitHub repo (`--depth 1`) or downloads a single `SKILL.md` (≤500KB) into the requesting user's `data/{userID}/skills/` dir. These are registered only when an agent's config explicitly lists one of them (`needsLubanTools` in `main.go`).
 - `internal/tool/skill/` — legacy `read_skill` loader plus the shared `skill.Loader` (used by luban). `read_skill` is registered only for backward compatibility when an agent explicitly lists it; new configs should use `luban_read_skill`.
 - `internal/tool/mcpclient/` — external MCP client. Supports `sse`, `stdio`, and Streamable `http` transports. Discovered tools are registered with an optional prefix to avoid collisions.

@@ -32,3 +32,21 @@ var schemaPython = json.RawMessage(`{
   ],
   "additionalProperties": false
 }`)
+
+var schemaPip = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "packages": {
+      "type": "array",
+      "description": "Python packages to install via pip (e.g. [\"requests\", \"numpy>=2.0\"]).",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "upgrade": {
+      "type": "boolean",
+      "description": "When true, pass --upgrade to install the latest versions."
+    }
+  },
+  "required": ["packages"],
+  "additionalProperties": false
+}`)

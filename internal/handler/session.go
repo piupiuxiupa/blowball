@@ -178,6 +178,11 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 		if errors.Is(res.err, context.Canceled) {
 			return
 		}
+		logger.L().Error("orchestrator failed",
+			zap.String("op", "handler.send_message"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(res.err))
 		return
 	}
 

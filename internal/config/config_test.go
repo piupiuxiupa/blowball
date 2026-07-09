@@ -634,6 +634,138 @@ tools:
 	}
 }
 
+func TestLoad_PipConfig(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+tools:
+  executor:
+    pip:
+      enabled: true
+      timeout: 90s
+      max_output_bytes: 32768
+      allowed_env_patterns: ["PATH", "PYTHON*"]
+      network: false
+      index_url: https://pypi.tuna.tsinghua.edu.cn/simple
+      extra_index_urls:
+        - https://extra.example.com/simple
+      trusted_hosts:
+        - pypi.tuna.tsinghua.edu.cn
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	pip := cfg.Tools.Executor.Pip
+	if !pip.Enabled {
+		t.Error("Tools.Executor.Pip.Enabled = false, want true")
+	}
+	if pip.Timeout != 90*time.Second {
+		t.Errorf("Tools.Executor.Pip.Timeout = %v, want 90s", pip.Timeout)
+	}
+	if pip.MaxOutputBytes != 32768 {
+		t.Errorf("Tools.Executor.Pip.MaxOutputBytes = %d, want 32768", pip.MaxOutputBytes)
+	}
+	if len(pip.AllowedEnvPatterns) != 2 || pip.AllowedEnvPatterns[0] != "PATH" {
+		t.Errorf("unexpected pip env patterns: %v", pip.AllowedEnvPatterns)
+	}
+	if pip.NetworkEnabled() {
+		t.Error("Tools.Executor.Pip.Network = true, want false")
+	}
+	if pip.IndexURL != "https://pypi.tuna.tsinghua.edu.cn/simple" {
+		t.Errorf("Tools.Executor.Pip.IndexURL = %q, want %q", pip.IndexURL, "https://pypi.tuna.tsinghua.edu.cn/simple")
+	}
+	if len(pip.ExtraIndexURLs) != 1 || pip.ExtraIndexURLs[0] != "https://extra.example.com/simple" {
+		t.Errorf("unexpected pip extra index URLs: %v", pip.ExtraIndexURLs)
+	}
+	if len(pip.TrustedHosts) != 1 || pip.TrustedHosts[0] != "pypi.tuna.tsinghua.edu.cn" {
+		t.Errorf("unexpected pip trusted hosts: %v", pip.TrustedHosts)
+	}
+}
+
+func TestLoad_PipConfigDefaults(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+tools:
+  executor:
+    pip:
+      enabled: true
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	pip := cfg.Tools.Executor.Pip
+	if pip.Timeout != 120*time.Second {
+		t.Errorf("Tools.Executor.Pip.Timeout default = %v, want 120s", pip.Timeout)
+	}
+	if pip.MaxOutputBytes != 65536 {
+		t.Errorf("Tools.Executor.Pip.MaxOutputBytes default = %d, want 65536", pip.MaxOutputBytes)
+	}
+	if !pip.NetworkEnabled() {
+		t.Error("Tools.Executor.Pip.Network default = false, want true")
+	}
+	if len(pip.AllowedEnvPatterns) == 0 {
+		t.Error("Tools.Executor.Pip.AllowedEnvPatterns should have defaults")
+	}
+}
+
+func TestPipToolConfig_NetworkEnabledDefaultsToTrue(t *testing.T) {
+	cfg := PipToolConfig{}
+	if !cfg.NetworkEnabled() {
+		t.Error("NetworkEnabled should default to true when Network is nil")
+	}
+
+	f := false
+	cfg.Network = &f
+	if cfg.NetworkEnabled() {
+		t.Error("NetworkEnabled should return false when Network is explicitly false")
+	}
+
+	tr := true
+	cfg.Network = &tr
+	if !cfg.NetworkEnabled() {
+		t.Error("NetworkEnabled should return true when Network is explicitly true")
+	}
+}
+
+func TestPipToolConfig_ToExecutorToolConfig(t *testing.T) {
+	f := false
+	cfg := PipToolConfig{
+		Enabled:            true,
+		Timeout:            90 * time.Second,
+		MaxOutputBytes:     32768,
+		AllowedEnvPatterns: []string{"PATH"},
+		Network:            &f,
+	}
+
+	exec := cfg.ToExecutorToolConfig()
+	if !exec.Enabled {
+		t.Error("Enabled mismatch")
+	}
+	if exec.Timeout != 90*time.Second {
+		t.Errorf("Timeout mismatch: %v", exec.Timeout)
+	}
+	if exec.MaxOutputBytes != 32768 {
+		t.Errorf("MaxOutputBytes mismatch: %d", exec.MaxOutputBytes)
+	}
+	if len(exec.AllowedEnvPatterns) != 1 || exec.AllowedEnvPatterns[0] != "PATH" {
+		t.Errorf("AllowedEnvPatterns mismatch: %v", exec.AllowedEnvPatterns)
+	}
+	if exec.Network {
+		t.Error("Network mismatch")
+	}
+}
+
 func TestConfig_ValidateAgentSkills(t *testing.T) {
 	cfg := &Config{
 		Agents: AgentsConfig{

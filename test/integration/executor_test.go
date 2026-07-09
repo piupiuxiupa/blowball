@@ -194,6 +194,59 @@ func TestExecutorTimeout(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestExecutorPipInstallAndImport(t *testing.T) {
+	if !executor.IsAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	tools, _ := newExecutorTools(t, config.ExecutorConfig{
+		Python: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
+		Pip:    config.PipToolConfig{Enabled: true, Timeout: 120 * time.Second, MaxOutputBytes: 65536},
+	})
+	reg := newRegistryWithExecutor(t, tools)
+
+	// Install a small, pure-Python package.
+	res, err := reg.Call(executorCtx("u1"), executor.ToolPip, json.RawMessage(`{"packages":["colorama"],"upgrade":false}`))
+	require.NoError(t, err)
+	m := res.(*executor.ExecutionResult)
+	require.Equal(t, 0, m.ExitCode, "pip install failed: %s", m.Output)
+
+	// Verify it is importable from the python tool without sys.path changes.
+	res, err = reg.Call(executorCtx("u1"), executor.ToolPython, json.RawMessage(`{"code":"import colorama; print(colorama.__version__)"}`))
+	require.NoError(t, err)
+	m = res.(*executor.ExecutionResult)
+	require.Equal(t, 0, m.ExitCode, "import failed: %s", m.Output)
+	require.NotEmpty(t, m.Output)
+}
+
+func TestExecutorPipInstallUsesMirror(t *testing.T) {
+	if !executor.IsAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	cfg := config.PipToolConfig{
+		Enabled:        true,
+		Timeout:        120 * time.Second,
+		MaxOutputBytes: 65536,
+		IndexURL:       "https://pypi.tuna.tsinghua.edu.cn/simple",
+		TrustedHosts:   []string{"pypi.tuna.tsinghua.edu.cn"},
+	}
+	// Network is enabled by default; explicit false should make pip fail to reach
+	// the configured mirror.
+	f := false
+	cfg.Network = &f
+
+	tools, _ := newExecutorTools(t, config.ExecutorConfig{
+		Pip: cfg,
+	})
+	reg := newRegistryWithExecutor(t, tools)
+
+	res, err := reg.Call(executorCtx("u1"), executor.ToolPip, json.RawMessage(`{"packages":["colorama"]}`))
+	require.NoError(t, err)
+	m := res.(*executor.ExecutionResult)
+	require.NotEqual(t, 0, m.ExitCode, "pip install should fail when network is disabled")
+}
+
 const (
 	defaultTimeout = 30 * time.Second
 	shortTimeout   = 1 * time.Second

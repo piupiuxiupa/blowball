@@ -45,9 +45,10 @@ type fileEntry struct {
 	UpdateTime string `json:"update_time"`
 }
 
-// List handles GET /api/v1/workspace/files[?path=<sub>]. Returns 200 with a
-// (possibly empty) array of file/dir entries sorted by name. A path that
-// resolves outside the workspace is rejected with 403.
+// List handles GET /api/v1/workspace/files[?path=<sub>][&include_hidden=<bool>].
+// Returns 200 with a (possibly empty) array of file/dir entries sorted by name.
+// Hidden entries (names beginning with ".") are excluded unless include_hidden
+// is true. A path that resolves outside the workspace is rejected with 403.
 func (h *WorkspaceHandler) List(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	tid := middleware.TraceIDFromCtx(c)
@@ -55,6 +56,7 @@ func (h *WorkspaceHandler) List(c *gin.Context) {
 
 	wsRoot := h.fsSvc.UserWorkspace(userID)
 	rel := c.Query("path")
+	includeHidden := parseBoolQuery(c.Query("include_hidden"))
 
 	target, err := resolveListTarget(wsRoot, rel)
 	if err != nil {
@@ -75,12 +77,16 @@ func (h *WorkspaceHandler) List(c *gin.Context) {
 
 	out := make([]fileEntry, 0, len(entries))
 	for _, e := range entries {
+		name := e.Name()
+		if !includeHidden && isHiddenName(name) {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
 		out = append(out, fileEntry{
-			Name:       e.Name(),
+			Name:       name,
 			Type:       fileType(e),
 			Size:       info.Size(),
 			UpdateTime: info.ModTime().UTC().Format(time.RFC3339),
@@ -426,6 +432,21 @@ func fileType(e os.DirEntry) string {
 		return "dir"
 	}
 	return "file"
+}
+
+// isHiddenName reports whether a file or directory name should be considered
+// hidden (starts with "."). This matches the definition used by the xizhi
+// file-discovery tools so the REST API and agent tools behave consistently.
+func isHiddenName(name string) bool {
+	return name != "" && name[0] == '.'
+}
+
+// parseBoolQuery parses a query parameter string as a boolean. It returns true
+// only for explicit truthy values ("true", "1"); everything else, including the
+// empty string, returns false. This avoids treating malformed values as errors.
+func parseBoolQuery(v string) bool {
+	s := strings.ToLower(strings.TrimSpace(v))
+	return s == "true" || s == "1"
 }
 
 // relPath returns relPath relative to wsRoot, falling back to abs on error.

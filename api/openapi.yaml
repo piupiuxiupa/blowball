@@ -37,13 +37,10 @@ components:
               example: invalid request body
     LoginRequest:
       type: object
-      required: [username, password]
+      required: [username]
       properties:
         username:
           type: string
-        password:
-          type: string
-          format: password
     LoginResponse:
       type: object
       required: [access_token, expire, token_type]
@@ -333,14 +330,14 @@ paths:
   /api/v1/auth/login:
     post:
       tags: [Auth]
-      summary: Exchange credentials for a JWT access token.
+      summary: Exchange a username for a JWT access token.
       security: []
       requestBody:
         required: true
         content:
           application/json:
             schema: {$ref: '#/components/schemas/LoginRequest'}
-            example: {username: alice, password: hunter2}
+            example: {username: alice}
       responses:
         '200':
           description: Successful login.
@@ -352,14 +349,15 @@ paths:
         '401':
           description: |
             Authentication failed. The `message` distinguishes the cause:
-            `user not found`, `invalid credentials`, or `user disabled`.
+            `user not found` or `user disabled`. Unexpected internal failures
+            collapse to a generic `unauthorized`.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
               examples:
                 userNotFound:    {value: {error: {code: UNAUTHORIZED, message: "user not found"}}}
-                invalidCreds:    {value: {error: {code: UNAUTHORIZED, message: "invalid credentials"}}}
                 userDisabled:    {value: {error: {code: UNAUTHORIZED, message: "user disabled"}}}
+                unauthorized:    {value: {error: {code: UNAUTHORIZED, message: "unauthorized"}}}
   /api/v1/sessions:
     get:
       tags: [Session]
@@ -516,6 +514,13 @@ paths:
           required: false
           schema: {type: string}
           description: Optional workspace-relative subdirectory. Defaults to the workspace root.
+        - name: include_hidden
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Whether to include hidden files and directories (names starting with '.'). Defaults to false.
       responses:
         '200':
           description: File/dir entries, sorted (directories first, then name).

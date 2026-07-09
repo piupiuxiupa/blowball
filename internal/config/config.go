@@ -88,22 +88,22 @@ type AgentMCPServerConfig struct {
 
 // AgentConfig describes a single agent's runtime settings.
 type AgentConfig struct {
-	Name           string         `yaml:"name"`
-	Model          string         `yaml:"model"`
-	SystemPrompt   string         `yaml:"system_prompt"`
-	MaxTokens      int            `yaml:"max_tokens"`
-	Tools          []string       `yaml:"tools"`
-	MCP            AgentMCPConfig `yaml:"mcp"`
-	Skills         []string       `yaml:"skills"`
-	Thinking       bool           `yaml:"thinking"`
-	ReasoningEffort string        `yaml:"reasoning_effort"`
+	Name            string         `yaml:"name"`
+	Model           string         `yaml:"model"`
+	SystemPrompt    string         `yaml:"system_prompt"`
+	MaxTokens       int            `yaml:"max_tokens"`
+	Tools           []string       `yaml:"tools"`
+	MCP             AgentMCPConfig `yaml:"mcp"`
+	Skills          []string       `yaml:"skills"`
+	Thinking        bool           `yaml:"thinking"`
+	ReasoningEffort string         `yaml:"reasoning_effort"`
 }
 
 // AgentsConfig holds the three blowball agents.
 type AgentsConfig struct {
-	Confucius  AgentConfig `yaml:"confucius"`
-	Chongzhi AgentConfig `yaml:"chongzhi"`
-	Liang    AgentConfig `yaml:"liang"`
+	Confucius AgentConfig `yaml:"confucius"`
+	Chongzhi  AgentConfig `yaml:"chongzhi"`
+	Liang     AgentConfig `yaml:"liang"`
 }
 
 // validate checks every agent's MCP server references point to a declared
@@ -177,6 +177,7 @@ type ExecutorToolConfig struct {
 type ExecutorConfig struct {
 	Bash   ExecutorToolConfig `yaml:"bash"`
 	Python ExecutorToolConfig `yaml:"python"`
+	Pip    PipToolConfig      `yaml:"pip"`
 }
 
 // DefaultExecutorToolConfig returns the recommended defaults for an executor
@@ -188,6 +189,52 @@ func DefaultExecutorToolConfig() ExecutorToolConfig {
 		MaxOutputBytes:     65536,
 		AllowedEnvPatterns: []string{"PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"},
 		Network:            false,
+	}
+}
+
+// PipToolConfig holds the per-tool settings for the pip_install executor tool.
+// It mirrors ExecutorToolConfig but defaults network to true because pip
+// requires network access in most deployments.
+type PipToolConfig struct {
+	Enabled            bool          `yaml:"enabled"`
+	Timeout            time.Duration `yaml:"timeout"`
+	MaxOutputBytes     int           `yaml:"max_output_bytes"`
+	AllowedEnvPatterns []string      `yaml:"allowed_env_patterns"`
+	Network            *bool         `yaml:"network"`
+	IndexURL           string        `yaml:"index_url"`
+	ExtraIndexURLs     []string      `yaml:"extra_index_urls"`
+	TrustedHosts       []string      `yaml:"trusted_hosts"`
+}
+
+// DefaultPipToolConfig returns the recommended defaults for pip_install.
+func DefaultPipToolConfig() PipToolConfig {
+	return PipToolConfig{
+		Enabled:            false,
+		Timeout:            120 * time.Second,
+		MaxOutputBytes:     65536,
+		AllowedEnvPatterns: []string{"PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"},
+		Network:            boolPtr(true),
+	}
+}
+
+// NetworkEnabled reports whether pip_install should have network access,
+// defaulting to true when the config leaves the field unset.
+func (p *PipToolConfig) NetworkEnabled() bool {
+	if p.Network == nil {
+		return true
+	}
+	return *p.Network
+}
+
+// ToExecutorToolConfig converts the pip-specific config into the generic
+// executor tool shape used by the sandbox runner.
+func (p *PipToolConfig) ToExecutorToolConfig() ExecutorToolConfig {
+	return ExecutorToolConfig{
+		Enabled:            p.Enabled,
+		Timeout:            p.Timeout,
+		MaxOutputBytes:     p.MaxOutputBytes,
+		AllowedEnvPatterns: p.AllowedEnvPatterns,
+		Network:            p.NetworkEnabled(),
 	}
 }
 
@@ -207,6 +254,27 @@ func (e *ExecutorToolConfig) ApplyDefaults() {
 	}
 }
 
+// ApplyDefaults fills zero-valued pip fields with the recommended defaults.
+func (p *PipToolConfig) ApplyDefaults() {
+	def := DefaultPipToolConfig()
+	if p.Timeout == 0 {
+		p.Timeout = def.Timeout
+	}
+	if p.MaxOutputBytes == 0 {
+		p.MaxOutputBytes = def.MaxOutputBytes
+	}
+	if len(p.AllowedEnvPatterns) == 0 {
+		p.AllowedEnvPatterns = def.AllowedEnvPatterns
+	}
+	if p.Network == nil {
+		p.Network = def.Network
+	}
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 // ToolsConfig groups all tool configuration.
 type ToolsConfig struct {
 	Xizhi    XizhiConfig    `yaml:"xizhi"`
@@ -221,17 +289,17 @@ type MCPConfig struct {
 
 // MCPServerConfig describes a single external MCP server.
 type MCPServerConfig struct {
-	Name           string            `yaml:"name"`
-	Transport      string            `yaml:"transport"`
-	URL            string            `yaml:"url"`
-	Command        string            `yaml:"command"`
-	Args           []string          `yaml:"args"`
-	Env            map[string]string `yaml:"env"`
-	Headers        map[string]string `yaml:"headers"`
-	Timeout        time.Duration     `yaml:"timeout"`
-	CallTimeout    time.Duration     `yaml:"call_timeout"`
-	Reconnect      bool              `yaml:"reconnect"`
-	Prefix         string            `yaml:"prefix"`
+	Name        string            `yaml:"name"`
+	Transport   string            `yaml:"transport"`
+	URL         string            `yaml:"url"`
+	Command     string            `yaml:"command"`
+	Args        []string          `yaml:"args"`
+	Env         map[string]string `yaml:"env"`
+	Headers     map[string]string `yaml:"headers"`
+	Timeout     time.Duration     `yaml:"timeout"`
+	CallTimeout time.Duration     `yaml:"call_timeout"`
+	Reconnect   bool              `yaml:"reconnect"`
+	Prefix      string            `yaml:"prefix"`
 }
 
 // LoggingConfig holds structured logging settings.
@@ -263,6 +331,7 @@ func Load(path string) (*Config, error) {
 
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Python.ApplyDefaults()
+	cfg.Tools.Executor.Pip.ApplyDefaults()
 
 	return &cfg, nil
 }
@@ -385,6 +454,7 @@ func (c *Config) ValidateAgentSkills(userID string, hasSkill func(name, userID s
 	}
 	return nil
 }
+
 // corresponding environment variable values. A reference with a default is
 // left as the default when the variable is unset; a reference without a
 // default becomes empty when unset, matching os.ExpandEnv semantics while

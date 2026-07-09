@@ -54,6 +54,11 @@ func (t *Tools) run(ctx context.Context, toolName string, cfg config.ExecutorToo
 		return nil, fmt.Errorf("executor: create workspace tmp: %w", err)
 	}
 
+	workspacePip := filepath.Join(workspaceRoot, ".pip")
+	if err := os.MkdirAll(workspacePip, 0o755); err != nil {
+		return nil, fmt.Errorf("executor: create workspace .pip: %w", err)
+	}
+
 	bwrapArgs := buildBwrapArgs(workspaceRoot, workspaceTmp, t.globalSkillsDir, userSkillsDir, cfg)
 	bwrapArgs = append(bwrapArgs, sandboxArgs...)
 

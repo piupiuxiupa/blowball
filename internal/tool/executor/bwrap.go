@@ -33,6 +33,11 @@ func detectBwrap() bool {
 	return true
 }
 
+// pipTargetPath is the in-sandbox location where pip_install writes packages.
+// It is bound to {workspaceRoot}/.pip on the host and prepended to PYTHONPATH
+// so the python tool can import installed packages without sys.path changes.
+const pipTargetPath = "/workspace/.pip"
+
 // buildBwrapArgs constructs the bubblewrap argument list for a sandbox whose
 // root filesystem exposes the minimum required host directories read-only, the
 // user's workspace read-write at /workspace, the workspace's tmp directory
@@ -65,7 +70,13 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir 
 	}
 
 	args = append(args, "--clearenv")
-	for k, v := range filterEnv(cfg.AllowedEnvPatterns) {
+	env := filterEnv(cfg.AllowedEnvPatterns)
+	if existing, ok := env["PYTHONPATH"]; ok && existing != "" {
+		env["PYTHONPATH"] = pipTargetPath + ":" + existing
+	} else {
+		env["PYTHONPATH"] = pipTargetPath
+	}
+	for k, v := range env {
 		args = append(args, "--setenv", k, v)
 	}
 
