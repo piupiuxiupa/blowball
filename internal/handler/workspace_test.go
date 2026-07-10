@@ -62,6 +62,7 @@ func newWSTestEnv(t *testing.T) *wsTestEnv {
 		}
 		h.Download(c)
 	})
+	r.PUT("/api/v1/workspace/files/*path", h.Rename)
 	r.DELETE("/api/v1/workspace/files/*path", h.Delete)
 	return &wsTestEnv{handler: h, engine: r, dataDir: dataDir, fsSvc: fsSvc}
 }
@@ -647,11 +648,13 @@ func TestTokenDownload_ProductionRouting(t *testing.T) {
 		SessionMessages:        func(*gin.Context) {},
 		SendMessage:            func(*gin.Context) {},
 		SessionDelete:          func(*gin.Context) {},
+		SessionUpdateTitle:     func(*gin.Context) {},
 		WorkspaceList:          h.List,
 		WorkspaceUpload:        h.Upload,
 		WorkspaceDownload:      h.Download,
 		WorkspaceContent:       h.Content,
 		WorkspaceDelete:        h.Delete,
+		WorkspaceRename:        h.Rename,
 		MCPTools:               func(*gin.Context) {},
 		SkillsList:             func(*gin.Context) {},
 	})
@@ -904,6 +907,277 @@ func TestDelete_NotFound_404(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+}
+
+// TestRename_File_Success renames a file within the workspace root.
+func TestRename_File_Success(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "old.md"), []byte("content"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/old.md",
+		strings.NewReader(`{"new_path":"new.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "old.md", resp.OldPath)
+	assert.Equal(t, "new.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "old.md"))
+	require.ErrorIs(t, err, os.ErrNotExist, "source must be gone")
+	data, err := os.ReadFile(filepath.Join(ws, "new.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "content", string(data))
+}
+
+// TestRename_Directory_Success renames a directory recursively.
+func TestRename_Directory_Success(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "old-dir", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "old-dir", "sub", "f.txt"), []byte("x"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/old-dir",
+		strings.NewReader(`{"new_path":"new-dir"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "old-dir", resp.OldPath)
+	assert.Equal(t, "new-dir", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "old-dir"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "new-dir", "sub", "f.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+// TestRename_MoveToSubdirectory moves a file into an existing subdirectory.
+func TestRename_MoveToSubdirectory(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "subdir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("move me"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a.md",
+		strings.NewReader(`{"new_path":"subdir/b.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "subdir/b.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "a.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "subdir", "b.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "move me", string(data))
+}
+
+// TestRename_DestinationExists_409 verifies no overwrite when destination exists.
+func TestRename_DestinationExists_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "src.md"), []byte("src"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "dst.md"), []byte("dst"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/src.md",
+		strings.NewReader(`{"new_path":"dst.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
+
+	// Source and destination are untouched.
+	srcData, err := os.ReadFile(filepath.Join(ws, "src.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "src", string(srcData))
+	dstData, err := os.ReadFile(filepath.Join(ws, "dst.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "dst", string(dstData))
+}
+
+// TestRename_SourceMissing_404 verifies renaming a missing source returns 404.
+func TestRename_SourceMissing_404(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/missing.md",
+		strings.NewReader(`{"new_path":"x.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "NOT_FOUND", body.Error.Code)
+}
+
+// TestRename_PathOutsideWorkspace_403 verifies traversal attempts for either
+// source or destination are rejected.
+func TestRename_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("a"), 0o644))
+
+	cases := []struct {
+		name    string
+		path    string
+		newPath string
+	}{
+		{"source outside", "../../etc/passwd", "x.md"},
+		{"destination outside", "a.md", "../../etc/passwd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut,
+				"/api/v1/workspace/files/"+tc.path,
+				strings.NewReader(`{"new_path":"`+tc.newPath+`"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			env.engine.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+			var body struct {
+				Error struct{ Code string `json:"code"` } `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "FORBIDDEN", body.Error.Code)
+		})
+	}
+}
+
+// TestRename_WorkspaceRoot_400 verifies the workspace root cannot be renamed.
+func TestRename_WorkspaceRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/.",
+		strings.NewReader(`{"new_path":"new-root"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+}
+
+// TestRename_MissingNewPath_400 verifies a missing or empty new_path is rejected.
+func TestRename_MissingNewPath_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("a"), 0o644))
+
+	cases := []string{
+		`{}`,
+		`{"new_path":""}`,
+		`{"new_path":"   "}`,
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest(http.MethodPut,
+			"/api/v1/workspace/files/a.md",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	}
+}
+
+// TestRename_NestedPath_EncodedSlashes verifies renaming a deeply nested file
+// via URL-encoded slashes (the frontend wire form) hits the right file and
+// leaves a root decoy untouched.
+func TestRename_NestedPath_EncodedSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub", "deep"), 0o755))
+	nested := filepath.Join(ws, "sub", "deep", "note.md")
+	rootDecoy := filepath.Join(ws, "note.md")
+	require.NoError(t, os.WriteFile(nested, []byte("nested"), 0o644))
+	require.NoError(t, os.WriteFile(rootDecoy, []byte("root"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/"+url.PathEscape("sub/deep/note.md"),
+		strings.NewReader(`{"new_path":"sub/deep/renamed.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(nested)
+	require.ErrorIs(t, err, os.ErrNotExist, "nested source must be gone")
+	_, err = os.Stat(rootDecoy)
+	require.NoError(t, err, "root decoy must remain")
+	data, err := os.ReadFile(filepath.Join(ws, "sub", "deep", "renamed.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested", string(data))
+}
+
+// TestRename_LiteralSlashes moves a file using literal slashes in the catch-all.
+func TestRename_LiteralSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a", "b", "c.txt"), []byte("c"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a/b/c.txt",
+		strings.NewReader(`{"new_path":"a/b/d.txt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(filepath.Join(ws, "a", "b", "c.txt"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "a", "b", "d.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "c", string(data))
+}
+
+// TestRename_CreateDestinationParent verifies a move into a not-yet-existing
+// subdirectory creates the parent directories.
+func TestRename_CreateDestinationParent(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "f.txt"), []byte("f"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/f.txt",
+		strings.NewReader(`{"new_path":"new/sub/f.txt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(ws, "new", "sub", "f.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "f", string(data))
 }
 
 // TestDelete_WorkspaceRoot_400 verifies a path that resolves to the workspace

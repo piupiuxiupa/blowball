@@ -16,10 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
+	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -125,6 +127,7 @@ func (m *handlerFakeMySQL) DeleteSession(_ context.Context, sessionID string) er
 	m.deleteSessionArg = sessionID
 	return m.deleteSessionErr
 }
+func (m *handlerFakeMySQL) UpdateSessionTime(_ context.Context, _ string) error { return nil }
 func (m *handlerFakeMySQL) ListSessionsWithTitle(_ context.Context, _ string) ([]mysqlstore.SessionWithTitle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,6 +139,13 @@ func (m *handlerFakeMySQL) ListSessionsWithTitle(_ context.Context, _ string) ([
 	return out, nil
 }
 func (m *handlerFakeMySQL) UpsertTitle(_ context.Context, t model.Title) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.upsertTitleCalls++
+	m.upsertTitleArg = t
+	return nil
+}
+func (m *handlerFakeMySQL) UpsertTitleManual(_ context.Context, t model.Title) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.upsertTitleCalls++
@@ -351,7 +361,8 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	deps := sessionDeps(mysql, redis, fs)
 	sessSvc := newSessionSvc(deps)
 	msgSvc := newMessageSvc(deps)
-	h := NewSessionHandler(sessSvc, msgSvc, nil, stub, "/tmp/blowball-test-data")
+	titleSvc := service.NewTitleService(nil, mysql, config.OpenAIConfig{Model: "title-model"})
+	h := NewSessionHandler(sessSvc, msgSvc, titleSvc, stub, "/tmp/blowball-test-data")
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -363,6 +374,7 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	r.GET("/api/v1/sessions", h.ListSessions)
 	r.GET("/api/v1/sessions/:session_id/messages", h.GetSessionMessages)
 	r.POST("/api/v1/sessions/:session_id/messages", h.SendMessage)
+	r.PATCH("/api/v1/sessions/:session_id", h.UpdateTitle)
 	r.DELETE("/api/v1/sessions/:session_id", h.DeleteSession)
 	return &sessionHandlerTestEnv{h: h, mysql: mysql, redis: redis, fs: fs, stub: stub, engine: r}
 }
@@ -1101,6 +1113,130 @@ func TestDeleteSession_LookupError_500(t *testing.T) {
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
 	assert.Equal(t, 0, env.mysql.deleteSessionCalls)
+}
+
+// TestUpdateTitle_Success verifies the owner can set a manual title and the
+// response echoes the sanitized title plus the refreshed update_time.
+func TestUpdateTitle_Success(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/sessions/sess-1",
+		strings.NewReader(`{"title":"  New Title  "}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp updateTitleResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "sess-1", resp.SessionID)
+	assert.Equal(t, "New Title", resp.Title)
+	_, err := time.Parse(time.RFC3339, resp.UpdateTime)
+	assert.NoError(t, err)
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 1, env.mysql.upsertTitleCalls)
+	assert.Equal(t, "New Title", env.mysql.upsertTitleArg.Title)
+	assert.True(t, env.mysql.upsertTitleArg.IsManual)
+}
+
+// TestUpdateTitle_TruncatesLongTitle verifies titles longer than 20 runes are
+// stored truncated and the truncated value is returned.
+func TestUpdateTitle_TruncatesLongTitle(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/sessions/sess-1",
+		strings.NewReader(`{"title":"`+strings.Repeat("x", 50)+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp updateTitleResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, strings.Repeat("x", 20), resp.Title)
+}
+
+// TestUpdateTitle_EmptyTitle_400 verifies whitespace-only titles are rejected.
+func TestUpdateTitle_EmptyTitle_400(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/sessions/sess-1",
+		strings.NewReader(`{"title":"   "}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+}
+
+// TestUpdateTitle_SessionNotFound_404 verifies updating a missing or unowned
+// session returns 404 without leaking existence.
+func TestUpdateTitle_SessionNotFound_404(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionByIDFound = nil
+
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/sessions/sess-missing",
+		strings.NewReader(`{"title":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "NOT_FOUND", body.Error.Code)
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 0, env.mysql.upsertTitleCalls)
+}
+
+// TestUpdateTitle_WrongOwner_404 verifies a user cannot update another user's
+// session title.
+func TestUpdateTitle_WrongOwner_404(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-1", UserID: "other-user"}
+
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/sessions/sess-1",
+		strings.NewReader(`{"title":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, 0, env.mysql.upsertTitleCalls)
+}
+
+// TestUpdateTitle_LookupError_500 verifies a store error during ownership
+// lookup surfaces as 500 (not 404).
+func TestUpdateTitle_LookupError_500(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionIDErr = errors.New("db down")
+
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/sessions/sess-1",
+		strings.NewReader(`{"title":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
 }
 
 // TestDeleteSession_PurgeError_500 verifies a purge failure surfaces as 500.

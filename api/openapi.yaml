@@ -232,6 +232,37 @@ components:
         path: {type: string}
         content: {type: string}
         size: {type: integer}
+    UpdateTitleRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          description: New session title (max 20 characters; longer values are truncated).
+    UpdateTitleResponse:
+      type: object
+      required: [session_id, title, update_time]
+      properties:
+        session_id: {type: string}
+        title: {type: string}
+        update_time:
+          type: string
+          format: date-time
+    RenameRequest:
+      type: object
+      required: [new_path]
+      properties:
+        new_path:
+          type: string
+          minLength: 1
+          description: Workspace-relative destination path.
+    RenameResponse:
+      type: object
+      required: [old_path, new_path]
+      properties:
+        old_path: {type: string}
+        new_path: {type: string}
     MCPTool:
       type: object
       required: [type, name, description, parameters]
@@ -294,6 +325,11 @@ components:
           schema: {$ref: '#/components/schemas/Error'}
     NotFound:
       description: Resource not found.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    AlreadyExists:
+      description: Target resource already exists.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -409,6 +445,38 @@ paths:
       responses:
         '204':
           description: Session deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+    patch:
+      tags: [Session]
+      summary: Update the title of a session owned by the authenticated user.
+      description: |
+        Sets a manual title for the session. Manual titles are not overwritten
+        by asynchronous AI title generation and the session's update_time is
+        refreshed so the session appears first in the list.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+          description: ID of the session to update.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateTitleRequest'}
+      responses:
+        '200':
+          description: Title updated successfully.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UpdateTitleResponse'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -700,6 +768,43 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+    put:
+      tags: [Workspace]
+      summary: Rename or move a workspace file or directory.
+      description: |
+        Renames or moves a file or directory within the user's workspace. The
+        destination path must not already exist (as either a file or directory);
+        if it does, the operation returns 409 without making any changes.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Workspace-relative source file or directory path (catch-all, may include `/`).
+          example: reports/old.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RenameRequest'}
+      responses:
+        '200':
+          description: Rename succeeded.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RenameResponse'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/AlreadyExists'
         '500':
           $ref: '#/components/responses/Internal'
   /api/v1/workspace/files/{path}/content:

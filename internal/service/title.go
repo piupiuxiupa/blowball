@@ -72,6 +72,15 @@ func (s *TitleService) generate(ctx context.Context, sessionID, userMsg, assista
 		log = log.With(zap.String("trace_id", tid))
 	}
 
+	// If the user has manually set the title, do not overwrite it.
+	existing, err := s.mysql.GetTitle(ctx, sessionID)
+	if err != nil {
+		log.Error("get title failed; proceeding with generation", zap.Error(err))
+	} else if existing != nil && existing.IsManual {
+		log.Info("title is manual; skipping AI generation")
+		return
+	}
+
 	title := s.callLLM(ctx, log, userMsg, assistantMsg)
 	title = sanitizeTitle(title, userMsg)
 
@@ -117,6 +126,25 @@ func (s *TitleService) callLLM(ctx context.Context, log *zap.Logger, userMsg, as
 	return resp.Content
 }
 
+// SetManualTitle sanitizes and persists a user-edited session title. It marks
+// the title as manual so subsequent AI title generation will not overwrite it,
+// and touches the session's update_time so the session appears first in the
+// list. The sanitized title is returned so the handler can echo it back.
+func (s *TitleService) SetManualTitle(ctx context.Context, sessionID string, title string) (string, error) {
+	title = sanitizeTitle(title, title)
+
+	tid := trace.FromContext(ctx)
+	if err := s.mysql.UpsertTitleManual(ctx, model.Title{
+		SessionID: sessionID,
+		Title:     title,
+		TraceID:   tid,
+		IsManual:  true,
+	}); err != nil {
+		return "", err
+	}
+	return title, s.mysql.UpdateSessionTime(ctx, sessionID)
+}
+
 // sanitizeTitle trims surrounding whitespace/quotes and truncates defensively
 // to maxTitleRunes runes. If the LLM output (post-trim) is empty, the first
 // maxTitleRunes runes of userMsg are used as the fallback per the spec's
@@ -126,7 +154,7 @@ func sanitizeTitle(raw, userMsg string) string {
 	t = strings.Trim(t, `"'`+"`")
 	t = strings.TrimSpace(t)
 	if t == "" {
-		t = userMsg
+		t = strings.TrimSpace(userMsg)
 	}
 	if utf8.RuneCountInString(t) <= maxTitleRunes {
 		return t

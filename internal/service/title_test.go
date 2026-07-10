@@ -12,6 +12,7 @@ import (
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/trace"
 )
 
@@ -102,6 +103,80 @@ func TestGenerateTitle_UpsertError_DoesNotPanic(t *testing.T) {
 		svc.GenerateTitle(context.Background(), sessionID, "u", "a")
 	})
 	require.Equal(t, 1, m.upsertTitleCalls)
+}
+
+func TestGenerateTitle_ManualTitle_SkipsLLM(t *testing.T) {
+	const sessionID = "s-manual"
+	m := &fakeMySQLStore{getTitleFound: &model.Title{SessionID: sessionID, Title: "User Title", IsManual: true}}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "AI Title"}}
+	svc := newTitleSvc(m, llm)
+
+	svc.GenerateTitle(context.Background(), sessionID, "user query", "assistant reply")
+
+	require.Equal(t, 0, m.upsertTitleCalls, "UpsertTitle must NOT be called for manual titles")
+	require.False(t, llm.gotCall, "LLM must NOT be called for manual titles")
+}
+
+func TestGenerateTitle_GetTitleError_StillGenerates(t *testing.T) {
+	const sessionID = "s-get-err"
+	m := &fakeMySQLStore{getTitleErr: errors.New("db down")}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "Fallback Gen"}}
+	svc := newTitleSvc(m, llm)
+
+	svc.GenerateTitle(context.Background(), sessionID, "user query", "assistant reply")
+
+	require.Equal(t, 1, m.upsertTitleCalls)
+	assert.Equal(t, "Fallback Gen", m.upsertTitleArg.Title)
+	assert.True(t, llm.gotCall)
+}
+
+func TestSetManualTitle_Success(t *testing.T) {
+	const sessionID = "s-set-manual"
+	m := &fakeMySQLStore{}
+	svc := newTitleSvc(m, nil)
+
+	ctx := trace.WithContext(context.Background(), "tid-set")
+	sanitized, err := svc.SetManualTitle(ctx, sessionID, "  My Manual Title  ")
+
+	require.NoError(t, err)
+	assert.Equal(t, "My Manual Title", sanitized)
+	require.Equal(t, 1, m.upsertTitleCalls)
+	assert.Equal(t, sessionID, m.upsertTitleArg.SessionID)
+	assert.Equal(t, "My Manual Title", m.upsertTitleArg.Title)
+	assert.True(t, m.upsertTitleArg.IsManual)
+	assert.Equal(t, "tid-set", m.upsertTitleArg.TraceID)
+}
+
+func TestSetManualTitle_TruncatesTo20Runes(t *testing.T) {
+	const sessionID = "s-truncate"
+	m := &fakeMySQLStore{}
+	svc := newTitleSvc(m, nil)
+
+	_, err := svc.SetManualTitle(context.Background(), sessionID, strings.Repeat("x", 50))
+
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("x", 20), m.upsertTitleArg.Title)
+}
+
+func TestSetManualTitle_EmptyFallsBackToEmpty(t *testing.T) {
+	const sessionID = "s-empty"
+	m := &fakeMySQLStore{}
+	svc := newTitleSvc(m, nil)
+
+	_, err := svc.SetManualTitle(context.Background(), sessionID, "   ")
+
+	require.NoError(t, err)
+	assert.Empty(t, m.upsertTitleArg.Title)
+}
+
+func TestSetManualTitle_UpsertError_ReturnsError(t *testing.T) {
+	const sessionID = "s-upsert-err"
+	m := &fakeMySQLStore{upsertTitleErr: errors.New("dup")}
+	svc := newTitleSvc(m, nil)
+
+	_, err := svc.SetManualTitle(context.Background(), sessionID, "title")
+
+	require.Error(t, err)
 }
 
 func TestGenerateTitle_PanicRecovered(t *testing.T) {

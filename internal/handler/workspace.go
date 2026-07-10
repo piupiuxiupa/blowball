@@ -338,6 +338,96 @@ func (h *WorkspaceHandler) Content(c *gin.Context) {
 	})
 }
 
+// renameRequest is the JSON body for PUT /api/v1/workspace/files/*path.
+type renameRequest struct {
+	NewPath string `json:"new_path"`
+}
+
+// renameResponse is the JSON body for PUT /api/v1/workspace/files/*path.
+type renameResponse struct {
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+}
+
+// Rename handles PUT /api/v1/workspace/files/*path. It renames or moves a file
+// or directory within the user's workspace. The destination must not already
+// exist; if it does the operation returns 409 without making any changes.
+func (h *WorkspaceHandler) Rename(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	var req renameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
+		return
+	}
+	if strings.TrimSpace(req.NewPath) == "" {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "new_path is required"))
+		return
+	}
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	relSrc := strings.TrimPrefix(c.Param("path"), "/")
+	relDst := req.NewPath
+
+	srcAbs, err := xizhi.ValidatePath(wsRoot, relSrc)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+	dstAbs, err := xizhi.ValidatePath(wsRoot, relDst)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	srcInfo, err := os.Stat(srcAbs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "source not found"))
+			return
+		}
+		logWS(ctx, "workspace.rename.stat", srcAbs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat source failed"))
+		return
+	}
+
+	// Refuse to rename the workspace root itself.
+	if rootInfo, rerr := os.Stat(wsRoot); rerr == nil && os.SameFile(srcInfo, rootInfo) {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "cannot rename the workspace root"))
+		return
+	}
+
+	if _, err := os.Stat(dstAbs); err == nil {
+		c.JSON(http.StatusConflict, errorBody("ALREADY_EXISTS", "destination already exists"))
+		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		logWS(ctx, "workspace.rename.stat", dstAbs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat destination failed"))
+		return
+	}
+
+	// Ensure the destination parent directory exists so moves into new
+	// subdirectories succeed.
+	if err := os.MkdirAll(filepath.Dir(dstAbs), 0o755); err != nil {
+		logWS(ctx, "workspace.rename.mkdir", filepath.Dir(dstAbs), err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create destination directory failed"))
+		return
+	}
+
+	if err := os.Rename(srcAbs, dstAbs); err != nil {
+		logWS(ctx, "workspace.rename.move", srcAbs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "rename failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, renameResponse{
+		OldPath: relPath(wsRoot, srcAbs),
+		NewPath: relPath(wsRoot, dstAbs),
+	})
+}
+
 // Delete handles DELETE /api/v1/workspace/files/*path. It removes a file or,
 // for a directory, recursively removes the directory and everything beneath it.
 // Path validation reuses xizhi.ValidatePath so traversal / symlink escape is

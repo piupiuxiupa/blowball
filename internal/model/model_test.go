@@ -20,7 +20,7 @@ var expectedDBTags = map[string][]string{
 		"update_time", "create_time",
 	},
 	"Title": {
-		"session_id", "title", "trace_id",
+		"session_id", "title", "trace_id", "is_manual",
 		"update_time", "create_time",
 	},
 	"Message": {
@@ -95,11 +95,11 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 		{
 			name: "Title",
 			target: Title{
-				SessionID: "s-1", Title: "hello", TraceID: "t-1",
+				SessionID: "s-1", Title: "hello", TraceID: "t-1", IsManual: true,
 				UpdateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 				CreateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 			},
-			want: []string{"session_id", "title", "trace_id", "update_time", "create_time"},
+			want: []string{"session_id", "title", "trace_id", "is_manual", "update_time", "create_time"},
 		},
 		{
 			name: "Message",

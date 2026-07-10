@@ -21,8 +21,10 @@ type MySQLStore interface {
 	CreateSession(ctx context.Context, sess model.Session) error
 	GetSessionByID(ctx context.Context, sessionID string) (*model.Session, error)
 	DeleteSession(ctx context.Context, sessionID string) error
+	UpdateSessionTime(ctx context.Context, sessionID string) error
 	ListSessionsWithTitle(ctx context.Context, userID string) ([]mysql.SessionWithTitle, error)
 	UpsertTitle(ctx context.Context, t model.Title) error
+	UpsertTitleManual(ctx context.Context, t model.Title) error
 	GetTitle(ctx context.Context, sessionID string) (*model.Title, error)
 	AppendMessage(ctx context.Context, m model.Message) (int64, error)
 	AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error)

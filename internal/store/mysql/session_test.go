@@ -38,6 +38,7 @@ func setupArchiveTestStore(t *testing.T) (*Store, func()) {
 			session_id  CHAR(36)     NOT NULL,
 			title       VARCHAR(128) NOT NULL,
 			trace_id    CHAR(36)     NOT NULL,
+			is_manual   BOOLEAN      NOT NULL DEFAULT FALSE,
 			update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			create_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (session_id),

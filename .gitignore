@@ -7,3 +7,4 @@ bin/
 /skills/
 .env
 tmp/
+.DS_Store

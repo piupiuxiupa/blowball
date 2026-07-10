@@ -281,18 +281,24 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())
 	handler.RegisterRoutes(r, handler.RouteDeps{
-		AuthMW:            middleware.AuthMiddleware(integrationTestSecret),
-		Login:             func(*gin.Context) {},
-		SessionList:       sessH.ListSessions,
-		SessionCreate:     sessH.CreateSession,
-		SessionMessages:   sessH.GetSessionMessages,
-		SendMessage:       sessH.SendMessage,
-		WorkspaceList:     wsH.List,
-		WorkspaceUpload:   wsH.Upload,
-		WorkspaceDownload: wsH.Download,
-		WorkspaceContent:  wsH.Content,
-		MCPTools:          mcpH.Tools,
-		SkillsList:        skillH.List,
+		AuthMW:                 middleware.AuthMiddleware(integrationTestSecret),
+		QueryTokenAuthMW:       middleware.QueryTokenAuthMiddleware(integrationTestSecret),
+		Login:                  func(*gin.Context) {},
+		SessionList:            sessH.ListSessions,
+		SessionCreate:          sessH.CreateSession,
+		SessionMessages:        sessH.GetSessionMessages,
+		SendMessage:            sessH.SendMessage,
+		SessionDelete:          sessH.DeleteSession,
+		SessionUpdateTitle:     sessH.UpdateTitle,
+		WorkspaceList:          wsH.List,
+		WorkspaceUpload:        wsH.Upload,
+		WorkspaceDownload:      wsH.Download,
+		WorkspaceTokenDownload: wsH.TokenDownload,
+		WorkspaceContent:       wsH.Content,
+		WorkspaceDelete:        wsH.Delete,
+		WorkspaceRename:        wsH.Rename,
+		MCPTools:               mcpH.Tools,
+		SkillsList:             skillH.List,
 	})
 	return r, mysqlFake
 }

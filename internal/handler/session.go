@@ -58,6 +58,18 @@ type sendMessageRequest struct {
 	Content string `json:"content"`
 }
 
+// updateTitleRequest is the JSON body for PATCH /api/v1/sessions/:session_id.
+type updateTitleRequest struct {
+	Title string `json:"title"`
+}
+
+// updateTitleResponse is the JSON body for PATCH /api/v1/sessions/:session_id.
+type updateTitleResponse struct {
+	SessionID  string `json:"session_id"`
+	Title      string `json:"title"`
+	UpdateTime string `json:"update_time"`
+}
+
 // SendMessage handles POST /api/v1/sessions/:session_id/messages.
 //
 // Flow:
@@ -423,4 +435,73 @@ func (h *SessionHandler) ListSessions(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"sessions": entries})
+}
+
+// UpdateTitle handles PATCH /api/v1/sessions/:session_id. It lets the session
+// owner set a manual title. Manual titles are not overwritten by asynchronous
+// AI title generation and the session's update_time is refreshed so the
+// session appears first in the list.
+func (h *SessionHandler) UpdateTitle(c *gin.Context) {
+	var req updateTitleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "title is required"))
+		return
+	}
+
+	userID := middleware.UserIDFromCtx(c)
+	sessionID := c.Param("session_id")
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	sess, err := h.sessSvc.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		logger.L().Error("session lookup failed",
+			zap.String("op", "handler.update_title"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "session lookup failed"))
+		return
+	}
+	if sess == nil || sess.UserID != userID {
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "session not found"))
+		return
+	}
+
+	sanitized, err := h.titleSvc.SetManualTitle(ctx, sessionID, req.Title)
+	if err != nil {
+		logger.L().Error("set manual title failed",
+			zap.String("op", "handler.update_title"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "update title failed"))
+		return
+	}
+
+	// Refresh the session row to obtain the touched update_time.
+	sess, err = h.sessSvc.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		logger.L().Error("session re-lookup after title update failed",
+			zap.String("op", "handler.update_title"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "update title failed"))
+		return
+	}
+	if sess == nil {
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "session not found"))
+		return
+	}
+
+	c.JSON(http.StatusOK, updateTitleResponse{
+		SessionID:  sessionID,
+		Title:      sanitized,
+		UpdateTime: sess.UpdateTime.UTC().Format(time.RFC3339),
+	})
 }

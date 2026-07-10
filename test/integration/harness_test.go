@@ -228,6 +228,15 @@ func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
 	return nil
 }
 
+func (m *memoryMySQL) UpdateSessionTime(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[sessionID]; ok {
+		s.UpdateTime = time.Now().UTC()
+	}
+	return nil
+}
+
 func (m *memoryMySQL) ListSessionsWithTitle(_ context.Context, userID string) ([]mysqlstore.SessionWithTitle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -251,6 +260,13 @@ func (m *memoryMySQL) ListSessionsWithTitle(_ context.Context, userID string) ([
 }
 
 func (m *memoryMySQL) UpsertTitle(_ context.Context, t model.Title) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.titles[t.SessionID] = t
+	return nil
+}
+
+func (m *memoryMySQL) UpsertTitleManual(_ context.Context, t model.Title) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.titles[t.SessionID] = t
@@ -492,12 +508,14 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            sessH.SendMessage,
 		SessionDelete:          sessH.DeleteSession,
+		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
 		WorkspaceUpload:        wsH.Upload,
 		WorkspaceDownload:      wsH.Download,
 		WorkspaceTokenDownload: wsH.TokenDownload,
 		WorkspaceContent:       wsH.Content,
 		WorkspaceDelete:        wsH.Delete,
+		WorkspaceRename:        wsH.Rename,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
 	})
@@ -571,12 +589,14 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            sessH.SendMessage,
 		SessionDelete:          sessH.DeleteSession,
+		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
 		WorkspaceUpload:        wsH.Upload,
 		WorkspaceDownload:      wsH.Download,
 		WorkspaceTokenDownload: wsH.TokenDownload,
 		WorkspaceContent:       wsH.Content,
 		WorkspaceDelete:        wsH.Delete,
+		WorkspaceRename:        wsH.Rename,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
 	})
@@ -668,12 +688,14 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            sessH.SendMessage,
 		SessionDelete:          sessH.DeleteSession,
+		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
 		WorkspaceUpload:        wsH.Upload,
 		WorkspaceDownload:      wsH.Download,
 		WorkspaceTokenDownload: wsH.TokenDownload,
 		WorkspaceContent:       wsH.Content,
 		WorkspaceDelete:        wsH.Delete,
+		WorkspaceRename:        wsH.Rename,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
 	})

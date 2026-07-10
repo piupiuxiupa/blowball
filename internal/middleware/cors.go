@@ -34,7 +34,7 @@ type CORSConfig struct {
 func DefaultCORSConfig() CORSConfig {
 	return CORSConfig{
 		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
 		AllowHeaders:     []string{"Content-Type", "Authorization"},
 		AllowCredentials: true,
 		MaxAge:           86400,

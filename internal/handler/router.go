@@ -44,6 +44,9 @@ type RouteDeps struct {
 	// SessionDelete handles DELETE /api/v1/sessions/:session_id. Required.
 	SessionDelete gin.HandlerFunc
 
+	// SessionUpdateTitle handles PATCH /api/v1/sessions/:session_id. Required.
+	SessionUpdateTitle gin.HandlerFunc
+
 	// WorkspaceList handles GET /api/v1/workspace/files. Required.
 	WorkspaceList gin.HandlerFunc
 
@@ -58,6 +61,9 @@ type RouteDeps struct {
 
 	// WorkspaceDelete handles DELETE /api/v1/workspace/files/*path. Required.
 	WorkspaceDelete gin.HandlerFunc
+
+	// WorkspaceRename handles PUT /api/v1/workspace/files/*path. Required.
+	WorkspaceRename gin.HandlerFunc
 
 	// MCPTools handles GET /api/v1/mcp/tools. Required.
 	MCPTools gin.HandlerFunc
@@ -84,6 +90,7 @@ const tokenDownloadPath = "download"
 //	POST /api/v1/auth/login                       (public)
 //	GET  /api/v1/sessions                         (auth)
 //	POST /api/v1/sessions                         (auth)
+//	PATCH /api/v1/sessions/:session_id            (auth)
 //	GET  /api/v1/sessions/:session_id/messages    (auth)
 //	POST /api/v1/sessions/:session_id/messages    (auth, SSE)
 //	DELETE /api/v1/sessions/:session_id           (auth)
@@ -92,6 +99,7 @@ const tokenDownloadPath = "download"
 //	GET  /api/v1/workspace/files/download/*path    (query token auth)
 //	GET  /api/v1/workspace/files/*path             (auth, download)
 //	GET  /api/v1/workspace/files/*path/content     (auth, text content)
+//	PUT  /api/v1/workspace/files/*path             (auth, rename file/dir)
 //	DELETE /api/v1/workspace/files/*path          (auth, delete file/dir)
 //	GET  /api/v1/mcp/tools                        (auth)
 //	GET  /api/v1/skills                           (auth)
@@ -120,6 +128,7 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.POST("/sessions", deps.SessionCreate)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
 	authed.POST("/sessions/:session_id/messages", deps.SendMessage)
+	authed.PATCH("/sessions/:session_id", deps.SessionUpdateTitle)
 	authed.DELETE("/sessions/:session_id", deps.SessionDelete)
 
 	authed.GET("/workspace/files", deps.WorkspaceList)
@@ -135,6 +144,9 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	// DELETE shares the same catch-all path under a different method; gin
 	// routes per method so this coexists with the GET catch-all above.
 	authed.DELETE("/workspace/files/*path", deps.WorkspaceDelete)
+
+	// PUT also shares the catch-all for rename/move operations.
+	authed.PUT("/workspace/files/*path", deps.WorkspaceRename)
 
 	authed.GET("/mcp/tools", deps.MCPTools)
 	authed.GET("/skills", deps.SkillsList)

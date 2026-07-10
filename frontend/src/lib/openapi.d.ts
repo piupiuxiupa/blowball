@@ -52,7 +52,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Exchange credentials for a JWT access token. */
+        /** Exchange a username for a JWT access token. */
         post: {
             parameters: {
                 query?: never;
@@ -64,8 +64,7 @@ export interface paths {
                 content: {
                     /**
                      * @example {
-                     *       "username": "alice",
-                     *       "password": "hunter2"
+                     *       "username": "alice"
                      *     }
                      */
                     "application/json": components["schemas"]["LoginRequest"];
@@ -84,7 +83,8 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 /**
                  * @description Authentication failed. The `message` distinguishes the cause:
-                 *     `user not found`, `invalid credentials`, or `user disabled`.
+                 *     `user not found` or `user disabled`. Unexpected internal failures
+                 *     collapse to a generic `unauthorized`.
                  */
                 401: {
                     headers: {
@@ -211,7 +211,43 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Update the title of a session owned by the authenticated user.
+         * @description Sets a manual title for the session. Manual titles are not overwritten
+         *     by asynchronous AI title generation and the session's update_time is
+         *     refreshed so the session appears first in the list.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description ID of the session to update. */
+                    session_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateTitleRequest"];
+                };
+            };
+            responses: {
+                /** @description Title updated successfully. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UpdateTitleResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                500: components["responses"]["Internal"];
+            };
+        };
         trace?: never;
     };
     "/api/v1/sessions/{session_id}/messages": {
@@ -320,6 +356,8 @@ export interface paths {
                 query?: {
                     /** @description Optional workspace-relative subdirectory. Defaults to the workspace root. */
                     path?: string;
+                    /** @description Whether to include hidden files and directories (names starting with '.'). Defaults to false. */
+                    include_hidden?: boolean;
                 };
                 header?: never;
                 path?: never;
@@ -538,7 +576,48 @@ export interface paths {
                 500: components["responses"]["Internal"];
             };
         };
-        put?: never;
+        /**
+         * Rename or move a workspace file or directory.
+         * @description Renames or moves a file or directory within the user's workspace. The
+         *     destination path must not already exist (as either a file or directory);
+         *     if it does, the operation returns 409 without making any changes.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description Workspace-relative source file or directory path (catch-all, may include `/`).
+                     * @example reports/old.md
+                     */
+                    path: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RenameRequest"];
+                };
+            };
+            responses: {
+                /** @description Rename succeeded. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RenameResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["AlreadyExists"];
+                500: components["responses"]["Internal"];
+            };
+        };
         post?: never;
         /**
          * Delete a workspace file or directory.
@@ -732,8 +811,6 @@ export interface components {
         };
         LoginRequest: {
             username: string;
-            /** Format: password */
-            password: string;
         };
         LoginResponse: {
             /** @description Signed JWT to send as `Bearer` in subsequent requests. */
@@ -878,6 +955,24 @@ export interface components {
             content: string;
             size: number;
         };
+        UpdateTitleRequest: {
+            /** @description New session title (max 20 characters; longer values are truncated). */
+            title: string;
+        };
+        UpdateTitleResponse: {
+            session_id: string;
+            title: string;
+            /** Format: date-time */
+            update_time: string;
+        };
+        RenameRequest: {
+            /** @description Workspace-relative destination path. */
+            new_path: string;
+        };
+        RenameResponse: {
+            old_path: string;
+            new_path: string;
+        };
         MCPTool: {
             /**
              * @example function
@@ -938,6 +1033,15 @@ export interface components {
         };
         /** @description Resource not found. */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Target resource already exists. */
+        AlreadyExists: {
             headers: {
                 [name: string]: unknown;
             };

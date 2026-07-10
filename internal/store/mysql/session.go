@@ -114,3 +114,12 @@ func (s *Store) ListSessionsWithTitle(ctx context.Context, userID string) ([]Ses
 	}
 	return rows, nil
 }
+
+// UpdateSessionTime touches the update_time of the given session so it bubbles
+// to the top of the session list (ordered by update_time DESC).
+func (s *Store) UpdateSessionTime(ctx context.Context, sessionID string) error {
+	const sql = `UPDATE sessions SET update_time = NOW() WHERE session_id = ?`
+	logQuery(ctx, "session.update_time", sql, sessionID)
+	_, err := s.db.ExecContext(ctx, sql, sessionID)
+	return err
+}

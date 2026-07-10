@@ -85,6 +85,12 @@ func (f *fakeMySQLStore) DeleteSession(_ context.Context, sessionID string) erro
 	return f.deleteSessionErr
 }
 
+func (f *fakeMySQLStore) UpdateSessionTime(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeMySQLStore) ListSessionsWithTitle(_ context.Context, userID string) ([]mysqlstore.SessionWithTitle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -97,6 +103,14 @@ func (f *fakeMySQLStore) ListSessionsWithTitle(_ context.Context, userID string)
 }
 
 func (f *fakeMySQLStore) UpsertTitle(_ context.Context, t model.Title) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.upsertTitleCalls++
+	f.upsertTitleArg = t
+	return f.upsertTitleErr
+}
+
+func (f *fakeMySQLStore) UpsertTitleManual(_ context.Context, t model.Title) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upsertTitleCalls++
