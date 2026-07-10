@@ -96,6 +96,42 @@ export async function apiPost<T>(
   return handleResponse<T>(response);
 }
 
+export async function apiPut<T>(
+  path: string,
+  options: { body?: unknown; token?: string | null } = {}
+): Promise<T> {
+  const token = options.token ?? getToken();
+  const response = await fetch(getApiBase() + path, {
+    method: 'PUT',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  return handleResponse<T>(response);
+}
+
+export async function apiPatch<T>(
+  path: string,
+  options: { body?: unknown; token?: string | null } = {}
+): Promise<T> {
+  const token = options.token ?? getToken();
+  const response = await fetch(getApiBase() + path, {
+    method: 'PATCH',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  return handleResponse<T>(response);
+}
+
 export async function apiDelete<T = void>(
   path: string,
   options: { token?: string | null } = {}
@@ -180,3 +216,11 @@ export type FileContentResponse =
   paths['/api/v1/workspace/files/{path}/content']['get']['responses']['200']['content']['application/json'];
 export type Message = NonNullable<SessionMessagesResponse['messages']>[number];
 export type FileEntry = NonNullable<FileListResponse['files']>[number];
+export type UpdateTitleRequest =
+  paths['/api/v1/sessions/{session_id}']['patch']['requestBody']['content']['application/json'];
+export type UpdateTitleResponse =
+  paths['/api/v1/sessions/{session_id}']['patch']['responses']['200']['content']['application/json'];
+export type RenameRequest =
+  paths['/api/v1/workspace/files/{path}']['put']['requestBody']['content']['application/json'];
+export type RenameResponse =
+  paths['/api/v1/workspace/files/{path}']['put']['responses']['200']['content']['application/json'];

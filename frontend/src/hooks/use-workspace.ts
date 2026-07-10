@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { apiDelete, apiGet, apiUpload, ApiRequestError } from '@/lib/api';
-import type { FileListResponse, UploadResponse } from '@/lib/api';
+import { apiDelete, apiGet, apiPut, apiUpload, ApiRequestError } from '@/lib/api';
+import type { FileListResponse, UploadResponse, RenameResponse } from '@/lib/api';
 import { useUIStore } from '@/stores/ui-store';
 
 export function useWorkspace(path?: string) {
@@ -33,6 +33,42 @@ export function useWorkspace(path?: string) {
     uploadFile: uploadMutation.mutateAsync,
     isUploading: uploadMutation.isPending,
   };
+}
+
+export function useRenameFile() {
+  const queryClient = useQueryClient();
+
+  const syncRenamed = (oldPath: string, newPath: string) => {
+    queryClient.removeQueries({ queryKey: ['file-content', oldPath] });
+    queryClient.invalidateQueries({ queryKey: ['workspace'] });
+
+    const ui = useUIStore.getState();
+    const active = ui.activeFilePath;
+    if (!active) return;
+
+    let next: string | null = null;
+    if (active === oldPath) {
+      next = newPath;
+    } else if (active.startsWith(`${oldPath}/`)) {
+      next = `${newPath}${active.slice(oldPath.length)}`;
+    }
+    if (next !== null) {
+      ui.setActiveFile(next);
+    }
+  };
+
+  return useMutation({
+    mutationFn: ({ oldPath, newPath }: { oldPath: string; newPath: string }) =>
+      apiPut<RenameResponse>(`/api/v1/workspace/files/${encodeURIComponent(oldPath)}`, {
+        body: { new_path: newPath },
+      }),
+    onSuccess: (data) => syncRenamed(data.old_path, data.new_path),
+    onError: (err, { oldPath, newPath }) => {
+      if (err instanceof ApiRequestError && err.code === 'NOT_FOUND') {
+        syncRenamed(oldPath, newPath);
+      }
+    },
+  });
 }
 
 // Delete is a dedicated hook so each file/dir node owns its own mutation.

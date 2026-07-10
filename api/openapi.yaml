@@ -37,10 +37,13 @@ components:
               example: invalid request body
     LoginRequest:
       type: object
-      required: [username]
+      required: [username, password]
       properties:
         username:
           type: string
+        password:
+          type: string
+          description: User password (verified by the seed-created credential hash).
     LoginResponse:
       type: object
       required: [access_token, expire, token_type]

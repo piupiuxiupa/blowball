@@ -46,20 +46,29 @@
 - **WHEN** 用户发送 GET /api/v1/sessions
 - **THEN** 系统返回 HTTP 200，body 为会话数组，每项包含 session_id 和 title，按 update_time 降序排列
 
+#### Scenario: Session update_time reflects latest message activity
+- **WHEN** 用户向一个已存在的会话发送新消息且该 turn 的消息成功持久化
+- **THEN** 系统 SHALL 刷新该会话的 `sessions.update_time`
+- **AND THEN** 该会话在后续 GET /api/v1/sessions 列表中出现在最前面
+
 #### Scenario: Empty session list
 - **WHEN** 用户没有任何会话
 - **THEN** 系统返回 HTTP 200，body 为空数组 []
 
 ### Requirement: Auto generate session title
-系统 SHALL 在用户首条消息发出后，异步调用 OpenAI 根据用户提问和 Agent 回答生成简短标题。
+系统 SHALL 在用户首条消息发出后，异步调用 OpenAI 根据用户提问和 Agent 回答生成简短标题，但 SHALL NOT 覆盖用户手动设置的标题。
 
 #### Scenario: Title generated after first exchange
 - **WHEN** 用户在新会话中发送首条消息并收到完整回复
-- **THEN** 系统异步调用 OpenAI，生成不超过 20 字的简短标题，写入 titles 表
+- **THEN** 系统异步调用 OpenAI，生成不超过 20 字的简短标题，写入 titles 表，且 `is_manual = FALSE`
 
 #### Scenario: Title generation failure
 - **WHEN** 标题生成调用 OpenAI 失败
 - **THEN** 系统使用用户消息前 20 字符作为默认标题，记录警告日志
+
+#### Scenario: Manual title is not overwritten
+- **WHEN** 用户此前已通过 `PATCH /api/v1/sessions/:session_id` 设置过该会话标题
+- **THEN** 系统自动标题生成跳过 LLM 调用，且不修改 `titles` 行
 
 ### Requirement: Three-layer message storage
 

@@ -145,6 +145,31 @@ func TestSaveMessagesBatch_AllLayersSucceed(t *testing.T) {
 	for i, msg := range msgs {
 		assert.Equal(t, msg, m.appendMessagesArg[i])
 	}
+
+	// Session update_time is refreshed for the parent session.
+	require.Equal(t, 1, m.updateSessionTimeCalls)
+	assert.Equal(t, sessionID, m.updateSessionTimeArg)
+}
+
+func TestSaveMessagesBatch_UpdateSessionTimeFailure_LoggedNotReturned(t *testing.T) {
+	const (
+		userID    = "u-batch-time"
+		sessionID = "s-batch-time"
+	)
+	m := &fakeMySQLStore{
+		appendMessagesIDs:    []int64{1},
+		updateSessionTimeErr: errFake,
+	}
+	r := &fakeRedisStore{}
+	f := &fakeFSStore{}
+	svc := NewSessionService(newDeps(m, r, f))
+
+	err := svc.SaveMessagesBatch(context.Background(), userID, []model.Message{sampleMessage(sessionID, "x")})
+	require.NoError(t, err, "update_session_time failure must NOT surface to caller")
+
+	require.Equal(t, 1, m.appendMessagesCalls, "message insert still attempted")
+	require.Equal(t, 1, m.updateSessionTimeCalls, "update_session_time still attempted")
+	assert.Equal(t, sessionID, m.updateSessionTimeArg)
 }
 
 func TestSaveMessagesBatch_RedisFailure_DoesNotBlock(t *testing.T) {

@@ -1,11 +1,12 @@
-import { useState } from 'react';
-import { Folder, ChevronRight, ChevronDown, File, Trash2, Loader2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Folder, ChevronRight, ChevronDown, File, Trash2, Pencil, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useWorkspace, useDeleteFile } from '@/hooks/use-workspace';
+import { useWorkspace, useDeleteFile, useRenameFile } from '@/hooks/use-workspace';
 import { useUIStore } from '@/stores/ui-store';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { UploadButton } from './upload-button';
 import type { FileEntry } from '@/lib/api';
 
@@ -62,12 +63,23 @@ function FileNodeList({ entries, parentPath }: { entries: FileEntry[]; parentPat
 
 function FileNode({ entry, parentPath }: { entry: FileEntry; parentPath: string }) {
   const [expanded, setExpanded] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
   const { activeFilePath, setActiveFile } = useUIStore();
   const deleteFile = useDeleteFile();
+  const renameFile = useRenameFile();
   const fullPath = joinPath(parentPath, entry.name);
   const isActive = activeFilePath === fullPath;
   const isDeleting = deleteFile.isPending;
+  const isRenaming = renameFile.isPending;
   const isDir = entry.type === 'dir';
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [isEditing]);
 
   const handleDelete = async (e: React.MouseEvent) => {
     // Stop propagation so the click doesn't also toggle/expand the row.
@@ -83,22 +95,81 @@ function FileNode({ entry, parentPath }: { entry: FileEntry; parentPath: string 
     }
   };
 
-  const deleteButton = (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="absolute right-0.5 top-1/2 h-6 w-6 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
-      onClick={handleDelete}
-      disabled={isDeleting}
-      title={isDir ? '删除目录' : '删除文件'}
-      aria-label={`${isDir ? '删除目录' : '删除文件'} ${entry.name}`}
-    >
-      {isDeleting ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : (
-        <Trash2 className="h-3.5 w-3.5" />
-      )}
-    </Button>
+  const startEditing = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsEditing(true);
+  };
+
+  const submitRename = async (newName: string) => {
+    const trimmed = newName.trim();
+    if (trimmed && trimmed !== entry.name) {
+      const newPath = joinPath(parentPath, trimmed);
+      try {
+        await renameFile.mutateAsync({ oldPath: fullPath, newPath });
+      } catch (err) {
+        alert(`重命名失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    setIsEditing(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void submitRename(e.currentTarget.value);
+    } else if (e.key === 'Escape') {
+      setIsEditing(false);
+    }
+  };
+
+  const handleBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    void submitRename(e.target.value);
+  };
+
+  const actionButtons = !isEditing && (
+    <>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="absolute right-8 top-1/2 h-6 w-6 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-accent-foreground focus-visible:opacity-100 group-hover:opacity-100"
+        onClick={startEditing}
+        disabled={isDeleting || isRenaming}
+        title={isDir ? '重命名目录' : '重命名文件'}
+        aria-label={`${isDir ? '重命名目录' : '重命名文件'} ${entry.name}`}
+      >
+        <Pencil className="h-3.5 w-3.5" />
+      </Button>
+
+      <Button
+        variant="ghost"
+        size="icon"
+        className="absolute right-0.5 top-1/2 h-6 w-6 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+        onClick={handleDelete}
+        disabled={isDeleting || isRenaming}
+        title={isDir ? '删除目录' : '删除文件'}
+        aria-label={`${isDir ? '删除目录' : '删除文件'} ${entry.name}`}
+      >
+        {isDeleting ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Trash2 className="h-3.5 w-3.5" />
+        )}
+      </Button>
+    </>
+  );
+
+  const nameContent = isEditing ? (
+    <Input
+      ref={inputRef}
+      defaultValue={entry.name}
+      onKeyDown={handleKeyDown}
+      onBlur={handleBlur}
+      disabled={isRenaming}
+      className="h-6 px-1 py-0 text-sm"
+      onClick={(e) => e.stopPropagation()}
+    />
+  ) : (
+    <span className="truncate">{entry.name}</span>
   );
 
   if (isDir) {
@@ -106,8 +177,9 @@ function FileNode({ entry, parentPath }: { entry: FileEntry; parentPath: string 
       <div>
         <div className="group relative flex items-center">
           <button
-            onClick={() => setExpanded(!expanded)}
-            className="flex w-full items-center gap-1 rounded-md px-2 py-1 pr-6 text-left text-sm hover:bg-muted"
+            onClick={() => !isEditing && setExpanded(!expanded)}
+            disabled={isDeleting || isEditing}
+            className="flex w-full items-center gap-1 rounded-md px-2 py-1 pr-14 text-left text-sm hover:bg-muted"
           >
             {expanded ? (
               <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -115,9 +187,9 @@ function FileNode({ entry, parentPath }: { entry: FileEntry; parentPath: string 
               <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             )}
             <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span className="truncate">{entry.name}</span>
+            {nameContent}
           </button>
-          {deleteButton}
+          {actionButtons}
         </div>
 
         {expanded && (
@@ -133,17 +205,17 @@ function FileNode({ entry, parentPath }: { entry: FileEntry; parentPath: string 
     <div className="group relative flex items-center">
       <button
         onClick={() => setActiveFile(fullPath)}
-        disabled={isDeleting}
+        disabled={isDeleting || isEditing}
         className={cn(
-          'flex w-full items-center gap-2 rounded-md px-2 py-1 pr-6 text-left text-sm transition-colors',
+          'flex w-full items-center gap-2 rounded-md px-2 py-1 pr-14 text-left text-sm transition-colors',
           isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-muted',
           isDeleting && 'opacity-50'
         )}
       >
         <File className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="truncate">{entry.name}</span>
+        {nameContent}
       </button>
-      {deleteButton}
+      {actionButtons}
     </div>
   );
 }

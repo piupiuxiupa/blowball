@@ -811,6 +811,8 @@ export interface components {
         };
         LoginRequest: {
             username: string;
+            /** @description User password (verified by the seed-created credential hash). */
+            password: string;
         };
         LoginResponse: {
             /** @description Signed JWT to send as `Bearer` in subsequent requests. */

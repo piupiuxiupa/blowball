@@ -51,6 +51,10 @@ type fakeMySQLStore struct {
 	appendMessagesIDs   []int64
 	appendMessagesErr   error
 
+	updateSessionTimeCalls int
+	updateSessionTimeArg   string
+	updateSessionTimeErr   error
+
 	listMessagesRows []model.Message
 	listMessagesErr  error
 }
@@ -88,7 +92,9 @@ func (f *fakeMySQLStore) DeleteSession(_ context.Context, sessionID string) erro
 func (f *fakeMySQLStore) UpdateSessionTime(_ context.Context, sessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return nil
+	f.updateSessionTimeCalls++
+	f.updateSessionTimeArg = sessionID
+	return f.updateSessionTimeErr
 }
 
 func (f *fakeMySQLStore) ListSessionsWithTitle(_ context.Context, userID string) ([]mysqlstore.SessionWithTitle, error) {

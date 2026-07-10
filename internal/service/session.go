@@ -245,6 +245,13 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 		log.Error("mysql append batch failed; messages held in FS only", zap.Error(err))
 	}
 
+	// 4) Refresh session update_time so recently-active sessions bubble to the
+	// top of the list. Errors are logged but not returned; a stale sort order is
+	// preferable to interrupting the streaming response.
+	if err := s.mysql.UpdateSessionTime(ctx, msgs[0].SessionID); err != nil {
+		log.Error("update session time failed", zap.String("session_id", msgs[0].SessionID), zap.Error(err))
+	}
+
 	return nil
 }
 

@@ -1,7 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { apiDelete, apiGet, apiPost, ApiRequestError } from '@/lib/api';
-import type { SessionListResponse, CreateSessionResponse } from '@/lib/api';
+import { apiDelete, apiGet, apiPatch, apiPost, ApiRequestError } from '@/lib/api';
+import type { SessionListResponse, CreateSessionResponse, UpdateTitleResponse } from '@/lib/api';
 import { useUIStore } from '@/stores/ui-store';
+
+export function useUpdateSession() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ sessionId, title }: { sessionId: string; title: string }) =>
+      apiPatch<UpdateTitleResponse>(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
+        body: { title },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    },
+  });
+}
 
 export function useSessions() {
   const queryClient = useQueryClient();
