@@ -1,6 +1,7 @@
+import { memo } from 'react';
 import { User, Bot, Wrench, Lightbulb } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import ReactMarkdown from 'react-markdown';
+import { MarkdownRenderer } from './markdown-renderer';
 
 interface ChatMessageProps {
   block: {
@@ -14,7 +15,7 @@ interface ChatMessageProps {
   };
 }
 
-export function ChatMessage({ block }: ChatMessageProps) {
+export const ChatMessage = memo(function ChatMessage({ block }: ChatMessageProps) {
   const isUser = block.role === 'user';
 
   return (
@@ -48,14 +49,14 @@ export function ChatMessage({ block }: ChatMessageProps) {
               <span>思考过程</span>
             </summary>
             <div className="prose prose-sm max-w-none pt-1 text-muted-foreground">
-              <ReactMarkdown>{block.reasoning}</ReactMarkdown>
+              <MarkdownRenderer>{block.reasoning}</MarkdownRenderer>
             </div>
           </details>
         )}
 
         {block.content && (
           <div className={cn('prose prose-sm max-w-none', isUser && 'prose-invert')}>
-            <ReactMarkdown>{block.content}</ReactMarkdown>
+            <MarkdownRenderer>{block.content}</MarkdownRenderer>
           </div>
         )}
 
@@ -75,4 +76,4 @@ export function ChatMessage({ block }: ChatMessageProps) {
       </div>
     </div>
   );
-}
+});

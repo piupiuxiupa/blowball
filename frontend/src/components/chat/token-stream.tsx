@@ -1,5 +1,6 @@
+import { memo } from 'react';
 import { Bot, Loader2, Wrench, AlertCircle, Lightbulb } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import { MarkdownRenderer } from './markdown-renderer';
 
 interface TokenStreamProps {
   agent: string;
@@ -8,7 +9,27 @@ interface TokenStreamProps {
   status: 'idle' | 'running' | 'tool_call' | 'error';
 }
 
-export function TokenStream({ agent, content, reasoning, status }: TokenStreamProps) {
+function splitStreamingContent(text: string, isFinished: boolean): { completed: string[]; pending: string } {
+  if (isFinished) {
+    return { completed: text ? [text] : [], pending: '' };
+  }
+  // 流式过程中：已完结的段落用 Markdown 渲染，正在输入的最后一行用纯文本展示，
+  // 避免每来一个 token 都重新解析整段内容。
+  const trimmed = text.endsWith('\n') ? text.slice(0, -1) : text;
+  const lastBreak = trimmed.lastIndexOf('\n');
+  if (lastBreak === -1) {
+    return { completed: [], pending: text };
+  }
+  return {
+    completed: trimmed.slice(0, lastBreak).split('\n').filter((s) => s.length > 0),
+    pending: text.slice(lastBreak + 1),
+  };
+}
+
+export const TokenStream = memo(function TokenStream({ agent, content, reasoning, status }: TokenStreamProps) {
+  const isFinished = status === 'idle' || status === 'error';
+  const { completed, pending } = splitStreamingContent(content, isFinished);
+
   return (
     <div className="flex gap-3">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
@@ -29,15 +50,18 @@ export function TokenStream({ agent, content, reasoning, status }: TokenStreamPr
               <Lightbulb className="h-3 w-3" />
               <span>思考过程</span>
             </summary>
-            <div className="prose prose-sm max-w-none pt-1 text-muted-foreground">
-              <ReactMarkdown>{reasoning}</ReactMarkdown>
+            <div className="prose prose-sm max-w-none whitespace-pre-wrap pt-1 text-muted-foreground">
+              {reasoning}
             </div>
           </details>
         )}
 
-        {content && (
+        {(completed.length > 0 || pending) && (
           <div className="prose prose-sm max-w-none">
-            <ReactMarkdown>{content}</ReactMarkdown>
+            {completed.map((segment, idx) => (
+              <MarkdownRenderer key={idx}>{segment}</MarkdownRenderer>
+            ))}
+            {pending && <p className="m-0">{pending}</p>}
           </div>
         )}
 
@@ -51,4 +75,4 @@ export function TokenStream({ agent, content, reasoning, status }: TokenStreamPr
       </div>
     </div>
   );
-}
+});

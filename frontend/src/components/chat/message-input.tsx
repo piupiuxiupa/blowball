@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Send } from 'lucide-react';
+import { Send, Square } from 'lucide-react';
 import { useSendMessage } from '@/hooks/use-send-message';
 import { useUIStore } from '@/stores/ui-store';
 import { Button } from '@/components/ui/button';
@@ -12,12 +12,17 @@ interface MessageInputProps {
 export function MessageInput({ disabled }: MessageInputProps) {
   const [content, setContent] = useState('');
   const activeSessionId = useUIStore((s) => s.activeSessionId);
-  const { mutate: sendMessage, isPending } = useSendMessage();
+  const { mutate: sendMessage, isPending, abort } = useSendMessage();
 
   const handleSubmit = () => {
     if (!activeSessionId || !content.trim() || isPending) return;
     sendMessage({ sessionId: activeSessionId, content: content.trim() });
     setContent('');
+  };
+
+  const handleStop = () => {
+    if (!activeSessionId || !isPending) return;
+    abort(activeSessionId);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -39,12 +44,13 @@ export function MessageInput({ disabled }: MessageInputProps) {
         className="min-h-[80px] flex-1"
       />
       <Button
-        onClick={handleSubmit}
-        disabled={disabled || isPending || !content.trim()}
+        onClick={isPending ? handleStop : handleSubmit}
+        disabled={disabled || (!isPending && !content.trim())}
         size="icon"
         className="h-9 w-9 shrink-0"
+        variant={isPending ? 'destructive' : 'default'}
       >
-        <Send className="h-4 w-4" />
+        {isPending ? <Square className="h-4 w-4 fill-current" /> : <Send className="h-4 w-4" />}
       </Button>
     </div>
   );

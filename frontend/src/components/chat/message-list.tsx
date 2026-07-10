@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useMessages } from '@/hooks/use-messages';
 import { useUIStore } from '@/stores/ui-store';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -112,6 +112,8 @@ function groupMessages(messages: Message[]): MessageBlock[] {
   return blocks;
 }
 
+const SCROLL_THRESHOLD = 80;
+
 export function MessageList() {
   const activeSessionId = useUIStore((s) => s.activeSessionId);
   const { data, isLoading } = useMessages(activeSessionId);
@@ -125,18 +127,49 @@ export function MessageList() {
     activeSessionId ? s.agentStatus[activeSessionId] : null
   );
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
 
   const messages = data?.messages ?? [];
-  const blocks = groupMessages(messages);
+  const blocks = useMemo(() => groupMessages(messages), [messages]);
+
+  const scheduleScrollToBottom = () => {
+    if (scrollRafRef.current != null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const el = scrollRef.current;
+      if (!el) return;
+      // 只有用户本来就在底部附近时才继续自动滚动，避免他正在翻看历史时被强行拉下去。
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom <= SCROLL_THRESHOLD) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+  };
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isNearBottomRef.current = distanceFromBottom <= SCROLL_THRESHOLD;
+  };
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    if (isNearBottomRef.current) {
+      scheduleScrollToBottom();
     }
-  }, [messages, streamingText, agentStatus?.status]);
+    return () => {
+      if (scrollRafRef.current != null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+    // 故意不把 streamingText 放进依赖：token 高频更新时只在 rAF 里读一次 DOM，
+    // 避免每个 token 都触发 effect 和强制同步布局。
+  }, [messages.length, activeSessionId, agentStatus?.status]);
 
   return (
-    <ScrollArea ref={scrollRef} className="h-full px-4 py-4">
+    <ScrollArea ref={scrollRef} onScroll={handleScroll} className="h-full px-4 py-4">
       {isLoading && (
         <div className="space-y-4">
           <Skeleton className="h-16 w-3/4" />

@@ -114,7 +114,7 @@ export async function apiDelete<T = void>(
 
 export async function apiPostStream(
   path: string,
-  options: { body?: unknown; token?: string | null } = {}
+  options: { body?: unknown; token?: string | null; signal?: AbortSignal } = {}
 ): Promise<Response> {
   const token = options.token ?? getToken();
   const response = await fetch(getApiBase() + path, {
@@ -125,6 +125,7 @@ export async function apiPostStream(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
+    signal: options.signal,
   });
 
   if (!response.ok) {
