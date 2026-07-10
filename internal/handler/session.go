@@ -166,16 +166,82 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 			zap.Error(sseErr))
 	}
 
-	// Persist the user message and the assistant reply together in a single
-	// batch using a detached context so a client disconnect mid-stream (which
-	// cancels the request ctx) does NOT lose the saved messages. We always wait
-	// for the orchestrator to finish so the event stream is complete.
+	// Wait for the orchestrator to finish (success, error, or cancellation) so
+	// the event stream collected by the adapter is complete.
 	res := <-resultCh
+
+	// saveCtx is a detached context that survives the HTTP request so the
+	// three-tier persistence goroutine is not killed by a client disconnect.
+	saveCtx := trace.WithContext(context.Background(), tid)
+
+	// persistEvents writes the user message and the supplied assistant event
+	// stream using the existing SaveMessagesBatch path, then triggers title
+	// generation for a first turn. It is used for both successful and
+	// interrupted (client-canceled) turns.
+	persistEvents := func(events []stream.StreamEvent) {
+		// Title generation still needs a single assistant content string. We
+		// derive it from the token events emitted by Confucius so the title
+		// service contract remains unchanged.
+		var assistantContent strings.Builder
+		for _, e := range events {
+			if e.Type == stream.EventToken && e.Agent == stream.AgentConfucius {
+				assistantContent.WriteString(e.Content)
+			}
+		}
+
+		go func(events []stream.StreamEvent) {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.L().Error("panic saving event stream",
+						zap.String("op", "handler.send_message"),
+						zap.String("session_id", sessionID),
+						zap.Any("recover", r))
+				}
+			}()
+
+			now := time.Now().UTC()
+			merged := MergeEvents(events)
+			msgs := make([]model.Message, 0, len(merged)+1)
+			msgs = append(msgs, UserMessage(sessionID, tid, req.Content, userMsgTime))
+			for i, e := range merged {
+				msg, mErr := MessageFromEvent(e, sessionID, tid, i+1, now)
+				if mErr != nil {
+					logger.L().Error("map event to message failed",
+						zap.String("op", "handler.send_message"),
+						zap.String("session_id", sessionID),
+						zap.Error(mErr))
+					return
+				}
+				msgs = append(msgs, msg)
+			}
+
+			if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
+				logger.L().Error("save event stream failed",
+					zap.String("op", "handler.send_message"),
+					zap.String("session_id", sessionID),
+					zap.Error(err))
+			}
+		}(events)
+
+		if isFirstTurn && h.titleSvc != nil {
+			// Fire-and-forget; TitleService.GenerateTitle has its own recover().
+			go h.titleSvc.GenerateTitle(saveCtx, sessionID, req.Content, assistantContent.String())
+		}
+	}
+
 	if res.err != nil {
-		// On failure, drop the collected assistant events AND the user message.
-		// Both are now persisted together only after a successful turn, so an
-		// error or cancellation means nothing from this turn is written.
+		// Client-initiated cancellation means the user explicitly interrupted
+		// the assistant turn. Persist the partial stream so the session can be
+		// resumed from where it was cut off. Non-cancellation errors are still
+		// transient/malformed and are discarded unchanged.
 		if errors.Is(res.err, context.Canceled) {
+			logger.L().Warn("client disconnected; persisting partial interrupted turn",
+				zap.String("op", "handler.send_message"),
+				zap.String("session_id", sessionID),
+				zap.String("user_id", userID),
+				zap.Int("event_count", len(res.events)),
+				zap.Error(res.err))
+			persistEvents(res.events)
 			return
 		}
 		logger.L().Error("orchestrator failed",
@@ -189,54 +255,7 @@ func (h *SessionHandler) SendMessage(c *gin.Context) {
 	// Success path: persist the full turn (user message + event stream) in one
 	// asynchronous batch. The response has already been sent; there is no need
 	// to block the HTTP handler on three-layer storage.
-	saveCtx := trace.WithContext(context.Background(), tid)
-	go func(events []stream.StreamEvent) {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.L().Error("panic saving event stream",
-					zap.String("op", "handler.send_message"),
-					zap.String("session_id", sessionID),
-					zap.Any("recover", r))
-			}
-		}()
-
-		now := time.Now().UTC()
-		merged := MergeEvents(events)
-		msgs := make([]model.Message, 0, len(merged)+1)
-		msgs = append(msgs, UserMessage(sessionID, tid, req.Content, userMsgTime))
-		for i, e := range merged {
-			msg, mErr := MessageFromEvent(e, sessionID, tid, i+1, now)
-			if mErr != nil {
-				logger.L().Error("map event to message failed",
-					zap.String("op", "handler.send_message"),
-					zap.String("session_id", sessionID),
-					zap.Error(mErr))
-				return
-			}
-			msgs = append(msgs, msg)
-		}
-
-		if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
-			logger.L().Error("save event stream failed",
-				zap.String("op", "handler.send_message"),
-				zap.String("session_id", sessionID),
-				zap.Error(err))
-		}
-	}(res.events)
-
-	if isFirstTurn && h.titleSvc != nil {
-		// Title generation still needs a single assistant content string. We
-		// derive it from the token events emitted by Confucius so the title
-		// service contract remains unchanged.
-		var assistantContent strings.Builder
-		for _, e := range res.events {
-			if e.Type == stream.EventToken && e.Agent == stream.AgentConfucius {
-				assistantContent.WriteString(e.Content)
-			}
-		}
-		// Fire-and-forget; TitleService.GenerateTitle has its own recover().
-		go h.titleSvc.GenerateTitle(saveCtx, sessionID, req.Content, assistantContent.String())
-	}
+	persistEvents(res.events)
 }
 
 // createSessionResponse is the body for POST /api/v1/sessions.

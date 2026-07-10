@@ -504,3 +504,79 @@ func TestMessageFlow_ToolCallMemory(t *testing.T) {
 	assert.True(t, sawToolCall, "second turn prompt should contain the tool call")
 	assert.True(t, sawToolResult, "second turn prompt should contain the tool result")
 }
+
+// TestMessageFlow_InterruptedTurn_PersistsPartialStream exercises the
+// client-disconnect path: the HTTP request context is cancelled mid-response,
+// but the handler still persists the user message and any assistant tokens
+// emitted before cancellation. Recovery through MessageService must surface the
+// same partial history.
+func TestMessageFlow_InterruptedTurn_PersistsPartialStream(t *testing.T) {
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{
+			tokens:       []string{"partial ", "reply", " more"},
+			content:      "partial reply more",
+			finishReason: "stop",
+			usage:        agent.Usage{TotalTokens: 3},
+			tokenDelay:   50 * time.Millisecond,
+		},
+	)
+	env := newTestEnv(t, llm)
+	token := authToken(t, defaultUserID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/"+defaultSessionID+"/messages",
+		strings.NewReader(`{"content":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req = req.WithContext(ctx)
+
+	// Cancel the request after the first token has been emitted but before the
+	// second one. With a 50ms tokenDelay, the first token lands at ~50ms.
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		cancel()
+	}()
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	// The handler always writes a 200 because the SSE headers are sent first.
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Wait for the detached-context persistence goroutine to land.
+	require.Eventually(t, func() bool {
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) > 0
+	}, 2*time.Second, 10*time.Millisecond, "expected interrupted turn to be persisted")
+
+	msgs := env.mysqlFake.messagesFor(defaultSessionID)
+	require.GreaterOrEqual(t, len(msgs), 2, "expected user message plus at least one assistant event")
+	assert.Equal(t, model.RoleUser, msgs[0].Role)
+	assert.Equal(t, "hello", msgs[0].Content)
+
+	var sawToken bool
+	for _, m := range msgs[1:] {
+		if m.EventType == model.EventTypeToken {
+			sawToken = true
+			break
+		}
+	}
+	assert.True(t, sawToken, "expected at least one partial assistant token to be persisted")
+
+	// RecoverMessages must include the preserved user message and partial reply.
+	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(recovered), 2)
+	assert.Equal(t, "hello", recovered[0].Content)
+
+	var recoveredToken bool
+	for _, m := range recovered[1:] {
+		if m.EventType == model.EventTypeToken {
+			recoveredToken = true
+			break
+		}
+	}
+	assert.True(t, recoveredToken, "recovered history should include partial assistant token")
+}

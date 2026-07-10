@@ -896,6 +896,140 @@ func TestSendMessage_OrchestratorFailure_PersistsNothing(t *testing.T) {
 	assert.Empty(t, env.mysql.appendMessagesArg, "expected no messages persisted on orchestrator failure")
 }
 
+// TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents verifies that a
+// client-initiated cancellation (context.Canceled) does not discard the turn.
+// The user message and any assistant events emitted before cancellation are
+// persisted in a single batch.
+func TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "partial "),
+			stream.TokenEvent(stream.AgentConfucius, "reply"),
+			stream.AgentEndEvent(stream.AgentConfucius),
+		},
+		returnErr: context.Canceled,
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-cancel/messages",
+		strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// One combined batch must land despite the cancellation.
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected single batch for interrupted turn")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+
+	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
+	require.Len(t, env.mysql.appendMessagesArg, 4, "batch must contain user + partial assistant events")
+	userMsg := env.mysql.appendMessagesArg[0]
+	assert.Equal(t, model.AgentUser, userMsg.Agent)
+	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
+	assert.Equal(t, model.RoleUser, userMsg.Role)
+	assert.Equal(t, "hi", userMsg.Content)
+
+	wantTypes := []string{
+		model.EventTypeAgentStart,
+		model.EventTypeToken,
+		model.EventTypeAgentEnd,
+	}
+	for i, want := range wantTypes {
+		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+	}
+	assert.Equal(t, "partial reply", env.mysql.appendMessagesArg[2].Content, "partial tokens should be merged")
+}
+
+// TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser verifies
+// that when cancellation happens before the assistant emits any event, only the
+// user message is persisted.
+func TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{},
+		returnErr:    context.Canceled,
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-cancel-empty/messages",
+		strings.NewReader(`{"content":"hello?"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected single batch for user-only interrupted turn")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	require.Len(t, env.mysql.appendMessagesArg, 1, "only the user message should be persisted")
+	assert.Equal(t, model.RoleUser, env.mysql.appendMessagesArg[0].Role)
+	assert.Equal(t, "hello?", env.mysql.appendMessagesArg[0].Content)
+}
+
+// TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle verifies that title
+// generation still fires when the first turn is interrupted, using the partial
+// assistant content collected before cancellation.
+func TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "partial title content"),
+			stream.AgentEndEvent(stream.AgentConfucius),
+		},
+		returnErr: context.Canceled,
+	}
+	env.h.orch = stub
+	// Env constructor already built the engine with the original stub; rebuild
+	// the route so the new orchestrator is wired in.
+	env.engine = gin.New()
+	env.engine.Use(func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Set(middleware.TraceIDKey, "trace-1")
+		c.Next()
+	})
+	env.engine.POST("/api/v1/sessions/:session_id/messages", env.h.SendMessage)
+
+	deps := sessionDeps(env.mysql, env.redis, env.fs)
+	env.h.titleSvc = newTitleSvcWithFake(t, deps, "Canceled Title")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-cancel-title/messages",
+		strings.NewReader(`{"content":"first interrupted"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.upsertTitleCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected title generation on interrupted first turn")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, "sess-cancel-title", env.mysql.upsertTitleArg.SessionID)
+	assert.Equal(t, "Canceled Title", env.mysql.upsertTitleArg.Title)
+}
+
 // TestDeleteSession_Success_204 verifies the owner deleting their own session
 // returns 204 and drives the service purge exactly once.
 func TestDeleteSession_Success_204(t *testing.T) {

@@ -65,6 +65,9 @@ type scriptedLLMResponse struct {
 	toolCalls        []agent.ToolCall
 	usage            agent.Usage
 	err              error
+	// tokenDelay is inserted before each content token so tests can interrupt
+	// the stream mid-response.
+	tokenDelay time.Duration
 }
 
 // scriptedLLMClient is a fake agent.LLMClient shared across the agent tree.
@@ -111,6 +114,9 @@ func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest
 	for _, tok := range resp.tokens {
 		if err := ctx.Err(); err != nil {
 			return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
+		}
+		if resp.tokenDelay > 0 {
+			time.Sleep(resp.tokenDelay)
 		}
 		if onToken != nil {
 			if err := onToken(tok); err != nil {

@@ -31,23 +31,22 @@ agents:
     name: Confucius
     model: gpt-4o-mini
     system_prompt: |
-      You are Confucius, the central orchestrator agent.
+      You are confucius, the central orchestrator agent.
+      Before assigning any task or reply users, you will thoroughly understand the capabilities, skills, and tools of each agent, so that you can make the most appropriate choice.
       You decide which sub-agent to dispatch based on the user's request:
-        - Chongzhi: for coding and file editing tasks
-        - Liang: for analysis and explanation tasks
-      Always pass enough context in the task description so the chosen
-      sub-agent can complete the work independently.
+        - Chongzhi(冲之): for coding and file editing tasks
+        - Liang(亮): for analysis and explanation tasks
+      Always pass enough context in the task description so the chosen sub-agent can complete the work independently.
+      You do not do anything, only dispatch tasks to sub-agents.
+      You are fully aware of the capabilities of all available agents and can select the most suitable one(s) to accomplish a given task.
+      You are also able to launch multiple agents in parallel to process tasks concurrently, thereby accelerating overall task completion.
     max_tokens: 2048
     # Enable OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 reasoning variants).
     # When true, max_tokens is sent as max_completion_tokens and reasoning_effort
     # is included in the request. Omit or set to false for standard models.
     thinking: false
     # reasoning_effort: medium  # only valid when thinking: true
-    tools:
-      - xizhi_list_files
-      - xizhi_tree
-      - xizhi_glob_files
-      - webfetch
+    tools: []
     # Optional: declare MCP servers and tools this agent may use.
     mcp:
       servers:
@@ -78,9 +77,9 @@ agents:
       - xizhi_tree
       - xizhi_glob_files
       - webfetch
-      # - bash
-      # - python
-      # - pip_install   # requires tools.executor.pip.enabled: true
+      - bash
+      - python
+      - pip_install   # requires tools.executor.pip.enabled: true
     mcp:
       servers: []
     skills: []
@@ -91,13 +90,15 @@ agents:
     system_prompt: |
       You are Liang, the analysis agent.
       Read the provided context and produce a clear, structured analysis.
-      You do not have file tools; rely on the context given to you.
     max_tokens: 2048
     tools:
+      - webfetch
+      - luban_list_skills
+      - luban_read_skill
+      - xizhi_read_file
       - xizhi_list_files
       - xizhi_tree
       - xizhi_glob_files
-      - webfetch
     mcp:
       servers: []
     skills: []

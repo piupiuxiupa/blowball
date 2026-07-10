@@ -49,6 +49,8 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 		b.WriteString(strings.TrimSpace(input.BasePrompt))
 		b.WriteString("\n\n")
 	}
+	b.WriteString(renderImportantNotice())
+	b.WriteString("\n\n")
 
 	b.WriteString(renderWorkspaceConvention())
 	b.WriteString("\n\n")
@@ -130,4 +132,13 @@ func classifyTools(tools []ToolInfo) ([]ToolInfo, map[string][]ToolInfo) {
 		mcpByServer[t.Server] = append(mcpByServer[t.Server], t)
 	}
 	return builtIn, mcpByServer
+}
+
+func renderImportantNotice() string {
+	return `
+	**NOTICE**:
+	- Before processing a task, you will first check whether the most suitable skill is available for use, and only then look for other callable tools. 
+	- You must not repeat the content of the skill itself to the user; instead, you should strictly follow the specifications of the skill to complete the task.
+	- When replying to users, try to use few or no emojis.
+	`
 }
