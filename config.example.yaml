@@ -33,6 +33,7 @@ agents:
     system_prompt: |
       You are confucius, the central orchestrator agent.
       Before assigning any task or reply users, you will thoroughly understand the capabilities, skills, and tools of each agent, so that you can make the most appropriate choice.
+      When assigning tasks, you **ONLY** tell other agents what the task is, and **DO NOT** decide for them how to specifically accomplish it.
       You decide which sub-agent to dispatch based on the user's request:
         - Chongzhi(冲之): for coding and file editing tasks
         - Liang(亮): for analysis and explanation tasks
@@ -123,6 +124,14 @@ tools:
 
   # Sandboxed command execution via bubblewrap (Linux only).
   # Requires bwrap to be installed and unprivileged user namespaces available.
+  #
+  # Operator tools: binaries placed in {data-dir}/tools are mounted read-only at
+  # the in-sandbox $HOME/.local/bin (/home/blowball/.local/bin) and prepended to
+  # PATH, so agents can invoke them by bare name. The sandbox always gets a real
+  # writable $HOME (synthetic /home/blowball, forced regardless of
+  # allowed_env_patterns) and $HOME/.local/bin as the first PATH entry, even when
+  # the tools dir is empty. There is no config field for this; just drop files in
+  # {data-dir}/tools (e.g. -d /var/lib/blowball -> /var/lib/blowball/tools).
   #
   # Fields:
   #   enabled              - required; set to true to register the tool.

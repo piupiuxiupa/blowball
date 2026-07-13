@@ -36,11 +36,12 @@ func newExecutorTools(t *testing.T, cfg config.ExecutorConfig) (*executor.Tools,
 	ws := t.TempDir()
 	globalSkills := t.TempDir()
 	userSkills := t.TempDir()
+	tools := t.TempDir()
 	return executor.NewTools(cfg, func(userID string) string {
 		return ws
 	}, func(userID string) string {
 		return userSkills
-	}, globalSkills), ws
+	}, globalSkills, tools), ws
 }
 
 func executorCtx(userID string) context.Context {
@@ -107,13 +108,14 @@ func TestExecutorSkillDirectoryAccess(t *testing.T) {
 	ws := t.TempDir()
 	globalSkills := t.TempDir()
 	userSkills := t.TempDir()
+	tools := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(globalSkills, "marker.txt"), []byte("global\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(userSkills, "marker.txt"), []byte("user\n"), 0o644))
 
-	tools := executor.NewTools(config.ExecutorConfig{
+	toolsBundle := executor.NewTools(config.ExecutorConfig{
 		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
-	}, func(string) string { return ws }, func(string) string { return userSkills }, globalSkills)
-	reg := newRegistryWithExecutor(t, tools)
+	}, func(string) string { return ws }, func(string) string { return userSkills }, globalSkills, tools)
+	reg := newRegistryWithExecutor(t, toolsBundle)
 
 	res, err := reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"cat /skills/global/marker.txt /skills/user/marker.txt"}`))
 	require.NoError(t, err)
@@ -245,6 +247,73 @@ func TestExecutorPipInstallUsesMirror(t *testing.T) {
 	require.NoError(t, err)
 	m := res.(*executor.ExecutionResult)
 	require.NotEqual(t, 0, m.ExitCode, "pip install should fail when network is disabled")
+}
+
+// TestExecutorSandboxHomeForced guards the executor-tools spec: HOME is forced to
+// the synthetic writable path and resolves to a real mounted directory, so
+// commands that cache/config under $HOME keep working.
+func TestExecutorSandboxHomeForced(t *testing.T) {
+	if !executor.IsAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	tools, _ := newExecutorTools(t, config.ExecutorConfig{
+		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
+	})
+	reg := newRegistryWithExecutor(t, tools)
+
+	// HOME is forced to the synthetic path regardless of the host HOME.
+	res, err := reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"echo $HOME"}`))
+	require.NoError(t, err)
+	m := res.(*executor.ExecutionResult)
+	require.Equal(t, "/home/blowball\n", m.Output, "HOME should be forced to the synthetic sandbox path")
+
+	// The synthetic home is a writable tmpfs, so writes under $HOME succeed.
+	res, err = reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"echo hi > $HOME/.cache_foo && cat $HOME/.cache_foo"}`))
+	require.NoError(t, err)
+	m = res.(*executor.ExecutionResult)
+	require.Equal(t, 0, m.ExitCode, "write to $HOME should succeed: %s", m.Output)
+	require.Equal(t, "hi\n", m.Output)
+}
+
+// TestExecutorOperatorToolOnPath guards the executor-tools spec: the operator
+// tools dir is mounted read-only at $HOME/.local/bin, prepended to PATH, and
+// invocable by bare name.
+func TestExecutorOperatorToolOnPath(t *testing.T) {
+	if !executor.IsAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	ws := t.TempDir()
+	globalSkills := t.TempDir()
+	userSkills := t.TempDir()
+	toolsDir := t.TempDir()
+	// Place an operator-provided executable in the tools dir.
+	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, "mytool"), []byte("#!/bin/sh\necho from-mytool\n"), 0o755))
+
+	tools := executor.NewTools(config.ExecutorConfig{
+		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
+	}, func(string) string { return ws }, func(string) string { return userSkills }, globalSkills, toolsDir)
+	reg := newRegistryWithExecutor(t, tools)
+
+	// $HOME/.local/bin is the first PATH entry.
+	res, err := reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"echo $PATH | cut -d: -f1"}`))
+	require.NoError(t, err)
+	m := res.(*executor.ExecutionResult)
+	require.Equal(t, "/home/blowball/.local/bin\n", m.Output, "first PATH entry should be the operator tools bin")
+
+	// The operator tool resolves from $HOME/.local/bin via PATH.
+	res, err = reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"mytool"}`))
+	require.NoError(t, err)
+	m = res.(*executor.ExecutionResult)
+	require.Equal(t, 0, m.ExitCode, "mytool should resolve via PATH: %s", m.Output)
+	require.Equal(t, "from-mytool\n", m.Output)
+
+	// The tools dir is mounted read-only: creating a file under it must fail.
+	res, err = reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"touch $HOME/.local/bin/evil 2>/dev/null; echo $?"}`))
+	require.NoError(t, err)
+	m = res.(*executor.ExecutionResult)
+	require.NotEqual(t, "0\n", m.Output, "tools bin should be read-only")
 }
 
 const (

@@ -31,19 +31,22 @@ type Tools struct {
 	workspaceFn     func(userID string) string
 	globalSkillsDir string
 	userSkillsFn    func(userID string) string
+	toolsDir        string
 }
 
 // NewTools creates an executor tool bundle backed by cfg, workspaceFn,
-// globalSkillsDir and userSkillsFn. workspaceFn and userSkillsFn map a userID
-// to the absolute path of that user's workspace and skills directory,
+// globalSkillsDir, userSkillsFn and toolsDir. workspaceFn and userSkillsFn map
+// a userID to the absolute path of that user's workspace and skills directory,
 // respectively. globalSkillsDir is the project-level skills directory shared
-// across all users.
-func NewTools(cfg config.ExecutorConfig, workspaceFn, userSkillsFn func(userID string) string, globalSkillsDir string) *Tools {
+// across all users. toolsDir is the operator-managed CLI binary directory that
+// is mounted read-only at the in-sandbox $HOME/.local/bin.
+func NewTools(cfg config.ExecutorConfig, workspaceFn, userSkillsFn func(userID string) string, globalSkillsDir, toolsDir string) *Tools {
 	return &Tools{
 		cfg:             cfg,
 		workspaceFn:     workspaceFn,
 		globalSkillsDir: globalSkillsDir,
 		userSkillsFn:    userSkillsFn,
+		toolsDir:        toolsDir,
 	}
 }
 

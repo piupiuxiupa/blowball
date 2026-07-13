@@ -84,10 +84,11 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("load config %q: %w", configPath, err)
 	}
 
-	// Derive the three runtime locations from the single -d root (D2/D3): data, logs, skills.
+	// Derive the four runtime locations from the single -d root (D2/D3/D6): data, logs, skills, tools.
 	dataDir := filepath.Join(dataRoot, "data")
 	logDir := filepath.Join(dataRoot, "logs")
 	skillsDir := filepath.Join(dataRoot, "skills")
+	toolsDir := filepath.Join(dataRoot, "tools")
 
 	// 2. Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -106,7 +107,8 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		zap.String("data_root", dataRoot),
 		zap.String("data_dir", dataDir),
 		zap.String("log_dir", logDir),
-		zap.String("skills_dir", skillsDir))
+		zap.String("skills_dir", skillsDir),
+		zap.String("tools_dir", toolsDir))
 
 	// 4. MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
 	mysqlStore, err := mysql.New(cfg.MySQL.DSN)
@@ -141,8 +143,13 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		log.Fatal("create skills dir failed", zap.Error(err))
 	}
 
-	// 5. go-landlock, widened to cover logs for lumberjack's post-rotation reopen (D6). Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless.
-	if err := xizhi.ApplyLandlock(dataDir, logDir, skillsDir); err != nil {
+	// Ensure the operator tools directory exists (always created, even when empty) so the landlock rule and the in-sandbox --ro-bind always resolve. Operators place CLI binaries here to expose them inside the bash/python/pip sandboxes at $HOME/.local/bin.
+	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
+		log.Fatal("create tools dir failed", zap.Error(err))
+	}
+
+	// 5. go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — while the operator tools dir is restricted read-only, mirroring the in-sandbox --ro-bind as defense-in-depth. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless.
+	if err := xizhi.ApplyLandlock([]string{dataDir, logDir, skillsDir}, []string{toolsDir}); err != nil {
 		log.Warn("landlock not applied; relying on application-layer validation only",
 			zap.Error(err))
 	}
@@ -162,7 +169,7 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 			return fsStore.UserWorkspace(userID)
 		}, func(userID string) string {
 			return fsStore.UserSkills(userID)
-		}, skillsDir)
+		}, skillsDir, toolsDir)
 		if err := executor.RegisterAll(reg, executorTools); err != nil {
 			log.Fatal("register executor tools failed", zap.Error(err))
 		}

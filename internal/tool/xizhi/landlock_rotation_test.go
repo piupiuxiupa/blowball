@@ -57,7 +57,8 @@ func landlockRotationChild(t *testing.T) {
 	}
 
 	// Apply landlock to the three runtime subdirs, exactly as the server does.
-	if err := ApplyLandlock(dataDir, logDir, skillsDir); err != nil {
+	// No read-only dirs in this scenario.
+	if err := ApplyLandlock([]string{dataDir, logDir, skillsDir}, nil); err != nil {
 		t.Fatalf("ApplyLandlock: %v", err)
 	}
 
@@ -113,4 +114,76 @@ func landlockRotationChild(t *testing.T) {
 	}
 
 	fmt.Println("ROTATION_OK")
+}
+
+// landlockToolsROChildEnv re-execs the test binary as a child for the
+// tools-read-only landlock scenario. As with the rotation test, the
+// process-global landlock restriction is confined to the child so it never
+// leaks into the parent test process.
+const landlockToolsROChildEnv = "BLOWBALL_TEST_LANDLOCK_TOOLS_RO"
+
+// TestApplyLandlock_ToolsReadOnly guards D5: {data-dir}/tools is restricted
+// read-only while {data-dir}/data, logs and skills remain read-write. The check
+// re-execs the test binary as a child process that applies landlock and probes
+// each directory; the parent asserts the child reported success.
+func TestApplyLandlock_ToolsReadOnly(t *testing.T) {
+	if os.Getenv(landlockToolsROChildEnv) == "1" {
+		landlockToolsROChild(t)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestApplyLandlock_ToolsReadOnly")
+	cmd.Env = append(os.Environ(), landlockToolsROChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("landlocked child failed: %v\noutput:\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("TOOLS_RO_OK")) {
+		t.Fatalf("child did not report tools-read-only success; output:\n%s", out)
+	}
+}
+
+func landlockToolsROChild(t *testing.T) {
+	t.Helper()
+
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	logDir := filepath.Join(root, "logs")
+	skillsDir := filepath.Join(root, "skills")
+	toolsDir := filepath.Join(root, "tools")
+	for _, d := range []string{dataDir, logDir, skillsDir, toolsDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	// Seed a file in tools so the read probe has something to read.
+	if err := os.WriteFile(filepath.Join(toolsDir, "tool.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatalf("seed tools file: %v", err)
+	}
+
+	// Apply landlock exactly as the server does: data/logs/skills read-write,
+	// tools read-only (mirroring the in-sandbox --ro-bind as defense-in-depth).
+	if err := ApplyLandlock([]string{dataDir, logDir, skillsDir}, []string{toolsDir}); err != nil {
+		t.Fatalf("ApplyLandlock: %v", err)
+	}
+
+	// Writing to tools must be denied by landlock (read-only path class).
+	if err := os.WriteFile(filepath.Join(toolsDir, "evil"), []byte("x"), 0o644); err == nil {
+		t.Fatalf("write to tools dir unexpectedly succeeded; landlock did not mark it read-only")
+	}
+
+	// Reading from tools must still succeed under the read-only restriction.
+	if _, err := os.ReadFile(filepath.Join(toolsDir, "tool.txt")); err != nil {
+		t.Fatalf("read from tools dir failed under read-only landlock: %v", err)
+	}
+
+	// Writing to the read-write runtime subdirs must still succeed.
+	for _, d := range []string{dataDir, logDir, skillsDir} {
+		if err := os.WriteFile(filepath.Join(d, "marker"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write to rw dir %s failed under landlock: %v", d, err)
+		}
+	}
+
+	fmt.Println("TOOLS_RO_OK")
 }
