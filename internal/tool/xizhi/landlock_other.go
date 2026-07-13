@@ -14,9 +14,9 @@ import (
 // Landlock is a Linux-only kernel feature; on other platforms we log a warning
 // so operators know process-level file restriction is inactive and rely on
 // application-layer path validation alone.
-func applyLandlock(dataDir string) error {
+func applyLandlock(dirs []string) error {
 	logger.L().Warn("landlock not available on this platform; skipping process-level restriction",
-		zap.String("data_dir", dataDir),
+		zap.Strings("dirs", dirs),
 		zap.String("platform", runtime.GOOS),
 	)
 	return nil

@@ -5,6 +5,7 @@ bin/
 /data/
 .claude/
 /skills/
+/logs/
 .env
 tmp/
 .DS_Store

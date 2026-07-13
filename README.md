@@ -59,22 +59,29 @@ Values support `${VAR}` and `${VAR:default}` environment substitution.
 
 ### 4. Create a user
 
-The API has no public sign-up endpoint. Use the seed CLI:
+The API has no public sign-up endpoint. Use the seed subcommand:
 
 ```bash
 make build
-./bin/seed -username alice
+./bin/blowball seed --username alice
 ```
 
-You will be prompted for a password. The tool stores a bcrypt hash and prints the generated `user_id`.
+You will be prompted for a password. The tool stores a bcrypt hash and prints the generated `user_id`. Add `--password 'pw'` to go non-interactive, or `--dry-run` to preview the hash without writing.
 
 ### 5. Run the server
 
 ```bash
-make run
+make run        # = ./bin/blowball serve
 ```
 
-The server listens on the port configured in `config.yaml` (default `8080`).
+The server listens on the port configured in `config.yaml` (default `8080`). It is a single cobra binary with two subcommands (`serve`, `seed`) sharing the persistent flags `-f`/`--config` (config path, default `config.yaml`) and `-d`/`--data-dir` (runtime root, default `.`):
+
+```bash
+./bin/blowball serve                                     # reads ./config.yaml, writes ./data, ./logs, reads ./skills
+./bin/blowball serve -d /var/lib/blowball -f /etc/bb/config.yaml   # gather all runtime state under one root
+```
+
+The runtime root holds three subdirectories: `data/` (per-user workspaces, session files, per-user skills), `logs/` (the rotated structured log), and `skills/` (global skills). With the default `-d .` this is `./data`, `./logs`, `./skills` — backward compatible with the historical layout, only `./logs` is new. Missing directories are created on startup.
 
 ### 6. Run the frontend (optional)
 
@@ -89,7 +96,7 @@ The Vite dev server starts on port `5173` and proxies `/api` to `http://localhos
 ## Development
 
 ```bash
-# Build server + seed
+# Build the unified blowball binary (serve + seed subcommands)
 make build
 
 # Run all tests with race detection
@@ -367,7 +374,7 @@ Key sections in `config.yaml`:
 - `agents` — system prompts, models, max tokens, tool lists, MCP permissions, skill lists, and `thinking` / `reasoning_effort` for each agent.
 - `tools` — enable/disable tool families (xizhi, webfetch, executor) and set timeouts.
 - `mcp` — external MCP server declarations.
-- `logging` — level and format (`json` or `console`).
+- `logging` — level; `format` (`json`, the default, or `console`); `output` (sinks, default `["stderr", "file"]`); `file.*` rotation settings for the file sink (`max_size_mb`, `max_backups`, `max_age_days`, `compress`, via lumberjack). The file sink writes `{data-dir}/logs/blowball.log`. Set `output: ["stderr"]` to run console-only with no log file.
 
 ## License
 

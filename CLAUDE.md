@@ -10,12 +10,21 @@ All backend commands run from the repository root. Frontend commands run from `f
 
 ### Backend
 
+The server and the seed CLI are a single cobra binary `bin/blowball` with `serve` and `seed` subcommands sharing persistent `-f`/`--config` (config path, default `config.yaml`) and `-d`/`--data-dir` (runtime root, default `.`) flags. The runtime root holds `data/`, `logs/`, and `skills/`; with the default `-d .` these resolve to `./data`, `./logs`, `./skills`.
+
 ```bash
-# Build the server and seed CLI
+# Build the unified blowball binary (serve + seed subcommands)
 make build
 
-# Run the server (builds first)
+# Run the server (builds first): ./bin/blowball serve
 make run
+
+# Run the server under a dedicated runtime root (-d) and config (-f)
+./bin/blowball serve -d /var/lib/blowball -f /etc/blowball/config.yaml
+
+# Create a user (password is prompted securely)
+./bin/blowball seed --username alice
+./bin/blowball seed --username alice --password 's3cret' --dry-run   # preview hash only
 
 # Run all Go tests with race detection
 make test
@@ -72,7 +81,7 @@ cp config.example.yaml config.yaml
 
 # Create a user (password is prompted securely)
 make build
-./bin/seed -username alice
+./bin/blowball seed --username alice
 
 # Run server
 make run
@@ -107,7 +116,9 @@ sudo apt install bubblewrap
 
 ### Backend request flow
 
-`cmd/server/main.go` bootstraps the application in a strict sequence: load `config.yaml` (with `${VAR}` env expansion), initialize the zap logger, connect MySQL/Redis, create the filesystem store under `data/`, apply Landlock sandboxing (Linux-only), register tools, build services, build the orchestrator, construct handlers, wire the Gin router, and start a gracefully-shutdown HTTP server.
+The unified binary lives in `cmd/blowball/`: `main.go` wires the cobra root (`serve`/`seed` subcommands + persistent `-f`/`-d` flags), `serve.go` holds the server bootstrap (`serveRun`), and `seed.go` holds the user-creation subcommand.
+
+The `serve` subcommand bootstraps the application in a strict sequence: resolve `-f`/`-d` → load config (`-f`, with `${VAR}` env expansion) → derive `dataDir`/`logDir`/`skillsDir` from `-d` → `MkdirAll({d}/logs)` → initialize the zap logger (tee console + file under `{d}/logs/blowball.log`, rotated by lumberjack) → connect MySQL/Redis → create the filesystem store under `{d}/data` → `MkdirAll({d}/skills)` → apply Landlock sandboxing to the three runtime subdirs (Linux-only) → register tools, build services, build the orchestrator, construct handlers, wire the Gin router, and start a gracefully-shutdown HTTP server. The log directory is created and the log file opened before the logger emits its first line, and before Landlock is applied, so lumberjack's post-rotation reopen stays inside the sandbox.
 
 HTTP routes live in `internal/handler/router.go`. Protected routes use `middleware.AuthMiddleware` (JWT Bearer validation) after `TraceMiddleware` and CORS. Key endpoints:
 
@@ -169,7 +180,7 @@ Built-in tool families:
 - `internal/tool/xizhi/` — workspace file tools (`xizhi_read_file`, `xizhi_write_file`, `xizhi_modify_file`, `xizhi_list_files`, `xizhi_tree`, `xizhi_glob_files`). Each closure is scoped to the requesting user's workspace root (`data/{userID}/workspace`). `validatePath` rejects absolute paths, `..`, and symlink escapes. `modify_file` requires a unique old-content match. Landlock provides defense-in-depth on Linux.
 - `internal/tool/webfetch/` — `webfetch` HTTP fetch tool.
 - `internal/tool/executor/` — sandboxed command execution (`bash`, `python`, `pip_install`). Only available on Linux when `bwrap` (bubblewrap) is installed. Each invocation runs in a fresh user/mount/pid/network namespace, binds `data/{userID}/workspace` to `/workspace`, clears the environment and re-injects only variables matching `allowed_env_patterns`, and subjects commands to a configured timeout and `max_output_bytes` cap. Network access is disabled by default for `bash` and `python` (`--unshare-net`) but enabled by default for `pip_install`. Installed packages are written to `/workspace/.pip` and exposed to the `python` tool through `PYTHONPATH`. Every execution emits an audit log entry; dangerous keywords (`rm`, `curl`, `wget`, `sudo`, `sshd`) trigger a warning log but do not block execution.
-- `internal/tool/luban/` — skill management tools: `luban_list_skills`, `luban_read_skill`, and `luban_install_skill`. `luban_install_skill` `git clone`s a GitHub repo (`--depth 1`) or downloads a single `SKILL.md` (≤500KB) into the requesting user's `data/{userID}/skills/` dir. These are registered only when an agent's config explicitly lists one of them (`needsLubanTools` in `main.go`).
+- `internal/tool/luban/` — skill management tools: `luban_list_skills`, `luban_read_skill`, and `luban_install_skill`. `luban_install_skill` `git clone`s a GitHub repo (`--depth 1`) or downloads a single `SKILL.md` (≤500KB) into the requesting user's `data/{userID}/skills/` dir. These are registered only when an agent's config explicitly lists one of them (`needsLubanTools` in `cmd/blowball/serve.go`).
 - `internal/tool/skill/` — legacy `read_skill` loader plus the shared `skill.Loader` (used by luban). `read_skill` is registered only for backward compatibility when an agent explicitly lists it; new configs should use `luban_read_skill`.
 - `internal/tool/mcpclient/` — external MCP client. Supports `sse`, `stdio`, and Streamable `http` transports. Discovered tools are registered with an optional prefix to avoid collisions.
 
@@ -180,7 +191,7 @@ Agent tool visibility is strictly configured:
 - `agents.<name>.skills` lists skill names injected into the system prompt and enables `read_skill`/`luban_read_skill`.
 - `agents.<name>.thinking` enables OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 variants): `max_tokens` is sent as `max_completion_tokens` and `reasoning_effort` (`low`/`medium`/`high`) is included. `reasoning_effort` may only be set when `thinking: true` — config validation in `internal/config/config.go` rejects it otherwise.
 
-Skills are `{skill-name}/SKILL.md` files with YAML frontmatter (`name`, `description`). Global skills live in `./skills/`; per-user skills live in `data/{userID}/skills/`. User skills override global skills of the same name.
+Skills are `{skill-name}/SKILL.md` files with YAML frontmatter (`name`, `description`). Global skills live in `{data-dir}/skills/` (default `./skills/`); per-user skills live in `data/{userID}/skills/`. User skills override global skills of the same name.
 
 ### SSE streaming
 
@@ -228,7 +239,7 @@ Vite dev server proxies `/api` to `http://localhost:8080`.
 - **Config**: `internal/config/config.go` loads YAML and expands `${VAR}` / `${VAR:default}` from the environment. Durations support short suffixes (`s`, `m`, `h`, `d`, `w`).
 - **Context values**: `TraceMiddleware` mints `trace_id`; `AuthMiddleware` injects `userID`. Both propagate through stores via context. The skill tool reads `userID` from context to scope skill lookups.
 - **Not-found handling**: MySQL and filesystem store methods return `(nil, nil)` on missing records, not errors.
-- **Security**: there is no public user-creation endpoint; users are created via `cmd/seed`. Workspace file tools enforce per-user path scoping at the application layer; Landlock is a best-effort extra layer on Linux.
+- **Security**: there is no public user-creation endpoint; users are created via the `blowball seed` subcommand. Workspace file tools enforce per-user path scoping at the application layer; Landlock is a best-effort extra layer on Linux. Landlock is scoped to the three runtime subdirs (`{d}/data`, `{d}/logs`, `{d}/skills`) so it now also covers the logs dir (for lumberjack's post-rotation reopen); in production point `-d` at a dedicated directory rather than the repo root to keep the sandbox tight.
 - **Prompt rendering**: `internal/prompt/render.go` assembles the system prompt with environment info, built-in tools, MCP tools grouped by server, and skills as XML tags.
 - **Message reconstruction**: `internal/handler/message_reconstruct.go` rebuilds agent-ready conversation history from persistence, tracking tool-call state across messages.
 - **Testing**: unit tests are per-package; integration tests in `test/integration/` exercise real handlers/services/orchestrator with faked MySQL, Redis, and LLM.

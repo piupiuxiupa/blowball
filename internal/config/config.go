@@ -303,9 +303,62 @@ type MCPServerConfig struct {
 }
 
 // LoggingConfig holds structured logging settings.
+//
+// Output selects the log sinks. Recognized values are "stderr", "stdout"
+// (console sinks) and "file" (the rotated file sink under the runtime logs
+// directory). When Output is empty it defaults to ["stderr", "file"]. Format
+// selects the encoder for every enabled sink: "json" (default) or "console".
 type LoggingConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
+	Level  string        `yaml:"level"`
+	Format string        `yaml:"format"`
+	Output []string      `yaml:"output"`
+	File   LogFileConfig `yaml:"file"`
+}
+
+// LogFileConfig holds lumberjack rotation settings for the file log sink.
+// Zero values fall back to the defaults applied in applyDefaults.
+type LogFileConfig struct {
+	MaxSizeMB  int  `yaml:"max_size_mb"`
+	MaxBackups int  `yaml:"max_backups"`
+	MaxAgeDays int  `yaml:"max_age_days"`
+	Compress   bool `yaml:"compress"`
+}
+
+// DefaultLogFileConfig returns the lumberjack defaults used when a file sink is
+// enabled but the operator omits one or more rotation fields. Compress is left
+// false to match the bool zero value (it cannot be auto-defaulted, since false
+// is itself a valid explicit choice).
+func DefaultLogFileConfig() LogFileConfig {
+	return LogFileConfig{
+		MaxSizeMB:  100,
+		MaxBackups: 7,
+		MaxAgeDays: 30,
+	}
+}
+
+// DefaultLoggingOutput is the sink set used when logging.output is omitted.
+var DefaultLoggingOutput = []string{"stderr", "file"}
+
+// applyDefaults fills zero-valued logging fields with the recommended
+// defaults: format → "json", output → [stderr, file], and the lumberjack
+// rotation defaults. It is idempotent.
+func (l *LoggingConfig) applyDefaults() {
+	if strings.TrimSpace(l.Format) == "" {
+		l.Format = "json"
+	}
+	if len(l.Output) == 0 {
+		l.Output = append([]string(nil), DefaultLoggingOutput...)
+	}
+	def := DefaultLogFileConfig()
+	if l.File.MaxSizeMB == 0 {
+		l.File.MaxSizeMB = def.MaxSizeMB
+	}
+	if l.File.MaxBackups == 0 {
+		l.File.MaxBackups = def.MaxBackups
+	}
+	if l.File.MaxAgeDays == 0 {
+		l.File.MaxAgeDays = def.MaxAgeDays
+	}
 }
 
 // Load reads the YAML config at path, expands ${VAR} / ${VAR:default}
@@ -325,13 +378,14 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
 
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-
+	cfg.Logging.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Python.ApplyDefaults()
 	cfg.Tools.Executor.Pip.ApplyDefaults()
+
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
 }
@@ -344,11 +398,32 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.MySQL.DSN) == "" {
 		return fmt.Errorf("config validation error: mysql.dsn must be non-empty")
 	}
+	if err := c.Logging.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
 	if err := c.MCP.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Agents.validate(c.MCP.serverNames()); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
+	}
+	return nil
+}
+
+// validate checks the logging format and output sink names. Format must be one
+// of json|console; output entries must each be one of stderr|stdout|file.
+func (l LoggingConfig) validate() error {
+	switch l.Format {
+	case "json", "console":
+	default:
+		return fmt.Errorf("logging.format: unsupported value %q (want json|console)", l.Format)
+	}
+	for i, sink := range l.Output {
+		switch sink {
+		case "stderr", "stdout", "file":
+		default:
+			return fmt.Errorf("logging.output[%d]: unsupported sink %q (want stderr|stdout|file)", i, sink)
+		}
 	}
 	return nil
 }

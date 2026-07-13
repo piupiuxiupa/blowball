@@ -787,3 +787,109 @@ func TestConfig_ValidateAgentSkills(t *testing.T) {
 		t.Fatal("expected error for unknown skill")
 	}
 }
+
+func TestLoad_LoggingDefaults(t *testing.T) {
+	// No logging block at all: defaults must populate.
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Logging.Format != "json" {
+		t.Errorf("Logging.Format default = %q, want %q", cfg.Logging.Format, "json")
+	}
+	if len(cfg.Logging.Output) != 2 || cfg.Logging.Output[0] != "stderr" || cfg.Logging.Output[1] != "file" {
+		t.Errorf("Logging.Output default = %v, want [stderr file]", cfg.Logging.Output)
+	}
+	def := DefaultLogFileConfig()
+	if cfg.Logging.File.MaxSizeMB != def.MaxSizeMB {
+		t.Errorf("Logging.File.MaxSizeMB default = %d, want %d", cfg.Logging.File.MaxSizeMB, def.MaxSizeMB)
+	}
+	if cfg.Logging.File.MaxBackups != def.MaxBackups {
+		t.Errorf("Logging.File.MaxBackups default = %d, want %d", cfg.Logging.File.MaxBackups, def.MaxBackups)
+	}
+	if cfg.Logging.File.MaxAgeDays != def.MaxAgeDays {
+		t.Errorf("Logging.File.MaxAgeDays default = %d, want %d", cfg.Logging.File.MaxAgeDays, def.MaxAgeDays)
+	}
+}
+
+func TestLoad_LoggingInvalidFormat(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+logging:
+  format: xml
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load expected validation error for invalid logging.format, got nil")
+	}
+	if !strings.Contains(err.Error(), "logging.format") {
+		t.Errorf("error %q does not mention logging.format", err.Error())
+	}
+}
+
+func TestLoad_LoggingInvalidOutput(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+logging:
+  output: ["syslog"]
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load expected validation error for invalid logging.output sink, got nil")
+	}
+	if !strings.Contains(err.Error(), "logging.output") {
+		t.Errorf("error %q does not mention logging.output", err.Error())
+	}
+}
+
+func TestLoad_LoggingExplicitValues(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+logging:
+  level: debug
+  format: console
+  output: ["stdout"]
+  file:
+    max_size_mb: 5
+    max_backups: 2
+    max_age_days: 7
+    compress: true
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Logging.Format != "console" {
+		t.Errorf("Logging.Format = %q, want console", cfg.Logging.Format)
+	}
+	if len(cfg.Logging.Output) != 1 || cfg.Logging.Output[0] != "stdout" {
+		t.Errorf("Logging.Output = %v, want [stdout]", cfg.Logging.Output)
+	}
+	if cfg.Logging.File.MaxSizeMB != 5 {
+		t.Errorf("Logging.File.MaxSizeMB = %d, want 5", cfg.Logging.File.MaxSizeMB)
+	}
+	if !cfg.Logging.File.Compress {
+		t.Error("Logging.File.Compress = false, want true")
+	}
+}

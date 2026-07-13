@@ -1,24 +1,8 @@
-// Package main is the blowball HTTP server entry point.
+// Package main is the blowball unified CLI entry point.
 //
-// main wires every internal package — config, logger, stores, services, agent
-// orchestrator, tool registry, HTTP handlers and middleware — and runs the Gin
-// server with graceful shutdown on SIGINT/SIGTERM.
-//
-// The bootstrap order matters:
-//  1. config.yaml (the loader expands ${VAR} references).
-//  2. zap logger (so every step below logs through it).
-//  3. MySQL (sqlx connection pool), Redis (go-redis client), FS store.
-//  4. go-landlock restriction on the data directory (best-effort; no-op on
-//     non-Linux platforms such as the macOS dev environment).
-//  5. Tool registry with the Xizhi file tools registered against a placeholder
-//     root. The orchestrator's per-request AgentFactory rebuilds a registry
-//     scoped to the requesting user's workspace, so the placeholder root here
-//     only backs the MCP tools-listing endpoint.
-//  6. Services (auth, session, message, title), the OpenAI client, the agent
-//     orchestrator, and the HTTP handlers.
-//  7. Gin engine with recovery + trace + CORS middleware, route registration,
-//     then ListenAndServe in a goroutine so the main goroutine can block on
-//     the OS signal that triggers Shutdown.
+// The cobra root exposes `serve` and `seed` subcommands and persistent `-f`/`--config` and
+// `-d`/`--data-dir` flags. See main.go for the command wiring; this file holds the
+// `serve` subcommand (HTTP server bootstrap) and seed.go holds the `seed` subcommand.
 package main
 
 import (
@@ -27,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/agent"
@@ -53,43 +39,76 @@ import (
 	"github.com/lush/blowball/internal/tool/xizhi"
 )
 
-// DataDir is the on-disk root for per-user workspaces, session files and
-// skills. Landlock restricts the process to it (on Linux) and every store that
-// touches disk is rooted here.
-const DataDir = "data"
-
 // RedisCacheTTL is the expiration applied to every session-level cache write.
-// The spec defaults to 24h; if the deployment wants a different value it can be
-// surfaced through config later without touching this constant.
+// The spec defaults to 24h; if the deployment wants a different value it can be surfaced
+// through config later without touching this constant.
 const RedisCacheTTL = 24 * time.Hour
 
-// MaxUploadBytes caps a single multipart upload at 50 MiB. Larger uploads are
-// rejected with 413 before they reach disk.
+// MaxUploadBytes caps a single multipart upload at 50 MiB. Larger uploads are rejected with 413 before they reach disk.
 const MaxUploadBytes = 50 << 20
 
-// ShutdownTimeout is the upper bound on draining in-flight requests after a
-// SIGINT/SIGTERM, per the api-server spec's graceful-shutdown requirement.
+// ShutdownTimeout is the upper bound on draining in-flight requests after a SIGINT/SIGTERM,
+// per the api-server spec's graceful-shutdown requirement.
 const ShutdownTimeout = 10 * time.Second
 
-func main() {
-	// 1. Load config. ${VAR} / ${VAR:default} references are expanded by the
-	// loader, so callers can drive every secret / DSN through the environment.
-	cfg, err := config.Load("config.yaml")
+// newServeCmd builds the `serve` cobra subcommand. It runs the HTTP server bootstrap, deriving the runtime data root from the persistent `-d` flag and the config path from `-f`.
+func newServeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:          "serve",
+		Short:        "Run the blowball HTTP server",
+		Long:         "Run the blowball HTTP server (Gin) with graceful shutdown on SIGINT/SIGTERM.",
+		SilenceUsage: true,
+		RunE:         serveRun,
+	}
+}
+
+// serveRun is the server bootstrap. Bootstrap order (see design.md D5):
+//
+//  0. resolve -f, -d from cobra flags
+//  1. config.Load(-f)
+//
+// 2. MkdirAll({d}/logs)            — ensure log dir exists before the logger opens it
+// 3. logger.Init(cfg.Logging, {d}/logs)  — writes to the right file from the first line
+// 4. stores under {d}/data; skills at {d}/skills
+// 5. ApplyLandlock({d}/data, {d}/logs, {d}/skills)
+// 6. services, orchestrator, handlers, Gin, ListenAndServe
+func serveRun(cmd *cobra.Command, _ []string) error {
+	configPath, dataRoot, err := persistentFlags(cmd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
-	// 2. Init the zap logger and install it as the package default so any
-	// caller of logger.L() (services, stores, middleware) picks it up.
-	log, err := logger.Init(cfg.Logging.Level)
+	// 1. Load config. ${VAR} / ${VAR:default} references are expanded by the loader.
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "init logger: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("load config %q: %w", configPath, err)
+	}
+
+	// Derive the three runtime locations from the single -d root (D2/D3): data, logs, skills.
+	dataDir := filepath.Join(dataRoot, "data")
+	logDir := filepath.Join(dataRoot, "logs")
+	skillsDir := filepath.Join(dataRoot, "skills")
+
+	// 2. Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return fmt.Errorf("create log dir %q: %w", logDir, err)
+	}
+
+	// 3. Init the zap logger (tee console + file, rotated by lumberjack) and install it as the package default.
+	log, err := logger.Init(cfg.Logging, logDir)
+	if err != nil {
+		return fmt.Errorf("init logger: %w", err)
 	}
 	defer func() { _ = log.Sync() }()
 
-	// 3. MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
+	log.Info("runtime layout",
+		zap.String("config", configPath),
+		zap.String("data_root", dataRoot),
+		zap.String("data_dir", dataDir),
+		zap.String("log_dir", logDir),
+		zap.String("skills_dir", skillsDir))
+
+	// 4. MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
 	mysqlStore, err := mysql.New(cfg.MySQL.DSN)
 	if err != nil {
 		log.Fatal("mysql init failed", zap.Error(err))
@@ -100,7 +119,7 @@ func main() {
 		}
 	}()
 
-	// 4. Redis. The shared TTL is applied to session-level cache keys.
+	// Redis. The shared TTL is applied to session-level cache keys.
 	redisStore, err := redis.New(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB, RedisCacheTTL)
 	if err != nil {
 		log.Fatal("redis init failed", zap.Error(err))
@@ -111,31 +130,29 @@ func main() {
 		}
 	}()
 
-	// 5. FS store for per-user session files, workspace and skills directories.
-	fsStore, err := fs.New(DataDir)
+	// FS store for per-user session files, workspace and skills directories. fs.New creates dataDir.
+	fsStore, err := fs.New(dataDir)
 	if err != nil {
 		log.Fatal("fs store init failed", zap.Error(err))
 	}
 
-	// 6. go-landlock. Best-effort: a no-op on non-Linux platforms and logged
-	// at warn rather than fatal so macOS dev workflows keep running. The
-	// application-layer path validation in xizhi still enforces per-user
-	// workspace isolation regardless.
-	if err := xizhi.ApplyLandlock(DataDir); err != nil {
+	// Ensure the global skills directory exists (the loader does not create it) so per-subdir landlock below resolves cleanly.
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		log.Fatal("create skills dir failed", zap.Error(err))
+	}
+
+	// 5. go-landlock, widened to cover logs for lumberjack's post-rotation reopen (D6). Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless.
+	if err := xizhi.ApplyLandlock(dataDir, logDir, skillsDir); err != nil {
 		log.Warn("landlock not applied; relying on application-layer validation only",
 			zap.Error(err))
 	}
 
-	// 7. Tool registry. The main registry backs the MCP tools-listing endpoint.
-	// Real tool execution during orchestration uses a per-request registry the
-	// orchestrator's factory rebuilds scoped to the user's workspace root.
+	// 6. Tool registry. The main registry backs the MCP tools-listing endpoint. Real tool execution during orchestration uses a per-request registry the orchestrator's factory rebuilds scoped to the user's workspace root.
 	reg := tool.NewRegistry()
-	xizhi.RegisterAll(reg, DataDir, cfg.Tools.Xizhi)
+	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
-	// 7b. Sandboxed bash/python/pip execution. Only registered on Linux where
-	// bwrap is available; on other platforms enabled tools are ignored. If a tool
-	// is explicitly enabled but bwrap is missing on Linux, startup fails fast.
+	// Sandboxed bash/python/pip execution. Only registered on Linux where bwrap is available; on other platforms enabled tools are ignored. If a tool is explicitly enabled but bwrap is missing on Linux, startup fails fast.
 	if cfg.Tools.Executor.Bash.Enabled || cfg.Tools.Executor.Python.Enabled || cfg.Tools.Executor.Pip.Enabled {
 		if !executor.IsAvailable() {
 			log.Fatal("executor tools enabled but bubblewrap (bwrap) is not available",
@@ -145,16 +162,14 @@ func main() {
 			return fsStore.UserWorkspace(userID)
 		}, func(userID string) string {
 			return fsStore.UserSkills(userID)
-		}, "skills")
+		}, skillsDir)
 		if err := executor.RegisterAll(reg, executorTools); err != nil {
 			log.Fatal("register executor tools failed", zap.Error(err))
 		}
 	}
 
-	// 7a. Skill loader. Discover skills from the project-level skills/ directory
-	// and per-user data/{userID}/skills/ directories. Register the luban skill
-	// tools globally when at least one agent lists them in its tools.
-	skillLoader := skill.NewLoader("skills", func(userID string) string {
+	// Skill loader. Discover skills from the global skills directory and per-user data/{userID}/skills/ directories. Register the luban skill tools globally when at least one agent lists them.
+	skillLoader := skill.NewLoader(skillsDir, func(userID string) string {
 		return fsStore.UserSkills(userID)
 	})
 	if needsLubanTools(cfg.Agents) {
@@ -166,17 +181,14 @@ func main() {
 		}
 	}
 
-	// Keep read_skill registered for backward compatibility when an agent still
-	// explicitly references it. New configurations should use luban_read_skill.
+	// Keep read_skill registered for backward compatibility when an agent still explicitly references it. New configurations should use luban_read_skill.
 	if needsReadSkill(cfg.Agents) {
 		if err := skill.RegisterReadSkill(reg, skillLoader); err != nil {
 			log.Fatal("register read_skill failed", zap.Error(err))
 		}
 	}
 
-	// 7b. External MCP servers. Connect, discover tools, and register proxy
-	// specs into the process-wide registry. Startup fails fast on connection or
-	// tool-list errors so misconfiguration is surfaced immediately.
+	// External MCP servers. Connect, discover tools, and register proxy specs into the process-wide registry. Startup fails fast on connection or tool-list errors.
 	mcpManager, err := mcpclient.RegisterAllWithManager(context.Background(), reg, cfg.MCP)
 	if err != nil {
 		log.Fatal("mcp client registration failed", zap.Error(err))
@@ -193,15 +205,12 @@ func main() {
 		log.Fatal("agent mcp tool validation failed", zap.Error(err))
 	}
 
-	// Validate agent skill references against global skills. Per-user skills are
-	// validated at request time when the userID is known.
+	// Validate agent skill references against global skills. Per-user skills are validated at request time when the userID is known.
 	if err := cfg.ValidateAgentSkills("", skillLoader.HasSkill); err != nil {
 		log.Fatal("agent skill validation failed", zap.Error(err))
 	}
 
-	// 8. Services. SessionService owns the three-layer write path; the message
-	// service delegates saves back to SessionService.SaveMessage so writes stay
-	// in one place.
+	// 7. Services. SessionService owns the three-layer write path; the message service delegates saves back to SessionService.SaveMessage so writes stay in one place.
 	deps := service.SessionDeps{MySQL: mysqlStore, Redis: redisStore, FS: fsStore}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
@@ -209,10 +218,7 @@ func main() {
 	openAIClient := agent.NewOpenAIClient(cfg.OpenAI)
 	titleSvc := service.NewTitleService(openAIClient, mysqlStore, cfg.OpenAI)
 
-	// 9. Orchestrator. The workspace-root closure maps the authenticated user
-	// id to its workspace directory under the data root; the orchestrator's
-	// per-request AgentFactory uses the workspace_root passed to Handle, so the
-	// closure here is only a convenience accessor for handlers that need it.
+	// 8. Orchestrator. The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
 	wsFn := func(userID string) string {
 		return fsStore.UserWorkspace(userID)
 	}
@@ -221,8 +227,7 @@ func main() {
 		log.Fatal("orchestrator init failed", zap.Error(err))
 	}
 
-	// 10. Handlers. AuthService needs the parsed JWT expire duration; config
-	// exposes ParseDuration to handle the short-form suffixes (e.g. "7d").
+	// 9. Handlers. AuthService needs the parsed JWT expire duration; config exposes ParseDuration to handle the short-form suffixes (e.g. "7d").
 	jwtExpire, err := cfg.JWT.ParseDuration()
 	if err != nil {
 		log.Fatal("parse jwt.expire failed", zap.Error(err))
@@ -230,13 +235,12 @@ func main() {
 	authSvc := service.NewAuthService(mysqlStore, cfg.JWT.Secret, jwtExpire)
 	authHandler := handler.NewAuthHandler(authSvc)
 	orchAdapter := handler.NewOrchestratorAdapter(orch)
-	sessionHandler := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, orchAdapter, DataDir)
+	sessionHandler := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, orchAdapter, dataDir)
 	workspaceHandler := handler.NewWorkspaceHandler(fsStore, MaxUploadBytes)
 	mcpHandler := handler.NewMCPHandler(reg)
 	skillHandler := handler.NewSkillHandler(fsStore)
 
-	// 11. Gin engine. Recovery catches panics; trace mints a per-request
-	// trace_id and echoes it back on X-Trace-Id; CORS handles preflight.
+	// 10. Gin engine. Recovery catches panics; trace mints a per-request trace_id and echoes it back on X-Trace-Id; CORS handles preflight.
 	engine := gin.New()
 	engine.Use(gin.Recovery())
 	engine.Use(middleware.TraceMiddleware())
@@ -264,18 +268,14 @@ func main() {
 	}
 	handler.RegisterRoutes(engine, routeDeps)
 
-	// 12. HTTP server with graceful shutdown. ListenAndServe runs in a
-	// goroutine so the main goroutine can block on the OS signal; on signal we
-	// call Shutdown with a 10s grace period and then close the stores (their
-	// Close is also deferred above as a backstop for early-return paths).
+	// 11. HTTP server with graceful shutdown. ListenAndServe runs in a goroutine so the main goroutine can block on the OS signal; on signal we call Shutdown with a 10s grace period and then close the stores (their Close is also deferred above as a backstop for early-return paths).
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler: engine,
 	}
 	go func() {
 		log.Info("server starting",
-			zap.Int("port", cfg.Server.Port),
-			zap.String("data_dir", DataDir))
+			zap.Int("port", cfg.Server.Port))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal("listen failed", zap.Error(err))
 		}
@@ -292,10 +292,10 @@ func main() {
 		log.Error("server shutdown error", zap.Error(err))
 	}
 	log.Info("server stopped")
+	return nil
 }
 
-// needsLubanTools reports whether any agent explicitly lists one of the luban
-// skill tools in its tools list.
+// needsLubanTools reports whether any agent explicitly lists one of the luban skill tools in its tools list.
 func needsLubanTools(agents config.AgentsConfig) bool {
 	lubanTools := []string{luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill}
 	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Chongzhi, agents.Liang} {
@@ -308,9 +308,7 @@ func needsLubanTools(agents config.AgentsConfig) bool {
 	return false
 }
 
-// needsReadSkill reports whether any agent explicitly lists read_skill in its
-// tools. read_skill is kept as a backward-compatibility entry point; new
-// configurations should use luban_read_skill.
+// needsReadSkill reports whether any agent explicitly lists read_skill in its tools. read_skill is kept as a backward-compatibility entry point; new configurations should use luban_read_skill.
 func needsReadSkill(agents config.AgentsConfig) bool {
 	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Chongzhi, agents.Liang} {
 		if slices.Contains(cfg.Tools, skill.ToolName) {
@@ -320,8 +318,7 @@ func needsReadSkill(agents config.AgentsConfig) bool {
 	return false
 }
 
-// toServerToolSet converts the server-name -> tool-names mapping into the
-// map[string]map[string]struct{} shape expected by Config.ValidateAgentMCPTools.
+// toServerToolSet converts the server-name -> tool-names mapping into the map[string]map[string]struct{} shape expected by Config.ValidateAgentMCPTools.
 func toServerToolSet(serverTools map[string][]string) map[string]map[string]struct{} {
 	out := make(map[string]map[string]struct{}, len(serverTools))
 	for serverName, names := range serverTools {
@@ -332,4 +329,17 @@ func toServerToolSet(serverTools map[string][]string) map[string]map[string]stru
 		out[serverName] = set
 	}
 	return out
+}
+
+// persistentFlags resolves the shared -f/--config and -d/--data-dir persistent flags from cmd.
+func persistentFlags(cmd *cobra.Command) (configPath, dataRoot string, err error) {
+	configPath, err = cmd.Flags().GetString("config")
+	if err != nil {
+		return "", "", fmt.Errorf("read --config: %w", err)
+	}
+	dataRoot, err = cmd.Flags().GetString("data-dir")
+	if err != nil {
+		return "", "", fmt.Errorf("read --data-dir: %w", err)
+	}
+	return configPath, dataRoot, nil
 }

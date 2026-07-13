@@ -233,4 +233,21 @@ mcp:
 
 logging:
   level: info
+  # Encoding for every enabled sink: "json" (default) or "console".
   format: json
+  # Log sinks. Recognized values: "stderr", "stdout" (console) and "file"
+  # (rotated file under {data-dir}/logs). Defaults to ["stderr", "file"].
+  # Set just ["stderr"] to run console-only with no on-disk log file.
+  output:
+    - stderr
+    - file
+  # Rotation settings for the file sink (lumberjack). Fields left at zero fall
+  # back to the defaults shown here. max_size_mb is the per-file size that
+  # triggers a rotation; max_backups bounds how many rotated backups are kept;
+  # max_age_days deletes backups older than N days; compress gzip-compresses
+  # rotated backups (off by default).
+  file:
+    max_size_mb: 100
+    max_backups: 7
+    max_age_days: 30
+    # compress: true
