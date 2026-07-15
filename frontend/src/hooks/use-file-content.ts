@@ -2,7 +2,12 @@ import { useQuery } from '@tanstack/react-query';
 import { apiGet, getApiBase, getToken } from '@/lib/api';
 import type { FileContentResponse } from '@/lib/api';
 
-export function useFileContent(path: string | null) {
+// opts.enabled lets callers opt out of the text-content fetch for files that
+// are rendered another way (e.g. office files via OnlyOffice's binary download
+// endpoint, where /content would just 400 with BINARY_FILE). Defaults to
+// "fetch whenever a path is set".
+export function useFileContent(path: string | null, opts?: { enabled?: boolean }) {
+  const enabled = opts?.enabled ?? !!path;
   return useQuery({
     queryKey: ['file-content', path],
     queryFn: async () => {
@@ -20,7 +25,7 @@ export function useFileContent(path: string | null) {
         };
       }
     },
-    enabled: !!path,
+    enabled,
   });
 }
 

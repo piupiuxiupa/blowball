@@ -21,3 +21,12 @@ export function isWord(ext: string): boolean {
 export function isExcel(ext: string): boolean {
   return ext === 'xls' || ext === 'xlsx';
 }
+
+export function isSlide(ext: string): boolean {
+  return ext === 'pptx' || ext === 'ppt';
+}
+
+// isOffice returns true for any extension OnlyOffice renders (word/cell/slide).
+export function isOffice(ext: string): boolean {
+  return isWord(ext) || isExcel(ext) || isSlide(ext);
+}

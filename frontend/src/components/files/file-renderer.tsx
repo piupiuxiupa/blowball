@@ -1,18 +1,24 @@
 import { useUIStore } from '@/stores/ui-store';
 import { useFileContent } from '@/hooks/use-file-content';
-import { getFileExtension, isImage, isMarkdown, isPdf, isWord, isExcel } from '@/lib/file-type';
+import { getFileExtension, isImage, isMarkdown, isPdf, isOffice } from '@/lib/file-type';
 import { MarkdownViewer } from './markdown-viewer';
 import { CodeViewer } from './code-viewer';
 import { ImageViewer } from './image-viewer';
 import { PdfViewer } from './pdf-viewer';
 import { BinaryPlaceholder } from './binary-placeholder';
-import { WordViewer } from './word-viewer';
-import { ExcelViewer } from './excel-viewer';
+import { OfficeViewer } from './office-viewer';
 import { Skeleton } from '@/components/ui/skeleton';
 
 export function FileRenderer() {
   const activeFilePath = useUIStore((s) => s.activeFilePath);
-  const { data, isLoading } = useFileContent(activeFilePath);
+  // Office files render through OnlyOffice (binary, via the download endpoint),
+  // so we skip the text-content fetch for them — otherwise /content 400s with
+  // BINARY_FILE on every office open. ext is computed before the hook so it can
+  // gate the query (hooks must run unconditionally).
+  const ext = getFileExtension(activeFilePath ?? '');
+  const { data, isLoading } = useFileContent(activeFilePath, {
+    enabled: !!activeFilePath && !isOffice(ext),
+  });
 
   if (!activeFilePath) {
     return (
@@ -32,14 +38,9 @@ export function FileRenderer() {
     );
   }
 
-  const ext = getFileExtension(activeFilePath);
-
   // Route binary previewers by extension before falling back to text content.
-  if (isWord(ext)) {
-    return <WordViewer path={activeFilePath} />;
-  }
-  if (isExcel(ext)) {
-    return <ExcelViewer path={activeFilePath} />;
+  if (isOffice(ext)) {
+    return <OfficeViewer path={activeFilePath} />;
   }
   if (isPdf(ext)) {
     return <PdfViewer path={activeFilePath} />;
