@@ -65,6 +65,16 @@ type RouteDeps struct {
 	// WorkspaceRename handles PUT /api/v1/workspace/files/*path. Required.
 	WorkspaceRename gin.HandlerFunc
 
+	// WorkspaceOnlyOfficeConfig handles GET /api/v1/workspace/files/*path/onlyoffice-config.
+	// It signs a DocEditor config with the OnlyOffice secret (Bearer auth, like
+	// /content). Required; nil panics if hit, so callers must always wire it.
+	WorkspaceOnlyOfficeConfig gin.HandlerFunc
+
+	// WorkspaceOnlyOfficeCallback handles POST /api/v1/workspace/onlyoffice-callback.
+	// It persists document-save callbacks from the DocumentServer (query-token
+	// auth, like token-download). Required.
+	WorkspaceOnlyOfficeCallback gin.HandlerFunc
+
 	// MCPTools handles GET /api/v1/mcp/tools. Required.
 	MCPTools gin.HandlerFunc
 
@@ -85,6 +95,17 @@ const contentRouteSuffix = "/content"
 // path equals this value or starts with "download/".
 const tokenDownloadPath = "download"
 
+// onlyOfficeConfigSuffix is the URL suffix that selects the OnlyOffice
+// editor-config signing handler over the download handler. Like /content it
+// shares the single catch-all route and dispatches on this trailing suffix.
+const onlyOfficeConfigSuffix = "/onlyoffice-config"
+
+// onlyOfficeCallbackRoute is the static POST route that receives OnlyOffice
+// document-save callbacks. Unlike the catch-all GETs it is a standalone route so
+// it can carry the query-token auth middleware without colliding with gin's
+// wildcard registration.
+const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
+
 // RegisterRoutes wires every route onto r per the api-server spec:
 //
 //	POST /api/v1/auth/login                       (public)
@@ -99,8 +120,10 @@ const tokenDownloadPath = "download"
 //	GET  /api/v1/workspace/files/download/*path    (query token auth)
 //	GET  /api/v1/workspace/files/*path             (auth, download)
 //	GET  /api/v1/workspace/files/*path/content     (auth, text content)
+//	GET  /api/v1/workspace/files/*path/onlyoffice-config (auth, signed editor config)
 //	PUT  /api/v1/workspace/files/*path             (auth, rename file/dir)
 //	DELETE /api/v1/workspace/files/*path          (auth, delete file/dir)
+//	POST /api/v1/workspace/onlyoffice-callback     (query token, save callback)
 //	GET  /api/v1/mcp/tools                        (auth)
 //	GET  /api/v1/skills                           (auth)
 //
@@ -148,6 +171,13 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	// PUT also shares the catch-all for rename/move operations.
 	authed.PUT("/workspace/files/*path", deps.WorkspaceRename)
 
+	// OnlyOffice save callback. It is a standalone POST (not under the catch-all)
+	// so it can use the query-token middleware — OnlyOffice posts from the
+	// DocumentServer container and cannot send the Bearer header. The middleware
+	// aborts on a missing/invalid token; on success it falls through to the
+	// handler, which replies with OnlyOffice's {"error": N} convention.
+	v1.POST(onlyOfficeCallbackRoute, deps.QueryTokenAuthMW, deps.WorkspaceOnlyOfficeCallback)
+
 	authed.GET("/mcp/tools", deps.MCPTools)
 	authed.GET("/skills", deps.SkillsList)
 }
@@ -188,6 +218,12 @@ func dispatchWorkspaceFile(deps RouteDeps) gin.HandlerFunc {
 			// Re-set the param so WorkspaceContent reads the trimmed value.
 			c.Params = stripContentSuffix(c.Params, trimmed)
 			deps.WorkspaceContent(c)
+			return
+		}
+		if strings.HasSuffix(raw, onlyOfficeConfigSuffix) {
+			trimmed := strings.TrimSuffix(raw, onlyOfficeConfigSuffix)
+			c.Params = setPathParam(c.Params, trimmed)
+			deps.WorkspaceOnlyOfficeConfig(c)
 			return
 		}
 		deps.WorkspaceDownload(c)

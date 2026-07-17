@@ -2,7 +2,11 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/middleware"
+	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/store/fs"
@@ -28,13 +33,35 @@ import (
 type WorkspaceHandler struct {
 	fsSvc          *fs.Store
 	maxUploadBytes int64
+	oo             OnlyOfficeSettings
+}
+
+// OnlyOfficeSettings is the server-side OnlyOffice integration config injected
+// into WorkspaceHandler. Secret signs the editor config (HS256); ServerURL is
+// the browser-facing api.js origin and the host allowlist base for callback
+// result URLs; InternalBackend is the container-reachable backend origin used to
+// build document.url and callbackUrl. When Secret is empty the editor-config and
+// callback endpoints return 503 rather than signing an unverifiable config.
+type OnlyOfficeSettings struct {
+	Secret          string
+	ServerURL       string
+	InternalBackend string
+}
+
+// configured reports whether OnlyOffice editing is enabled. The editor-config
+// endpoint cannot sign a valid config without a secret, so an empty secret
+// disables both endpoints (503).
+func (o OnlyOfficeSettings) configured() bool {
+	return strings.TrimSpace(o.Secret) != ""
 }
 
 // NewWorkspaceHandler wires the handler. maxUploadBytes is the per-file upload
 // cap; uploads larger than this are rejected with 413 before they reach disk.
-// A non-positive value disables the cap (not recommended for production).
-func NewWorkspaceHandler(fsSvc *fs.Store, maxUploadBytes int64) *WorkspaceHandler {
-	return &WorkspaceHandler{fsSvc: fsSvc, maxUploadBytes: maxUploadBytes}
+// A non-positive value disables the cap (not recommended for production). oo is
+// the OnlyOffice integration config; pass an empty OnlyOfficeSettings to disable
+// office editing (the editor endpoints then return 503).
+func NewWorkspaceHandler(fsSvc *fs.Store, maxUploadBytes int64, oo OnlyOfficeSettings) *WorkspaceHandler {
+	return &WorkspaceHandler{fsSvc: fsSvc, maxUploadBytes: maxUploadBytes, oo: oo}
 }
 
 // fileEntry is one element of the GET /api/v1/workspace/files response array.
@@ -479,6 +506,315 @@ func (h *WorkspaceHandler) Delete(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// OnlyOffice status codes from the DocumentServer save callback. 2 = document
+// is ready for saving (being closed with changes); 6 = force save (timed or
+// manual). Both carry the edited file at body.url and must be persisted.
+const (
+	onlyOfficeStatusSave    = 2
+	onlyOfficeStatusForce   = 6
+	onlyOfficeDownloadLimit = 60 * time.Second
+)
+
+// errOnlyOfficeHostNotAllowed signals a callback result URL whose host is not
+// the configured DocumentServer host (an SSRF attempt or a siteUrl mismatch).
+var errOnlyOfficeHostNotAllowed = errors.New("onlyoffice: result url host not in allowlist")
+
+// onlyOfficeConfigResponse is the JSON body returned by the editor-config
+// endpoint: the browser loads api.js from ServerURL and instantiates
+// DocsAPI.DocEditor(id, {...config, token}).
+type onlyOfficeConfigResponse struct {
+	ServerURL string         `json:"server_url"`
+	Config    map[string]any `json:"config"`
+	Token     string         `json:"token"`
+}
+
+// OnlyOfficeConfig handles GET /api/v1/workspace/files/*path/onlyoffice-config.
+// It builds a DocEditor config (edit mode, a per-request random key, document.url
+// and editorConfig.callbackUrl pointing at InternalBackend with the user's Bearer
+// JWT as the query token), signs it with the configured OnlyOffice secret
+// (HS256), and returns {server_url, config, token}. The secret never leaves the
+// server — the browser only ever holds the signed token.
+//
+// 503 when OnlyOffice is not configured (empty secret); 403 on path escape; 404
+// when the file does not exist; 400 when the path is a directory.
+func (h *WorkspaceHandler) OnlyOfficeConfig(c *gin.Context) {
+	if !h.oo.configured() {
+		c.JSON(http.StatusServiceUnavailable, errorBody("ONLYOFFICE_DISABLED", "onlyoffice is not configured"))
+		return
+	}
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	rel := strings.TrimPrefix(c.Param("path"), "/")
+
+	abs, err := xizhi.ValidatePath(wsRoot, rel)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "file not found"))
+			return
+		}
+		logWS(ctx, "workspace.onlyoffice_config.stat", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat file failed"))
+		return
+	}
+	if info.IsDir() {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "path is a directory"))
+		return
+	}
+
+	// The DocumentServer reaches the backend as the requesting user: embed the
+	// same Bearer JWT (still valid for its remaining lifetime) as the query token
+	// on document.url and the save callbackUrl. AuthMiddleware already verified
+	// it, so it is present.
+	userJWT := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+
+	config, err := h.buildOnlyOfficeConfig(rel, userJWT)
+	if err != nil {
+		logWS(ctx, "workspace.onlyoffice_config.build", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "build editor config failed"))
+		return
+	}
+	token, err := jwt.SignClaims(h.oo.Secret, config)
+	if err != nil {
+		logWS(ctx, "workspace.onlyoffice_config.sign", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "sign editor config failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, onlyOfficeConfigResponse{
+		ServerURL: h.oo.ServerURL,
+		Config:    config,
+		Token:     token,
+	})
+}
+
+// OnlyOfficeCallback handles POST /api/v1/workspace/onlyoffice-callback?path=<>&token=<jwt>.
+// It receives OnlyOffice document-save callbacks from the DocumentServer. For
+// save statuses (2/6) it downloads the result URL — host-allowlisted to the
+// configured DocumentServer to mitigate SSRF — and atomically overwrites the
+// workspace file (capped at maxUploadBytes). Non-save statuses (1/3/4/7) and
+// missing-URL saves are acked without touching disk. Every business outcome is
+// reported with OnlyOffice's {"error": N} convention (0 ok, non-0 retry); auth
+// (401) and path-escape (403) remain HTTP-level errors.
+func (h *WorkspaceHandler) OnlyOfficeCallback(c *gin.Context) {
+	if !h.oo.configured() {
+		c.JSON(http.StatusServiceUnavailable, errorBody("ONLYOFFICE_DISABLED", "onlyoffice is not configured"))
+		return
+	}
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	rel := strings.TrimSpace(c.Query("path"))
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	abs, err := xizhi.ValidatePath(wsRoot, rel)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	var body struct {
+		Status int    `json:"status"`
+		Key    string `json:"key"`
+		URL    string `json:"url"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		// Malformed callback — reply in-contract so OnlyOffice retries rather
+		// than treating a 4xx as terminal.
+		writeOnlyOfficeError(c, 1)
+		return
+	}
+
+	// Non-save statuses: ack without persisting. OnlyOffice opens/closes with
+	// no changes, force-save-without-url, etc.
+	if !onlyOfficeIsSaveStatus(body.Status) {
+		writeOnlyOfficeError(c, 0)
+		return
+	}
+	if strings.TrimSpace(body.URL) == "" {
+		writeOnlyOfficeError(c, 0)
+		return
+	}
+
+	// SSRF mitigation: the result URL comes from the request body, so only
+	// download from the configured DocumentServer host.
+	if !h.onlyOfficeURLAllowed(body.URL) {
+		logWS(ctx, "workspace.onlyoffice_callback.host_rejected", body.URL, errOnlyOfficeHostNotAllowed)
+		writeOnlyOfficeError(c, 1)
+		return
+	}
+
+	if err := h.onlyOfficePersist(ctx, abs, body.URL); err != nil {
+		logWS(ctx, "workspace.onlyoffice_callback.persist", abs, err)
+		writeOnlyOfficeError(c, 1)
+		return
+	}
+	writeOnlyOfficeError(c, 0)
+}
+
+// onlyOfficeIsSaveStatus reports whether a status warrants downloading + persisting.
+func onlyOfficeIsSaveStatus(status int) bool {
+	return status == onlyOfficeStatusSave || status == onlyOfficeStatusForce
+}
+
+// buildOnlyOfficeConfig constructs the DocEditor config for a workspace file. The
+// document.key is freshly random per request so reopening always re-converts and
+// never serves a stale cached document.
+func (h *WorkspaceHandler) buildOnlyOfficeConfig(rel, userJWT string) (map[string]any, error) {
+	key, err := randomOnlyOfficeKey()
+	if err != nil {
+		return nil, err
+	}
+	title := filepath.Base(rel)
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(rel), "."))
+
+	// The DocumentServer downloads the source file and POSTs saves back to the
+	// backend over InternalBackend (the container-reachable origin), authenticating
+	// as the user via the embedded JWT query token.
+	docURL := h.oo.InternalBackend + "/api/v1/workspace/files/download/" + url.PathEscape(rel) + "?inline=1&token=" + url.QueryEscape(userJWT)
+	callbackURL := h.oo.InternalBackend + "/api/v1/workspace/onlyoffice-callback?path=" + url.QueryEscape(rel) + "&token=" + url.QueryEscape(userJWT)
+
+	return map[string]any{
+		"documentType": onlyOfficeDocumentType(ext),
+		"document": gin.H{
+			"fileType": ext,
+			"key":      key,
+			"title":    title,
+			"url":      docURL,
+			"permissions": gin.H{
+				"edit":     true,
+				"download": true,
+			},
+		},
+		"editorConfig": gin.H{
+			"mode":        "edit",
+			"callbackUrl": callbackURL,
+			"customization": gin.H{
+				"forcesave": true,
+			},
+			"user": gin.H{
+				"id":   "blowball",
+				"name": "blowball",
+			},
+		},
+	}, nil
+}
+
+// onlyOfficeDocumentType maps an extension (no dot) to OnlyOffice's documentType
+// word/cell/slide. Office files always carry a known extension; unknown types
+// fall back to "word" and OnlyOffice rejects them client-side regardless.
+func onlyOfficeDocumentType(ext string) string {
+	switch ext {
+	case "doc", "docx":
+		return "word"
+	case "xls", "xlsx":
+		return "cell"
+	case "ppt", "pptx":
+		return "slide"
+	default:
+		return "word"
+	}
+}
+
+// randomOnlyOfficeKey returns a fresh, URL-safe document key. OnlyOffice caches
+// converted documents by key, so a random key per open guarantees a re-convert
+// (no stale post-save content). crypto/rand gives 128 bits of entropy; base32
+// (no padding, lowercased) keeps it under the 128-char limit and URL-safe.
+func randomOnlyOfficeKey() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate onlyoffice key: %w", err)
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:])), nil
+}
+
+// onlyOfficeURLAllowed reports whether a callback result URL's host matches the
+// configured DocumentServer host. Comparing hostnames (not host:port) keeps a
+// port drift between browser-facing and container-internal URLs from rejecting
+// legitimate saves while still blocking SSRF to other hosts.
+func (h *WorkspaceHandler) onlyOfficeURLAllowed(raw string) bool {
+	server, err := url.Parse(h.oo.ServerURL)
+	if err != nil || server.Hostname() == "" {
+		return false
+	}
+	target, err := url.Parse(raw)
+	if err != nil || target.Hostname() == "" {
+		return false
+	}
+	return target.Hostname() == server.Hostname()
+}
+
+// onlyOfficePersist downloads the edited document and atomically overwrites abs.
+// It streams into a temp file in the same directory (so os.Rename is atomic on
+// the same filesystem), caps the size at maxUploadBytes, and only renames on
+// full success — any failure leaves the original file untouched and the temp
+// removed.
+func (h *WorkspaceHandler) onlyOfficePersist(ctx context.Context, abs, fileURL string) error {
+	client := &http.Client{Timeout: onlyOfficeDownloadLimit}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		return fmt.Errorf("build download request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download result: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("download result: status %d", resp.StatusCode)
+	}
+
+	dir := filepath.Dir(abs)
+	tmp, err := os.CreateTemp(dir, ".oo-callback-*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+
+	limit := h.maxUploadBytes
+	if limit <= 0 {
+		// No upload cap configured — refuse an unbounded download rather than
+		// filling disk. This mirrors the upload path's "non-positive disables"
+		// caveat (not recommended for production).
+		return fmt.Errorf("download result: max upload bytes is not configured")
+	}
+	// Copy up to limit+1 bytes so an oversize result is detectable without
+	// buffering the whole file in memory.
+	n, err := io.Copy(tmp, io.LimitReader(resp.Body, limit+1))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if n > limit {
+		cleanup()
+		return fmt.Errorf("download result: size %d exceeds max upload bytes %d", n, limit)
+	}
+
+	if err := os.Rename(tmpName, abs); err != nil {
+		cleanup()
+		return fmt.Errorf("rename temp: %w", err)
+	}
+	return nil
+}
+
+// writeOnlyOfficeError replies with OnlyOffice's {"error": N} convention over
+// HTTP 200. OnlyOffice interprets the JSON body, not the HTTP status, as the
+// success signal (0 = ok, non-0 = retry).
+func writeOnlyOfficeError(c *gin.Context, code int) {
+	c.JSON(http.StatusOK, gin.H{"error": code})
 }
 
 // maxUploadBytesMemory returns the in-memory threshold for multipart parsing.

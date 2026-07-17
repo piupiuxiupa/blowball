@@ -274,7 +274,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
-	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20)
+	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg)
 	skillH := handler.NewSkillHandler(fsSvc)
 

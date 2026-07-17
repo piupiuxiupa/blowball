@@ -493,7 +493,7 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
-	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20)
+	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry())
 	skillH := handler.NewSkillHandler(fsSvc)
 
@@ -574,7 +574,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
-	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20)
+	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg)
 	skillH := handler.NewSkillHandler(fsSvc)
 
@@ -673,7 +673,7 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
-	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20)
+	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry())
 	skillH := handler.NewSkillHandler(fsSvc)
 

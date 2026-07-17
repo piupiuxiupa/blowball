@@ -712,6 +712,149 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspace/files/{path}/onlyoffice-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Build and sign an OnlyOffice editor config for a workspace office file.
+         * @description Returns a server-signed DocEditor config (`{server_url, config, token}`)
+         *     so the browser can open the file for editing in OnlyOffice. The OnlyOffice
+         *     secret lives only in the backend config and never reaches the browser; the
+         *     returned `token` is an HS256 JWT whose payload is `config`. `document.url`
+         *     and `editorConfig.callbackUrl` point at the backend's internal origin and
+         *     embed the caller's JWT as a query `token`, and `document.key` is freshly
+         *     random so reopening always re-converts. Shares the workspace catch-all with
+         *     `/content`, dispatching on the trailing `/onlyoffice-config` suffix.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description Workspace-relative office file path (catch-all, may include `/`).
+                     * @example reports/2026-q2.docx
+                     */
+                    path: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Signed editor config. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["OnlyOfficeConfigResponse"];
+                    };
+                };
+                /** @description The path resolves to a directory. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description OnlyOffice is not configured (secret empty); editing is disabled. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspace/onlyoffice-callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Receive an OnlyOffice document-save callback and persist it.
+         * @description Endpoint the OnlyOffice DocumentServer POSTs to when a document is saved.
+         *     Authenticates via the `token` query parameter (the user JWT embedded in
+         *     the signed `callbackUrl`) instead of the Authorization header, since the
+         *     callback originates from the DocumentServer container. For save statuses
+         *     (2/6) it downloads the edited file from `url` — host-allowlisted to the
+         *     configured DocumentServer to mitigate SSRF — and atomically overwrites the
+         *     workspace file (capped at the upload size limit). Non-save statuses are
+         *     acknowledged without writing. Outcomes use OnlyOffice's `{"error": N}`
+         *     convention (0 = ok, non-0 = retry); auth/path errors are normal HTTP 4xx.
+         */
+        post: {
+            parameters: {
+                query: {
+                    /**
+                     * @description Workspace-relative file path to overwrite.
+                     * @example reports/2026-q2.docx
+                     */
+                    path: string;
+                    /** @description JWT access token (embedded in the signed callbackUrl). */
+                    token: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["OnlyOfficeCallbackRequest"];
+                };
+            };
+            responses: {
+                /** @description Callback processed; body reports success or a retryable error. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["OnlyOfficeCallbackResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description OnlyOffice is not configured (secret empty); editing is disabled. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mcp/tools": {
         parameters: {
             query?: never;
@@ -1003,6 +1146,53 @@ export interface components {
         };
         SkillsResponse: {
             skills: components["schemas"]["SkillEntry"][];
+        };
+        /**
+         * @description A server-signed OnlyOffice DocEditor config. The browser loads api.js
+         *     from `server_url` and instantiates `new DocsAPI.DocEditor(id,
+         *     {...config, token})`. The OnlyOffice secret never leaves the server —
+         *     `token` is an HS256 JWT whose payload is `config`, verifiable by the
+         *     DocumentServer with the same secret.
+         */
+        OnlyOfficeConfigResponse: {
+            /** @description Browser-facing DocumentServer origin (api.js is loaded from here). */
+            server_url: string;
+            /**
+             * @description DocEditor config object. Contains `documentType` (word/cell/slide),
+             *     `document{fileType, key, title, url, permissions{edit:true,
+             *     download:true}}` and `editorConfig{mode:"edit", callbackUrl,
+             *     customization{forcesave:true}, user}`. `document.key` is freshly
+             *     random per request; `document.url` and `editorConfig.callbackUrl`
+             *     are rooted at the backend's internal origin and carry the user JWT
+             *     as a query `token`.
+             */
+            config: {
+                [key: string]: unknown;
+            };
+            /** @description HS256 JWT signing `config` with the OnlyOffice secret. */
+            token: string;
+        };
+        /**
+         * @description OnlyOffice DocumentServer save callback. `status` 2/6 carry the edited
+         *     document at `url` and trigger a download + workspace overwrite; other
+         *     statuses (1/3/4/7) are acknowledged without writing.
+         */
+        OnlyOfficeCallbackRequest: {
+            /** @description Document state (1=being edited, 2=ready for saving, 3/7=saving error, 4=closed no changes, 6=forcesave). */
+            status?: number;
+            /** @description Document key the config was signed with. */
+            key?: string;
+            /** @description URL of the edited document to download (only present on save statuses). */
+            url?: string;
+        };
+        /**
+         * @description OnlyOffice callback contract. `error` 0 = success; non-0 makes the
+         *     DocumentServer retry. Auth/path errors are reported as normal HTTP 4xx,
+         *     not through this body.
+         */
+        OnlyOfficeCallbackResponse: {
+            /** @description 0 on success, non-0 to trigger a DocumentServer retry. */
+            error: number;
         };
     };
     responses: {

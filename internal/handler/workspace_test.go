@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -10,11 +11,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	jwtpkg "github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -42,7 +45,7 @@ func newWSTestEnv(t *testing.T) *wsTestEnv {
 	// Create user workspace so List/Download can succeed.
 	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
 
-	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes)
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -378,7 +381,7 @@ func newTokenDownloadTestEnv(t *testing.T) *tokenDownloadTestEnv {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-td", "workspace"), 0o755))
 
-	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes)
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
 	secret := "ws-token-secret"
 
 	r := gin.New()
@@ -629,7 +632,7 @@ func TestTokenDownload_ProductionRouting(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-prod", "workspace"), 0o755))
 
 	secret := "prod-routing-secret"
-	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes)
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
 	ws := filepath.Join(dataDir, "user-prod", "workspace")
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "multiply_1_to_100.py"), []byte("print(1)"), 0o644))
 
@@ -1209,4 +1212,415 @@ func TestDelete_WorkspaceRoot_400(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(ws, "keep.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "survive", string(data))
+}
+
+// --- OnlyOffice editor-config + save-callback tests ---
+
+// ooTestEnv wires a WorkspaceHandler with OnlyOffice enabled behind a gin engine
+// whose routing mirrors production: the config endpoint hangs off the catch-all
+// behind AuthMiddleware (Bearer), and the callback endpoint is a standalone POST
+// behind QueryTokenAuthMiddleware. A backing httptest.Server plays the
+// DocumentServer for the callback download (its URL is also ServerURL, so the
+// host allowlist accepts its result URLs).
+type ooTestEnv struct {
+	engine    *gin.Engine
+	dataDir   string
+	jwtSecret string // blowball user-JWT secret (AuthMiddleware)
+	ooSecret  string // OnlyOffice editor-config signing secret
+	serverURL string // OnlyOffice ServerURL = backing server URL
+	backend   string // InternalBackend (host the container reaches the backend at)
+	dlServer  *httptest.Server
+}
+
+func newOnlyOfficeTestEnv(t *testing.T) *ooTestEnv {
+	t.Helper()
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
+
+	// Backing "DocumentServer": serves the edited result the callback downloads.
+	// Branch on path so one server covers the persist / 404 / oversize cases.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edited", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("EDITED-CONTENT"))
+	})
+	mux.HandleFunc("/missing", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/oversize", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), testMaxUploadBytes+10))
+	})
+	dlServer := httptest.NewServer(mux)
+	t.Cleanup(dlServer.Close)
+
+	jwtSecret := "oo-user-jwt-secret"
+	ooSecret := "oo-editor-secret"
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{
+		Secret:          ooSecret,
+		ServerURL:       dlServer.URL,
+		InternalBackend: "http://oo-backend.local",
+	})
+
+	r := gin.New()
+	r.Use(middleware.TraceMiddleware())
+	// Config endpoint: catch-all with /onlyoffice-config suffix, Bearer auth.
+	r.GET("/api/v1/workspace/files/*path", middleware.AuthMiddleware(jwtSecret), func(c *gin.Context) {
+		raw := strings.TrimPrefix(c.Param("path"), "/")
+		if strings.HasSuffix(raw, onlyOfficeConfigSuffix) {
+			c.Params = []gin.Param{{Key: "path", Value: strings.TrimSuffix(raw, onlyOfficeConfigSuffix)}}
+			h.OnlyOfficeConfig(c)
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": "not found"}})
+	})
+	// Callback endpoint: standalone POST with query-token auth.
+	r.POST("/api/v1/workspace/onlyoffice-callback", middleware.QueryTokenAuthMiddleware(jwtSecret), h.OnlyOfficeCallback)
+
+	return &ooTestEnv{
+		engine: r, dataDir: dataDir, jwtSecret: jwtSecret, ooSecret: ooSecret,
+		serverURL: dlServer.URL, backend: "http://oo-backend.local", dlServer: dlServer,
+	}
+}
+
+func (e *ooTestEnv) wsRoot() string { return filepath.Join(e.dataDir, "user-1", "workspace") }
+
+// userJWT signs a blowball user JWT for user-1 (the configured workspace owner).
+func (e *ooTestEnv) userJWT(t *testing.T) string {
+	t.Helper()
+	tok, err := jwt.Sign(e.jwtSecret, "user-1", time.Hour)
+	require.NoError(t, err)
+	return tok
+}
+
+// postCallback issues a callback POST with the given JSON body and file path.
+func (e *ooTestEnv) postCallback(t *testing.T, rel, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	q := url.Values{}
+	q.Set("path", rel)
+	q.Set("token", e.userJWT(t))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/onlyoffice-callback?"+q.Encode(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	return w
+}
+
+// onlyOfficeConfigBody decodes the editor-config response into a typed struct.
+type onlyOfficeConfigBody struct {
+	ServerURL string                 `json:"server_url"`
+	Config    map[string]any         `json:"config"`
+	Token     string                 `json:"token"`
+}
+
+// TestOnlyOfficeConfig_SignedConfig verifies the happy path: the endpoint
+// returns an edit-mode config with a random key, document.url and callbackUrl
+// rooted at InternalBackend and carrying the user JWT, and a token that the same
+// secret verifies and whose payload equals the returned config.
+func TestOnlyOfficeConfig_SignedConfig(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "report.docx"), []byte("orig"), 0o644))
+
+	// doConfigGET uses userJWT(nil); sign directly here instead.
+	target := "/api/v1/workspace/files/" + url.PathEscape("report.docx") + onlyOfficeConfigSuffix
+	userTok := env.userJWT(t)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+userTok)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp onlyOfficeConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, env.serverURL, resp.ServerURL)
+
+	doc := resp.Config["document"].(map[string]any)
+	editor := resp.Config["editorConfig"].(map[string]any)
+	assert.Equal(t, "word", resp.Config["documentType"])
+	assert.Equal(t, "docx", doc["fileType"])
+	assert.Equal(t, "report.docx", doc["title"])
+	assert.NotEmpty(t, doc["key"], "key must be randomly generated")
+	perms := doc["permissions"].(map[string]any)
+	assert.Equal(t, true, perms["edit"])
+	assert.Equal(t, true, perms["download"])
+	assert.Equal(t, "edit", editor["mode"])
+	custom := editor["customization"].(map[string]any)
+	assert.Equal(t, true, custom["forcesave"])
+
+	// document.url and callbackUrl must be rooted at InternalBackend and embed
+	// the user JWT as the query token.
+	docURL := doc["url"].(string)
+	cbURL := editor["callbackUrl"].(string)
+	assert.Contains(t, docURL, env.backend+"/api/v1/workspace/files/download/report.docx")
+	assert.Contains(t, docURL, "token="+url.QueryEscape(userTok))
+	assert.Contains(t, cbURL, env.backend+"/api/v1/workspace/onlyoffice-callback")
+	assert.Contains(t, cbURL, "path=report.docx")
+	assert.Contains(t, cbURL, "token="+url.QueryEscape(userTok))
+
+	// The token must verify with the same secret and carry the config as payload.
+	claims := jwtpkg.MapClaims{}
+	parsed, err := jwtpkg.ParseWithClaims(resp.Token, claims, func(t *jwtpkg.Token) (any, error) {
+		return []byte(env.ooSecret), nil
+	})
+	require.NoError(t, err, "token must verify with the onlyoffice secret")
+	require.True(t, parsed.Valid)
+	// documentType round-trips through both the JSON response and the JWT payload.
+	assert.Equal(t, "word", claims["documentType"])
+	// The full config object must be the JWT payload (OnlyOffice verifies it).
+	assert.True(t, reflect.DeepEqual(normalizeJSON(resp.Config), normalizeJSON(map[string]any(claims))),
+		"token payload must equal the returned config")
+}
+
+// TestOnlyOfficeConfig_PathOutsideWorkspace_403 verifies a traversal attempt is
+// rejected with 403 before any config is built.
+func TestOnlyOfficeConfig_PathOutsideWorkspace_403(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/" + url.PathEscape("../../etc/passwd") + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "FORBIDDEN", body.Error.Code)
+}
+
+// TestOnlyOfficeConfig_NotFound_404 verifies a missing file returns 404.
+func TestOnlyOfficeConfig_NotFound_404(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/missing.docx" + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "NOT_FOUND", body.Error.Code)
+}
+
+// TestOnlyOfficeConfig_Unauthenticated_401 verifies a request without a Bearer
+// token is rejected by AuthMiddleware.
+func TestOnlyOfficeConfig_Unauthenticated_401(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/report.docx" + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestOnlyOfficeConfig_Disabled_503 verifies that when the secret is empty the
+// endpoint returns 503 instead of signing an unverifiable config.
+func TestOnlyOfficeConfig_Disabled_503(t *testing.T) {
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "user-1", "workspace", "report.docx"), []byte("x"), 0o644))
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{}) // disabled
+
+	r := gin.New()
+	r.GET("/api/v1/workspace/files/*path", func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Params = []gin.Param{{Key: "path", Value: strings.TrimPrefix(c.Param("path"), "/")}}
+		h.OnlyOfficeConfig(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/report.docx"+onlyOfficeConfigSuffix, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ONLYOFFICE_DISABLED", body.Error.Code)
+}
+
+// TestOnlyOfficeCallback_SaveStatus_Persists verifies status 2 and 6 download the
+// result file and atomically overwrite the workspace file, returning error:0.
+func TestOnlyOfficeCallback_SaveStatus_Persists(t *testing.T) {
+	for _, status := range []int{2, 6} {
+		t.Run(fmt.Sprintf("status=%d", status), func(t *testing.T) {
+			env := newOnlyOfficeTestEnv(t)
+			ws := env.wsRoot()
+			target := filepath.Join(ws, "report.docx")
+			require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+			body := fmt.Sprintf(`{"status":%d,"key":"k","url":%q}`, status, env.dlServer.URL+"/edited")
+			w := env.postCallback(t, "report.docx", body)
+
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			var resp struct {
+				Error int `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, 0, resp.Error, "save must ack error:0")
+
+			data, err := os.ReadFile(target)
+			require.NoError(t, err)
+			assert.Equal(t, "EDITED-CONTENT", string(data), "workspace file must be overwritten")
+		})
+	}
+}
+
+// TestOnlyOfficeCallback_NonSaveStatus_NoWrite verifies status 1 and 4 do not
+// touch disk but still ack error:0.
+func TestOnlyOfficeCallback_NonSaveStatus_NoWrite(t *testing.T) {
+	for _, status := range []int{1, 4} {
+		t.Run(fmt.Sprintf("status=%d", status), func(t *testing.T) {
+			env := newOnlyOfficeTestEnv(t)
+			ws := env.wsRoot()
+			target := filepath.Join(ws, "report.docx")
+			require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+			body := fmt.Sprintf(`{"status":%d,"key":"k","url":%q}`, status, env.dlServer.URL+"/edited")
+			w := env.postCallback(t, "report.docx", body)
+
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			var resp struct {
+				Error int `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, 0, resp.Error)
+
+			data, err := os.ReadFile(target)
+			require.NoError(t, err)
+			assert.Equal(t, "ORIGINAL", string(data), "non-save status must not modify the file")
+		})
+	}
+}
+
+// TestOnlyOfficeCallback_HostNotAllowed verifies a result URL whose host differs
+// from ServerURL is rejected (SSRF mitigation) with error:1 and no write.
+func TestOnlyOfficeCallback_HostNotAllowed(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "report.docx")
+	require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+	body := fmt.Sprintf(`{"status":2,"key":"k","url":%q}`, "http://evil.example/edited")
+	w := env.postCallback(t, "report.docx", body)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error int `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Error, "disallowed host must error:1")
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "ORIGINAL", string(data), "rejected callback must not modify the file")
+}
+
+// TestOnlyOfficeCallback_DownloadFails verifies a non-2xx download leaves the
+// original file intact and replies error:1.
+func TestOnlyOfficeCallback_DownloadFails(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "report.docx")
+	require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+	body := fmt.Sprintf(`{"status":2,"key":"k","url":%q}`, env.dlServer.URL+"/missing")
+	w := env.postCallback(t, "report.docx", body)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error int `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Error)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "ORIGINAL", string(data), "failed download must leave the original intact")
+}
+
+// TestOnlyOfficeCallback_Oversize verifies a result larger than maxUploadBytes is
+// rejected with error:1 and the original file is untouched.
+func TestOnlyOfficeCallback_Oversize(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "report.docx")
+	require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+	body := fmt.Sprintf(`{"status":2,"key":"k","url":%q}`, env.dlServer.URL+"/oversize")
+	w := env.postCallback(t, "report.docx", body)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error int `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Error)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "ORIGINAL", string(data), "oversize result must leave the original intact")
+}
+
+// TestOnlyOfficeCallback_MissingToken_401 verifies the query-token middleware
+// rejects a callback without a token.
+func TestOnlyOfficeCallback_MissingToken_401(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/onlyoffice-callback?path=report.docx", strings.NewReader(`{"status":2}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Message string `json:"message"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "missing token", body.Error.Message)
+}
+
+// TestOnlyOfficeCallback_PathOutsideWorkspace_403 verifies a traversal attempt in
+// the path query is rejected with 403 even with a valid token.
+func TestOnlyOfficeCallback_PathOutsideWorkspace_403(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	w := env.postCallback(t, "../../../etc/passwd", `{"status":2}`)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "FORBIDDEN", body.Error.Code)
+}
+
+// normalizeJSON normalizes a value decoded from JSON so two decodings of the
+// same object compare equal. It recurses into nested maps and slices; leaves are
+// returned as-is. (Numbers in this config are absent, so no float coercion.)
+func normalizeJSON(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = normalizeJSON(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = normalizeJSON(val)
+		}
+		return out
+	default:
+		return v
+	}
 }

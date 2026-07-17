@@ -36,6 +36,21 @@ func Sign(secret string, userID string, expire time.Duration) (string, error) {
 	return token.SignedString([]byte(secret))
 }
 
+// SignClaims issues an HS256 token for an arbitrary claim set. It is used to
+// sign OnlyOffice editor configs, whose JWT payload is the config object itself
+// (verified by the DocumentServer with the same secret). The claims map is
+// passed verbatim into the JWT payload; nested objects must be JSON-marshalable.
+func SignClaims(secret string, claims map[string]any) (string, error) {
+	if secret == "" {
+		return "", fmt.Errorf("jwt sign: secret must be non-empty")
+	}
+	if claims == nil {
+		return "", fmt.Errorf("jwt sign: claims must be non-nil")
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims(claims))
+	return token.SignedString([]byte(secret))
+}
+
 // Verify validates the tokenStr using secret and returns the user_id claim.
 // It returns an error if the signature is invalid, the token is malformed,
 // or it has expired.

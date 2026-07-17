@@ -16,15 +16,40 @@ import (
 
 // Config is the root configuration tree mirroring config.yaml.
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	OpenAI  OpenAIConfig  `yaml:"openai"`
-	MySQL   MySQLConfig   `yaml:"mysql"`
-	Redis   RedisConfig   `yaml:"redis"`
-	JWT     JWTConfig     `yaml:"jwt"`
-	Agents  AgentsConfig  `yaml:"agents"`
-	Tools   ToolsConfig   `yaml:"tools"`
-	MCP     MCPConfig     `yaml:"mcp"`
-	Logging LoggingConfig `yaml:"logging"`
+	Server     ServerConfig     `yaml:"server"`
+	OpenAI     OpenAIConfig     `yaml:"openai"`
+	MySQL      MySQLConfig      `yaml:"mysql"`
+	Redis      RedisConfig      `yaml:"redis"`
+	JWT        JWTConfig        `yaml:"jwt"`
+	Agents     AgentsConfig     `yaml:"agents"`
+	Tools      ToolsConfig      `yaml:"tools"`
+	MCP        MCPConfig        `yaml:"mcp"`
+	Logging    LoggingConfig    `yaml:"logging"`
+	OnlyOffice OnlyOfficeConfig `yaml:"onlyoffice"`
+}
+
+// OnlyOfficeConfig holds the server-side OnlyOffice DocumentServer integration
+// settings. The editor-config signing endpoint signs DocEditor configs with
+// Secret (HS256); it must match the DocumentServer local.json secret. ServerURL
+// is the browser-facing origin the editor loads api.js from AND the host
+// allowlist base for callback result URLs. InternalBackend is the origin the
+// DocumentServer container uses to reach the blowball backend (for document.url
+// and callbackUrl). All three expand ${VAR} like every other config value; when
+// Secret is empty the editor endpoints return 503 instead of signing an
+// unverifiable config.
+type OnlyOfficeConfig struct {
+	Secret          string `yaml:"secret"`
+	ServerURL       string `yaml:"server_url"`
+	InternalBackend string `yaml:"internal_backend"`
+}
+
+// applyDefaults fills the OnlyOffice ServerURL default when omitted. The browser
+// loads api.js from this origin, so a sensible local default keeps a dev
+// DocumentServer working without explicit config.
+func (o *OnlyOfficeConfig) applyDefaults() {
+	if strings.TrimSpace(o.ServerURL) == "" {
+		o.ServerURL = "http://localhost"
+	}
 }
 
 // ServerConfig holds HTTP server settings.
@@ -379,6 +404,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.Logging.applyDefaults()
+	cfg.OnlyOffice.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Python.ApplyDefaults()
 	cfg.Tools.Executor.Pip.ApplyDefaults()

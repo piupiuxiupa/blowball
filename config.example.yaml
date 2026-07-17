@@ -26,6 +26,28 @@ jwt:
   secret: ${JWT_SECRET}
   expire: 7d
 
+# OnlyOffice DocumentServer integration for editing office files (docx/xlsx/pptx).
+# When omitted entirely the editor endpoints return 503 (read-only rendering is
+# unaffected). Secret MUST match the DocumentServer local.json secret used for
+# browser/inbox/outbox JWT verification, or the editor will reject the signed
+# config. This is a DIFFERENT secret from jwt.secret above — they are independent
+# and must never be swapped. Note: this is NOT blowball's config.yaml jwt.secret.
+onlyoffice:
+  # Shared OnlyOffice JWT secret. Must equal the value in the DocumentServer
+  # container's local.json (token.secret.browser/inbox/outbox). Leave empty to
+  # disable editing (endpoints return 503).
+  secret: ${ONLYOFFICE_SECRET}
+  # Browser-facing origin the editor loads api.js from, AND the host allowlist
+  # base for callback result URLs (SSRF mitigation). Use http://localhost (NOT a
+  # LAN IP) when the browser runs on the same machine as the DocumentServer so
+  # the editor's websocket isn't routed through a proxy. Defaults to http://localhost.
+  server_url: http://localhost
+  # Origin the DocumentServer CONTAINER uses to reach the blowball backend (it
+  # cannot reach the browser-facing http://localhost:8080). Used to build
+  # document.url and the save callbackUrl. Must be an address the container can
+  # actually route to that serves the blowball API.
+  internal_backend: ${ONLYOFFICE_INTERNAL_BACKEND:http://127.0.0.1:8080}
+
 agents:
   confucius:
     name: Confucius
