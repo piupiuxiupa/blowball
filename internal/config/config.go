@@ -20,6 +20,7 @@ type Config struct {
 	OpenAI     OpenAIConfig     `yaml:"openai"`
 	MySQL      MySQLConfig      `yaml:"mysql"`
 	Redis      RedisConfig      `yaml:"redis"`
+	Auth       AuthConfig       `yaml:"auth"`
 	JWT        JWTConfig        `yaml:"jwt"`
 	Agents     AgentsConfig     `yaml:"agents"`
 	Tools      ToolsConfig      `yaml:"tools"`
@@ -110,6 +111,25 @@ type RedisConfig struct {
 type JWTConfig struct {
 	Secret string `yaml:"secret"`
 	Expire string `yaml:"expire"`
+}
+
+// AuthConfig holds login policy. PasswordRequired gates whether Login verifies
+// the supplied password against the stored bcrypt hash. It is a pointer so an
+// unset value can default to "required": omitting the key preserves the
+// historical password-based behavior, while an explicit false enables
+// passwordless login (any seeded, active user logs in by username alone).
+type AuthConfig struct {
+	PasswordRequired *bool `yaml:"password_required"`
+}
+
+// IsPasswordRequired reports whether login must verify a password. It defaults
+// to true when auth.password_required is omitted, preserving the password-based
+// default; an explicit false opts into passwordless login.
+func (a AuthConfig) IsPasswordRequired() bool {
+	if a.PasswordRequired == nil {
+		return true
+	}
+	return *a.PasswordRequired
 }
 
 // ParseDuration resolves the configured expire duration. The value may be a

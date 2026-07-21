@@ -68,6 +68,8 @@ make build
 
 You will be prompted for a password. The tool stores a bcrypt hash and prints the generated `user_id`. Add `--password 'pw'` to go non-interactive, or `--dry-run` to preview the hash without writing.
 
+**Passwordless login (optional).** Set `auth.password_required: false` in `config.yaml` to skip password verification at login — any seeded, active user can then log in by username alone. The default is `true` (password required).
+
 ### 5. Run the server
 
 ```bash

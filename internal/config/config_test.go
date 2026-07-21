@@ -893,3 +893,69 @@ logging:
 		t.Error("Logging.File.Compress = false, want true")
 	}
 }
+
+func TestAuthIsPasswordRequired_DefaultsToTrue(t *testing.T) {
+	// Omitting auth.password_required must preserve the password-based default.
+	var cfg AuthConfig
+	if !cfg.IsPasswordRequired() {
+		t.Error("IsPasswordRequired() = false for unset value, want true (default)")
+	}
+
+	off := false
+	cfg = AuthConfig{PasswordRequired: &off}
+	if cfg.IsPasswordRequired() {
+		t.Error("IsPasswordRequired() = true for explicit false, want false")
+	}
+
+	on := true
+	cfg = AuthConfig{PasswordRequired: &on}
+	if !cfg.IsPasswordRequired() {
+		t.Error("IsPasswordRequired() = false for explicit true, want true")
+	}
+}
+
+func TestLoad_AuthPasswordRequired(t *testing.T) {
+	t.Run("explicit false loads", func(t *testing.T) {
+		path := writeTempYAML(t, `
+server:
+  port: 9090
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+redis:
+  addr: 127.0.0.1:6379
+auth:
+  password_required: false
+jwt:
+  secret: "super-secret"
+  expire: 7d
+`)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if cfg.Auth.IsPasswordRequired() {
+			t.Fatal("IsPasswordRequired() = true, want false")
+		}
+	})
+
+	t.Run("omitted defaults to true", func(t *testing.T) {
+		path := writeTempYAML(t, `
+server:
+  port: 9090
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+redis:
+  addr: 127.0.0.1:6379
+jwt:
+  secret: "super-secret"
+  expire: 7d
+`)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if !cfg.Auth.IsPasswordRequired() {
+			t.Fatal("IsPasswordRequired() = false, want true (default)")
+		}
+	})
+}

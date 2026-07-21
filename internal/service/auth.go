@@ -40,30 +40,36 @@ type UserStore interface {
 	GetUserByUsername(ctx context.Context, username string) (*model.User, error)
 }
 
-// AuthService owns login: user lookup, bcrypt verification, status gating and
-// JWT issuance.
+// AuthService owns login: user lookup, optional bcrypt verification, status
+// gating and JWT issuance.
 type AuthService struct {
-	userStore UserStore
-	jwtSecret string
-	jwtExpire time.Duration
+	userStore        UserStore
+	jwtSecret        string
+	jwtExpire        time.Duration
+	passwordRequired bool
 }
 
 // NewAuthService wires the service with its store and JWT parameters.
 // jwtExpire is the lifetime baked into every token this service issues.
-func NewAuthService(us UserStore, secret string, expire time.Duration) *AuthService {
+// passwordRequired gates whether Login verifies the password against the stored
+// bcrypt hash; when false, login is passwordless (any active user logs in by
+// username alone).
+func NewAuthService(us UserStore, secret string, expire time.Duration, passwordRequired bool) *AuthService {
 	return &AuthService{
-		userStore: us,
-		jwtSecret: secret,
-		jwtExpire: expire,
+		userStore:        us,
+		jwtSecret:        secret,
+		jwtExpire:        expire,
+		passwordRequired: passwordRequired,
 	}
 }
 
 // Login authenticates username/password and returns a freshly signed JWT plus
-// the absolute time at which it expires. The bcrypt comparison path is taken
-// for both existing users (real hash) and deliberately-missing users (empty
-// hash) is NOT done here — the spec only mandates the sentinel errors, so we
-// return ErrUserNotFound immediately when the lookup misses, which avoids
-// touching bcrypt entirely and keeps the failure mode crisp.
+// the absolute time at which it expires. When the service is configured for
+// passwordless login the bcrypt comparison is skipped entirely — any active
+// user is logged in regardless of the supplied password. Otherwise the password
+// is verified against the stored bcrypt hash and a mismatch yields
+// ErrInvalidCredentials. The lookup still returns ErrUserNotFound immediately
+// when the username misses, which keeps the failure mode crisp.
 //
 // Passwords are never logged; only the outcome (success/failure) and the
 // reason are recorded, always with the request trace_id attached.
@@ -89,9 +95,11 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (str
 		return "", time.Time{}, ErrUserDisabled
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
-		log.Info("login failed: invalid credentials", zap.String("username", username))
-		return "", time.Time{}, ErrInvalidCredentials
+	if s.passwordRequired {
+		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
+			log.Info("login failed: invalid credentials", zap.String("username", username))
+			return "", time.Time{}, ErrInvalidCredentials
+		}
 	}
 
 	expireAt := time.Now().Add(s.jwtExpire)

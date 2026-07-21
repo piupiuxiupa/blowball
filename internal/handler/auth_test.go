@@ -38,12 +38,22 @@ func (f *fakeStore) GetUserByUsername(_ context.Context, username string) (*mode
 }
 
 func newHandler(t *testing.T, users ...*model.User) (*AuthHandler, *gin.Engine) {
+	return newHandlerMode(t, true, users...)
+}
+
+// newHandlerPasswordless wires the handler against a passwordless AuthService,
+// so the full HTTP path can be driven with username-only credentials.
+func newHandlerPasswordless(t *testing.T, users ...*model.User) (*AuthHandler, *gin.Engine) {
+	return newHandlerMode(t, false, users...)
+}
+
+func newHandlerMode(t *testing.T, passwordRequired bool, users ...*model.User) (*AuthHandler, *gin.Engine) {
 	t.Helper()
 	store := &fakeStore{users: map[string]*model.User{}}
 	for _, u := range users {
 		store.users[u.Username] = u
 	}
-	svc := service.NewAuthService(store, handlerTestSecret, time.Hour)
+	svc := service.NewAuthService(store, handlerTestSecret, time.Hour, passwordRequired)
 	h := NewAuthHandler(svc)
 	r := gin.New()
 	r.POST("/api/v1/auth/login", h.Login)
@@ -183,4 +193,28 @@ func TestLoginHandler_MissingFields(t *testing.T) {
 	var env errEnvelope
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&env))
 	assert.Equal(t, "UNAUTHORIZED", env.Error.Code)
+}
+
+func TestLoginHandler_Passwordless(t *testing.T) {
+	const (
+		username = "frank"
+		userID   = "uid-frank"
+	)
+	_, engine := newHandlerPasswordless(t, &model.User{
+		UserID:   userID,
+		Username: username,
+		Password: mustHash(t, "real"),
+		Status:   model.UserStatusActive,
+	})
+
+	// In passwordless mode a wrong password still logs in; only the username
+	// matters.
+	w := doPost(t, engine, `{"username":"frank","password":"wrong"}`)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp loginResp
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	gotID, err := jwt.Verify(handlerTestSecret, resp.AccessToken)
+	require.NoError(t, err)
+	assert.Equal(t, userID, gotID)
 }

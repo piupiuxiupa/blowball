@@ -37,13 +37,16 @@ components:
               example: invalid request body
     LoginRequest:
       type: object
-      required: [username, password]
+      required: [username]
       properties:
         username:
           type: string
         password:
           type: string
-          description: User password (verified by the seed-created credential hash).
+          description: >-
+            User password, verified against the seed-created bcrypt hash.
+            Required only when auth.password_required is true (the default);
+            in passwordless mode the password, if sent, is ignored.
     LoginResponse:
       type: object
       required: [access_token, expire, token_type]

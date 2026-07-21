@@ -327,7 +327,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	if err != nil {
 		rt.log.Fatal("parse jwt.expire failed", zap.Error(err))
 	}
-	authSvc := service.NewAuthService(rt.mysqlStore, cfg.JWT.Secret, jwtExpire)
+	authSvc := service.NewAuthService(rt.mysqlStore, cfg.JWT.Secret, jwtExpire, cfg.Auth.IsPasswordRequired())
 	authHandler := handler.NewAuthHandler(authSvc)
 
 	// The api role never calls the LLM; a nil client is safe because

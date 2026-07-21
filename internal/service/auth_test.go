@@ -38,12 +38,22 @@ func mustHash(t *testing.T, password string) string {
 }
 
 func newSvc(t *testing.T, users ...*model.User) (*AuthService, *fakeUserStore) {
+	return newSvcMode(t, true, users...)
+}
+
+// newSvcPasswordless wires a service with password verification disabled, so
+// any active user logs in regardless of the supplied password.
+func newSvcPasswordless(t *testing.T, users ...*model.User) (*AuthService, *fakeUserStore) {
+	return newSvcMode(t, false, users...)
+}
+
+func newSvcMode(t *testing.T, passwordRequired bool, users ...*model.User) (*AuthService, *fakeUserStore) {
 	t.Helper()
 	store := &fakeUserStore{users: map[string]*model.User{}}
 	for _, u := range users {
 		store.users[u.Username] = u
 	}
-	return NewAuthService(store, testSecret, testExpire), store
+	return NewAuthService(store, testSecret, testExpire, passwordRequired), store
 }
 
 func TestLogin_Success(t *testing.T) {
@@ -149,4 +159,34 @@ func TestLogin_ActualBcryptHash(t *testing.T) {
 	// proving the comparison actually runs the hash through bcrypt.
 	_, _, err = svc.Login(context.Background(), username, password+"x")
 	assert.ErrorIs(t, err, ErrInvalidCredentials)
+}
+
+func TestLogin_PasswordlessMode(t *testing.T) {
+	const (
+		username = "eve"
+		userID   = "55555555-5555-5555-5555-555555555555"
+	)
+	// The stored hash is whatever seed wrote; in passwordless mode login never
+	// compares it.
+	svc, _ := newSvcPasswordless(t, &model.User{
+		UserID:   userID,
+		Username: username,
+		Password: mustHash(t, "real-password"),
+		Status:   model.UserStatusActive,
+	})
+
+	// A wrong password still succeeds — bcrypt is skipped entirely.
+	token, _, err := svc.Login(context.Background(), username, "totally-wrong")
+	require.NoError(t, err)
+	gotUserID, verifyErr := jwt.Verify(testSecret, token)
+	require.NoError(t, verifyErr)
+	assert.Equal(t, userID, gotUserID)
+
+	// An empty password also succeeds.
+	_, _, err = svc.Login(context.Background(), username, "")
+	require.NoError(t, err)
+
+	// Lookup and status gating are still enforced in passwordless mode.
+	_, _, err = svc.Login(context.Background(), "nope", "anything")
+	assert.ErrorIs(t, err, ErrUserNotFound)
 }
