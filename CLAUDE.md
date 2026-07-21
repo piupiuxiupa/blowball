@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Blowball is a Go backend for a multi-agent chat workspace with a React frontend. It exposes a JWT-secured HTTP API (Gin), persists sessions/messages in MySQL with Redis caching and filesystem warm storage, and orchestrates OpenAI-backed agents.
+Blowball is a Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API (Gin), persists sessions/messages in MySQL with Redis caching and filesystem warm storage, and orchestrates OpenAI-backed agents. (The React frontend lives in the separate `blowball-frontend` repo.)
 
 ## Common commands
 
-All backend commands run from the repository root. Frontend commands run from `frontend/`.
+All backend commands run from the repository root.
 
 ### Backend
 
@@ -53,27 +53,7 @@ make clean
 
 ### Frontend
 
-```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Start Vite dev server (proxies /api to localhost:8080)
-npm run dev
-
-# Type-check and build
-npm run build
-
-# Type-check only
-npm run lint
-
-# Preview the production build locally
-npm run preview
-
-# Regenerate TypeScript types from ../api/openapi.yaml
-npm run generate-api
-```
+The frontend lives in the separate `blowball-frontend` repo (sibling directory); run `npm install` / `npm run dev` / `npm run build` there. See that repo's README.
 
 ### Local development environment
 
@@ -241,22 +221,7 @@ Each message row carries an `event_type` column. Reasoning/thinking output is pe
 
 ### Frontend
 
-The frontend is a React 19 + Vite + TypeScript app in `frontend/`.
-
-- Routing: `react-router` v7 in `src/App.tsx`; `/login` and `/` (protected by `AuthGuard`).
-- State:
-  - Zustand `auth-store` persists the JWT in `localStorage`.
-  - Zustand `ui-store` holds transient UI state (active session/file, streaming tokens, agent status).
-  - TanStack Query caches server state (sessions, messages, workspace files).
-- API: `src/lib/api.ts` reads `VITE_API_BASE_URL` and injects the bearer token. `src/lib/sse.ts` parses SSE streams.
-- Env: `frontend/.env.example` documents `VITE_API_BASE_URL` (backend origin) and `VITE_BASE_PATH` (deploy sub-path; `vite.config.ts` feeds it to Vite's `base`, surfaced at runtime as `BASE_PATH` in `src/lib/config.ts` for the router and asset URLs).
-- Hooks in `src/hooks/` are the only place components should call the API.
-- Streaming: `useSendMessage` dispatches SSE events into `ui-store`; `message-list.tsx` groups raw events into logical assistant/user blocks.
-- Workspace files: `useWorkspace` lists files; `file-renderer.tsx` dispatches by extension to markdown/code/image/PDF/binary viewers.
-- Styling: Tailwind CSS v4 with a single light theme; minimal hand-built UI component subset in `src/components/ui/`.
-- Types: generated from `../api/openapi.yaml` via `npm run generate-api` into `src/lib/openapi.d.ts`.
-
-Vite dev server proxies `/api` to `http://localhost:8080`.
+The React 19 + Vite + TypeScript frontend lives in the separate `blowball-frontend` repo. The API contract is defined here in `api/openapi.yaml`; when it changes, copy that file into `blowball-frontend/` and run `npm run generate-api` there to regenerate `src/lib/openapi.d.ts`.
 
 ## Important conventions
 

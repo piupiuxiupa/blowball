@@ -1,6 +1,6 @@
 # blowball
 
-A Go backend for a multi-agent chat workspace with a React frontend. It exposes a JWT-secured HTTP API built with [Gin](https://gin-gonic.com/), persists sessions and messages in MySQL, caches session state in Redis, and orchestrates a small team of LLM agents backed by OpenAI.
+A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API built with [Gin](https://gin-gonic.com/), persists sessions and messages in MySQL, caches session state in Redis, and orchestrates a small team of LLM agents backed by OpenAI. The React frontend lives in the separate [`blowball-frontend`](../blowball-frontend) repo.
 
 ## Features
 
@@ -27,7 +27,6 @@ A Go backend for a multi-agent chat workspace with a React frontend. It exposes 
 - MySQL 8.0
 - Redis 7
 - An OpenAI API key
-- Node.js 20+ (for the frontend)
 
 ### 2. Start dependencies
 
@@ -87,13 +86,7 @@ The runtime root holds three subdirectories: `data/` (per-user workspaces, sessi
 
 ### 6. Run the frontend (optional)
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The Vite dev server starts on port `5173` and proxies `/api` to `http://localhost:8080`.
+The React frontend lives in the separate `blowball-frontend` repo. From there, run `npm install` then `npm run dev`; the Vite dev server starts on port `5173` and proxies `/api` to `http://localhost:8080`.
 
 ## Development
 
@@ -118,13 +111,6 @@ make lint
 
 # Clean build artifacts
 make clean
-
-# Frontend (from frontend/)
-npm install
-npm run dev
-npm run build
-npm run lint
-npm run generate-api
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the full architecture, conventions, and tool configuration details.
@@ -137,7 +123,6 @@ See [`CLAUDE.md`](CLAUDE.md) for the full architecture, conventions, and tool co
 ├── cmd/
 │   ├── seed/                 # CLI to create users
 │   └── server/               # HTTP server entry point
-├── frontend/                 # React 19 + Vite + TypeScript app
 ├── internal/
 │   ├── agent/                # Agents, orchestrator, OpenAI client
 │   ├── config/               # YAML config loader

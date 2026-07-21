@@ -1,6 +1,4 @@
-.PHONY: build run run-api run-agent test migrate lint seed clean frontend-install frontend-dev frontend-build frontend-lint
-
-FRONTEND_DIR := frontend
+.PHONY: build run run-api run-agent test migrate lint seed clean
 
 build:
 	go build -o bin/blowball ./cmd/blowball/
@@ -36,15 +34,3 @@ lint:
 
 clean:
 	rm -rf bin/
-
-frontend-install:
-	cd $(FRONTEND_DIR) && npm install
-
-frontend-dev: frontend-install
-	cd $(FRONTEND_DIR) && npm run dev
-
-frontend-build: frontend-install
-	cd $(FRONTEND_DIR) && npm run build
-
-frontend-lint:
-	cd $(FRONTEND_DIR) && npm run lint
