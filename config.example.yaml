@@ -2,7 +2,12 @@
 # Values support ${VAR} substitution from environment variables.
 
 server:
+  # Listen port for the api role and the all role (the all role serves the full
+  # route set on a single listener).
   port: 8080
+  # Listen port for the agent role (used only when running with --role agent).
+  # Defaults to 8081 when omitted.
+  agent_port: 8081
 
 openai:
   api_key: ${OPENAI_API_KEY}

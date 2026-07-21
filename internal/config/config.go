@@ -52,9 +52,34 @@ func (o *OnlyOfficeConfig) applyDefaults() {
 	}
 }
 
+// DefaultServerPort is the listen port used for the api and all roles when
+// server.port is omitted. It matches the value documented in config.example.yaml.
+const DefaultServerPort = 8080
+
+// DefaultAgentPort is the listen port used for the agent role when
+// server.agent_port is omitted. The agent role runs on its own listener so it
+// can be operated independently of the api role (see the service-roles spec).
+const DefaultAgentPort = 8081
+
 // ServerConfig holds HTTP server settings.
+//
+// Port is the listener for the api role and the all role (the all role serves
+// the full route set on a single listener). AgentPort is the listener for the
+// agent role; it is ignored unless the process is started with --role agent.
 type ServerConfig struct {
-	Port int `yaml:"port"`
+	Port      int `yaml:"port"`
+	AgentPort int `yaml:"agent_port"`
+}
+
+// applyDefaults fills zero-valued server fields with the role-aware defaults:
+// Port → DefaultServerPort, AgentPort → DefaultAgentPort. It is idempotent.
+func (s *ServerConfig) applyDefaults() {
+	if s.Port == 0 {
+		s.Port = DefaultServerPort
+	}
+	if s.AgentPort == 0 {
+		s.AgentPort = DefaultAgentPort
+	}
 }
 
 // OpenAIConfig holds OpenAI API client settings.
@@ -150,7 +175,7 @@ func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 			if cfg.ReasoningEffort == "" {
 				cfg.ReasoningEffort = "medium"
 			}
-			if cfg.ReasoningEffort != "low" && cfg.ReasoningEffort != "medium" && cfg.ReasoningEffort != "high" {
+			if cfg.ReasoningEffort != "low" && cfg.ReasoningEffort != "medium" && cfg.ReasoningEffort != "high" && cfg.ReasoningEffort != "xhigh" {
 				return fmt.Errorf("agents.%s.reasoning_effort: invalid value %q (must be low, medium, or high)", name, cfg.ReasoningEffort)
 			}
 		} else if cfg.ReasoningEffort != "" {
@@ -405,6 +430,7 @@ func Load(path string) (*Config, error) {
 
 	cfg.Logging.applyDefaults()
 	cfg.OnlyOffice.applyDefaults()
+	cfg.Server.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Python.ApplyDefaults()
 	cfg.Tools.Executor.Pip.ApplyDefaults()

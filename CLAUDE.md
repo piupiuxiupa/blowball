@@ -22,6 +22,12 @@ make run
 # Run the server under a dedicated runtime root (-d) and config (-f)
 ./bin/blowball serve -d /var/lib/blowball -f /etc/blowball/config.yaml
 
+# Select a process role (default --role all == the pre-split monolith on server.port).
+# Run the two split roles against the SAME -d root so they share the data plane:
+./bin/blowball serve --role api   -d /var/lib/blowball -f /etc/blowball/config.yaml   # CRUD on server.port (8080)
+./bin/blowball serve --role agent -d /var/lib/blowball -f /etc/blowball/config.yaml   # streaming + /mcp/tools on server.agent_port (8081)
+# Rollback: stop both role processes and run plain `serve` (== --role all) on server.port.
+
 # Create a user (password is prompted securely)
 ./bin/blowball seed --username alice
 ./bin/blowball seed --username alice --password 's3cret' --dry-run   # preview hash only
@@ -120,7 +126,23 @@ The runtime root (`-d`) holds a fourth subdir `{data-dir}/tools`, created at sta
 
 The unified binary lives in `cmd/blowball/`: `main.go` wires the cobra root (`serve`/`seed` subcommands + persistent `-f`/`-d` flags), `serve.go` holds the server bootstrap (`serveRun`), and `seed.go` holds the user-creation subcommand.
 
-The `serve` subcommand bootstraps the application in a strict sequence: resolve `-f`/`-d` → load config (`-f`, with `${VAR}` env expansion) → derive `dataDir`/`logDir`/`skillsDir`/`toolsDir` from `-d` → `MkdirAll({d}/logs)` → initialize the zap logger (tee console + file under `{d}/logs/blowball.log`, rotated by lumberjack) → connect MySQL/Redis → create the filesystem store under `{d}/data` → `MkdirAll({d}/skills)` → `MkdirAll({d}/tools)` → apply Landlock sandboxing (read-write for `data`/`logs`/`skills`, read-only for `tools`; Linux-only) → register tools, build services, build the orchestrator, construct handlers, wire the Gin router, and start a gracefully-shutdown HTTP server. The log directory is created and the log file opened before the logger emits its first line, and before Landlock is applied, so lumberjack's post-rotation reopen stays inside the sandbox.
+The `serve` subcommand bootstraps the application in a strict sequence: resolve `--role`/`-f`/`-d` → shared setup (`setupRuntime`: load config (`-f`, with `${VAR}` env expansion) → derive `dataDir`/`logDir`/`skillsDir`/`toolsDir` from `-d` → `MkdirAll({d}/logs)` → initialize the zap logger with a role-scoped filename (tee console + file under `{d}/logs/blowball[-api|-agent].log`, rotated by lumberjack) → enforce the role-aware `openai.api_key` requirement → connect MySQL/Redis → create the filesystem store under `{d}/data` → `MkdirAll({d}/skills)` → `MkdirAll({d}/tools)` → apply Landlock sandboxing (read-write for `data`/`logs`/`skills`, read-only for `tools`; Linux-only)) → build the shared `SessionService` → register routes by role via `wireAPI`/`wireAgent` → start a gracefully-shutdown HTTP listener. The log directory is created and the log file opened before the logger emits its first line, and before Landlock is applied, so lumberjack's post-rotation reopen stays inside the sandbox.
+
+### Deployment roles (`--role`)
+
+`serve` selects a process role via `--role all|api|agent` (default `all`). The role decides which route partition the process registers, which listener it opens, and which log file it writes. This lets agent execution run as an independent process so a surge or crash in the agent path cannot take the CRUD API down, while the data plane stays shared and unchanged (Phase 1: same-machine, shared local filesystem; cross-host scaling and object storage are out of scope).
+
+| Role | Routes registered | Listener | Log file | Wires |
+|------|-------------------|----------|----------|-------|
+| `all` (default) | full set (API ∪ agent) on one engine | `server.port` (default 8080) | `blowball.log` | everything — identical to the pre-split monolith (dev, tests, rollback) |
+| `api` | CRUD only: auth, session CRUD, message-history read, title update, workspace file CRUD, skills list | `server.port` | `blowball-api.log` | `wireAPI` — CRUD services/handlers only; **no** orchestrator, OpenAI client, tool registry, or MCP manager. A missing `openai.api_key` is a warning, not fatal (the api role never calls the LLM). |
+| `agent` | streaming message endpoint (`POST /sessions/:id/messages`) + `GET /api/v1/mcp/tools` (both JWT-authed) | `server.agent_port` (default 8081) | `blowball-agent.log` | `wireAgent` — tool registry, MCP manager, OpenAI client, orchestrator, `TitleService`, and the streaming handler; owns the full streaming-turn pipeline (lookup → recover → orchestrate → SSE → persist → title). |
+
+Route registration is partitioned in `internal/handler/router.go`: `RegisterAPIRoutes` / `RegisterAgentRoutes` each mount their own subset behind `AuthMiddleware` (middleware order is Recovery → Trace → CORS → Auth on every engine); `RegisterRoutes` is the union used by the `all` role and the integration test harness. The streaming handler (`MessageStreamHandler`, `internal/handler/message_stream.go`) is wired only by the agent role; the api role's `SessionHandler` is CRUD-only and takes no orchestrator, so the api process has a compile-time-honest boundary against the agent layer.
+
+**Shared data plane:** both roles derive `data`/`logs`/`skills`/`tools` from the same `-d` root and connect the same MySQL/Redis/local FS — the three-layer persistence, `xizhi` workspace tools, executor sandbox, and Landlock policy behave exactly as in the monolith. A turn persisted by the agent role is readable by the api role through the shared store.
+
+**External request routing is out of scope.** How traffic reaches each role's port (reverse proxy, gateway, ingress) is operator-managed; blowball only listens on the role's port and logs `role`, `port`, and the registered route groups at startup. Pointing the streaming route at the api port (or running two `api` roles) surfaces as 404s at the routing layer — by design.
 
 HTTP routes live in `internal/handler/router.go`. Protected routes use `middleware.AuthMiddleware` (JWT Bearer validation) after `TraceMiddleware` and CORS. Key endpoints:
 
@@ -144,7 +166,7 @@ HTTP routes live in `internal/handler/router.go`. Protected routes use `middlewa
 
 See `api/openapi.yaml` for full request/response schemas.
 
-A chat request flows: `SessionHandler.SendMessage` → `MessageService.RecoverMessages` (load history) + `AppendMessage` → `OrchestratorRunner.Handle` → SSE writer `stream.WriteSSE`. Title generation runs asynchronously after the first assistant response.
+A chat request flows: `MessageStreamHandler.SendMessage` (agent role) → `MessageService.RecoverMessages` (load history) + `AppendMessage` → `OrchestratorRunner.Handle` → SSE writer `stream.WriteSSE`. Title generation runs asynchronously after the first assistant response.
 
 ### Workspace file routing
 

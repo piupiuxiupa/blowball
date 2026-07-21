@@ -106,14 +106,18 @@ const onlyOfficeConfigSuffix = "/onlyoffice-config"
 // wildcard registration.
 const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
 
-// RegisterRoutes wires every route onto r per the api-server spec:
+// RegisterRoutes wires every route onto r per the api-server spec. It is the
+// union of the API-route and agent-route partitions plus the health check, and
+// matches the pre-split monolith route set exactly. The all role (and the
+// integration test harness) use this; the api and agent roles register only
+// their own partition via RegisterAPIRoutes / RegisterAgentRoutes.
 //
 //	POST /api/v1/auth/login                       (public)
 //	GET  /api/v1/sessions                         (auth)
 //	POST /api/v1/sessions                         (auth)
 //	PATCH /api/v1/sessions/:session_id            (auth)
 //	GET  /api/v1/sessions/:session_id/messages    (auth)
-//	POST /api/v1/sessions/:session_id/messages    (auth, SSE)
+//	POST /api/v1/sessions/:session_id/messages    (auth, SSE)   [agent]
 //	DELETE /api/v1/sessions/:session_id           (auth)
 //	GET  /api/v1/workspace/files                  (auth)
 //	POST /api/v1/workspace/upload                 (auth)
@@ -124,7 +128,7 @@ const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
 //	PUT  /api/v1/workspace/files/*path             (auth, rename file/dir)
 //	DELETE /api/v1/workspace/files/*path          (auth, delete file/dir)
 //	POST /api/v1/workspace/onlyoffice-callback     (query token, save callback)
-//	GET  /api/v1/mcp/tools                        (auth)
+//	GET  /api/v1/mcp/tools                        (auth)         [agent]
 //	GET  /api/v1/skills                           (auth)
 //
 // The auth group is mounted at /api/v1 and gated by deps.AuthMW; /auth/login
@@ -137,10 +141,29 @@ const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
 // a separate static route cannot be registered because gin rejects a static
 // segment and a wildcard at the same tree node.
 func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
+	RegisterHealthz(r)
+	RegisterAPIRoutes(r, deps)
+	RegisterAgentRoutes(r, deps)
+}
+
+// RegisterHealthz mounts the unauthenticated GET /healthz endpoint. It is
+// registered exactly once per engine (by the role dispatcher in serveRun, or
+// by RegisterRoutes for the all role) so the api and agent engines each expose
+// a health check without colliding on a double registration.
+func RegisterHealthz(r *gin.Engine) {
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+}
 
+// RegisterAPIRoutes mounts the CRUD route partition owned by the api role
+// (and contributed by the all role): auth/login, session list/create/delete,
+// message-history read, manual title update, workspace file CRUD, and the
+// skills list. It does NOT register the streaming message endpoint or the MCP
+// tool list — those belong to the agent partition. deps.AuthMW gates the
+// protected group; deps.QueryTokenAuthMW gates the token-download and
+// OnlyOffice-callback routes.
+func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	v1 := r.Group("/api/v1")
 	v1.POST("/auth/login", deps.Login)
 
@@ -150,7 +173,6 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.GET("/sessions", deps.SessionList)
 	authed.POST("/sessions", deps.SessionCreate)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
-	authed.POST("/sessions/:session_id/messages", deps.SendMessage)
 	authed.PATCH("/sessions/:session_id", deps.SessionUpdateTitle)
 	authed.DELETE("/sessions/:session_id", deps.SessionDelete)
 
@@ -178,8 +200,23 @@ func RegisterRoutes(r *gin.Engine, deps RouteDeps) {
 	// handler, which replies with OnlyOffice's {"error": N} convention.
 	v1.POST(onlyOfficeCallbackRoute, deps.QueryTokenAuthMW, deps.WorkspaceOnlyOfficeCallback)
 
-	authed.GET("/mcp/tools", deps.MCPTools)
 	authed.GET("/skills", deps.SkillsList)
+}
+
+// RegisterAgentRoutes mounts the agent-route partition owned by the agent role
+// (and contributed by the all role): the streaming message endpoint
+// POST /api/v1/sessions/:session_id/messages and the MCP tool list
+// GET /api/v1/mcp/tools. Both are gated by deps.AuthMW. The streaming endpoint
+// is the only place the lightweight CRUD path and the heavy agent-execution
+// path meet; isolating its registration here is what lets the api role run
+// with no dependency on the agent layer.
+func RegisterAgentRoutes(r *gin.Engine, deps RouteDeps) {
+	v1 := r.Group("/api/v1")
+	authed := v1.Group("/")
+	authed.Use(deps.AuthMW)
+
+	authed.POST("/sessions/:session_id/messages", deps.SendMessage)
+	authed.GET("/mcp/tools", deps.MCPTools)
 }
 
 // workspaceFileAuthMW selects the appropriate auth middleware for the

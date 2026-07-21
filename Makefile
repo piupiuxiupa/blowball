@@ -1,12 +1,22 @@
-.PHONY: build run test migrate lint seed clean frontend-install frontend-dev frontend-build frontend-lint
+.PHONY: build run run-api run-agent test migrate lint seed clean frontend-install frontend-dev frontend-build frontend-lint
 
 FRONTEND_DIR := frontend
 
 build:
 	go build -o bin/blowball ./cmd/blowball/
 
+# run == --role all: the pre-split monolith (full route set on server.port).
 run: build
 	./bin/blowball serve
+
+# Split process roles. Run both against the SAME -d root so they share the data
+# plane (MySQL/Redis/local FS); external routing directs the streaming route and
+# /mcp/tools to the agent port and everything else to the api port.
+run-api: build
+	./bin/blowball serve --role api
+
+run-agent: build
+	./bin/blowball serve --role agent
 
 test:
 	go test -race ./...

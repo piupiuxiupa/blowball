@@ -1,6 +1,16 @@
 import type { paths } from './openapi';
 
+// The backend runs as two deployable roles that may listen on separate ports
+// (see the "--role api|agent" split in cmd/blowball/serve.go):
+//   - API base   → CRUD: auth, session CRUD, message history, workspace files.
+//                  Default http://localhost:8080 (server.port).
+//   - Agent base → streaming message turn + MCP tools.
+//                  Default http://localhost:8081 (server.agent_port).
+// VITE_AGENT_BASE_URL falls back to the API base so the monolith (`--role all`,
+// dev, tests) and existing .env files keep working unchanged — set it only when
+// running the split deployment against server.agent_port.
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
+const AGENT_BASE = import.meta.env.VITE_AGENT_BASE_URL || API_BASE;
 
 export type ApiError = {
   error: {
@@ -21,6 +31,12 @@ export class ApiRequestError extends Error {
 
 export function getApiBase(): string {
   return API_BASE.replace(/\/$/, '');
+}
+
+// Base origin for the agent role (streaming message turn + MCP tools). Falls back
+// to the API base when VITE_AGENT_BASE_URL is unset.
+export function getAgentBase(): string {
+  return AGENT_BASE.replace(/\/$/, '');
 }
 
 export function getToken(): string | null {
@@ -153,7 +169,9 @@ export async function apiPostStream(
   options: { body?: unknown; token?: string | null; signal?: AbortSignal } = {}
 ): Promise<Response> {
   const token = options.token ?? getToken();
-  const response = await fetch(getApiBase() + path, {
+  // Streaming turns are served by the agent role (server.agent_port), so route
+  // through the agent base rather than the API/CRUD base.
+  const response = await fetch(getAgentBase() + path, {
     method: 'POST',
     headers: {
       Accept: 'text/event-stream',

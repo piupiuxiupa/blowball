@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,37 +52,173 @@ const MaxUploadBytes = 50 << 20
 // per the api-server spec's graceful-shutdown requirement.
 const ShutdownTimeout = 10 * time.Second
 
-// newServeCmd builds the `serve` cobra subcommand. It runs the HTTP server bootstrap, deriving the runtime data root from the persistent `-d` flag and the config path from `-f`.
+// validRoles is the set of accepted --role values. "all" is the default and
+// preserves the pre-split single-process behavior; "api" and "agent" select the
+// partitioned process roles (see the service-roles spec).
+var validRoles = []string{"all", "api", "agent"}
+
+// newServeCmd builds the `serve` cobra subcommand. It runs the HTTP server
+// bootstrap, deriving the runtime data root from the persistent -d flag, the
+// config path from -f, and the process role from --role.
 func newServeCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:          "serve",
 		Short:        "Run the blowball HTTP server",
 		Long:         "Run the blowball HTTP server (Gin) with graceful shutdown on SIGINT/SIGTERM.",
 		SilenceUsage: true,
 		RunE:         serveRun,
 	}
+	// --role selects which route partition this process serves. "all" (default)
+	// is the rollback path: one process, full route set, single listener on
+	// server.port — identical to the pre-split monolith.
+	cmd.Flags().String("role", "all", "process role: all|api|agent")
+	return cmd
 }
 
-// serveRun is the server bootstrap. Bootstrap order (see design.md D5):
+// serveRun is the server bootstrap. Bootstrap order (see design.md D3):
 //
-//  0. resolve -f, -d from cobra flags
-//  1. config.Load(-f)
-//
-// 2. MkdirAll({d}/logs)            — ensure log dir exists before the logger opens it
-// 3. logger.Init(cfg.Logging, {d}/logs)  — writes to the right file from the first line
-// 4. stores under {d}/data; skills at {d}/skills
-// 5. ApplyLandlock({d}/data, {d}/logs, {d}/skills)
-// 6. services, orchestrator, handlers, Gin, ListenAndServe
+//  0. resolve --role, -f, -d from cobra flags
+//  1. shared setup (setupRuntime): config → runtime dirs → logger (role-aware
+//     filename) → MySQL/Redis/FS → skills/tools dirs → Landlock. Plus the
+//     role-aware openai.api_key requirement.
+//  2. build the shared (store-only) SessionService both roles need
+//  3. build the engine (Recovery → Trace → CORS) and mount /healthz
+//  4. register routes by role: wireAPI (CRUD) and/or wireAgent (streaming + MCP)
+//  5. per-role HTTP listener + graceful shutdown
 func serveRun(cmd *cobra.Command, _ []string) error {
+	// Validate --role before any setup so a bad value exits non-zero without
+	// touching the filesystem or opening connections.
+	role, err := resolveRole(cmd)
+	if err != nil {
+		return err
+	}
 	configPath, dataRoot, err := persistentFlags(cmd)
 	if err != nil {
 		return err
 	}
 
-	// 1. Load config. ${VAR} / ${VAR:default} references are expanded by the loader.
+	// 1. Shared setup (runs for every role).
+	rt, err := setupRuntime(configPath, dataRoot, role)
+	if err != nil {
+		return err
+	}
+	log := rt.log
+	defer func() { _ = log.Sync() }()
+	defer func() {
+		if cerr := rt.mysqlStore.Close(); cerr != nil {
+			log.Warn("mysql close failed", zap.Error(cerr))
+		}
+	}()
+	defer func() {
+		if cerr := rt.redisStore.Close(); cerr != nil {
+			log.Warn("redis close failed", zap.Error(cerr))
+		}
+	}()
+
+	// 2. Shared session service. Store-only, so it carries no agent-layer
+	// dependency; both the api CRUD handlers and the agent streaming handler use it.
+	sessDeps := service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: rt.fsStore}
+	sessSvc := service.NewSessionService(sessDeps)
+
+	// 3. Engine + health check. Each role gets its own engine with the standard
+	// middleware chain (Recovery → Trace → CORS); auth is applied per-route-group
+	// inside the registration functions.
+	engine := newEngine()
+	handler.RegisterHealthz(engine)
+
+	// 4. Register routes by role. wireAPI/wireAgent each construct only the
+	// handlers their partition needs, so the api role never instantiates the
+	// orchestrator, OpenAI client, tool registry, or MCP manager.
+	var mcpMgr *mcpclient.Manager
+	switch role {
+	case "all":
+		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
+		agentDeps, mgr := wireAgent(rt, sessSvc)
+		mcpMgr = mgr
+		handler.RegisterAgentRoutes(engine, agentDeps)
+	case "api":
+		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
+	case "agent":
+		agentDeps, mgr := wireAgent(rt, sessSvc)
+		mcpMgr = mgr
+		handler.RegisterAgentRoutes(engine, agentDeps)
+	}
+	if mcpMgr != nil {
+		defer func() {
+			if cerr := mcpMgr.Close(); cerr != nil {
+				log.Warn("mcp client close failed", zap.Error(cerr))
+			}
+		}()
+	}
+
+	// 5. Per-role listener. all and api listen on server.port; agent listens on
+	// server.agent_port. D2: all keeps a single listener on server.port so any
+	// existing caller (tests, dev proxy, monitoring) keeps working unchanged.
+	port := rt.cfg.Server.Port
+	if role == "agent" {
+		port = rt.cfg.Server.AgentPort
+	}
+
+	log.Info("server starting",
+		zap.String("role", role),
+		zap.Int("port", port),
+		zap.Strings("route_groups", routeGroups(role)))
+
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: engine,
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("listen failed", zap.Error(err))
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Info("shutting down server", zap.String("role", role))
+
+	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Error("server shutdown error", zap.Error(err))
+	}
+	log.Info("server stopped", zap.String("role", role))
+	return nil
+}
+
+// runtime bundles everything the shared setup produces and both role builders
+// consume: the parsed config, the selected role, the derived runtime
+// directories, the zap logger, and the three shared stores. Stores are concrete
+// because they are constructed once at startup and closed via deferred Close in
+// serveRun.
+type appRuntime struct {
+	cfg        *config.Config
+	role       string
+	dataDir    string
+	logDir     string
+	skillsDir  string
+	toolsDir   string
+	log        *zap.Logger
+	mysqlStore *mysql.Store
+	redisStore *redis.Store
+	fsStore    *fs.Store
+}
+
+// setupRuntime performs the shared bootstrap that runs for every role: load
+// config, derive the four runtime directories, init the role-aware logger,
+// enforce the role-aware openai.api_key requirement, connect MySQL/Redis, open
+// the FS store, ensure the skills/tools dirs exist, and apply Landlock. It
+// matches the pre-split bootstrap step-for-step; the only additions are the
+// role-scoped log filename and the relaxed openai-key check for the api role.
+//
+// Store-init failures use log.Fatal (as before) so a bad DSN or unreachable
+// Redis aborts startup with a clear message rather than a generic cobra error.
+func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return fmt.Errorf("load config %q: %w", configPath, err)
+		return nil, fmt.Errorf("load config %q: %w", configPath, err)
 	}
 
 	// Derive the four runtime locations from the single -d root (D2/D3/D6): data, logs, skills, tools.
@@ -90,19 +227,42 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 	skillsDir := filepath.Join(dataRoot, "skills")
 	toolsDir := filepath.Join(dataRoot, "tools")
 
-	// 2. Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
+	// Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return fmt.Errorf("create log dir %q: %w", logDir, err)
+		return nil, fmt.Errorf("create log dir %q: %w", logDir, err)
 	}
 
-	// 3. Init the zap logger (tee console + file, rotated by lumberjack) and install it as the package default.
-	log, err := logger.Init(cfg.Logging, logDir)
+	// Init the zap logger with a role-scoped filename so two role processes on
+	// the same host do not contend on one lumberjack-managed file.
+	log, err := logger.InitForRole(cfg.Logging, logDir, role)
 	if err != nil {
-		return fmt.Errorf("init logger: %w", err)
+		return nil, fmt.Errorf("init logger: %w", err)
 	}
-	defer func() { _ = log.Sync() }()
+
+	// Role-aware openai.api_key requirement. The api role never drives the LLM,
+	// so a missing key is downgraded to a warning; the all and agent roles
+	// construct the orchestrator/title service and therefore require it.
+	if strings.TrimSpace(cfg.OpenAI.APIKey) == "" {
+		if openAIKeyRequired(role) {
+			log.Fatal("openai.api_key must be non-empty for this role",
+				zap.String("role", role))
+		}
+		log.Warn("openai.api_key is empty; allowed because this role never calls the LLM",
+			zap.String("role", role))
+	}
+
+	rt := &appRuntime{
+		cfg:       cfg,
+		role:      role,
+		dataDir:   dataDir,
+		logDir:    logDir,
+		skillsDir: skillsDir,
+		toolsDir:  toolsDir,
+		log:       log,
+	}
 
 	log.Info("runtime layout",
+		zap.String("role", role),
 		zap.String("config", configPath),
 		zap.String("data_root", dataRoot),
 		zap.String("data_dir", dataDir),
@@ -110,33 +270,26 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		zap.String("skills_dir", skillsDir),
 		zap.String("tools_dir", toolsDir))
 
-	// 4. MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
+	// MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
 	mysqlStore, err := mysql.New(cfg.MySQL.DSN)
 	if err != nil {
 		log.Fatal("mysql init failed", zap.Error(err))
 	}
-	defer func() {
-		if cerr := mysqlStore.Close(); cerr != nil {
-			log.Warn("mysql close failed", zap.Error(cerr))
-		}
-	}()
+	rt.mysqlStore = mysqlStore
 
 	// Redis. The shared TTL is applied to session-level cache keys.
 	redisStore, err := redis.New(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB, RedisCacheTTL)
 	if err != nil {
 		log.Fatal("redis init failed", zap.Error(err))
 	}
-	defer func() {
-		if cerr := redisStore.Close(); cerr != nil {
-			log.Warn("redis close failed", zap.Error(cerr))
-		}
-	}()
+	rt.redisStore = redisStore
 
 	// FS store for per-user session files, workspace and skills directories. fs.New creates dataDir.
 	fsStore, err := fs.New(dataDir)
 	if err != nil {
 		log.Fatal("fs store init failed", zap.Error(err))
 	}
+	rt.fsStore = fsStore
 
 	// Ensure the global skills directory exists (the loader does not create it) so per-subdir landlock below resolves cleanly.
 	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
@@ -148,13 +301,81 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		log.Fatal("create tools dir failed", zap.Error(err))
 	}
 
-	// 5. go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — while the operator tools dir is restricted read-only, mirroring the in-sandbox --ro-bind as defense-in-depth. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless.
+	// go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — while the operator tools dir is restricted read-only, mirroring the in-sandbox --ro-bind as defense-in-depth. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless.
 	if err := xizhi.ApplyLandlock([]string{dataDir, logDir, skillsDir}, []string{toolsDir}); err != nil {
 		log.Warn("landlock not applied; relying on application-layer validation only",
 			zap.Error(err))
 	}
 
-	// 6. Tool registry. The main registry backs the MCP tools-listing endpoint. Real tool execution during orchestration uses a per-request registry the orchestrator's factory rebuilds scoped to the user's workspace root.
+	return rt, nil
+}
+
+// wireAPI builds the CRUD services/handlers for the api role (and contributes
+// them in the all role): auth, session CRUD, message-history read, manual title
+// update, workspace file CRUD, and the skills list. It returns a RouteDeps
+// populated with only the API-route handlers plus the auth middleware; the
+// agent-partition fields (SendMessage, MCPTools) are left nil.
+//
+// Fault isolation: wireAPI does NOT construct the orchestrator, OpenAI client,
+// tool registry, or MCP manager. The api role's TitleService is built with a
+// nil LLM client — SetManualTitle never calls the LLM, so the api role needs no
+// OpenAI dependency.
+func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps {
+	cfg := rt.cfg
+
+	jwtExpire, err := cfg.JWT.ParseDuration()
+	if err != nil {
+		rt.log.Fatal("parse jwt.expire failed", zap.Error(err))
+	}
+	authSvc := service.NewAuthService(rt.mysqlStore, cfg.JWT.Secret, jwtExpire)
+	authHandler := handler.NewAuthHandler(authSvc)
+
+	// The api role never calls the LLM; a nil client is safe because
+	// SetManualTitle only touches MySQL (see TitleService.SetManualTitle).
+	titleSvc := service.NewTitleService(nil, rt.mysqlStore, cfg.OpenAI)
+	sessionHandler := handler.NewSessionHandler(sessSvc, titleSvc)
+	workspaceHandler := handler.NewWorkspaceHandler(rt.fsStore, MaxUploadBytes, handler.OnlyOfficeSettings{
+		Secret:          cfg.OnlyOffice.Secret,
+		ServerURL:       cfg.OnlyOffice.ServerURL,
+		InternalBackend: cfg.OnlyOffice.InternalBackend,
+	})
+	skillHandler := handler.NewSkillHandler(rt.fsStore)
+
+	return handler.RouteDeps{
+		AuthMW:                      middleware.AuthMiddleware(cfg.JWT.Secret),
+		QueryTokenAuthMW:            middleware.QueryTokenAuthMiddleware(cfg.JWT.Secret),
+		Login:                       authHandler.Login,
+		SessionList:                 sessionHandler.ListSessions,
+		SessionCreate:               sessionHandler.CreateSession,
+		SessionMessages:             sessionHandler.GetSessionMessages,
+		SessionDelete:               sessionHandler.DeleteSession,
+		SessionUpdateTitle:          sessionHandler.UpdateTitle,
+		WorkspaceList:               workspaceHandler.List,
+		WorkspaceUpload:             workspaceHandler.Upload,
+		WorkspaceDownload:           workspaceHandler.Download,
+		WorkspaceTokenDownload:      workspaceHandler.TokenDownload,
+		WorkspaceContent:            workspaceHandler.Content,
+		WorkspaceDelete:             workspaceHandler.Delete,
+		WorkspaceRename:             workspaceHandler.Rename,
+		WorkspaceOnlyOfficeConfig:   workspaceHandler.OnlyOfficeConfig,
+		WorkspaceOnlyOfficeCallback: workspaceHandler.OnlyOfficeCallback,
+		SkillsList:                  skillHandler.List,
+	}
+}
+
+// wireAgent builds the agent layer for the agent role (and contributes it in
+// the all role): the tool registry, the external MCP manager, the OpenAI
+// client, the orchestrator, the title service, and the streaming + MCP-tool
+// handlers. It returns a RouteDeps populated with only the agent-route
+// handlers (SendMessage, MCPTools) plus the auth middleware, and the MCP
+// manager so serveRun can defer its Close.
+func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager) {
+	cfg := rt.cfg
+	dataDir := rt.dataDir
+	fsStore := rt.fsStore
+	log := rt.log
+
+	// Tool registry. The main registry backs the MCP tools-listing endpoint. Real tool execution during orchestration uses a per-request registry the orchestrator's factory rebuilds scoped to the user's workspace root.
 	reg := tool.NewRegistry()
 	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
@@ -169,14 +390,14 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 			return fsStore.UserWorkspace(userID)
 		}, func(userID string) string {
 			return fsStore.UserSkills(userID)
-		}, skillsDir, toolsDir)
+		}, rt.skillsDir, rt.toolsDir)
 		if err := executor.RegisterAll(reg, executorTools); err != nil {
 			log.Fatal("register executor tools failed", zap.Error(err))
 		}
 	}
 
 	// Skill loader. Discover skills from the global skills directory and per-user data/{userID}/skills/ directories. Register the luban skill tools globally when at least one agent lists them.
-	skillLoader := skill.NewLoader(skillsDir, func(userID string) string {
+	skillLoader := skill.NewLoader(rt.skillsDir, func(userID string) string {
 		return fsStore.UserSkills(userID)
 	})
 	if needsLubanTools(cfg.Agents) {
@@ -200,11 +421,6 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		log.Fatal("mcp client registration failed", zap.Error(err))
 	}
-	defer func() {
-		if cerr := mcpManager.Close(); cerr != nil {
-			log.Warn("mcp client close failed", zap.Error(cerr))
-		}
-	}()
 
 	// Validate agent MCP tool references against the discovered remote tools.
 	serverTools := mcpManager.ServerTools()
@@ -217,15 +433,13 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		log.Fatal("agent skill validation failed", zap.Error(err))
 	}
 
-	// 7. Services. SessionService owns the three-layer write path; the message service delegates saves back to SessionService.SaveMessage so writes stay in one place.
-	deps := service.SessionDeps{MySQL: mysqlStore, Redis: redisStore, FS: fsStore}
-	sessSvc := service.NewSessionService(deps)
-	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
+	// Message service delegates saves back to SessionService.SaveMessage so writes stay in one place.
+	msgSvc := service.NewMessageService(service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: fsStore}, sessSvc.SaveMessage)
 
 	openAIClient := agent.NewOpenAIClient(cfg.OpenAI)
-	titleSvc := service.NewTitleService(openAIClient, mysqlStore, cfg.OpenAI)
+	titleSvc := service.NewTitleService(openAIClient, rt.mysqlStore, cfg.OpenAI)
 
-	// 8. Orchestrator. The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
+	// The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
 	wsFn := func(userID string) string {
 		return fsStore.UserWorkspace(userID)
 	}
@@ -234,78 +448,60 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		log.Fatal("orchestrator init failed", zap.Error(err))
 	}
 
-	// 9. Handlers. AuthService needs the parsed JWT expire duration; config exposes ParseDuration to handle the short-form suffixes (e.g. "7d").
-	jwtExpire, err := cfg.JWT.ParseDuration()
-	if err != nil {
-		log.Fatal("parse jwt.expire failed", zap.Error(err))
-	}
-	authSvc := service.NewAuthService(mysqlStore, cfg.JWT.Secret, jwtExpire)
-	authHandler := handler.NewAuthHandler(authSvc)
 	orchAdapter := handler.NewOrchestratorAdapter(orch)
-	sessionHandler := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, orchAdapter, dataDir)
-	workspaceHandler := handler.NewWorkspaceHandler(fsStore, MaxUploadBytes, handler.OnlyOfficeSettings{
-		Secret:          cfg.OnlyOffice.Secret,
-		ServerURL:       cfg.OnlyOffice.ServerURL,
-		InternalBackend: cfg.OnlyOffice.InternalBackend,
-	})
+	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, orchAdapter, dataDir)
 	mcpHandler := handler.NewMCPHandler(reg)
-	skillHandler := handler.NewSkillHandler(fsStore)
 
-	// 10. Gin engine. Recovery catches panics; trace mints a per-request trace_id and echoes it back on X-Trace-Id; CORS handles preflight.
+	return handler.RouteDeps{
+		AuthMW:      middleware.AuthMiddleware(cfg.JWT.Secret),
+		SendMessage: streamHandler.SendMessage,
+		MCPTools:    mcpHandler.Tools,
+	}, mcpManager
+}
+
+// newEngine builds a gin.Engine with the standard middleware chain shared by
+// every role: Recovery (panic safety) → Trace (per-request trace_id) → CORS.
+// Auth is applied per-route-group inside RegisterAPIRoutes / RegisterAgentRoutes
+// so it stays the final middleware before the handler.
+func newEngine() *gin.Engine {
 	engine := gin.New()
 	engine.Use(gin.Recovery())
 	engine.Use(middleware.TraceMiddleware())
 	engine.Use(middleware.CORS())
+	return engine
+}
 
-	routeDeps := handler.RouteDeps{
-		AuthMW:                      middleware.AuthMiddleware(cfg.JWT.Secret),
-		QueryTokenAuthMW:            middleware.QueryTokenAuthMiddleware(cfg.JWT.Secret),
-		Login:                       authHandler.Login,
-		SessionList:                 sessionHandler.ListSessions,
-		SessionCreate:               sessionHandler.CreateSession,
-		SessionMessages:             sessionHandler.GetSessionMessages,
-		SendMessage:                 sessionHandler.SendMessage,
-		SessionDelete:               sessionHandler.DeleteSession,
-		SessionUpdateTitle:          sessionHandler.UpdateTitle,
-		WorkspaceList:               workspaceHandler.List,
-		WorkspaceUpload:             workspaceHandler.Upload,
-		WorkspaceDownload:           workspaceHandler.Download,
-		WorkspaceTokenDownload:      workspaceHandler.TokenDownload,
-		WorkspaceContent:            workspaceHandler.Content,
-		WorkspaceDelete:             workspaceHandler.Delete,
-		WorkspaceRename:             workspaceHandler.Rename,
-		WorkspaceOnlyOfficeConfig:   workspaceHandler.OnlyOfficeConfig,
-		WorkspaceOnlyOfficeCallback: workspaceHandler.OnlyOfficeCallback,
-		MCPTools:                    mcpHandler.Tools,
-		SkillsList:                  skillHandler.List,
+// resolveRole reads and validates the --role flag, rejecting unknown values
+// before any setup runs so the process exits non-zero without side effects.
+func resolveRole(cmd *cobra.Command) (string, error) {
+	role, err := cmd.Flags().GetString("role")
+	if err != nil {
+		return "", fmt.Errorf("read --role: %w", err)
 	}
-	handler.RegisterRoutes(engine, routeDeps)
-
-	// 11. HTTP server with graceful shutdown. ListenAndServe runs in a goroutine so the main goroutine can block on the OS signal; on signal we call Shutdown with a 10s grace period and then close the stores (their Close is also deferred above as a backstop for early-return paths).
-	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: engine,
+	if !slices.Contains(validRoles, role) {
+		return "", fmt.Errorf("invalid --role %q (want %s)", role, strings.Join(validRoles, "|"))
 	}
-	go func() {
-		log.Info("server starting",
-			zap.Int("port", cfg.Server.Port))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal("listen failed", zap.Error(err))
-		}
-	}()
+	return role, nil
+}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Info("shutting down server")
+// openAIKeyRequired reports whether the role needs a configured openai.api_key
+// at startup. The api role never drives the LLM, so it does not require one;
+// the all and agent roles construct the orchestrator and title service, which do.
+func openAIKeyRequired(role string) bool {
+	return role != "api"
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Error("server shutdown error", zap.Error(err))
+// routeGroups returns the human-readable names of the route partitions a role
+// registers, for the startup log line.
+func routeGroups(role string) []string {
+	switch role {
+	case "api":
+		return []string{"api"}
+	case "agent":
+		return []string{"agent"}
+	default:
+		return []string{"api", "agent"}
 	}
-	log.Info("server stopped")
-	return nil
 }
 
 // needsLubanTools reports whether any agent explicitly lists one of the luban skill tools in its tools list.

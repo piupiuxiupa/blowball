@@ -7,7 +7,7 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
-// OrchestratorRunner is the agent-execution contract the SessionHandler
+// OrchestratorRunner is the agent-execution contract the MessageStreamHandler
 // depends on. It runs one chat turn, streaming events to hub, and returns the
 // raw event slice so the handler can persist the full assistant event stream.
 //
@@ -43,7 +43,7 @@ type orchestratorAdapter struct {
 }
 
 // NewOrchestratorAdapter wraps a *agent.Orchestrator as an OrchestratorRunner.
-// Phase 10's main.go should pass the result to NewSessionHandler.
+// The agent-role bootstrap should pass the result to NewMessageStreamHandler.
 func NewOrchestratorAdapter(o *agent.Orchestrator) OrchestratorRunner {
 	return &orchestratorAdapter{inner: o}
 }

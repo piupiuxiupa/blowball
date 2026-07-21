@@ -279,6 +279,84 @@ func TestInit_RotationTriggersOnSize(t *testing.T) {
 	}
 }
 
+// TestLogFileNameFor_RoleMapping verifies the per-role lumberjack filename so
+// two role processes on the same host do not contend on one file.
+func TestLogFileNameFor_RoleMapping(t *testing.T) {
+	cases := []struct {
+		role string
+		want string
+	}{
+		{"all", LogFileName},
+		{"", LogFileName}, // empty / unrecognized collapses to the all default
+		{"api", "blowball-api.log"},
+		{"agent", "blowball-agent.log"},
+		{"bogus", LogFileName},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			if got := LogFileNameFor(tc.role); got != tc.want {
+				t.Errorf("LogFileNameFor(%q) = %q, want %q", tc.role, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInitForRole_WritesRoleScopedFilename verifies each role actually opens
+// the role-scoped file under the log directory.
+func TestInitForRole_WritesRoleScopedFilename(t *testing.T) {
+	cases := []struct {
+		role string
+		want string
+	}{
+		{"all", LogFileName},
+		{"api", "blowball-api.log"},
+		{"agent", "blowball-agent.log"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			dir := t.TempDir()
+			l, err := InitForRole(config.LoggingConfig{
+				Level:  "info",
+				Format: "json",
+				Output: []string{"file"},
+			}, dir, tc.role)
+			if err != nil {
+				t.Fatalf("InitForRole(%q): %v", tc.role, err)
+			}
+			l.Info("role marker", zap.String("role", tc.role))
+			_ = l.Sync()
+			SetDefault(zap.NewNop())
+
+			data, err := os.ReadFile(filepath.Join(dir, tc.want))
+			if err != nil {
+				t.Fatalf("read %s: %v (dir entries: %v)", tc.want, err, entryNames(mustReadDir(t, dir)))
+			}
+			if !strings.Contains(string(data), "role marker") {
+				t.Errorf("%s missing message; content=%q", tc.want, data)
+			}
+
+			// No other role's file should have been created.
+			for _, other := range []string{LogFileName, "blowball-api.log", "blowball-agent.log"} {
+				if other == tc.want {
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(dir, other)); !os.IsNotExist(err) {
+					t.Errorf("role %q should not create %s, got err=%v", tc.role, other, err)
+				}
+			}
+		})
+	}
+}
+
+func mustReadDir(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	return entries
+}
+
 func TestInit_FileSinkFailsFastOnUnwritableDir(t *testing.T) {
 	// Point logDir at a path whose parent is a regular file, so MkdirAll fails.
 	regular := filepath.Join(t.TempDir(), "i-am-a-file")

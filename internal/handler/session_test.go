@@ -331,10 +331,13 @@ func (f *handlerFakeFS) EnsureUserDirs(_ context.Context, _ string) error {
 	return f.ensureErr
 }
 
-// sessionHandlerTestEnv bundles a configured SessionHandler with its backing
-// fakes so each test can construct the harness with one helper.
+// sessionHandlerTestEnv bundles a configured SessionHandler (CRUD) and
+// MessageStreamHandler (streaming) with their backing fakes so each test can
+// construct the harness with one helper. Mirrors the role split: the CRUD
+// routes are served by h, the streaming route by stream.
 type sessionHandlerTestEnv struct {
 	h      *SessionHandler
+	stream *MessageStreamHandler
 	mysql  *handlerFakeMySQL
 	redis  *handlerFakeRedis
 	fs     *handlerFakeFS
@@ -362,7 +365,10 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	sessSvc := newSessionSvc(deps)
 	msgSvc := newMessageSvc(deps)
 	titleSvc := service.NewTitleService(nil, mysql, config.OpenAIConfig{Model: "title-model"})
-	h := NewSessionHandler(sessSvc, msgSvc, titleSvc, stub, "/tmp/blowball-test-data")
+	// SessionHandler owns CRUD only; MessageStreamHandler owns the streaming
+	// endpoint and the orchestrator dependency. Both share the same services.
+	h := NewSessionHandler(sessSvc, titleSvc)
+	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, stub, "/tmp/blowball-test-data")
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -373,10 +379,10 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	r.POST("/api/v1/sessions", h.CreateSession)
 	r.GET("/api/v1/sessions", h.ListSessions)
 	r.GET("/api/v1/sessions/:session_id/messages", h.GetSessionMessages)
-	r.POST("/api/v1/sessions/:session_id/messages", h.SendMessage)
+	r.POST("/api/v1/sessions/:session_id/messages", stream.SendMessage)
 	r.PATCH("/api/v1/sessions/:session_id", h.UpdateTitle)
 	r.DELETE("/api/v1/sessions/:session_id", h.DeleteSession)
-	return &sessionHandlerTestEnv{h: h, mysql: mysql, redis: redis, fs: fs, stub: stub, engine: r}
+	return &sessionHandlerTestEnv{h: h, stream: stream, mysql: mysql, redis: redis, fs: fs, stub: stub, engine: r}
 }
 
 // TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE drives the
@@ -695,7 +701,7 @@ func TestSendMessage_FirstTurnFiresTitle(t *testing.T) {
 	env := newSessionHandlerEnv(t, nil)
 	// Wire a real TitleService backed by a fake LLM and the env's MySQL fake.
 	deps := sessionDeps(env.mysql, env.redis, env.fs)
-	env.h.titleSvc = newTitleSvcWithFake(t, deps, "Generated Title")
+	env.stream.titleSvc = newTitleSvcWithFake(t, deps, "Generated Title")
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/sessions/sess-new/messages",
@@ -736,7 +742,7 @@ func TestSendMessage_NotFirstTurnDoesNotFireTitle(t *testing.T) {
 	require.NoError(t, err)
 	env.redis.getResult = [][]byte{raw}
 
-	env.h.titleSvc = newTitleSvcWithFake(t, sessionDeps(env.mysql, env.redis, env.fs), "should not be used")
+	env.stream.titleSvc = newTitleSvcWithFake(t, sessionDeps(env.mysql, env.redis, env.fs), "should not be used")
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/sessions/sess-old/messages",
@@ -1007,7 +1013,7 @@ func TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle(t *testing.T) {
 		},
 		returnErr: context.Canceled,
 	}
-	env.h.orch = stub
+	env.stream.orch = stub
 	// Env constructor already built the engine with the original stub; rebuild
 	// the route so the new orchestrator is wired in.
 	env.engine = gin.New()
@@ -1016,10 +1022,10 @@ func TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle(t *testing.T) {
 		c.Set(middleware.TraceIDKey, "trace-1")
 		c.Next()
 	})
-	env.engine.POST("/api/v1/sessions/:session_id/messages", env.h.SendMessage)
+	env.engine.POST("/api/v1/sessions/:session_id/messages", env.stream.SendMessage)
 
 	deps := sessionDeps(env.mysql, env.redis, env.fs)
-	env.h.titleSvc = newTitleSvcWithFake(t, deps, "Canceled Title")
+	env.stream.titleSvc = newTitleSvcWithFake(t, deps, "Canceled Title")
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/sessions/sess-cancel-title/messages",

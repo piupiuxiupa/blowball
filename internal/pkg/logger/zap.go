@@ -29,8 +29,27 @@ import (
 	"github.com/lush/blowball/internal/config"
 )
 
-// LogFileName is the active log file written inside the log directory.
+// LogFileName is the active log file written inside the log directory for the
+// default ("all") role. Per-role filenames (blowball-api.log, blowball-agent.log)
+// are derived by LogFileNameFor; this constant covers the monolith / all role
+// and is the value existing callers and tests assume.
 const LogFileName = "blowball.log"
+
+// LogFileNameFor returns the lumberjack filename for the given role:
+// "blowball-api.log" (api), "blowball-agent.log" (agent), and "blowball.log"
+// for the all role and any unrecognized value. One file per role prevents two
+// lumberjack instances from contending on the same file when both roles run on
+// the same host.
+func LogFileNameFor(role string) string {
+	switch role {
+	case "api":
+		return "blowball-api.log"
+	case "agent":
+		return "blowball-agent.log"
+	default:
+		return LogFileName
+	}
+}
 
 var (
 	mu            sync.RWMutex
@@ -48,7 +67,19 @@ var (
 // the configured persistent log (D8: fail fast).
 //
 // The built logger is also installed as the package default returned by L().
+//
+// Init uses the default ("all") role filename; callers that select a process
+// role (api / agent) should use InitForRole so the lumberjack filename is
+// role-scoped.
 func Init(cfg config.LoggingConfig, logDir string) (*zap.Logger, error) {
+	return InitForRole(cfg, logDir, "all")
+}
+
+// InitForRole is the role-aware variant of Init: it behaves identically except
+// the rotated file is named after the role (see LogFileNameFor) so the api and
+// agent processes do not contend on one lumberjack-managed file when both run
+// on the same host. The built logger is installed as the package default.
+func InitForRole(cfg config.LoggingConfig, logDir, role string) (*zap.Logger, error) {
 	lvl, err := parseLevel(cfg.Level)
 	if err != nil {
 		return nil, err
@@ -72,7 +103,7 @@ func Init(cfg config.LoggingConfig, logDir string) (*zap.Logger, error) {
 	}
 
 	if hasFile {
-		writeSyncer, err := fileSink(logDir, cfg.File)
+		writeSyncer, err := fileSink(logDir, LogFileNameFor(role), cfg.File)
 		if err != nil {
 			return nil, err
 		}
@@ -145,8 +176,9 @@ func resolveSinks(output []string) (console, file bool, consoleWS zapcore.WriteS
 
 // fileSink builds the lumberjack-backed WriteSyncer for the file core. The log
 // directory is created if missing; failure to create it or open the file is
-// surfaced as an error so startup fails fast (D8).
-func fileSink(logDir string, file config.LogFileConfig) (zapcore.WriteSyncer, error) {
+// surfaced as an error so startup fails fast (D8). filename is the bare file
+// name (role-scoped by the caller via LogFileNameFor) placed inside logDir.
+func fileSink(logDir, filename string, file config.LogFileConfig) (zapcore.WriteSyncer, error) {
 	if strings.TrimSpace(logDir) == "" {
 		return nil, fmt.Errorf("file logging enabled but log directory is empty")
 	}
@@ -154,7 +186,7 @@ func fileSink(logDir string, file config.LogFileConfig) (zapcore.WriteSyncer, er
 		return nil, fmt.Errorf("create log directory %q: %w", logDir, err)
 	}
 	lj := &lumberjack.Logger{
-		Filename:   filepath.Join(logDir, LogFileName),
+		Filename:   filepath.Join(logDir, filename),
 		MaxSize:    file.MaxSizeMB,
 		MaxBackups: file.MaxBackups,
 		MaxAge:     file.MaxAgeDays,

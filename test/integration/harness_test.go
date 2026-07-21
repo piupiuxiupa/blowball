@@ -492,7 +492,8 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
-	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry())
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -506,7 +507,7 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
-		SendMessage:            sessH.SendMessage,
+		SendMessage:            streamH.SendMessage,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
@@ -573,7 +574,8 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
-	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg)
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -587,7 +589,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
-		SendMessage:            sessH.SendMessage,
+		SendMessage:            streamH.SendMessage,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
@@ -672,7 +674,8 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
-	sessH := handler.NewSessionHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry())
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -686,7 +689,7 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
-		SendMessage:            sessH.SendMessage,
+		SendMessage:            streamH.SendMessage,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
