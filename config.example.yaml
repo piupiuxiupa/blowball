@@ -27,6 +27,29 @@ redis:
   password: ""
   db: 0
 
+# Physical storage backend for the per-user data root ({data-dir}/data, which
+# holds sessions/, workspace/ and per-user skills/). "local" (the default) uses
+# each process's local disk — zero shared state, the only mode supported on
+# macOS/Windows dev. "shared" declares that the operator has mounted a shared
+# POSIX filesystem (MinIO-backed JuiceFS) onto {data-dir}/data BEFORE starting
+# blowball, so api/agent instances across machines read/write one per-user data
+# tree and gain DR backup. In shared mode the server runs a startup health check
+# that refuses to boot if the mount is missing/wrong (preventing silent
+# cross-node divergence); when executor tools are also enabled it additionally
+# self-checks that JuiceFS was mounted with --allow-other.
+#
+# shared-mode prerequisites (Linux only): see docs/shared-storage.md —
+#   * JuiceFS formatted against a MinIO bucket + a DEDICATED metadata engine
+#     (independent Redis/DB, NOT blowball's session cache).
+#   * /etc/fuse.conf with user_allow_other enabled.
+#   * a systemd mount unit mounting JuiceFS onto {data-dir}/data with
+#     --allow-other, Before=/Requires= the blowball service.
+#   * when enabling executor tools, the mount MUST use --allow-other so bwrap's
+#     user-namespace-mapped uid can write /workspace.
+storage:
+  workspace:
+    backend: local  # local (default) | shared
+
 # Login policy. When password_required is true (the default when omitted), the
 # /api/v1/auth/login endpoint verifies the password against the seed-created
 # bcrypt hash. Set it to false for passwordless login: any seeded, active user

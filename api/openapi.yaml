@@ -8,6 +8,12 @@ info:
     Authentication is JWT Bearer. All routes except `/auth/login` require an
     `Authorization: Bearer <token>` header. Errors follow the unified envelope
     `{"error": {"code": "ERROR_CODE", "message": "..."}}`.
+
+    Workspace file endpoints are transparent to the physical storage backend:
+    requests and responses are identical whether `storage.workspace.backend` is
+    `local` (per-process local disk) or `shared` (an operator-mounted shared
+    POSIX filesystem such as MinIO-backed JuiceFS). The backend selection only
+    changes where files physically live; it does not alter this contract.
 servers:
   - url: http://localhost:8080
     description: Local development server

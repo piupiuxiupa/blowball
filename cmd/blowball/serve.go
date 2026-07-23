@@ -28,6 +28,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/service"
+	"github.com/lush/blowball/internal/storage"
 	"github.com/lush/blowball/internal/store/fs"
 	"github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/store/redis"
@@ -291,6 +292,29 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	}
 	rt.fsStore = fsStore
 
+	// Shared POSIX filesystem backend startup health check (see the
+	// workspace-shared-storage spec). When storage.workspace.backend == "shared",
+	// {data-dir}/data MUST be the operator-mounted shared FS (MinIO-backed
+	// JuiceFS). The check runs BEFORE Landlock for every role (the api role does
+	// workspace CRUD on the shared data plane too) and fatals on a missing/wrong
+	// mount so a node can never silently degrade to local disk and diverge from
+	// the cluster. When executor tools are configured and this role runs them
+	// (agent/all), an extra bwrap probe catches a missing JuiceFS --allow-other.
+	if cfg.Storage.Workspace.IsShared() {
+		log.Info("shared workspace backend enabled; running mount health check",
+			zap.String("data_dir", dataDir))
+		if err := storage.CheckSharedBackend(storage.CheckOptions{DataDir: dataDir, Log: log}); err != nil {
+			log.Fatal("shared workspace backend health check failed; refusing to start",
+				zap.Error(err),
+				zap.String("remediation", "mount JuiceFS onto {data-dir}/data (see docs/shared-storage.md) before starting blowball"))
+		}
+		if executorConfigured(cfg) && role != "api" {
+			if err := executor.ProbeFUSEWorkspace(dataDir); err != nil {
+				log.Fatal("executor shared-workspace self-check failed; refusing to start", zap.Error(err))
+			}
+		}
+	}
+
 	// Ensure the global skills directory exists (the loader does not create it) so per-subdir landlock below resolves cleanly.
 	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
 		log.Fatal("create skills dir failed", zap.Error(err))
@@ -381,7 +405,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
 	// Sandboxed bash/python/pip execution. Only registered on Linux where bwrap is available; on other platforms enabled tools are ignored. If a tool is explicitly enabled but bwrap is missing on Linux, startup fails fast.
-	if cfg.Tools.Executor.Bash.Enabled || cfg.Tools.Executor.Python.Enabled || cfg.Tools.Executor.Pip.Enabled {
+	if executorConfigured(cfg) {
 		if !executor.IsAvailable() {
 			log.Fatal("executor tools enabled but bubblewrap (bwrap) is not available",
 				zap.String("platform", runtime.GOOS))
@@ -502,6 +526,13 @@ func routeGroups(role string) []string {
 	default:
 		return []string{"api", "agent"}
 	}
+}
+
+// executorConfigured reports whether any sandboxed executor tool (bash/python/
+// pip) is enabled in config. It gates both executor registration in wireAgent
+// and the shared-mode bwrap self-check in setupRuntime.
+func executorConfigured(cfg *config.Config) bool {
+	return cfg.Tools.Executor.Bash.Enabled || cfg.Tools.Executor.Python.Enabled || cfg.Tools.Executor.Pip.Enabled
 }
 
 // needsLubanTools reports whether any agent explicitly lists one of the luban skill tools in its tools list.

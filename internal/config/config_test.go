@@ -959,3 +959,109 @@ jwt:
 		}
 	})
 }
+
+func TestLoad_StorageBackendDefault(t *testing.T) {
+	// Omitting storage entirely must default to "local" (zero-behavior-change).
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Storage.Workspace.Backend != WorkspaceBackendLocal {
+		t.Errorf("Storage.Workspace.Backend = %q, want %q", cfg.Storage.Workspace.Backend, WorkspaceBackendLocal)
+	}
+	if cfg.Storage.Workspace.IsShared() {
+		t.Error("IsShared() = true, want false for default local backend")
+	}
+}
+
+func TestLoad_StorageBackendShared(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+storage:
+  workspace:
+    backend: shared
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Storage.Workspace.Backend != WorkspaceBackendShared {
+		t.Errorf("Storage.Workspace.Backend = %q, want %q", cfg.Storage.Workspace.Backend, WorkspaceBackendShared)
+	}
+	if !cfg.Storage.Workspace.IsShared() {
+		t.Error("IsShared() = false, want true")
+	}
+}
+
+func TestLoad_StorageBackendEnvSubstitution(t *testing.T) {
+	// storage.workspace.backend must honor ${VAR} expansion like other fields.
+	t.Setenv("WS_BACKEND", "shared")
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+storage:
+  workspace:
+    backend: ${WS_BACKEND}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Storage.Workspace.IsShared() {
+		t.Errorf("Storage.Workspace.Backend = %q, want shared after expansion", cfg.Storage.Workspace.Backend)
+	}
+}
+
+func TestLoad_StorageBackendInvalid(t *testing.T) {
+	// An unrecognized backend fails fast at load time. "" is NOT in this list:
+	// an empty value is valid because it defaults to "local".
+	for _, b := range []string{"nfs", "s3", "object-store"} {
+		path := writeTempYAML(t, fmt.Sprintf(`
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+storage:
+  workspace:
+    backend: %q
+`, b))
+		_, err := Load(path)
+		if err == nil {
+			t.Fatalf("Load expected validation error for backend %q, got nil", b)
+		}
+		if !strings.Contains(err.Error(), "storage.workspace.backend") {
+			t.Errorf("error %q does not mention storage.workspace.backend", err.Error())
+		}
+	}
+}
+
+func TestWorkspaceStorageConfig_NormalizesCase(t *testing.T) {
+	// Backend is lower-cased on load so "Shared" / "LOCAL" are accepted.
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+storage:
+  workspace:
+    backend: SHARED
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Storage.Workspace.IsShared() {
+		t.Errorf("Storage.Workspace.Backend = %q, want shared after normalization", cfg.Storage.Workspace.Backend)
+	}
+}

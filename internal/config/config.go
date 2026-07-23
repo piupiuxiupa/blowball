@@ -27,6 +27,66 @@ type Config struct {
 	MCP        MCPConfig        `yaml:"mcp"`
 	Logging    LoggingConfig    `yaml:"logging"`
 	OnlyOffice OnlyOfficeConfig `yaml:"onlyoffice"`
+	Storage    StorageConfig    `yaml:"storage"`
+}
+
+// WorkspaceBackendLocal is the default workspace storage backend: per-user
+// data lives on each process's local disk under {data-dir}/data. This is the
+// zero-behavior-change mode and the only supported mode on macOS/Windows dev.
+const WorkspaceBackendLocal = "local"
+
+// WorkspaceBackendShared declares that {data-dir}/data is a shared POSIX
+// filesystem (operator-mounted JuiceFS backed by MinIO) so per-user data is
+// shared across api/agent instances and DR-backed. Shared mode triggers a
+// startup mount health check (see the workspace-shared-storage spec).
+const WorkspaceBackendShared = "shared"
+
+// defaultWorkspaceBackend is the backend used when storage.workspace.backend is
+// omitted, preserving the pre-shared-storage local-disk behavior.
+const defaultWorkspaceBackend = WorkspaceBackendLocal
+
+// StorageConfig groups the physical-storage settings for blowball's on-disk
+// data (the per-user data root {data-dir}/data: sessions warm tier, workspace,
+// per-user skills). It does not affect MySQL or Redis, which are always remote.
+type StorageConfig struct {
+	Workspace WorkspaceStorageConfig `yaml:"workspace"`
+}
+
+// WorkspaceStorageConfig selects where the per-user workspace (and the wider
+// per-user data subtree) physically lives. Backend is "local" (default, local
+// disk) or "shared" (operator-mounted shared POSIX filesystem such as
+// MinIO-backed JuiceFS). The value supports ${VAR} expansion like every other
+// config field. In shared mode all existing POSIX file operations stay
+// transparent — only the mount point changes — but the server runs a startup
+// health check to refuse to boot if the shared mount is missing.
+type WorkspaceStorageConfig struct {
+	Backend string `yaml:"backend"`
+}
+
+// applyDefaults fills an omitted Backend with the local default. It is idempotent.
+func (w *WorkspaceStorageConfig) applyDefaults() {
+	if strings.TrimSpace(w.Backend) == "" {
+		w.Backend = defaultWorkspaceBackend
+	} else {
+		w.Backend = strings.ToLower(strings.TrimSpace(w.Backend))
+	}
+}
+
+// IsShared reports whether the workspace runs in shared-POSIX-filesystem mode,
+// i.e. storage.workspace.backend == "shared".
+func (w WorkspaceStorageConfig) IsShared() bool {
+	return w.Backend == WorkspaceBackendShared
+}
+
+// validate rejects an unrecognized Backend value. The set is local|shared; any
+// other value fails fast at load time rather than silently behaving as local.
+func (w WorkspaceStorageConfig) validate() error {
+	switch w.Backend {
+	case WorkspaceBackendLocal, WorkspaceBackendShared:
+		return nil
+	default:
+		return fmt.Errorf("storage.workspace.backend: unsupported value %q (want local|shared)", w.Backend)
+	}
 }
 
 // OnlyOfficeConfig holds the server-side OnlyOffice DocumentServer integration
@@ -451,6 +511,7 @@ func Load(path string) (*Config, error) {
 	cfg.Logging.applyDefaults()
 	cfg.OnlyOffice.applyDefaults()
 	cfg.Server.applyDefaults()
+	cfg.Storage.Workspace.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Python.ApplyDefaults()
 	cfg.Tools.Executor.Pip.ApplyDefaults()
@@ -471,6 +532,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: mysql.dsn must be non-empty")
 	}
 	if err := c.Logging.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Storage.Workspace.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.MCP.validate(); err != nil {

@@ -350,6 +350,37 @@ tools:
 - If a tool is enabled but `bwrap` is not installed, the server exits with a fatal error.
 - On macOS and Windows the tools are silently unavailable regardless of config.
 
+## Shared workspace storage (optional, multi-node + DR)
+
+By default each blowball process keeps per-user data (workspaces, session files,
+per-user skills) on its **local disk** under `{data-dir}/data`. To share that
+data across multiple `api`/`agent` instances on different machines and gain
+object-storage-level disaster recovery, set:
+
+```yaml
+storage:
+  workspace:
+    backend: shared   # local (default) | shared
+```
+
+In `shared` mode the operator mounts a **shared POSIX filesystem** — MinIO-backed
+[JuiceFS](https://juicefs.com/) — onto `{data-dir}/data` **before** starting
+blowball. All existing POSIX file operations (the `xizhi_*` tools, the workspace
+HTTP endpoints, the executor `--bind` sandbox, OnlyOffice's atomic save) stay
+unchanged and transparent; only the mount point differs. On startup, `shared`
+mode runs a health check that **refuses to boot** if `{data-dir}/data` is not the
+expected shared mount (preventing a node from silently writing local disk and
+diverging from the cluster), and — when executor tools are enabled — a bwrap
+self-check that catches a missing JuiceFS `--allow-other` / `user_allow_other`.
+
+Shared mode is **Linux-only** (JuiceFS, bubblewrap, and Landlock are Linux
+features); macOS/Windows dev continues to use `backend: local`.
+
+Prerequisites, migration, backup/restore, monitoring, and the rollback path are
+documented in [`docs/shared-storage.md`](docs/shared-storage.md). A cross-node
+visibility check is provided in
+[`scripts/verify-shared-storage.sh`](scripts/verify-shared-storage.sh).
+
 ## Configuration
 
 Key sections in `config.yaml`:
@@ -361,6 +392,7 @@ Key sections in `config.yaml`:
 - `agents` — system prompts, models, max tokens, tool lists, MCP permissions, skill lists, and `thinking` / `reasoning_effort` for each agent.
 - `tools` — enable/disable tool families (xizhi, webfetch, executor) and set timeouts.
 - `mcp` — external MCP server declarations.
+- `storage` — workspace storage backend (`local`, the default, or `shared`); see [Shared workspace storage](#shared-workspace-storage-optional-multi-node--dr) and [`docs/shared-storage.md`](docs/shared-storage.md).
 - `logging` — level; `format` (`json`, the default, or `console`); `output` (sinks, default `["stderr", "file"]`); `file.*` rotation settings for the file sink (`max_size_mb`, `max_backups`, `max_age_days`, `compress`, via lumberjack). The file sink writes `{data-dir}/logs/blowball.log`. Set `output: ["stderr"]` to run console-only with no log file.
 
 ## License
