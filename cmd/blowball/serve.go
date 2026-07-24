@@ -325,13 +325,42 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		log.Fatal("create tools dir failed", zap.Error(err))
 	}
 
-	// go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — while the operator tools dir is restricted read-only, mirroring the in-sandbox --ro-bind as defense-in-depth. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless.
-	if err := xizhi.ApplyLandlock([]string{dataDir, logDir, skillsDir}, []string{toolsDir}); err != nil {
-		log.Warn("landlock not applied; relying on application-layer validation only",
-			zap.Error(err))
+	// go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — plus operator extra_read_write; the operator tools dir is restricted read-only, plus operator extra_read_only; the configurable system_read_only baseline is restricted read-only too. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless. landlock.enabled: false skips ApplyLandlock entirely (warning-only). All defaults reproduce the pre-configurability literals.
+	rwDirs := append([]string{dataDir, logDir, skillsDir}, cfg.Landlock.ExtraReadWrite...)
+	roDirs := append([]string{toolsDir}, cfg.Landlock.ExtraReadOnly...)
+	log.Info("landlock policy",
+		zap.Bool("enabled", cfg.Landlock.IsEnabled()),
+		zap.Strings("rw_dirs", rwDirs),
+		zap.Strings("ro_dirs", roDirs),
+		zap.Strings("system_read_only", cfg.Landlock.SystemReadOnly),
+		zap.Strings("extra_read_only_mounts", sandboxMountTargets(cfg.Tools.Executor.Sandbox.ExtraReadOnlyMounts)),
+		zap.Strings("extra_read_write_mounts", sandboxMountTargets(cfg.Tools.Executor.Sandbox.ExtraReadWriteMounts)))
+	if cfg.Landlock.IsEnabled() {
+		// Guard 2.1 (≥1 effective RW dir) is a config-invalid condition → refuse to
+		// start, distinct from a kernel landlock failure below which is best-effort.
+		if err := config.ValidateLandlockRW(true, []string{dataDir, logDir, skillsDir}, cfg.Landlock.ExtraReadWrite); err != nil {
+			log.Fatal("landlock config invalid; refusing to start", zap.Error(err))
+		}
+		if err := xizhi.ApplyLandlock(rwDirs, roDirs, cfg.Landlock.SystemReadOnly); err != nil {
+			log.Warn("landlock not applied; relying on application-layer validation only",
+				zap.Error(err))
+		}
+	} else {
+		log.Warn("landlock disabled by config (landlock.enabled: false); relying on application-layer validation only")
 	}
 
 	return rt, nil
+}
+
+// sandboxMountTargets returns the in-sandbox target paths of the given extra
+// mounts for the startup audit log. It lives here (rather than on the config
+// type) to keep the parsed MountSpec export minimal.
+func sandboxMountTargets(mounts []config.MountSpec) []string {
+	out := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		out = append(out, m.Host+":"+m.Target)
+	}
+	return out
 }
 
 // wireAPI builds the CRUD services/handlers for the api role (and contributes
@@ -410,6 +439,9 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 			log.Fatal("executor tools enabled but bubblewrap (bwrap) is not available",
 				zap.String("platform", runtime.GOOS))
 		}
+		// cfg.Tools.Executor carries the parsed bwrap sandbox policy (Sandbox:
+		// stat-guarded system baseline + extra RO/RW mounts), so it threads
+		// straight into NewTools → buildBwrapArgs without an extra parameter.
 		executorTools := executor.NewTools(cfg.Tools.Executor, func(userID string) string {
 			return fsStore.UserWorkspace(userID)
 		}, func(userID string) string {

@@ -1065,3 +1065,256 @@ storage:
 		t.Errorf("Storage.Workspace.Backend = %q, want shared after normalization", cfg.Storage.Workspace.Backend)
 	}
 }
+
+// minimalValidYAML is the smallest config that passes validation; sandbox /
+// landlock-focused tests append their own block to it.
+const minimalValidYAML = `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`
+
+func TestLoad_LandlockDefaults(t *testing.T) {
+	// Omitting the landlock block reproduces the pre-configurability baseline.
+	cfg, err := Load(writeTempYAML(t, minimalValidYAML))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Landlock.IsEnabled() {
+		t.Error("Landlock.IsEnabled() = false, want true (default)")
+	}
+	if got, want := cfg.Landlock.SystemReadOnly, DefaultLandlockSystemReadOnly(); !sliceEq(got, want) {
+		t.Errorf("Landlock.SystemReadOnly = %v, want %v", got, want)
+	}
+	// The landlock baseline includes /proc (process-scope restriction needs it).
+	if !containsStr(cfg.Landlock.SystemReadOnly, "/proc") {
+		t.Errorf("Landlock.SystemReadOnly = %v, want it to contain /proc", cfg.Landlock.SystemReadOnly)
+	}
+	if len(cfg.Landlock.ExtraReadWrite) != 0 || len(cfg.Landlock.ExtraReadOnly) != 0 {
+		t.Errorf("Landlock extra_* should default to empty, got rw=%v ro=%v", cfg.Landlock.ExtraReadWrite, cfg.Landlock.ExtraReadOnly)
+	}
+}
+
+func TestLoad_LandlockExplicit(t *testing.T) {
+	t.Run("enabled false disables", func(t *testing.T) {
+		cfg, err := Load(writeTempYAML(t, minimalValidYAML+`
+landlock:
+  enabled: false
+`))
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if cfg.Landlock.IsEnabled() {
+			t.Fatal("Landlock.IsEnabled() = true, want false")
+		}
+	})
+
+	t.Run("extra dirs load", func(t *testing.T) {
+		cfg, err := Load(writeTempYAML(t, minimalValidYAML+`
+landlock:
+  extra_read_write: ["/var/cache/blowball"]
+  extra_read_only: ["/opt/data"]
+`))
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if got, want := cfg.Landlock.ExtraReadWrite, []string{"/var/cache/blowball"}; !sliceEq(got, want) {
+			t.Errorf("ExtraReadWrite = %v, want %v", got, want)
+		}
+		if got, want := cfg.Landlock.ExtraReadOnly, []string{"/opt/data"}; !sliceEq(got, want) {
+			t.Errorf("ExtraReadOnly = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestLoad_LandlockValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		block   string
+		wantErr string
+	}{
+		{"relative extra_read_write", "landlock:\n  extra_read_write: [\"data/models\"]\n", "absolute"},
+		{"relative extra_read_only", "landlock:\n  extra_read_only: [\"rel\"]\n", "absolute"},
+		{"relative system_read_only", "landlock:\n  system_read_only: [\"rel\"]\n", "absolute"},
+		{"broad extra_read_write", "landlock:\n  extra_read_write: [\"/\"]\n", "too broad"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeTempYAML(t, minimalValidYAML+tc.block))
+			if err == nil {
+				t.Fatalf("Load expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad_SandboxDefaults(t *testing.T) {
+	// Omitting the sandbox block reproduces the pre-configurability baseline.
+	cfg, err := Load(writeTempYAML(t, minimalValidYAML))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got, want := cfg.Tools.Executor.Sandbox.SystemReadOnly, DefaultExecutorSystemReadOnly(); !sliceEq(got, want) {
+		t.Errorf("Sandbox.SystemReadOnly = %v, want %v", got, want)
+	}
+	// The executor baseline does NOT include /proc (bwrap synthesizes it).
+	if containsStr(cfg.Tools.Executor.Sandbox.SystemReadOnly, "/proc") {
+		t.Errorf("Sandbox.SystemReadOnly = %v, must not contain /proc", cfg.Tools.Executor.Sandbox.SystemReadOnly)
+	}
+}
+
+func TestLoad_SandboxExtraMountsParsed(t *testing.T) {
+	cfg, err := Load(writeTempYAML(t, minimalValidYAML+`
+tools:
+  executor:
+    sandbox:
+      extra_read_only:
+        - "/opt/models"
+        - "/srv/datasets:/data"
+      extra_read_write:
+        - "/srv/cache"
+`))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	ro := cfg.Tools.Executor.Sandbox.ExtraReadOnlyMounts
+	if len(ro) != 2 || ro[0] != (MountSpec{Host: "/opt/models", Target: "/opt/models"}) || ro[1] != (MountSpec{Host: "/srv/datasets", Target: "/data"}) {
+		t.Errorf("ExtraReadOnlyMounts = %v, want [{/opt/models /opt/models} {/srv/datasets /data}]", ro)
+	}
+	rw := cfg.Tools.Executor.Sandbox.ExtraReadWriteMounts
+	if len(rw) != 1 || rw[0] != (MountSpec{Host: "/srv/cache", Target: "/srv/cache"}) {
+		t.Errorf("ExtraReadWriteMounts = %v, want [{/srv/cache /srv/cache}]", rw)
+	}
+}
+
+func TestLoad_SandboxValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		block   string
+		wantErr string
+	}{
+		{"broad extra_read_write", "tools:\n  executor:\n    sandbox:\n      extra_read_write: [\"/\"]\n", "too broad"},
+		{"relative host", "tools:\n  executor:\n    sandbox:\n      extra_read_only: [\"data/models\"]\n", "absolute"},
+		{"empty host:target target", "tools:\n  executor:\n    sandbox:\n      extra_read_only: [\"/opt/models:\"]\n", "empty"},
+		{"target conflicts /workspace", "tools:\n  executor:\n    sandbox:\n      extra_read_only: [\"/x:/workspace\"]\n", "conflict"},
+		{"target conflicts /home", "tools:\n  executor:\n    sandbox:\n      extra_read_write: [\"/x:/home\"]\n", "conflict"},
+		{"target conflicts system baseline", "tools:\n  executor:\n    sandbox:\n      system_read_only: [\"/usr\"]\n      extra_read_only: [\"/x:/usr\"]\n", "conflict"},
+		{"relative system_read_only", "tools:\n  executor:\n    sandbox:\n      system_read_only: [\"rel\"]\n", "absolute"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeTempYAML(t, minimalValidYAML+tc.block))
+			if err == nil {
+				t.Fatalf("Load expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseMounts(t *testing.T) {
+	t.Run("host only defaults target to host", func(t *testing.T) {
+		got, err := ParseMounts([]string{"/opt/models"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0] != (MountSpec{Host: "/opt/models", Target: "/opt/models"}) {
+			t.Errorf("ParseMounts = %v, want [{/opt/models /opt/models}]", got)
+		}
+	})
+	t.Run("host:target custom target", func(t *testing.T) {
+		got, err := ParseMounts([]string{"/srv/datasets:/data"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0] != (MountSpec{Host: "/srv/datasets", Target: "/data"}) {
+			t.Errorf("ParseMounts = %v, want [{/srv/datasets /data}]", got)
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		got, err := ParseMounts(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("ParseMounts(nil) = %v, want empty", got)
+		}
+	})
+	t.Run("relative host rejected", func(t *testing.T) {
+		if _, err := ParseMounts([]string{"data/models"}); err == nil {
+			t.Fatal("expected error for relative host, got nil")
+		}
+	})
+	t.Run("empty entry rejected", func(t *testing.T) {
+		if _, err := ParseMounts([]string{""}); err == nil {
+			t.Fatal("expected error for empty entry, got nil")
+		}
+	})
+	t.Run("empty target rejected", func(t *testing.T) {
+		if _, err := ParseMounts([]string{"/opt/models:"}); err == nil {
+			t.Fatal("expected error for empty target, got nil")
+		}
+	})
+}
+
+func TestValidateLandlockRW(t *testing.T) {
+	if err := ValidateLandlockRW(true, nil, nil); err == nil {
+		t.Error("expected error for enabled landlock with no RW dirs")
+	}
+	if err := ValidateLandlockRW(true, []string{"/d/data", "/d/logs", "/d/skills"}, nil); err != nil {
+		t.Errorf("unexpected error with default RW dirs: %v", err)
+	}
+	if err := ValidateLandlockRW(true, nil, []string{"/extra"}); err != nil {
+		t.Errorf("unexpected error with extra RW dir: %v", err)
+	}
+	// Disabled landlock never errors regardless of the RW set.
+	if err := ValidateLandlockRW(false, nil, nil); err != nil {
+		t.Errorf("unexpected error for disabled landlock: %v", err)
+	}
+}
+
+func TestLandlockIsEnabled_DefaultsToTrue(t *testing.T) {
+	var l LandlockConfig
+	if !l.IsEnabled() {
+		t.Error("IsEnabled() = false for unset value, want true (default)")
+	}
+	off := false
+	l = LandlockConfig{Enabled: &off}
+	if l.IsEnabled() {
+		t.Error("IsEnabled() = true for explicit false, want false")
+	}
+	on := true
+	l = LandlockConfig{Enabled: &on}
+	if !l.IsEnabled() {
+		t.Error("IsEnabled() = false for explicit true, want true")
+	}
+}
+
+// sliceEq reports whether two string slices are element-wise equal.
+func sliceEq(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// containsStr reports whether s contains v.
+func containsStr(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}

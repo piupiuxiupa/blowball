@@ -56,9 +56,9 @@ func landlockRotationChild(t *testing.T) {
 		}
 	}
 
-	// Apply landlock to the three runtime subdirs, exactly as the server does.
-	// No read-only dirs in this scenario.
-	if err := ApplyLandlock([]string{dataDir, logDir, skillsDir}, nil); err != nil {
+	// Apply landlock to the three runtime subdirs with the configurable system
+	// read-only baseline (default), exactly as the server does. No extra RO dirs.
+	if err := ApplyLandlock([]string{dataDir, logDir, skillsDir}, nil, config.DefaultLandlockSystemReadOnly()); err != nil {
 		t.Fatalf("ApplyLandlock: %v", err)
 	}
 
@@ -163,8 +163,9 @@ func landlockToolsROChild(t *testing.T) {
 	}
 
 	// Apply landlock exactly as the server does: data/logs/skills read-write,
-	// tools read-only (mirroring the in-sandbox --ro-bind as defense-in-depth).
-	if err := ApplyLandlock([]string{dataDir, logDir, skillsDir}, []string{toolsDir}); err != nil {
+	// tools read-only (mirroring the in-sandbox --ro-bind as defense-in-depth),
+	// plus the default stat-guarded system read-only baseline.
+	if err := ApplyLandlock([]string{dataDir, logDir, skillsDir}, []string{toolsDir}, config.DefaultLandlockSystemReadOnly()); err != nil {
 		t.Fatalf("ApplyLandlock: %v", err)
 	}
 
@@ -186,4 +187,61 @@ func landlockToolsROChild(t *testing.T) {
 	}
 
 	fmt.Println("TOOLS_RO_OK")
+}
+
+// landlockMissingROChildEnv re-execs the test binary as a child for the
+// missing-system-baseline scenario. As with the other landlock scenarios, the
+// process-global restriction is confined to the child so it never leaks into the
+// parent test process.
+const landlockMissingROChildEnv = "BLOWBALL_TEST_LANDLOCK_MISSING_RO"
+
+// TestApplyLandlock_MissingSystemROSkipped guards D3: a system_read_only
+// baseline entry that does not exist on the host (e.g. /lib64 on aarch64) is
+// skipped with a warning rather than failing the restriction. The check re-execs
+// the test binary as a child that applies landlock with the default baseline
+// plus a non-existent path and asserts the restriction succeeds; the parent
+// asserts the child reported success.
+func TestApplyLandlock_MissingSystemROSkipped(t *testing.T) {
+	if os.Getenv(landlockMissingROChildEnv) == "1" {
+		landlockMissingROChild(t)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestApplyLandlock_MissingSystemROSkipped")
+	cmd.Env = append(os.Environ(), landlockMissingROChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("landlocked child failed: %v\noutput:\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("MISSING_RO_OK")) {
+		t.Fatalf("child did not report missing-baseline success; output:\n%s", out)
+	}
+}
+
+func landlockMissingROChild(t *testing.T) {
+	t.Helper()
+
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	logDir := filepath.Join(root, "logs")
+	skillsDir := filepath.Join(root, "skills")
+	for _, d := range []string{dataDir, logDir, skillsDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	// Default baseline plus a deliberately non-existent path: the missing entry
+	// must be skipped (warned), not fail the restriction.
+	systemRO := append(config.DefaultLandlockSystemReadOnly(), "/this/path/does/not/exist")
+	if err := ApplyLandlock([]string{dataDir, logDir, skillsDir}, nil, systemRO); err != nil {
+		t.Fatalf("ApplyLandlock with a missing baseline entry: %v", err)
+	}
+
+	// RW runtime dirs must remain writable under the restriction.
+	if err := os.WriteFile(filepath.Join(dataDir, "marker"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write to data dir failed under landlock: %v", err)
+	}
+
+	fmt.Println("MISSING_RO_OK")
 }

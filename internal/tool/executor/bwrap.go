@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 
@@ -56,8 +57,13 @@ const toolsBinPath = sandboxHome + "/.local/bin"
 // user's workspace read-write at /workspace, the workspace's tmp directory
 // bound to /tmp, the global and per-user skill directories read-only at
 // /skills/global and /skills/user, and a writable synthetic home (tmpfs) with
-// the operator tools dir bound read-only at $HOME/.local/bin.
-func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir, toolsDir string, cfg config.ExecutorToolConfig) []string {
+// the operator tools dir bound read-only at $HOME/.local/bin. The configurable
+// stat-guarded system read-only baseline (sandbox.SystemReadOnly) and the
+// operator-configured extra mounts (sandbox.ExtraReadOnlyMounts /
+// ExtraReadWriteMounts) are appended after the fixed invariants. The
+// load-bearing invariants (/workspace, $HOME, $HOME/.local/bin, skills targets,
+// --chdir /workspace, PYTHONPATH) are unchanged and not configurable.
+func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir, toolsDir string, sandbox config.ExecutorSandboxConfig, cfg config.ExecutorToolConfig) []string {
 	args := []string{
 		"--unshare-user",
 		"--unshare-ipc",
@@ -68,11 +74,6 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir,
 		"--proc", "/proc",
 		"--dev", "/dev",
 		"--bind", workspaceTmp, "/tmp",
-		"--ro-bind", "/usr", "/usr",
-		"--ro-bind", "/bin", "/bin",
-		"--ro-bind", "/lib", "/lib",
-		"--ro-bind", "/lib64", "/lib64",
-		"--ro-bind", "/etc", "/etc",
 		"--bind", workspaceRoot, "/workspace",
 		"--ro-bind", globalSkillsDir, "/skills/global",
 		"--ro-bind", userSkillsDir, "/skills/user",
@@ -81,6 +82,24 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir,
 		"--tmpfs", sandboxHome,
 		"--ro-bind", toolsDir, toolsBinPath,
 		"--chdir", "/workspace",
+	}
+
+	// Configurable, stat-guarded system read-only baseline (spec D3): bind only
+	// the entries that exist on the host so a missing path (e.g. /lib64 on
+	// aarch64) does not fail bwrap startup. Appended after the fixed invariants;
+	// guard 2.4 (validated at load) guarantees no target collides with them.
+	for _, dir := range existingDirs(sandbox.SystemReadOnly) {
+		args = append(args, "--ro-bind", dir, dir)
+	}
+
+	// Operator extra mounts (configurable), parsed once at config load:
+	// read-only datasets then writable caches. Appended last; their targets are
+	// distinct from the invariants and baseline (guard 2.4).
+	for _, m := range sandbox.ExtraReadOnlyMounts {
+		args = append(args, "--ro-bind", m.Host, m.Target)
+	}
+	for _, m := range sandbox.ExtraReadWriteMounts {
+		args = append(args, "--bind", m.Host, m.Target)
 	}
 
 	if !cfg.Network {
@@ -120,6 +139,25 @@ type bwrapError struct {
 
 func (e *bwrapError) Error() string {
 	return e.msg
+}
+
+// existingDirs returns the subset of dirs that exist on the host (os.Stat
+// succeeds), preserving order and skipping empty entries. It is the stat guard
+// for the configurable system read-only baseline: a missing path (e.g. /lib64
+// on aarch64) is dropped rather than passed to bwrap, which would otherwise fail
+// to start on --ro-bind of a non-existent source.
+func existingDirs(dirs []string) []string {
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		if _, err := os.Stat(d); err != nil {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // requireAvailable returns an error when executor tools are enabled but bwrap

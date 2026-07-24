@@ -25,6 +25,7 @@ type Config struct {
 	Agents     AgentsConfig     `yaml:"agents"`
 	Tools      ToolsConfig      `yaml:"tools"`
 	MCP        MCPConfig        `yaml:"mcp"`
+	Landlock   LandlockConfig   `yaml:"landlock"`
 	Logging    LoggingConfig    `yaml:"logging"`
 	OnlyOffice OnlyOfficeConfig `yaml:"onlyoffice"`
 	Storage    StorageConfig    `yaml:"storage"`
@@ -87,6 +88,111 @@ func (w WorkspaceStorageConfig) validate() error {
 	default:
 		return fmt.Errorf("storage.workspace.backend: unsupported value %q (want local|shared)", w.Backend)
 	}
+}
+
+// LandlockConfig holds the process-level Landlock sandbox directory policy (see
+// the sandbox-directory-configuration spec). Enabled defaults to true via the
+// *bool nil→enabled pattern (matching PipToolConfig.Network): omitting the block
+// preserves the historical landlock-protected behavior, while an explicit false
+// skips ApplyLandlock entirely (warning-only). SystemReadOnly is the
+// stat-guarded read-only system baseline; ExtraReadWrite / ExtraReadOnly are
+// additional process-level RW/RO directories. All three lists default to the
+// pre-configurability literals so an omitted block is byte-for-byte equivalent.
+//
+// The process RW/RO application directories ({data-dir}/data, {data-dir}/logs,
+// {data-dir}/skills and {data-dir}/tools) are derived from -d and are NOT
+// configurable here (design non-goal); this block only adds to them.
+type LandlockConfig struct {
+	Enabled        *bool    `yaml:"enabled"`
+	SystemReadOnly []string `yaml:"system_read_only"`
+	ExtraReadWrite []string `yaml:"extra_read_write"`
+	ExtraReadOnly  []string `yaml:"extra_read_only"`
+}
+
+// IsEnabled reports whether landlock should be applied. It defaults to true when
+// Enabled is unset, preserving the historical landlock-protected behavior; an
+// explicit false opts out (ApplyLandlock is skipped with a warning).
+func (l LandlockConfig) IsEnabled() bool {
+	if l.Enabled == nil {
+		return true
+	}
+	return *l.Enabled
+}
+
+// DefaultLandlockSystemReadOnly is the default system read-only baseline for the
+// process-level Landlock restriction, mirroring the pre-configurability literal
+// in landlock_linux.go. It includes /proc because the process-scope restriction
+// needs proc readable.
+func DefaultLandlockSystemReadOnly() []string {
+	return []string{"/etc", "/usr", "/bin", "/lib", "/lib64", "/proc"}
+}
+
+// applyDefaults fills an omitted SystemReadOnly with the default baseline. It is
+// idempotent. Enabled is intentionally left untouched: IsEnabled handles the
+// nil→true default so an explicit false survives a round-trip.
+func (l *LandlockConfig) applyDefaults() {
+	if len(l.SystemReadOnly) == 0 {
+		l.SystemReadOnly = DefaultLandlockSystemReadOnly()
+	}
+}
+
+// validate enforces the landlock config-shape guards (see the
+// sandbox-directory-configuration spec, "配置校验守卫"): every SystemReadOnly /
+// ExtraReadOnly / ExtraReadWrite entry must be an absolute path, and
+// ExtraReadWrite must not be "/" (too broad). The "≥1 effective RW dir" guard
+// (2.1) depends on the runtime-derived dirs and is enforced in setupRuntime via
+// ValidateLandlockRW.
+func (l LandlockConfig) validate() error {
+	for i, d := range l.SystemReadOnly {
+		if !isAbs(d) {
+			return fmt.Errorf("landlock.system_read_only[%d] %q: must be an absolute path", i, d)
+		}
+	}
+	for i, d := range l.ExtraReadOnly {
+		if !isAbs(d) {
+			return fmt.Errorf("landlock.extra_read_only[%d] %q: must be an absolute path", i, d)
+		}
+	}
+	for i, d := range l.ExtraReadWrite {
+		if !isAbs(d) {
+			return fmt.Errorf("landlock.extra_read_write[%d] %q: must be an absolute path", i, d)
+		}
+		if d == "/" {
+			return fmt.Errorf("landlock.extra_read_write[%d]: %q is too broad", i, d)
+		}
+	}
+	return nil
+}
+
+// ValidateLandlockRW enforces guard 2.1: when landlock is enabled, the effective
+// read-write directory set (defaultRWDirs as derived by setupRuntime from -d,
+// plus extraRWDirs) must be non-empty. It preserves applyLandlock's existing
+// "≥1 RW directory" invariant. This is a startup-time check (called from
+// setupRuntime) because defaultRWDirs are resolved from -d only after config
+// load, so it cannot be evaluated inside Config.validate.
+func ValidateLandlockRW(enabled bool, defaultRWDirs, extraRWDirs []string) error {
+	if !enabled {
+		return nil
+	}
+	for _, d := range defaultRWDirs {
+		if strings.TrimSpace(d) != "" {
+			return nil
+		}
+	}
+	for _, d := range extraRWDirs {
+		if strings.TrimSpace(d) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("landlock: enabled but no read-write directory is configured")
+}
+
+// isAbs reports whether p is an absolute path (starts with '/'). The configured
+// paths are Linux sandbox/landlock paths, so a leading slash is the definition
+// of absolute; this deliberately avoids platform-specific filepath.IsAbs
+// semantics so the behavior is identical when tests run on macOS/Windows.
+func isAbs(p string) bool {
+	return strings.HasPrefix(p, "/")
 }
 
 // OnlyOfficeConfig holds the server-side OnlyOffice DocumentServer integration
@@ -305,9 +411,138 @@ type ExecutorToolConfig struct {
 
 // ExecutorConfig groups the sandboxed command execution tools.
 type ExecutorConfig struct {
-	Bash   ExecutorToolConfig `yaml:"bash"`
-	Python ExecutorToolConfig `yaml:"python"`
-	Pip    PipToolConfig      `yaml:"pip"`
+	Bash    ExecutorToolConfig    `yaml:"bash"`
+	Python  ExecutorToolConfig    `yaml:"python"`
+	Pip     PipToolConfig         `yaml:"pip"`
+	Sandbox ExecutorSandboxConfig `yaml:"sandbox"`
+}
+
+// MountSpec describes one operator-configured extra mount for the bwrap sandbox.
+// Host is the absolute host path; Target is the in-sandbox path (it defaults to
+// Host when the config entry omits a target). Entries are parsed once at config
+// load so the sandbox runner never touches the raw "host:target" strings.
+type MountSpec struct {
+	Host   string
+	Target string
+}
+
+// ExecutorSandboxConfig holds the per-command bwrap sandbox directory policy
+// (see the sandbox-directory-configuration spec). SystemReadOnly is the
+// stat-guarded read-only system baseline (no /proc: bwrap synthesizes /proc via
+// --proc). ExtraReadOnly / ExtraReadWrite are operator data-set and
+// writable-cache mounts supporting the "host" or "host:target" forms, parsed at
+// load time into the *Mounts fields. Defaults reproduce the pre-configurability
+// literals so an omitted block is byte-for-byte equivalent.
+type ExecutorSandboxConfig struct {
+	SystemReadOnly       []string    `yaml:"system_read_only"`
+	ExtraReadOnly        []string    `yaml:"extra_read_only"`
+	ExtraReadWrite       []string    `yaml:"extra_read_write"`
+	ExtraReadOnlyMounts  []MountSpec `yaml:"-"`
+	ExtraReadWriteMounts []MountSpec `yaml:"-"`
+}
+
+// DefaultExecutorSystemReadOnly is the default system read-only baseline for the
+// bwrap sandbox, mirroring the pre-configurability literal in bwrap.go (no
+// /proc: bwrap synthesizes /proc itself with --proc).
+func DefaultExecutorSystemReadOnly() []string {
+	return []string{"/usr", "/bin", "/lib", "/lib64", "/etc"}
+}
+
+// applyDefaults fills an omitted SystemReadOnly with the default baseline. It is
+// idempotent.
+func (s *ExecutorSandboxConfig) applyDefaults() {
+	if len(s.SystemReadOnly) == 0 {
+		s.SystemReadOnly = DefaultExecutorSystemReadOnly()
+	}
+}
+
+// ParseMounts parses operator extra-mount entries of the form "host" (target
+// equals host) or "host:target" (custom in-sandbox path) into MountSpec values.
+// Each host MUST be absolute; a relative or empty host is rejected. A
+// "host:target" entry with an empty target is rejected. This runs at config load
+// (fail-fast): on success the sandbox runner consumes only the parsed MountSpec
+// slice, never the raw strings.
+func ParseMounts(entries []string) ([]MountSpec, error) {
+	out := make([]MountSpec, 0, len(entries))
+	for i, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			return nil, fmt.Errorf("entry[%d]: empty", i)
+		}
+		host, target := e, e
+		if idx := strings.IndexByte(e, ':'); idx >= 0 {
+			host = strings.TrimSpace(e[:idx])
+			target = strings.TrimSpace(e[idx+1:])
+			if target == "" {
+				return nil, fmt.Errorf("entry[%d] %q: target after ':' is empty", i, e)
+			}
+		}
+		if host == "" || !isAbs(host) {
+			return nil, fmt.Errorf("entry[%d] %q: host must be an absolute path", i, e)
+		}
+		out = append(out, MountSpec{Host: host, Target: target})
+	}
+	return out, nil
+}
+
+// sandboxInvariantTargets are the fixed bwrap in-sandbox paths that the
+// load-bearing invariants (PYTHONPATH /workspace/.pip, --chdir /workspace, the
+// synthetic $HOME, $HOME/.local/bin, the skills mounts) depend on. An extra
+// mount targeting any of them is rejected (guard 2.4) because it would shadow
+// or collide with a fixed path and break sandbox semantics.
+var sandboxInvariantTargets = []string{"/workspace", "/home", "/skills", "/tmp", "/proc", "/dev"}
+
+// validate enforces the executor sandbox config-shape guards and resolves the
+// extra-mount entries into parsed MountSpecs. SystemReadOnly must be absolute;
+// ExtraReadWrite must not be "/"; extra-mount hosts must be absolute (via
+// ParseMounts); extra-mount targets must not collide with the fixed invariants
+// or a system baseline entry (guard 2.4). On success ExtraReadOnlyMounts /
+// ExtraReadWriteMounts are populated for the sandbox runner. It has a pointer
+// receiver because it populates those parsed fields.
+func (s *ExecutorSandboxConfig) validate() error {
+	for i, d := range s.SystemReadOnly {
+		if !isAbs(d) {
+			return fmt.Errorf("tools.executor.sandbox.system_read_only[%d] %q: must be an absolute path", i, d)
+		}
+	}
+	for i, d := range s.ExtraReadWrite {
+		if d == "/" {
+			return fmt.Errorf("tools.executor.sandbox.extra_read_write[%d]: %q is too broad", i, d)
+		}
+	}
+
+	roMounts, err := ParseMounts(s.ExtraReadOnly)
+	if err != nil {
+		return fmt.Errorf("tools.executor.sandbox.extra_read_only: %w", err)
+	}
+	rwMounts, err := ParseMounts(s.ExtraReadWrite)
+	if err != nil {
+		return fmt.Errorf("tools.executor.sandbox.extra_read_write: %w", err)
+	}
+
+	// Forbidden target set: the fixed invariants plus the system baseline (an
+	// extra mount should not shadow a baseline read-only bind).
+	forbidden := make(map[string]struct{}, len(sandboxInvariantTargets)+len(s.SystemReadOnly))
+	for _, t := range sandboxInvariantTargets {
+		forbidden[t] = struct{}{}
+	}
+	for _, t := range s.SystemReadOnly {
+		forbidden[t] = struct{}{}
+	}
+	for _, m := range roMounts {
+		if _, bad := forbidden[m.Target]; bad {
+			return fmt.Errorf("tools.executor.sandbox.extra_read_only: target %q conflicts with a fixed sandbox path or system baseline", m.Target)
+		}
+	}
+	for _, m := range rwMounts {
+		if _, bad := forbidden[m.Target]; bad {
+			return fmt.Errorf("tools.executor.sandbox.extra_read_write: target %q conflicts with a fixed sandbox path or system baseline", m.Target)
+		}
+	}
+
+	s.ExtraReadOnlyMounts = roMounts
+	s.ExtraReadWriteMounts = rwMounts
+	return nil
 }
 
 // DefaultExecutorToolConfig returns the recommended defaults for an executor
@@ -512,9 +747,11 @@ func Load(path string) (*Config, error) {
 	cfg.OnlyOffice.applyDefaults()
 	cfg.Server.applyDefaults()
 	cfg.Storage.Workspace.applyDefaults()
+	cfg.Landlock.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Python.ApplyDefaults()
 	cfg.Tools.Executor.Pip.ApplyDefaults()
+	cfg.Tools.Executor.Sandbox.applyDefaults()
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -541,6 +778,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Agents.validate(c.MCP.serverNames()); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Landlock.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Tools.Executor.Sandbox.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	return nil

@@ -1,19 +1,31 @@
 package executor
 
 import (
+	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/lush/blowball/internal/config"
 )
 
+// defaultSandbox returns an ExecutorSandboxConfig carrying the default
+// stat-guarded system baseline, mirroring what config.Load produces after
+// applyDefaults. Legacy flag-expectation tests pass it to buildBwrapArgs.
+func defaultSandbox() config.ExecutorSandboxConfig {
+	return config.ExecutorSandboxConfig{SystemReadOnly: config.DefaultExecutorSystemReadOnly()}
+}
+
 func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 	cfg := config.ExecutorToolConfig{
 		Network:            false,
 		AllowedEnvPatterns: []string{"PATH"},
 	}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 
+	// Host-independent invariants only. The system read-only baseline
+	// (/usr /bin /lib /lib64 /etc) is stat-guarded, so its bound subset depends
+	// on the host (e.g. /lib64 is absent on aarch64); it is exercised by
+	// TestBuildBwrapArgsStatGuardsSystemBaseline rather than asserted here.
 	required := []string{
 		"--unshare-user",
 		"--unshare-ipc",
@@ -24,11 +36,6 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 		"--proc", "/proc",
 		"--dev", "/dev",
 		"--bind", "/data/u1/workspace/tmp", "/tmp",
-		"--ro-bind", "/usr", "/usr",
-		"--ro-bind", "/bin", "/bin",
-		"--ro-bind", "/lib", "/lib",
-		"--ro-bind", "/lib64", "/lib64",
-		"--ro-bind", "/etc", "/etc",
 		"--bind", "/data/u1/workspace", "/workspace",
 		"--ro-bind", "/skills/global", "/skills/global",
 		"--ro-bind", "/data/u1/skills", "/skills/user",
@@ -50,7 +57,7 @@ func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 		Network:            true,
 		AllowedEnvPatterns: []string{"PATH"},
 	}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 	if slices.Contains(args, "--unshare-net") {
 		t.Error("expected --unshare-net to be absent when network is enabled")
 	}
@@ -58,7 +65,7 @@ func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 
 func TestBuildBwrapArgsWorkspaceBinding(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -74,7 +81,7 @@ func TestBuildBwrapArgsWorkspaceBinding(t *testing.T) {
 
 func TestBuildBwrapArgsSkillDirectoryBindings(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 
 	cases := []struct {
 		flag, source, target string
@@ -103,7 +110,7 @@ func TestBuildBwrapArgsSkillDirectoryBindings(t *testing.T) {
 
 func TestBuildBwrapArgsSetsPYTHONPATH(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -120,7 +127,7 @@ func TestBuildBwrapArgsSetsPYTHONPATH(t *testing.T) {
 func TestBuildBwrapArgsAppendsPYTHONPATH(t *testing.T) {
 	t.Setenv("PYTHONPATH", "/usr/lib/python")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH", "PYTHON*"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -137,7 +144,7 @@ func TestBuildBwrapArgsAppendsPYTHONPATH(t *testing.T) {
 func TestBuildBwrapArgsPrependsWhenPYTHONPATHAllowedButEmpty(t *testing.T) {
 	t.Setenv("PYTHONPATH", "")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PYTHON*"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -153,7 +160,7 @@ func TestBuildBwrapArgsPrependsWhenPYTHONPATHAllowedButEmpty(t *testing.T) {
 
 func TestBuildBwrapArgsClearsEnv(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH", "HOME"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
 
 	if !slices.Contains(args, "--clearenv") {
 		t.Error("expected --clearenv flag")
@@ -210,7 +217,7 @@ func findTriplet(args []string, flag, src, target string) int {
 // mountpoint exists when the bind lands (D2 ordering).
 func TestBuildBwrapArgsHomeTmpfsPrecedesToolsBind(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
 
 	tmpfsIdx := slices.Index(args, "--tmpfs")
 	if tmpfsIdx == -1 || tmpfsIdx+1 >= len(args) || args[tmpfsIdx+1] != sandboxHome {
@@ -230,7 +237,7 @@ func TestBuildBwrapArgsHomeTmpfsPrecedesToolsBind(t *testing.T) {
 func TestBuildBwrapArgsForcesHomeWhenAllowed(t *testing.T) {
 	t.Setenv("HOME", "/home/hostuser")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"HOME", "PATH"}}
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
 
 	if home := setenvValue(args, "HOME"); home != sandboxHome {
 		t.Errorf("expected HOME forced to %q, got %q", sandboxHome, home)
@@ -245,7 +252,7 @@ func TestBuildBwrapArgsForcesHomeWhenAllowed(t *testing.T) {
 func TestBuildBwrapArgsForcesHomeWhenFilteredOut(t *testing.T) {
 	t.Setenv("HOME", "/home/hostuser")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}} // HOME not allowed
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
 
 	if home := setenvValue(args, "HOME"); home != sandboxHome {
 		t.Errorf("expected HOME forced to %q even when filtered out, got %q", sandboxHome, home)
@@ -260,7 +267,7 @@ func TestBuildBwrapArgsForcesHomeWhenFilteredOut(t *testing.T) {
 func TestBuildBwrapArgsPrependsToolsBinToPathWhenAllowed(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
 
 	want := toolsBinPath + ":/usr/bin:/bin"
 	if path := setenvValue(args, "PATH"); path != want {
@@ -273,7 +280,7 @@ func TestBuildBwrapArgsPrependsToolsBinToPathWhenAllowed(t *testing.T) {
 func TestBuildBwrapArgsToolsBinOnlyWhenPathFilteredOut(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"HOME"}} // PATH not allowed
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
 
 	if path := setenvValue(args, "PATH"); path != toolsBinPath {
 		t.Errorf("expected PATH %q when host PATH filtered out, got %q", toolsBinPath, path)
@@ -286,7 +293,7 @@ func TestBuildBwrapArgsToolsBinOnlyWhenPathFilteredOut(t *testing.T) {
 func TestBuildBwrapArgsEmitsHomeAndToolsBindRegardlessOfToolsDir(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
 	for _, toolsDir := range []string{"", "/data/tools"} {
-		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", toolsDir, cfg)
+		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", toolsDir, defaultSandbox(), cfg)
 
 		tmpfsIdx := slices.Index(args, "--tmpfs")
 		if tmpfsIdx == -1 || tmpfsIdx+1 >= len(args) || args[tmpfsIdx+1] != sandboxHome {
@@ -295,5 +302,78 @@ func TestBuildBwrapArgsEmitsHomeAndToolsBindRegardlessOfToolsDir(t *testing.T) {
 		if findTriplet(args, "--ro-bind", toolsDir, toolsBinPath) == -1 {
 			t.Errorf("toolsDir=%q: expected --ro-bind %q %s, got %v", toolsDir, toolsDir, toolsBinPath, args)
 		}
+	}
+}
+
+// The configurable system read-only baseline is stat-guarded: only entries that
+// exist on the host are bound, so a missing path (e.g. /lib64 on aarch64) is
+// skipped rather than failing bwrap startup (spec D3).
+func TestBuildBwrapArgsStatGuardsSystemBaseline(t *testing.T) {
+	existing := t.TempDir()
+	missing := filepath.Join(existing, "does-not-exist")
+	sandbox := config.ExecutorSandboxConfig{SystemReadOnly: []string{existing, missing}}
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
+
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+
+	if findTriplet(args, "--ro-bind", existing, existing) == -1 {
+		t.Errorf("expected existing baseline dir %q to be --ro-bound, got %v", existing, args)
+	}
+	if findTriplet(args, "--ro-bind", missing, missing) != -1 {
+		t.Errorf("expected missing baseline dir %q to be skipped, got %v", missing, args)
+	}
+}
+
+// Operator extra read-only mounts are appended as --ro-bind host target after
+// the fixed invariants (spec: extra_read_only /data-set access).
+func TestBuildBwrapArgsAppendsExtraReadOnlyMount(t *testing.T) {
+	sandbox := defaultSandbox()
+	sandbox.ExtraReadOnlyMounts = []config.MountSpec{
+		{Host: "/opt/models", Target: "/opt/models"},
+		{Host: "/srv/datasets", Target: "/data"},
+	}
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
+
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+
+	if findTriplet(args, "--ro-bind", "/opt/models", "/opt/models") == -1 {
+		t.Errorf("expected --ro-bind /opt/models /opt/models, got %v", args)
+	}
+	if findTriplet(args, "--ro-bind", "/srv/datasets", "/data") == -1 {
+		t.Errorf("expected host:target --ro-bind /srv/datasets /data, got %v", args)
+	}
+}
+
+// Operator extra read-write mounts are appended as --bind host target (spec:
+// extra_read_write writable-cache access).
+func TestBuildBwrapArgsAppendsExtraReadWriteMount(t *testing.T) {
+	sandbox := defaultSandbox()
+	sandbox.ExtraReadWriteMounts = []config.MountSpec{{Host: "/srv/cache", Target: "/cache"}}
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
+
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+
+	if findTriplet(args, "--bind", "/srv/cache", "/cache") == -1 {
+		t.Errorf("expected --bind /srv/cache /cache, got %v", args)
+	}
+}
+
+// Extra mounts land after the fixed invariants so they never reorder the
+// tmpfs-home/tools-bind ordering the sandbox depends on.
+func TestBuildBwrapArgsExtraMountsComeAfterInvariants(t *testing.T) {
+	sandbox := defaultSandbox()
+	sandbox.ExtraReadOnlyMounts = []config.MountSpec{{Host: "/opt/models", Target: "/opt/models"}}
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
+
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+
+	tmpfsIdx := slices.Index(args, "--tmpfs")
+	bindIdx := findTriplet(args, "--ro-bind", "/data/tools", toolsBinPath)
+	extraIdx := findTriplet(args, "--ro-bind", "/opt/models", "/opt/models")
+	if tmpfsIdx == -1 || bindIdx == -1 || extraIdx == -1 {
+		t.Fatalf("missing expected mounts: tmpfs=%d tools=%d extra=%d args=%v", tmpfsIdx, bindIdx, extraIdx, args)
+	}
+	if extraIdx < tmpfsIdx || extraIdx < bindIdx {
+		t.Errorf("extra mount (idx %d) must come after tmpfs (idx %d) and tools bind (idx %d)", extraIdx, tmpfsIdx, bindIdx)
 	}
 }
