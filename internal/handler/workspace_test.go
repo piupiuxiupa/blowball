@@ -1306,23 +1306,46 @@ func (e *ooTestEnv) postCallback(t *testing.T, rel, body string) *httptest.Respo
 	return w
 }
 
-// onlyOfficeConfigBody decodes the editor-config response into a typed struct.
+// onlyOfficeConfigBody decodes the dual-mode editor-config response.
 type onlyOfficeConfigBody struct {
-	ServerURL string                 `json:"server_url"`
-	Config    map[string]any         `json:"config"`
-	Token     string                 `json:"token"`
+	ServerURL string             `json:"server_url"`
+	Edit      onlyOfficeModeBody `json:"edit"`
+	View      onlyOfficeModeBody `json:"view"`
+}
+
+// onlyOfficeModeBody is one signed {config, token} pair (edit or view).
+type onlyOfficeModeBody struct {
+	Config map[string]any `json:"config"`
+	Token  string         `json:"token"`
+}
+
+// verifyOnlyOfficeToken parses an OnlyOffice config JWT with the given secret,
+// requiring it to be valid and to carry exactly the supplied config as payload.
+func verifyOnlyOfficeToken(t *testing.T, token, secret string, cfg map[string]any) jwtpkg.MapClaims {
+	t.Helper()
+	claims := jwtpkg.MapClaims{}
+	parsed, err := jwtpkg.ParseWithClaims(token, claims, func(*jwtpkg.Token) (any, error) {
+		return []byte(secret), nil
+	})
+	require.NoError(t, err, "token must verify with the onlyoffice secret")
+	require.True(t, parsed.Valid)
+	require.True(t, reflect.DeepEqual(normalizeJSON(cfg), normalizeJSON(map[string]any(claims))),
+		"token payload must equal the returned config")
+	return claims
 }
 
 // TestOnlyOfficeConfig_SignedConfig verifies the happy path: the endpoint
-// returns an edit-mode config with a random key, document.url and callbackUrl
-// rooted at InternalBackend and carrying the user JWT, and a token that the same
-// secret verifies and whose payload equals the returned config.
+// returns both an edit-mode and a view-mode config, each with its own token.
+// The two configs share one random document.key; document.url and callbackUrl
+// are rooted at InternalBackend and carry the user JWT; each token verifies with
+// the same secret and carries exactly its config as payload, and the two tokens
+// differ. edit has mode:"edit"/permissions.edit:true/forcesave; view has
+// mode:"view"/permissions.edit:false/download:true and no forcesave.
 func TestOnlyOfficeConfig_SignedConfig(t *testing.T) {
 	env := newOnlyOfficeTestEnv(t)
 	ws := env.wsRoot()
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "report.docx"), []byte("orig"), 0o644))
 
-	// doConfigGET uses userJWT(nil); sign directly here instead.
 	target := "/api/v1/workspace/files/" + url.PathEscape("report.docx") + onlyOfficeConfigSuffix
 	userTok := env.userJWT(t)
 	req := httptest.NewRequest(http.MethodGet, target, nil)
@@ -1336,41 +1359,54 @@ func TestOnlyOfficeConfig_SignedConfig(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, env.serverURL, resp.ServerURL)
 
-	doc := resp.Config["document"].(map[string]any)
-	editor := resp.Config["editorConfig"].(map[string]any)
-	assert.Equal(t, "word", resp.Config["documentType"])
-	assert.Equal(t, "docx", doc["fileType"])
-	assert.Equal(t, "report.docx", doc["title"])
-	assert.NotEmpty(t, doc["key"], "key must be randomly generated")
-	perms := doc["permissions"].(map[string]any)
-	assert.Equal(t, true, perms["edit"])
-	assert.Equal(t, true, perms["download"])
-	assert.Equal(t, "edit", editor["mode"])
-	custom := editor["customization"].(map[string]any)
-	assert.Equal(t, true, custom["forcesave"])
+	editDoc := resp.Edit.Config["document"].(map[string]any)
+	editEditor := resp.Edit.Config["editorConfig"].(map[string]any)
+	viewDoc := resp.View.Config["document"].(map[string]any)
+	viewEditor := resp.View.Config["editorConfig"].(map[string]any)
 
-	// document.url and callbackUrl must be rooted at InternalBackend and embed
-	// the user JWT as the query token.
-	docURL := doc["url"].(string)
-	cbURL := editor["callbackUrl"].(string)
-	assert.Contains(t, docURL, env.backend+"/api/v1/workspace/files/download/report.docx")
-	assert.Contains(t, docURL, "token="+url.QueryEscape(userTok))
-	assert.Contains(t, cbURL, env.backend+"/api/v1/workspace/onlyoffice-callback")
-	assert.Contains(t, cbURL, "path=report.docx")
-	assert.Contains(t, cbURL, "token="+url.QueryEscape(userTok))
+	// Shared document identity across both modes.
+	assert.Equal(t, "word", resp.Edit.Config["documentType"])
+	assert.Equal(t, "word", resp.View.Config["documentType"])
+	for label, doc := range map[string]map[string]any{"edit": editDoc, "view": viewDoc} {
+		assert.Equal(t, "docx", doc["fileType"], "%s fileType", label)
+		assert.Equal(t, "report.docx", doc["title"], "%s title", label)
+		assert.NotEmpty(t, doc["key"], "%s key must be randomly generated", label)
+		// document.url rooted at InternalBackend, carrying the user JWT.
+		docURL := doc["url"].(string)
+		assert.Contains(t, docURL, env.backend+"/api/v1/workspace/files/download/report.docx", "%s url host", label)
+		assert.Contains(t, docURL, "token="+url.QueryEscape(userTok), "%s url token", label)
+	}
+	// Both modes share one random document.key.
+	assert.Equal(t, editDoc["key"], viewDoc["key"], "edit and view must share document.key")
 
-	// The token must verify with the same secret and carry the config as payload.
-	claims := jwtpkg.MapClaims{}
-	parsed, err := jwtpkg.ParseWithClaims(resp.Token, claims, func(t *jwtpkg.Token) (any, error) {
-		return []byte(env.ooSecret), nil
-	})
-	require.NoError(t, err, "token must verify with the onlyoffice secret")
-	require.True(t, parsed.Valid)
-	// documentType round-trips through both the JSON response and the JWT payload.
-	assert.Equal(t, "word", claims["documentType"])
-	// The full config object must be the JWT payload (OnlyOffice verifies it).
-	assert.True(t, reflect.DeepEqual(normalizeJSON(resp.Config), normalizeJSON(map[string]any(claims))),
-		"token payload must equal the returned config")
+	// edit config: mode edit, edit+download permitted, forcesave on.
+	editPerms := editDoc["permissions"].(map[string]any)
+	assert.Equal(t, "edit", editEditor["mode"])
+	assert.Equal(t, true, editPerms["edit"])
+	assert.Equal(t, true, editPerms["download"])
+	editCustom := editEditor["customization"].(map[string]any)
+	assert.Equal(t, true, editCustom["forcesave"])
+
+	// view config: mode view, edit denied but download allowed, NO forcesave.
+	viewPerms := viewDoc["permissions"].(map[string]any)
+	assert.Equal(t, "view", viewEditor["mode"])
+	assert.Equal(t, false, viewPerms["edit"])
+	assert.Equal(t, true, viewPerms["download"])
+	assert.NotContains(t, viewEditor, "customization", "view config must omit customization/forcesave")
+
+	// callbackUrl is present in both modes, rooted at InternalBackend + JWT.
+	for label, editor := range map[string]map[string]any{"edit": editEditor, "view": viewEditor} {
+		cbURL := editor["callbackUrl"].(string)
+		assert.Contains(t, cbURL, env.backend+"/api/v1/workspace/onlyoffice-callback", "%s callbackUrl host", label)
+		assert.Contains(t, cbURL, "path=report.docx", "%s callbackUrl path", label)
+		assert.Contains(t, cbURL, "token="+url.QueryEscape(userTok), "%s callbackUrl token", label)
+	}
+
+	// Each token verifies with the same secret and carries its own config; the two
+	// tokens are distinct.
+	verifyOnlyOfficeToken(t, resp.Edit.Token, env.ooSecret, resp.Edit.Config)
+	verifyOnlyOfficeToken(t, resp.View.Token, env.ooSecret, resp.View.Config)
+	assert.NotEqual(t, resp.Edit.Token, resp.View.Token, "edit and view tokens must differ")
 }
 
 // TestOnlyOfficeConfig_PathOutsideWorkspace_403 verifies a traversal attempt is
@@ -1406,6 +1442,26 @@ func TestOnlyOfficeConfig_NotFound_404(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "NOT_FOUND", body.Error.Code)
+}
+
+// TestOnlyOfficeConfig_Directory_400 verifies that a path resolving to a
+// directory is rejected with 400 before any config is built.
+func TestOnlyOfficeConfig_Directory_400(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(env.wsRoot(), "subdir"), 0o755))
+
+	target := "/api/v1/workspace/files/" + url.PathEscape("subdir") + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
 }
 
 // TestOnlyOfficeConfig_Unauthenticated_401 verifies a request without a Bearer

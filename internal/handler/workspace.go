@@ -523,19 +523,28 @@ var errOnlyOfficeHostNotAllowed = errors.New("onlyoffice: result url host not in
 
 // onlyOfficeConfigResponse is the JSON body returned by the editor-config
 // endpoint: the browser loads api.js from ServerURL and instantiates
-// DocsAPI.DocEditor(id, {...config, token}).
+// DocsAPI.DocEditor(id, {...config, token}) for whichever mode it needs. Edit
+// and View carry their own config + token: OnlyOffice signs the whole config,
+// so the frontend cannot switch modes by mutating a config in place — it must
+// use the pre-signed edit or view token.
 type onlyOfficeConfigResponse struct {
-	ServerURL string         `json:"server_url"`
-	Config    map[string]any `json:"config"`
-	Token     string         `json:"token"`
+	ServerURL string               `json:"server_url"`
+	Edit      onlyOfficeModeConfig `json:"edit"`
+	View      onlyOfficeModeConfig `json:"view"`
+}
+
+// onlyOfficeModeConfig pairs one DocEditor config (edit or view) with the HS256
+// JWT signing exactly that config.
+type onlyOfficeModeConfig struct {
+	Config map[string]any `json:"config"`
+	Token  string         `json:"token"`
 }
 
 // OnlyOfficeConfig handles GET /api/v1/workspace/files/*path/onlyoffice-config.
-// It builds a DocEditor config (edit mode, a per-request random key, document.url
-// and editorConfig.callbackUrl pointing at InternalBackend with the user's Bearer
-// JWT as the query token), signs it with the configured OnlyOffice secret
-// (HS256), and returns {server_url, config, token}. The secret never leaves the
-// server — the browser only ever holds the signed token.
+// It builds edit and view DocEditor configs (sharing one per-request random
+// document.key, document.url, and callbackUrl), signs each with the configured
+// OnlyOffice secret, and returns both {config, token} pairs so the frontend can
+// open the file in either mode without a second round-trip.
 //
 // 503 when OnlyOffice is not configured (empty secret); 403 on path escape; 404
 // when the file does not exist; 400 when the path is a directory.
@@ -577,24 +586,40 @@ func (h *WorkspaceHandler) OnlyOfficeConfig(c *gin.Context) {
 	// it, so it is present.
 	userJWT := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 
-	config, err := h.buildOnlyOfficeConfig(rel, userJWT)
+	editCfg, viewCfg, err := h.buildOnlyOfficeConfigs(rel, userJWT)
 	if err != nil {
 		logWS(ctx, "workspace.onlyoffice_config.build", abs, err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "build editor config failed"))
 		return
 	}
-	token, err := jwt.SignClaims(h.oo.Secret, config)
-	if err != nil {
-		logWS(ctx, "workspace.onlyoffice_config.sign", abs, err)
-		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "sign editor config failed"))
+	// Sign each config with its own token: OnlyOffice verifies the whole config,
+	// so edit and view (different permissions/mode) must carry separate signatures.
+	editToken, ok := h.signOnlyOfficeConfig(c, ctx, abs, editCfg)
+	if !ok {
+		return
+	}
+	viewToken, ok := h.signOnlyOfficeConfig(c, ctx, abs, viewCfg)
+	if !ok {
 		return
 	}
 
 	c.JSON(http.StatusOK, onlyOfficeConfigResponse{
 		ServerURL: h.oo.ServerURL,
-		Config:    config,
-		Token:     token,
+		Edit:      onlyOfficeModeConfig{Config: editCfg, Token: editToken},
+		View:      onlyOfficeModeConfig{Config: viewCfg, Token: viewToken},
 	})
+}
+
+// signOnlyOfficeConfig signs a DocEditor config with the OnlyOffice secret and
+// replies 500 on failure. It returns ok=false when the caller must abort.
+func (h *WorkspaceHandler) signOnlyOfficeConfig(c *gin.Context, ctx context.Context, abs string, cfg map[string]any) (string, bool) {
+	token, err := jwt.SignClaims(h.oo.Secret, cfg)
+	if err != nil {
+		logWS(ctx, "workspace.onlyoffice_config.sign", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "sign editor config failed"))
+		return "", false
+	}
+	return token, true
 }
 
 // OnlyOfficeCallback handles POST /api/v1/workspace/onlyoffice-callback?path=<>&token=<jwt>.
@@ -666,13 +691,18 @@ func onlyOfficeIsSaveStatus(status int) bool {
 	return status == onlyOfficeStatusSave || status == onlyOfficeStatusForce
 }
 
-// buildOnlyOfficeConfig constructs the DocEditor config for a workspace file. The
-// document.key is freshly random per request so reopening always re-converts and
-// never serves a stale cached document.
-func (h *WorkspaceHandler) buildOnlyOfficeConfig(rel, userJWT string) (map[string]any, error) {
+// buildOnlyOfficeConfigs constructs the edit and view DocEditor configs for a
+// workspace file. Both share one freshly random document.key (same file, same
+// open, one document identity), the same documentType/title/url, and the same
+// callbackUrl + user. Only the document permissions and editorConfig differ by
+// mode: edit allows editing and forcesave; view is read-only and carries no
+// forcesave (OnlyOffice omits save-status callbacks in view mode, so the shared
+// callbackUrl is harmless there). The random key guarantees reopening always
+// re-converts and never serves a stale cached document.
+func (h *WorkspaceHandler) buildOnlyOfficeConfigs(rel, userJWT string) (edit, view map[string]any, err error) {
 	key, err := randomOnlyOfficeKey()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	title := filepath.Base(rel)
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(rel), "."))
@@ -683,30 +713,46 @@ func (h *WorkspaceHandler) buildOnlyOfficeConfig(rel, userJWT string) (map[strin
 	docURL := h.oo.InternalBackend + "/api/v1/workspace/files/download/" + url.PathEscape(rel) + "?inline=1&token=" + url.QueryEscape(userJWT)
 	callbackURL := h.oo.InternalBackend + "/api/v1/workspace/onlyoffice-callback?path=" + url.QueryEscape(rel) + "&token=" + url.QueryEscape(userJWT)
 
-	return map[string]any{
-		"documentType": onlyOfficeDocumentType(ext),
-		"document": gin.H{
+	documentType := onlyOfficeDocumentType(ext)
+	user := gin.H{"id": "blowball", "name": "blowball"}
+
+	// makeDoc builds the document map for a mode. All fields are shared except
+	// permissions.edit; building a fresh map per mode avoids accidental aliasing.
+	makeDoc := func(editAllowed bool) gin.H {
+		return gin.H{
 			"fileType": ext,
 			"key":      key,
 			"title":    title,
 			"url":      docURL,
 			"permissions": gin.H{
-				"edit":     true,
+				"edit":     editAllowed,
 				"download": true,
 			},
-		},
+		}
+	}
+
+	edit = map[string]any{
+		"documentType": documentType,
+		"document":     makeDoc(true),
 		"editorConfig": gin.H{
 			"mode":        "edit",
 			"callbackUrl": callbackURL,
 			"customization": gin.H{
 				"forcesave": true,
 			},
-			"user": gin.H{
-				"id":   "blowball",
-				"name": "blowball",
-			},
+			"user": user,
 		},
-	}, nil
+	}
+	view = map[string]any{
+		"documentType": documentType,
+		"document":     makeDoc(false),
+		"editorConfig": gin.H{
+			"mode":        "view",
+			"callbackUrl": callbackURL,
+			"user":        user,
+		},
+	}
+	return edit, view, nil
 }
 
 // onlyOfficeDocumentType maps an extension (no dot) to OnlyOffice's documentType
