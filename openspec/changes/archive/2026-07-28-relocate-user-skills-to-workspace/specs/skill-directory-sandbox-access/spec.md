@@ -1,10 +1,4 @@
-# Capability: Skill Directory Sandbox Access
-
-## Purpose
-
-TBD — Makes both the global skills directory and the per-user skills directory available read-only inside the bubblewrap sandbox used by the `bash` and `python` executor tools.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Skill directories are accessible inside the sandbox
 The system SHALL make the global skills directory available read-only inside the bubblewrap sandbox used by the `bash` and `python` tools at `/skills/global`. Per-user skills live under the user's workspace at `data/{userID}/workspace/.blowball/skills/`, which is already reachable inside the sandbox at `/workspace/.blowball/skills/` via the existing read-write `/workspace` bind; there is no separate `/skills/user` mount.

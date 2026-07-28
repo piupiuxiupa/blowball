@@ -20,7 +20,7 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 		Network:            false,
 		AllowedEnvPatterns: []string{"PATH"},
 	}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	// Host-independent invariants only. The system read-only baseline
 	// (/usr /bin /lib /lib64 /etc) is stat-guarded, so its bound subset depends
@@ -38,7 +38,6 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 		"--bind", "/data/u1/workspace/tmp", "/tmp",
 		"--bind", "/data/u1/workspace", "/workspace",
 		"--ro-bind", "/skills/global", "/skills/global",
-		"--ro-bind", "/data/u1/skills", "/skills/user",
 		"--chdir", "/workspace",
 		"--unshare-net",
 		"--clearenv",
@@ -50,6 +49,12 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 			t.Errorf("expected args to contain %q, got %v", flag, args)
 		}
 	}
+
+	// Per-user skills are no longer mounted at a separate /skills/user path;
+	// they live under /workspace/.blowball/skills via the /workspace bind.
+	if slices.Contains(args, "/skills/user") {
+		t.Errorf("expected no /skills/user mount, got %v", args)
+	}
 }
 
 func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
@@ -57,7 +62,7 @@ func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 		Network:            true,
 		AllowedEnvPatterns: []string{"PATH"},
 	}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 	if slices.Contains(args, "--unshare-net") {
 		t.Error("expected --unshare-net to be absent when network is enabled")
 	}
@@ -65,7 +70,7 @@ func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 
 func TestBuildBwrapArgsWorkspaceBinding(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -81,13 +86,12 @@ func TestBuildBwrapArgsWorkspaceBinding(t *testing.T) {
 
 func TestBuildBwrapArgsSkillDirectoryBindings(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	cases := []struct {
 		flag, source, target string
 	}{
 		{"--ro-bind", "/skills/global", "/skills/global"},
-		{"--ro-bind", "/data/u1/skills", "/skills/user"},
 	}
 	for _, c := range cases {
 		idx := slices.Index(args, c.flag)
@@ -106,11 +110,17 @@ func TestBuildBwrapArgsSkillDirectoryBindings(t *testing.T) {
 			t.Errorf("expected %s %s %s in args, got %v", c.flag, c.source, c.target, args)
 		}
 	}
+
+	// No separate per-user skills mount exists; per-user skills are reached
+	// under /workspace/.blowball/skills via the /workspace bind.
+	if slices.Contains(args, "/skills/user") {
+		t.Errorf("expected no /skills/user mount, got %v", args)
+	}
 }
 
 func TestBuildBwrapArgsSetsPYTHONPATH(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -127,7 +137,7 @@ func TestBuildBwrapArgsSetsPYTHONPATH(t *testing.T) {
 func TestBuildBwrapArgsAppendsPYTHONPATH(t *testing.T) {
 	t.Setenv("PYTHONPATH", "/usr/lib/python")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH", "PYTHON*"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -144,7 +154,7 @@ func TestBuildBwrapArgsAppendsPYTHONPATH(t *testing.T) {
 func TestBuildBwrapArgsPrependsWhenPYTHONPATHAllowedButEmpty(t *testing.T) {
 	t.Setenv("PYTHONPATH", "")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PYTHON*"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	found := false
 	for i := 0; i < len(args)-2; i++ {
@@ -160,7 +170,7 @@ func TestBuildBwrapArgsPrependsWhenPYTHONPATHAllowedButEmpty(t *testing.T) {
 
 func TestBuildBwrapArgsClearsEnv(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH", "HOME"}}
-	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/u1/skills", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	if !slices.Contains(args, "--clearenv") {
 		t.Error("expected --clearenv flag")
@@ -217,7 +227,7 @@ func findTriplet(args []string, flag, src, target string) int {
 // mountpoint exists when the bind lands (D2 ordering).
 func TestBuildBwrapArgsHomeTmpfsPrecedesToolsBind(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	tmpfsIdx := slices.Index(args, "--tmpfs")
 	if tmpfsIdx == -1 || tmpfsIdx+1 >= len(args) || args[tmpfsIdx+1] != sandboxHome {
@@ -237,7 +247,7 @@ func TestBuildBwrapArgsHomeTmpfsPrecedesToolsBind(t *testing.T) {
 func TestBuildBwrapArgsForcesHomeWhenAllowed(t *testing.T) {
 	t.Setenv("HOME", "/home/hostuser")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"HOME", "PATH"}}
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	if home := setenvValue(args, "HOME"); home != sandboxHome {
 		t.Errorf("expected HOME forced to %q, got %q", sandboxHome, home)
@@ -252,7 +262,7 @@ func TestBuildBwrapArgsForcesHomeWhenAllowed(t *testing.T) {
 func TestBuildBwrapArgsForcesHomeWhenFilteredOut(t *testing.T) {
 	t.Setenv("HOME", "/home/hostuser")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}} // HOME not allowed
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	if home := setenvValue(args, "HOME"); home != sandboxHome {
 		t.Errorf("expected HOME forced to %q even when filtered out, got %q", sandboxHome, home)
@@ -267,7 +277,7 @@ func TestBuildBwrapArgsForcesHomeWhenFilteredOut(t *testing.T) {
 func TestBuildBwrapArgsPrependsToolsBinToPathWhenAllowed(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	want := toolsBinPath + ":/usr/bin:/bin"
 	if path := setenvValue(args, "PATH"); path != want {
@@ -280,7 +290,7 @@ func TestBuildBwrapArgsPrependsToolsBinToPathWhenAllowed(t *testing.T) {
 func TestBuildBwrapArgsToolsBinOnlyWhenPathFilteredOut(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"HOME"}} // PATH not allowed
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", defaultSandbox(), cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 
 	if path := setenvValue(args, "PATH"); path != toolsBinPath {
 		t.Errorf("expected PATH %q when host PATH filtered out, got %q", toolsBinPath, path)
@@ -293,7 +303,7 @@ func TestBuildBwrapArgsToolsBinOnlyWhenPathFilteredOut(t *testing.T) {
 func TestBuildBwrapArgsEmitsHomeAndToolsBindRegardlessOfToolsDir(t *testing.T) {
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
 	for _, toolsDir := range []string{"", "/data/tools"} {
-		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", toolsDir, defaultSandbox(), cfg)
+		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", toolsDir, defaultSandbox(), cfg)
 
 		tmpfsIdx := slices.Index(args, "--tmpfs")
 		if tmpfsIdx == -1 || tmpfsIdx+1 >= len(args) || args[tmpfsIdx+1] != sandboxHome {
@@ -314,7 +324,7 @@ func TestBuildBwrapArgsStatGuardsSystemBaseline(t *testing.T) {
 	sandbox := config.ExecutorSandboxConfig{SystemReadOnly: []string{existing, missing}}
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
 
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", sandbox, cfg)
 
 	if findTriplet(args, "--ro-bind", existing, existing) == -1 {
 		t.Errorf("expected existing baseline dir %q to be --ro-bound, got %v", existing, args)
@@ -334,7 +344,7 @@ func TestBuildBwrapArgsAppendsExtraReadOnlyMount(t *testing.T) {
 	}
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
 
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", sandbox, cfg)
 
 	if findTriplet(args, "--ro-bind", "/opt/models", "/opt/models") == -1 {
 		t.Errorf("expected --ro-bind /opt/models /opt/models, got %v", args)
@@ -351,7 +361,7 @@ func TestBuildBwrapArgsAppendsExtraReadWriteMount(t *testing.T) {
 	sandbox.ExtraReadWriteMounts = []config.MountSpec{{Host: "/srv/cache", Target: "/cache"}}
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
 
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", sandbox, cfg)
 
 	if findTriplet(args, "--bind", "/srv/cache", "/cache") == -1 {
 		t.Errorf("expected --bind /srv/cache /cache, got %v", args)
@@ -365,7 +375,7 @@ func TestBuildBwrapArgsExtraMountsComeAfterInvariants(t *testing.T) {
 	sandbox.ExtraReadOnlyMounts = []config.MountSpec{{Host: "/opt/models", Target: "/opt/models"}}
 	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
 
-	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/skills/user", "/data/tools", sandbox, cfg)
+	args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", sandbox, cfg)
 
 	tmpfsIdx := slices.Index(args, "--tmpfs")
 	bindIdx := findTriplet(args, "--ro-bind", "/data/tools", toolsBinPath)

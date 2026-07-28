@@ -441,11 +441,11 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		}
 		// cfg.Tools.Executor carries the parsed bwrap sandbox policy (Sandbox:
 		// stat-guarded system baseline + extra RO/RW mounts), so it threads
-		// straight into NewTools → buildBwrapArgs without an extra parameter.
+		// straight into NewTools → buildBwrapArgs. Per-user skills live under
+		// the workspace at .blowball/skills and reach the sandbox via the
+		// /workspace bind, so only the workspace resolver is needed here.
 		executorTools := executor.NewTools(cfg.Tools.Executor, func(userID string) string {
 			return fsStore.UserWorkspace(userID)
-		}, func(userID string) string {
-			return fsStore.UserSkills(userID)
 		}, rt.skillsDir, rt.toolsDir)
 		if err := executor.RegisterAll(reg, executorTools); err != nil {
 			log.Fatal("register executor tools failed", zap.Error(err))

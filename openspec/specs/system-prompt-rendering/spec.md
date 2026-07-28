@@ -47,23 +47,21 @@ The final system prompt sent to the LLM SHALL contain exactly one `# Environment
 The `# Environment` section SHALL list the primary working directory, platform, OS, user ID, assistant knowledge cutoff, global skills directory, and per-user skills directory.
 
 #### Scenario: System prompt includes all environment fields
-- **WHEN** an agent is built for user `u-1` with workspace `/data/u-1/workspace`, global skills directory `/app/skills`, and user skills directory `/data/u-1/skills`
-- **THEN** its system prompt environment section includes the workspace path, `runtime.GOARCH`, `runtime.GOOS`, `u-1`, the knowledge cutoff, `/app/skills`, and `/data/u-1/skills`
+- **WHEN** an agent is built for user `u-1` with workspace `/data/u-1/workspace`, global skills directory `/app/skills`, and user skills directory `/data/u-1/workspace/.blowball/skills`
+- **THEN** its system prompt environment section includes the workspace path, `runtime.GOARCH`, `runtime.GOOS`, `u-1`, the knowledge cutoff, `/app/skills`, and `/data/u-1/workspace/.blowball/skills`
 
 #### Scenario: Skill directories are shown as sandbox-resolvable paths
 - **WHEN** the system prompt is rendered for an agent that will run inside a bubblewrap sandbox
-- **THEN** the environment section exposes the global skills directory as `/skills/global` and the per-user skills directory as `/skills/user`
+- **THEN** the environment section exposes the global skills directory as `/skills/global` and the per-user skills directory as `/workspace/.blowball/skills`
 
 ### Requirement: Render with skills
-- **WHEN** `RenderSystemPrompt` is called with one or more skills
-- **THEN** the output contains a `## Skills` section with an XML-style `<skills>` catalog
-- **AND** the section tells the agent it may use `bash` or `python` tools to read and execute files under the exposed skill directories
-- **AND** the section clarifies that skill directories are read-only and must not be modified with `xizhi_*` tools
+The system prompt SHALL render a `## Skills` section with an XML-style `<skills>` catalog when one or more skills are configured. The section SHALL tell the agent it may use `bash` or `python` tools to read and execute files under the exposed skill directories. The section SHALL clarify that **global** skill directories are read-only and must not be modified; per-user skills live under the workspace at `.blowball/skills` and are managed exclusively via `luban_*` tools. `xizhi_*` tools MUST NOT be used to access `.blowball` or any skill directory.
 
 #### Scenario: Skill catalog includes directory guidance
 - **WHEN** an agent is configured with the `ifind-finance-data` skill
 - **THEN** its system prompt skills section informs the agent that helper scripts are available under `/skills/global/ifind-finance-data/`
 - **AND** it instructs the agent to use `bash` or `python` tools, not `xizhi_*` tools, to access those files
+- **AND** it states that per-user skills reside at `/workspace/.blowball/skills` and are managed via `luban_*` tools
 
 ### Requirement: Workspace is passed explicitly, not read from context
 `RenderSystemPrompt` SHALL receive `Workspace` as an input field. The rendering pipeline SHALL NOT read `ctx.Value("workspace")` to obtain the workspace path.
@@ -71,3 +69,18 @@ The `# Environment` section SHALL list the primary working directory, platform, 
 #### Scenario: Render without request context
 - **WHEN** `RenderSystemPrompt` is called with a `Workspace` string and no context
 - **THEN** it renders the workspace path correctly
+
+### Requirement: Multi-form skill install guidance
+When the system prompt renders a Skills section, it SHALL include guidance describing the install shapes supported by `luban_install_skill` and how to handle install-documentation URLs. Specifically, the guidance SHALL convey: (a) `luban_install_skill` can install a whole git repo, a single sub-skill selected via the `skill` parameter, or a single `SKILL.md`; (b) if a `.md` URL is not itself a skill, the tool returns the document content rather than installing, and the agent SHOULD read that content, determine the real source URL, and call `luban_install_skill` again with it; (c) when a user asks to install from an instruction page, the agent SHOULD follow that page to the real artifact instead of assuming the page itself is the skill.
+
+#### Scenario: Install guidance describes the supported shapes
+- **WHEN** the system prompt renders a Skills section for an agent with `luban_install_skill` available
+- **THEN** the section describes whole-repo, sub-skill (`skill`), and single-SKILL.md installs
+
+#### Scenario: Install guidance describes the install-doc flow
+- **WHEN** the system prompt renders a Skills section
+- **THEN** the section tells the agent that a non-skill `.md` URL is returned as an install document to read, and that the agent should follow it to the real source and re-install
+
+#### Scenario: Agent follows an instruction page to the real source
+- **WHEN** the user asks to install a skill from an instruction-page URL
+- **THEN** the rendered guidance directs the agent to read the returned install-doc content and install the real source it points at, rather than treating the page as the skill

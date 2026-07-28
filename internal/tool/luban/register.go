@@ -110,18 +110,27 @@ func registerReadSkill(r *tool.Registry, tools *Tools) error {
 
 func registerInstallSkill(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
-		Name:        ToolInstallSkill,
-		Description: "Install a skill or skill collection from a URL into your user skills directory. Supports git clone for GitHub repos and direct download for single SKILL.md files. Existing skills with the same name are overwritten. All writes stay inside your user skills directory. Never use xizhi_* tools to access the skills directory.",
+		Name: ToolInstallSkill,
+		Description: "Install a skill or skill collection from a URL into your user skills directory. luban_install_skill handles four shapes: " +
+			"(1) a whole git repository is cloned and installed as one entry (its root SKILL.md, or the sub-skills it contains); " +
+			"(2) a git repository that is a collection of sub-skills, combined with the optional `skill` parameter, installs only the selected sub-skill (matched by frontmatter `name`, else by repo-relative subpath) and discards the rest of the clone; " +
+			"(3) a URL ending in .md pointing at a single SKILL.md is downloaded and installed directly; " +
+			"(4) a .md URL whose body is NOT a valid SKILL.md is returned as an install document (result kind \"install-doc\") carrying the fetched content and a hint - read it, find the real skill source it describes, and call luban_install_skill again with that source URL. " +
+			"Existing skills with the same name are overwritten. All writes stay inside your user skills directory. Never use xizhi_* tools to access the skills directory.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"url": {
 					"type": "string",
-					"description": "HTTPS URL of the skill collection (e.g. a GitHub repo) or a single SKILL.md file."
+					"description": "HTTPS URL of the skill collection (e.g. a GitHub repo), a single SKILL.md file, or an install-documentation page ending in .md."
 				},
 				"name": {
 					"type": "string",
-					"description": "Optional target skill name. If omitted, the name is inferred from the URL path."
+					"description": "Optional target skill name. If omitted, the name is inferred from the URL path (for single files and whole repos) or from the selected sub-skill's frontmatter name (for sub-skill selection)."
+				},
+				"skill": {
+					"type": "string",
+					"description": "Optional. For git-repo collection URLs only: select a single sub-skill to install. Matched against a discovered sub-skill's frontmatter name; if there is no unique name match, treated as a repo-relative subpath (e.g. \"skills/my-skill\") whose directory contains a SKILL.md. On no match the tool errors with the list of available sub-skill names. Ignored for single-file sources."
 				}
 			},
 			"required": ["url"],
@@ -129,8 +138,9 @@ func registerInstallSkill(r *tool.Registry, tools *Tools) error {
 		}`),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
-				URL  string `json:"url"`
-				Name string `json:"name"`
+				URL   string `json:"url"`
+				Name  string `json:"name"`
+				Skill string `json:"skill"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("luban_install_skill: parse args: %w", err)
@@ -138,7 +148,7 @@ func registerInstallSkill(r *tool.Registry, tools *Tools) error {
 			ins := newInstaller(tools.loader, tools.userDirFn)
 			ins.httpClient = tools.httpClient
 			ins.maxSize = tools.maxSize
-			return ins.installSkill(ctx, a.URL, a.Name, skill.UserIDFromContext(ctx))
+			return ins.installSkill(ctx, a.URL, a.Name, a.Skill, skill.UserIDFromContext(ctx))
 		},
 	}
 	return r.Register(spec)

@@ -30,22 +30,22 @@ type Tools struct {
 	cfg             config.ExecutorConfig
 	workspaceFn     func(userID string) string
 	globalSkillsDir string
-	userSkillsFn    func(userID string) string
 	toolsDir        string
 }
 
 // NewTools creates an executor tool bundle backed by cfg, workspaceFn,
-// globalSkillsDir, userSkillsFn and toolsDir. workspaceFn and userSkillsFn map
-// a userID to the absolute path of that user's workspace and skills directory,
-// respectively. globalSkillsDir is the project-level skills directory shared
-// across all users. toolsDir is the operator-managed CLI binary directory that
-// is mounted read-only at the in-sandbox $HOME/.local/bin.
-func NewTools(cfg config.ExecutorConfig, workspaceFn, userSkillsFn func(userID string) string, globalSkillsDir, toolsDir string) *Tools {
+// globalSkillsDir and toolsDir. workspaceFn maps a userID to the absolute path
+// of that user's workspace; per-user skills live under it at
+// .blowball/skills and reach the sandbox through the /workspace bind, so no
+// separate resolver is needed. globalSkillsDir is the project-level skills
+// directory shared across all users, mounted read-only at /skills/global.
+// toolsDir is the operator-managed CLI binary directory that is mounted
+// read-only at the in-sandbox $HOME/.local/bin.
+func NewTools(cfg config.ExecutorConfig, workspaceFn func(userID string) string, globalSkillsDir, toolsDir string) *Tools {
 	return &Tools{
 		cfg:             cfg,
 		workspaceFn:     workspaceFn,
 		globalSkillsDir: globalSkillsDir,
-		userSkillsFn:    userSkillsFn,
 		toolsDir:        toolsDir,
 	}
 }
@@ -89,18 +89,4 @@ func (t *Tools) userWorkspace(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("executor: workspace resolver not configured")
 	}
 	return t.workspaceFn(userID), nil
-}
-
-// userSkillsDir resolves the per-user skills directory for the user attached
-// to ctx. It returns an error when no userID is present or the configured
-// userSkillsFn is nil.
-func (t *Tools) userSkillsDir(ctx context.Context) (string, error) {
-	userID := skill.UserIDFromContext(ctx)
-	if userID == "" {
-		return "", fmt.Errorf("executor: userID missing from context")
-	}
-	if t.userSkillsFn == nil {
-		return "", fmt.Errorf("executor: user skills resolver not configured")
-	}
-	return t.userSkillsFn(userID), nil
 }

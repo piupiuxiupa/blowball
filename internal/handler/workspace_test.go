@@ -241,6 +241,32 @@ func TestList_PathOutsideWorkspace_403(t *testing.T) {
 	assert.Equal(t, "FORBIDDEN", env2.Error.Code)
 }
 
+// TestList_ReservedNamespace_Allowed verifies the REST API — unlike the xizhi_*
+// agent tools — lets the user browse the reserved .blowball/ namespace (e.g. to
+// manage their own per-user skills), returning 200 rather than 403.
+func TestList_ReservedNamespace_Allowed(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".blowball", "skills", "foo"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".blowball", "skills", "foo", "SKILL.md"), []byte("# foo"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?path=.blowball", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 1)
+	assert.Equal(t, "skills", resp.Files[0].Name)
+	assert.Equal(t, "dir", resp.Files[0].Type)
+}
+
 // TestUpload_Success writes a small file to the workspace root and verifies
 // the response contains the path and size.
 func TestUpload_Success(t *testing.T) {
@@ -892,6 +918,26 @@ func TestDelete_PathOutsideWorkspace_403(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
+// TestDelete_ReservedNamespace_Allowed verifies the user can remove entries
+// under .blowball/ (e.g. an obsolete skill) through the REST API, which the
+// xizhi_* agent tools cannot reach.
+func TestDelete_ReservedNamespace_Allowed(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, ".blowball", "skills", "old")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("# old"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/workspace/files/"+url.PathEscape(".blowball/skills/old"), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(target)
+	require.ErrorIs(t, err, os.ErrNotExist, "reserved-namespace target must be removed")
 }
 
 // TestDelete_NotFound_404 verifies deleting a missing target returns 404.

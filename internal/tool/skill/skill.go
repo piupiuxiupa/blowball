@@ -72,6 +72,18 @@ func (l *Loader) List(userID string) []Skill {
 	return l.merge(l.ListGlobal(), l.listUser(userID))
 }
 
+// Discover walks dir recursively for {skill}/SKILL.md entries and returns the
+// skills whose frontmatter has both a name and a description, sorted by name.
+// It is the exported form of the recursive discovery used by List, exposed so
+// callers that operate on an arbitrary cloned directory (e.g. luban sub-skill
+// selection from a cloned collection) can reuse the same discovery logic.
+// Location is left empty; callers that need it should use List/ListGlobal.
+func (l *Loader) Discover(dir string) []Skill {
+	out := l.discover(dir, "")
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // ListGlobal returns only the global skills discovered from the project-level
 // skills directory. The result is sorted by name.
 func (l *Loader) ListGlobal() []Skill {

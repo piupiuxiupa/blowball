@@ -38,8 +38,8 @@ func dirExists(dir string) bool {
 // Store wraps a root directory. The directory layout under root is:
 //
 //	{root}/{userID}/sessions/{sessionID}.json
-//	{root}/{userID}/workspace/...
-//	{root}/{userID}/skills/...
+//	{root}/{userID}/workspace/...                        (user files; xizhi_* scoped here)
+//	{root}/{userID}/workspace/.blowball/skills/...       (reserved; per-user skills)
 type Store struct {
 	root string
 }

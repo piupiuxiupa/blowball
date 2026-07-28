@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -137,7 +138,9 @@ func TestEnsureUserDirs_CreatesAllSubdirs(t *testing.T) {
 		t.Fatalf("EnsureUserDirs: %v", err)
 	}
 
-	for _, sub := range []string{"sessions", "workspace", "skills"} {
+	// sessions/ and workspace/ are the top-level siblings; per-user skills are
+	// nested under the workspace in the reserved .blowball/skills namespace.
+	for _, sub := range []string{"sessions", "workspace"} {
 		dir := filepath.Join(root, "u-1", sub)
 		info, err := os.Stat(dir)
 		if err != nil {
@@ -148,9 +151,36 @@ func TestEnsureUserDirs_CreatesAllSubdirs(t *testing.T) {
 		}
 	}
 
+	// Per-user skills live under the workspace at .blowball/skills, not as a
+	// top-level sibling.
+	skillsDir := filepath.Join(root, "u-1", "workspace", ".blowball", "skills")
+	if info, err := os.Stat(skillsDir); err != nil || !info.IsDir() {
+		t.Fatalf("reserved skills dir %q not created: %v", skillsDir, err)
+	}
+
+	// No top-level skills/ directory must be created.
+	if _, err := os.Stat(filepath.Join(root, "u-1", "skills")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("top-level skills/ must not be created, got err=%v", err)
+	}
+
 	// UserDirExists must now report true.
 	if !store.UserDirExists("u-1") {
 		t.Fatal("UserDirExists reported false right after EnsureUserDirs")
+	}
+}
+
+func TestUserSkillsLivesUnderWorkspace(t *testing.T) {
+	store, root := newTestStore(t)
+
+	got := store.UserSkills("u-1")
+	want := filepath.Join(root, "u-1", "workspace", ".blowball", "skills")
+	if got != want {
+		t.Fatalf("UserSkills = %q, want %q", got, want)
+	}
+	// The skills dir must be a descendant of the workspace dir.
+	ws := store.UserWorkspace("u-1")
+	if !strings.HasPrefix(got, ws+string(filepath.Separator)) {
+		t.Fatalf("UserSkills %q is not beneath workspace %q", got, ws)
 	}
 }
 

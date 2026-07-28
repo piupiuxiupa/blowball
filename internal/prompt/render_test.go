@@ -13,7 +13,7 @@ func TestRenderSystemPrompt_EnvironmentOnly(t *testing.T) {
 		BasePrompt:      "You are a helpful assistant.",
 		Workspace:       "/data/u-1/workspace",
 		GlobalSkillsDir: "/skills/global",
-		UserSkillsDir:   "/skills/user",
+		UserSkillsDir:   "/workspace/.blowball/skills",
 		UserID:          "u-1",
 		Platform:        "arm64",
 		OS:              "darwin",
@@ -24,7 +24,7 @@ func TestRenderSystemPrompt_EnvironmentOnly(t *testing.T) {
 	assert.Contains(t, out, "You are a helpful assistant.")
 	assert.Contains(t, out, "# Environment")
 	assert.Contains(t, out, "- Global skills directory: /skills/global")
-	assert.Contains(t, out, "- User skills directory: /skills/user")
+	assert.Contains(t, out, "- User skills directory: /workspace/.blowball/skills")
 	assert.Contains(t, out, "- Platform: arm64")
 	assert.Contains(t, out, "- OS: darwin")
 	assert.Contains(t, out, "- User ID: u-1")
@@ -97,9 +97,19 @@ func TestRenderSystemPrompt_Skills(t *testing.T) {
 	assert.Contains(t, out, "Use luban_list_skills to discover skills")
 	assert.Contains(t, out, "luban_read_skill")
 	assert.Contains(t, out, "luban_install_skill")
+	// Multi-form install guidance: supported shapes and install-doc flow.
+	assert.Contains(t, out, "whole git repository is cloned as one entry")
+	assert.Contains(t, out, "selected sub-skill")
+	assert.Contains(t, out, "single SKILL.md URL ending in .md")
+	assert.Contains(t, out, "install document")
+	assert.Contains(t, out, "install-doc")
+	assert.Contains(t, out, "follow it to the real skill source URL it points at")
+	assert.Contains(t, out, "do not treat the instruction page itself as the skill")
 	assert.Contains(t, out, "You may use the bash or python tools to read and execute files under the exposed skill directories.")
-	assert.Contains(t, out, "Skill directories are read-only")
-	assert.Contains(t, out, "never use xizhi_* tools to access or modify skill directories")
+	assert.Contains(t, out, "Global skill directories are read-only")
+	assert.Contains(t, out, "Per-user skills live under the workspace at .blowball/skills")
+	assert.Contains(t, out, "managed exclusively via the luban_* tools")
+	assert.Contains(t, out, "never use xizhi_* tools to access .blowball or any skill directory")
 	assert.NotContains(t, out, "call read_skill")
 }
 

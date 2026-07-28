@@ -30,7 +30,7 @@ func newSkillTestEnv(t *testing.T) *skillTestEnv {
 	dataDir := t.TempDir()
 	fsSvc, err := fs.New(dataDir)
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "skills"), 0o755))
+	require.NoError(t, os.MkdirAll(fsSvc.UserSkills("user-1"), 0o755))
 
 	h := NewSkillHandler(fsSvc)
 	r := gin.New()
@@ -45,7 +45,7 @@ func newSkillTestEnv(t *testing.T) *skillTestEnv {
 }
 
 func (e *skillTestEnv) skillsDir() string {
-	return filepath.Join(e.dataDir, "user-1", "skills")
+	return e.fsSvc.UserSkills("user-1")
 }
 
 // TestSkills_List verifies that skill files are listed with the correct shape:

@@ -178,7 +178,7 @@ func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspa
 		BasePrompt:      cfg.SystemPrompt,
 		Workspace:       workspaceRoot,
 		GlobalSkillsDir: "/skills/global",
-		UserSkillsDir:   "/skills/user",
+		UserSkillsDir:   "/workspace/.blowball/skills",
 		UserID:          userID,
 		Platform:        runtime.GOARCH,
 		OS:              runtime.GOOS,

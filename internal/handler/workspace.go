@@ -28,8 +28,12 @@ import (
 
 // WorkspaceHandler owns the /api/v1/workspace/* routes: file listing, upload,
 // download, and text-content retrieval. All operations are scoped to the
-// authenticated user's workspace directory and validated via xizhi.ValidatePath
-// so path traversal and symlink escapes are rejected with 403.
+// authenticated user's workspace directory and validated via
+// xizhi.ValidatePathAllowReserved so path traversal and symlink escapes are
+// rejected with 403. Unlike the agent's xizhi_* tools, the REST API does NOT
+// reserve the .blowball/ namespace, so the user can browse and manage their own
+// application state (e.g. per-user skills under .blowball/skills/) directly;
+// the agent remains blocked via xizhi.ValidatePath.
 type WorkspaceHandler struct {
 	fsSvc          *fs.Store
 	maxUploadBytes int64
@@ -209,7 +213,7 @@ func (h *WorkspaceHandler) Download(c *gin.Context) {
 	wsRoot := h.fsSvc.UserWorkspace(userID)
 	rel := c.Param("path")
 
-	abs, err := xizhi.ValidatePath(wsRoot, strings.TrimPrefix(rel, "/"))
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, strings.TrimPrefix(rel, "/"))
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
@@ -250,7 +254,7 @@ func (h *WorkspaceHandler) TokenDownload(c *gin.Context) {
 	}
 
 	wsRoot := h.fsSvc.UserWorkspace(userID)
-	abs, err := xizhi.ValidatePath(wsRoot, rel)
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, rel)
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
@@ -325,7 +329,7 @@ func (h *WorkspaceHandler) Content(c *gin.Context) {
 	wsRoot := h.fsSvc.UserWorkspace(userID)
 	rel := c.Param("path")
 
-	abs, err := xizhi.ValidatePath(wsRoot, strings.TrimPrefix(rel, "/"))
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, strings.TrimPrefix(rel, "/"))
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
@@ -398,12 +402,12 @@ func (h *WorkspaceHandler) Rename(c *gin.Context) {
 	relSrc := strings.TrimPrefix(c.Param("path"), "/")
 	relDst := req.NewPath
 
-	srcAbs, err := xizhi.ValidatePath(wsRoot, relSrc)
+	srcAbs, err := xizhi.ValidatePathAllowReserved(wsRoot, relSrc)
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
 	}
-	dstAbs, err := xizhi.ValidatePath(wsRoot, relDst)
+	dstAbs, err := xizhi.ValidatePathAllowReserved(wsRoot, relDst)
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
@@ -457,7 +461,7 @@ func (h *WorkspaceHandler) Rename(c *gin.Context) {
 
 // Delete handles DELETE /api/v1/workspace/files/*path. It removes a file or,
 // for a directory, recursively removes the directory and everything beneath it.
-// Path validation reuses xizhi.ValidatePath so traversal / symlink escape is
+// Path validation reuses xizhi.ValidatePathAllowReserved so traversal / symlink escape is
 // rejected with 403 exactly as the read endpoints enforce. Workspace files have
 // no database source table, so nothing is archived — the entry is removed from
 // the filesystem only.
@@ -474,7 +478,7 @@ func (h *WorkspaceHandler) Delete(c *gin.Context) {
 	wsRoot := h.fsSvc.UserWorkspace(userID)
 	rel := c.Param("path")
 
-	abs, err := xizhi.ValidatePath(wsRoot, strings.TrimPrefix(rel, "/"))
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, strings.TrimPrefix(rel, "/"))
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
@@ -560,7 +564,7 @@ func (h *WorkspaceHandler) OnlyOfficeConfig(c *gin.Context) {
 	wsRoot := h.fsSvc.UserWorkspace(userID)
 	rel := strings.TrimPrefix(c.Param("path"), "/")
 
-	abs, err := xizhi.ValidatePath(wsRoot, rel)
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, rel)
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
@@ -641,7 +645,7 @@ func (h *WorkspaceHandler) OnlyOfficeCallback(c *gin.Context) {
 
 	rel := strings.TrimSpace(c.Query("path"))
 	wsRoot := h.fsSvc.UserWorkspace(userID)
-	abs, err := xizhi.ValidatePath(wsRoot, rel)
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, rel)
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
 		return
@@ -876,26 +880,26 @@ func (h *WorkspaceHandler) maxUploadBytesMemory() int64 {
 }
 
 // resolveListTarget resolves the listing target for a (possibly empty) rel
-// subdirectory. It uses the same xizhi.ValidatePath security primitive so a
+// subdirectory. It uses the same xizhi.ValidatePathAllowReserved security primitive so a
 // path that escapes the workspace is rejected identically to read/write. The
 // empty rel case lists the workspace root directly.
 func resolveListTarget(wsRoot, rel string) (string, error) {
 	if strings.TrimSpace(rel) == "" {
 		return wsRoot, nil
 	}
-	return xizhi.ValidatePath(wsRoot, rel)
+	return xizhi.ValidatePathAllowReserved(wsRoot, rel)
 }
 
 // resolveUploadDir resolves the destination directory for an upload. relDir
 // may be empty (root) or a subdirectory; traversal/escape is rejected via
-// xizhi.ValidatePath. The returned path may not yet exist; the caller creates
+// xizhi.ValidatePathAllowReserved. The returned path may not yet exist; the caller creates
 // it with MkdirAll.
 func resolveUploadDir(wsRoot, relDir string) (string, error) {
 	relDir = strings.TrimSpace(relDir)
 	if relDir == "" {
 		return wsRoot, nil
 	}
-	return xizhi.ValidatePath(wsRoot, relDir)
+	return xizhi.ValidatePathAllowReserved(wsRoot, relDir)
 }
 
 // fileType maps an os.DirEntry to the wire-format type tag.

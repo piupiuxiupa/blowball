@@ -55,15 +55,17 @@ const toolsBinPath = sandboxHome + "/.local/bin"
 // buildBwrapArgs constructs the bubblewrap argument list for a sandbox whose
 // root filesystem exposes the minimum required host directories read-only, the
 // user's workspace read-write at /workspace, the workspace's tmp directory
-// bound to /tmp, the global and per-user skill directories read-only at
-// /skills/global and /skills/user, and a writable synthetic home (tmpfs) with
-// the operator tools dir bound read-only at $HOME/.local/bin. The configurable
-// stat-guarded system read-only baseline (sandbox.SystemReadOnly) and the
-// operator-configured extra mounts (sandbox.ExtraReadOnlyMounts /
-// ExtraReadWriteMounts) are appended after the fixed invariants. The
-// load-bearing invariants (/workspace, $HOME, $HOME/.local/bin, skills targets,
-// --chdir /workspace, PYTHONPATH) are unchanged and not configurable.
-func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir, toolsDir string, sandbox config.ExecutorSandboxConfig, cfg config.ExecutorToolConfig) []string {
+// bound to /tmp, the global skill directory read-only at /skills/global, and a
+// writable synthetic home (tmpfs) with the operator tools dir bound read-only
+// at $HOME/.local/bin. Per-user skills are NOT mounted separately: they live
+// under the workspace at .blowball/skills and are already reachable (read-write)
+// via the /workspace bind. The configurable stat-guarded system read-only
+// baseline (sandbox.SystemReadOnly) and the operator-configured extra mounts
+// (sandbox.ExtraReadOnlyMounts / ExtraReadWriteMounts) are appended after the
+// fixed invariants. The load-bearing invariants (/workspace, $HOME,
+// $HOME/.local/bin, the global skills target, --chdir /workspace, PYTHONPATH)
+// are unchanged and not configurable.
+func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir string, sandbox config.ExecutorSandboxConfig, cfg config.ExecutorToolConfig) []string {
 	args := []string{
 		"--unshare-user",
 		"--unshare-ipc",
@@ -76,7 +78,6 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, userSkillsDir,
 		"--bind", workspaceTmp, "/tmp",
 		"--bind", workspaceRoot, "/workspace",
 		"--ro-bind", globalSkillsDir, "/skills/global",
-		"--ro-bind", userSkillsDir, "/skills/user",
 		// D2: establish the writable synthetic home as a tmpfs BEFORE binding the
 		// operator tools under it, so the mountpoint exists when the ro-bind lands.
 		"--tmpfs", sandboxHome,

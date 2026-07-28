@@ -35,6 +35,58 @@ func TestValidate_PathTraversal_Blocked(t *testing.T) {
 	}
 }
 
+func TestValidate_ReservedNamespace_Blocked(t *testing.T) {
+	root := t.TempDir()
+	// Pre-create the .blowball tree so EvalSymlinks on the parent can resolve.
+	require := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	require(os.MkdirAll(filepath.Join(root, ".blowball", "skills", "foo"), 0o755))
+	require(os.MkdirAll(filepath.Join(root, ".blowball", "anything"), 0o755))
+
+	cases := []string{
+		".blowball/skills/foo/SKILL.md",
+		".blowball/anything",
+		".blowball",
+	}
+	for _, rel := range cases {
+		rel := rel
+		t.Run(rel, func(t *testing.T) {
+			_, err := validatePath(root, rel)
+			if err == nil {
+				t.Fatalf("validatePath(%q) returned nil error, want reserved-namespace rejection", rel)
+			}
+			if !errors.Is(err, ErrPathOutsideWorkspace) {
+				t.Fatalf("validatePath(%q) err = %v, want wrapping ErrPathOutsideWorkspace", rel, err)
+			}
+			if !strings.Contains(err.Error(), "luban_*") {
+				t.Fatalf("validatePath(%q) err = %q, want guidance to use luban_* tools", rel, err.Error())
+			}
+		})
+	}
+}
+
+func TestValidate_NonReservedDotfile_Allowed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("KEY=1"), 0o644); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	// A non-reserved dotfile (and a near-namesake of the reserved dir) is allowed.
+	abs, err := validatePath(root, ".env")
+	if err != nil {
+		t.Fatalf("validatePath(.env) unexpected error: %v", err)
+	}
+	if want := filepath.Join(root, ".env"); abs != want {
+		t.Fatalf("abs = %q, want %q", abs, want)
+	}
+	if _, err := validatePath(root, ".blowball-notes"); err != nil {
+		t.Fatalf("validatePath(.blowball-notes) unexpected error: %v", err)
+	}
+}
+
 func TestValidate_AbsolutePath_Blocked(t *testing.T) {
 	root := t.TempDir()
 	abs := filepath.Join(root, "outside.txt")
@@ -158,5 +210,81 @@ func TestIsPathOutsideWorkspace(t *testing.T) {
 	}
 	if IsPathOutsideWorkspace(errors.New("other")) {
 		t.Fatal("IsPathOutsideWorkspace on unrelated err = true")
+	}
+}
+
+// TestValidateAllowReserved_ReservedNamespace_Allowed verifies the REST entry
+// point (ValidatePathAllowReserved) accepts the .blowball namespace that the
+// agent entry point (ValidatePath) rejects, so the user can manage their own
+// application state (e.g. per-user skills) through the API while the agent
+// (xizhi_*) tools stay blocked.
+func TestValidateAllowReserved_ReservedNamespace_Allowed(t *testing.T) {
+	root := t.TempDir()
+	require := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	require(os.MkdirAll(filepath.Join(root, ".blowball", "skills", "foo"), 0o755))
+
+	cases := []string{
+		".blowball",
+		".blowball/skills",
+		".blowball/skills/foo/SKILL.md",
+	}
+	for _, rel := range cases {
+		t.Run(rel, func(t *testing.T) {
+			// REST entry point: allowed, resolves under the workspace.
+			abs, err := ValidatePathAllowReserved(root, rel)
+			if err != nil {
+				t.Fatalf("ValidatePathAllowReserved(%q) unexpected error: %v", rel, err)
+			}
+			if want := filepath.Join(root, filepath.FromSlash(rel)); abs != want {
+				t.Fatalf("ValidatePathAllowReserved(%q) abs = %q, want %q", rel, abs, want)
+			}
+			// Agent entry point: still blocked.
+			if _, err := ValidatePath(root, rel); !errors.Is(err, ErrPathOutsideWorkspace) {
+				t.Fatalf("ValidatePath(%q) err = %v, want ErrPathOutsideWorkspace", rel, err)
+			}
+		})
+	}
+}
+
+// TestValidateAllowReserved_SecurityStaysEnforced verifies the allow-reserved
+// entry point still rejects traversal, absolute paths, and symlink escapes —
+// only the .blowball namespace policy is relaxed, not the security checks.
+func TestValidateAllowReserved_SecurityStaysEnforced(t *testing.T) {
+	root := t.TempDir()
+	require := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	require(os.MkdirAll(filepath.Join(root, "src"), 0o755))
+
+	if _, err := ValidatePathAllowReserved(root, "../escape"); !errors.Is(err, ErrPathOutsideWorkspace) {
+		t.Fatalf("traversal err = %v, want ErrPathOutsideWorkspace", err)
+	}
+	if _, err := ValidatePathAllowReserved(root, filepath.Join(root, "outside.txt")); !errors.Is(err, ErrPathOutsideWorkspace) {
+		t.Fatalf("absolute err = %v, want ErrPathOutsideWorkspace", err)
+	}
+	if _, err := ValidatePathAllowReserved(root, ""); !errors.Is(err, ErrPathOutsideWorkspace) {
+		t.Fatalf("empty err = %v, want ErrPathOutsideWorkspace", err)
+	}
+
+	// Symlink escape: a link inside the workspace pointing outside is rejected.
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	require(os.WriteFile(outsideFile, []byte("x"), 0o644))
+	require(os.Symlink(outsideFile, filepath.Join(root, "escape.txt")))
+	if _, err := ValidatePathAllowReserved(root, "escape.txt"); !errors.Is(err, ErrPathOutsideWorkspace) {
+		t.Fatalf("symlink escape err = %v, want ErrPathOutsideWorkspace", err)
+	}
+
+	// Legitimate non-reserved path still resolves.
+	if _, err := ValidatePathAllowReserved(root, "src/main.go"); err != nil {
+		t.Fatalf("ValidatePathAllowReserved(src/main.go) unexpected error: %v", err)
 	}
 }

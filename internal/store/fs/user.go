@@ -6,18 +6,22 @@ import (
 	"path/filepath"
 )
 
-// userSubDirs lists the fixed subdirectories created under each user's
+// userSubDirs lists the fixed subdirectories created directly under each user's
 // directory. The order is the on-disk creation order; sessions/ first because
-// the session service depends on it immediately, then workspace/ and skills/.
-var userSubDirs = []string{"sessions", "workspace", "skills"}
+// the session service depends on it immediately, then workspace/. Per-user
+// skills are NOT a top-level sibling: they live under the workspace in the
+// reserved .blowball/skills/ namespace, created by EnsureUserDirs once the
+// workspace dir exists.
+var userSubDirs = []string{"sessions", "workspace"}
 
 // userDir returns the directory owned by userID under the configured root.
 func (s *Store) userDir(userID string) string {
 	return filepath.Join(s.root, userID)
 }
 
-// EnsureUserDirs creates the user directory for userID and the canonical
-// sessions/, workspace/ and skills/ subdirectories beneath it. The call is
+// EnsureUserDirs creates the user directory for userID, the canonical sessions/
+// and workspace/ subdirectories beneath it, and the reserved
+// workspace/.blowball/skills/ directory that holds per-user skills. The call is
 // idempotent: already-existing directories are kept untouched.
 //
 // The function is named to align with the workspace-api spec's
@@ -41,6 +45,14 @@ func (s *Store) EnsureUserDirs(ctx context.Context, userID string) error {
 			return fmt.Errorf("create user subdir %q: %w", dir, err)
 		}
 	}
+
+	// Per-user skills live under the workspace in the reserved .blowball
+	// namespace; create it after the workspace dir exists. (No top-level
+	// skills/ sibling is created.)
+	skillsDir := s.UserSkills(userID)
+	if err := mkdirAll(skillsDir); err != nil {
+		return fmt.Errorf("create user skills dir %q: %w", skillsDir, err)
+	}
 	return nil
 }
 
@@ -51,10 +63,16 @@ func (s *Store) UserWorkspace(userID string) string {
 	return filepath.Join(s.userDir(userID), "workspace")
 }
 
-// UserSkills returns the absolute path of userID's skills directory. The skill
-// list handler scans this directory.
+// UserSkills returns the absolute path of userID's per-user skills directory.
+// Skills live under the workspace in the reserved, hidden .blowball/skills/
+// namespace (data/{userID}/workspace/.blowball/skills) so they travel with the
+// workspace; the skill list handler and luban install tool both scan/write it.
+// The .blowball name is reserved only on the agent path: xizhi.ValidatePath
+// rejects it so the agent's file tools cannot tamper with skills, while the
+// REST workspace API (xizhi.ValidatePathAllowReserved) and the luban_* tools
+// can still read and write it, letting the user manage their own skills.
 func (s *Store) UserSkills(userID string) string {
-	return filepath.Join(s.userDir(userID), "skills")
+	return filepath.Join(s.userDir(userID), "workspace", ".blowball", "skills")
 }
 
 // UserSessions returns the absolute path of userID's sessions directory. The

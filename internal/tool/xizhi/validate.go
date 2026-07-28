@@ -15,12 +15,21 @@ import (
 	"strings"
 )
 
+// reservedNamespaceDir is the reserved, application-owned directory directly
+// beneath each user's workspace. Workspace-resident application state —
+// including per-user skills at .blowball/skills/ — lives here. It is off-limits
+// to the xizhi_* file tools (validatePath rejects it) so the agent cannot
+// tamper with it; the authenticated user can still manage it through the REST
+// workspace API, which uses ValidatePathAllowReserved. Any path whose first
+// cleaned segment equals this name is rejected on the agent path.
+const reservedNamespaceDir = ".blowball"
+
 // Sentinel errors returned by path validation and the file tools. Callers use
 // errors.Is to branch on these (e.g. mapping to HTTP status codes).
 var (
 	// ErrPathOutsideWorkspace is returned when a requested path resolves to a
-	// location outside the workspace root (path traversal, absolute path, or a
-	// symlink that escapes).
+	// location outside the workspace root (path traversal, absolute path, a
+	// symlink that escapes, or a reserved application namespace).
 	ErrPathOutsideWorkspace = errors.New("path outside workspace")
 	// ErrFileNotFound is returned when a read/modify targets a file that does
 	// not exist inside the workspace.
@@ -44,22 +53,59 @@ func IsFileNotFound(err error) bool {
 	return errors.Is(err, ErrFileNotFound)
 }
 
-// ValidatePath is the exported entry point used by the workspace HTTP handler
-// to apply the same path-traversal / symlink-escape check the file tools use.
-// It is a thin pass-through to the internal validatePath so the workspace
-// handler does not duplicate the security logic.
+// ValidatePath is the exported entry point used by the xizhi_* file tools (and
+// any caller that must match the agent's path policy). It applies the shared
+// security validation AND rejects the reserved .blowball namespace, so the agent
+// cannot reach workspace-resident application state such as per-user skills.
 func ValidatePath(workspaceRoot, relPath string) (string, error) {
 	return validatePath(workspaceRoot, relPath)
 }
 
-// validatePath resolves relPath against workspaceRoot and verifies the real
-// (symlink-resolved) path stays inside the workspace. It returns the absolute
-// path the caller should operate on, computed as the absolute form of
+// ValidatePathAllowReserved applies the same traversal / absolute-path /
+// symlink-escape security checks as ValidatePath, but does NOT reject the
+// reserved .blowball namespace. It is the entry point for the workspace REST
+// handlers (list / read / write / rename / delete), so the authenticated user
+// can manage their own application state (e.g. per-user skills under
+// .blowball/skills/) directly through the API — while the agent's xizhi_* tools,
+// which use ValidatePath, still cannot. Security is unchanged: a path that
+// escapes the workspace is rejected identically.
+func ValidatePathAllowReserved(workspaceRoot, relPath string) (string, error) {
+	return validatePathSecurity(workspaceRoot, relPath)
+}
+
+// validatePath is the internal full check used by the xizhi_* file tools: the
+// shared security validation plus the reserved .blowball namespace rejection.
+func validatePath(workspaceRoot, relPath string) (string, error) {
+	if err := rejectReservedNamespace(relPath); err != nil {
+		return "", err
+	}
+	return validatePathSecurity(workspaceRoot, relPath)
+}
+
+// rejectReservedNamespace returns a wrapped ErrPathOutsideWorkspace when
+// relPath's first cleaned segment is the reserved .blowball application
+// directory; nil otherwise (including legitimate dotfiles such as .env or
+// .blowball-notes). This enforces the agent-tools namespace policy — the REST
+// API skips it via ValidatePathAllowReserved.
+func rejectReservedNamespace(relPath string) error {
+	cleaned := filepath.Clean(relPath)
+	if firstSegment(cleaned) == reservedNamespaceDir {
+		return fmt.Errorf("%w: %q is a reserved application directory; manage skills via the luban_* tools, not xizhi_*", ErrPathOutsideWorkspace, relPath)
+	}
+	return nil
+}
+
+// validatePathSecurity resolves relPath against workspaceRoot and verifies the
+// real (symlink-resolved) path stays inside the workspace. It returns the
+// absolute path the caller should operate on, computed as the absolute form of
 // filepath.Join(workspaceRoot, relPath). The security check uses a separately
 // resolved form so symlinks (including a root that itself sits behind a symlink
 // such as /var → /private/var on macOS) cannot trick the prefix comparison.
 //
-// The check is robust against three classes of escape:
+// This is the shared security primitive used by both the agent path
+// (validatePath, which adds the .blowball reservation) and the REST path
+// (ValidatePathAllowReserved). The check is robust against three classes of
+// escape:
 //  1. Absolute paths (filepath.IsAbs) — rejected outright.
 //  2. Path traversal — relPath is cleaned first, then any leading ".." segment
 //     is rejected.
@@ -68,7 +114,7 @@ func ValidatePath(workspaceRoot, relPath string) (string, error) {
 //     when the target does not yet exist (a write that creates a new file) the
 //     parent directory is resolved instead. The resulting real path is then
 //     prefix-checked against the resolved workspace root.
-func validatePath(workspaceRoot, relPath string) (string, error) {
+func validatePathSecurity(workspaceRoot, relPath string) (string, error) {
 	if workspaceRoot == "" {
 		return "", fmt.Errorf("%w: workspace root is empty", ErrPathOutsideWorkspace)
 	}
@@ -131,6 +177,14 @@ func validatePath(workspaceRoot, relPath string) (string, error) {
 		return "", fmt.Errorf("%w: %q resolves outside workspace; use a relative path such as tmp/hello.txt or src/main.go", ErrPathOutsideWorkspace, relPath)
 	}
 	return returnPath, nil
+}
+
+// firstSegment returns the first path segment of cleaned (the component before
+// the first OS separator), or cleaned itself when it is a single segment. It is
+// used to detect the reserved .blowball namespace regardless of what follows.
+func firstSegment(cleaned string) string {
+	before, _, _ := strings.Cut(cleaned, string(filepath.Separator))
+	return before
 }
 
 // isWithin reports whether target is the same as root or a path beneath root.

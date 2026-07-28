@@ -9,3 +9,4 @@ bin/
 .env
 tmp/
 .DS_Store
+.pi/

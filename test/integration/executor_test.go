@@ -35,12 +35,9 @@ func newExecutorTools(t *testing.T, cfg config.ExecutorConfig) (*executor.Tools,
 	t.Helper()
 	ws := t.TempDir()
 	globalSkills := t.TempDir()
-	userSkills := t.TempDir()
 	tools := t.TempDir()
 	return executor.NewTools(cfg, func(userID string) string {
 		return ws
-	}, func(userID string) string {
-		return userSkills
 	}, globalSkills, tools), ws
 }
 
@@ -107,20 +104,28 @@ func TestExecutorSkillDirectoryAccess(t *testing.T) {
 
 	ws := t.TempDir()
 	globalSkills := t.TempDir()
-	userSkills := t.TempDir()
 	tools := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(globalSkills, "marker.txt"), []byte("global\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(userSkills, "marker.txt"), []byte("user\n"), 0o644))
+	// Per-user skills live under the workspace at .blowball/skills and reach the
+	// sandbox through the /workspace bind (no separate /skills/user mount).
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".blowball", "skills"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".blowball", "skills", "marker.txt"), []byte("user\n"), 0o644))
 
 	toolsBundle := executor.NewTools(config.ExecutorConfig{
 		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
-	}, func(string) string { return ws }, func(string) string { return userSkills }, globalSkills, tools)
+	}, func(string) string { return ws }, globalSkills, tools)
 	reg := newRegistryWithExecutor(t, toolsBundle)
 
-	res, err := reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"cat /skills/global/marker.txt /skills/user/marker.txt"}`))
+	res, err := reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"cat /skills/global/marker.txt /workspace/.blowball/skills/marker.txt"}`))
 	require.NoError(t, err)
 	m := res.(*executor.ExecutionResult)
 	require.Equal(t, "global\nuser\n", m.Output)
+
+	// No separate per-user skills mount exists.
+	res, err = reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"test -e /skills/user && echo exists || echo missing"}`))
+	require.NoError(t, err)
+	m = res.(*executor.ExecutionResult)
+	require.Equal(t, "missing\n", m.Output, "/skills/user mount should no longer exist")
 
 	res, err = reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"touch /skills/global/forbidden.txt 2>/dev/null; echo $?"}`))
 	require.NoError(t, err)
@@ -286,14 +291,13 @@ func TestExecutorOperatorToolOnPath(t *testing.T) {
 
 	ws := t.TempDir()
 	globalSkills := t.TempDir()
-	userSkills := t.TempDir()
 	toolsDir := t.TempDir()
 	// Place an operator-provided executable in the tools dir.
 	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, "mytool"), []byte("#!/bin/sh\necho from-mytool\n"), 0o755))
 
 	tools := executor.NewTools(config.ExecutorConfig{
 		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
-	}, func(string) string { return ws }, func(string) string { return userSkills }, globalSkills, toolsDir)
+	}, func(string) string { return ws }, globalSkills, toolsDir)
 	reg := newRegistryWithExecutor(t, tools)
 
 	// $HOME/.local/bin is the first PATH entry.

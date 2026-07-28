@@ -121,3 +121,19 @@ Xizhi 的每个工具调用 SHALL 在应用层验证路径前缀，确保操作�
 - **WHEN** workspace 内存在符号链接指向外部目录
 - **THEN** 系统使用 filepath.EvalSymlinks 解析真实路径后验证前缀
 - **AND** 返回的错误信息提示使用相对路径，例如 "use a relative path such as src/main.go"
+
+### Requirement: Reserved workspace-internal directories are rejected
+`xizhi_*` path validation SHALL reject any path whose first cleaned segment is a reserved application namespace directory (`.blowball`), so that workspace-resident application state — including per-user skills at `.blowball/skills/` — is reachable only through its dedicated tools (`luban_*`) and never through the file tools. The rejection SHALL use the same outside-workspace error style with relative-path guidance.
+
+#### Scenario: Read under reserved directory blocked
+- **WHEN** the agent calls `xizhi_read_file` with path `.blowball/skills/foo/SKILL.md`
+- **THEN** the system rejects the operation with a path error
+- **AND** the error guides the model to use `luban_*` tools for skills
+
+#### Scenario: Write under reserved directory blocked
+- **WHEN** the agent calls `xizhi_write_file` with path `.blowball/skills/foo/SKILL.md`
+- **THEN** the system rejects the operation with a path error
+
+#### Scenario: Non-reserved dotfiles remain allowed
+- **WHEN** the agent calls `xizhi_read_file` with path `.env`
+- **THEN** the system reads the file normally, because `.env` is not a reserved namespace directory

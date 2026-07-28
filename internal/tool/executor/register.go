@@ -31,7 +31,7 @@ type pipArgs struct {
 func registerBash(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name:        ToolBash,
-		Description: "Execute a shell command inside a sandboxed workspace. The command runs as an unprivileged user with no network access by default; only the workspace directory is writable. The global and per-user skill directories are mounted read-only at /skills/global and /skills/user.",
+		Description: "Execute a shell command inside a sandboxed workspace. The command runs as an unprivileged user with no network access by default; only the workspace directory is writable. Global skills are mounted read-only at /skills/global; per-user skills live at /workspace/.blowball/skills (read-write, managed via luban).",
 		ParametersJSON: schemaBash,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a bashArgs
@@ -50,7 +50,7 @@ func registerBash(r *tool.Registry, tools *Tools) error {
 func registerPython(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name:        ToolPython,
-		Description: "Execute Python code or a Python file inside a sandboxed workspace. Runs as an unprivileged user with no network access by default; only the workspace directory is writable. Installed packages under /workspace/.pip are available automatically via PYTHONPATH. The global and per-user skill directories are mounted read-only at /skills/global and /skills/user.",
+		Description: "Execute Python code or a Python file inside a sandboxed workspace. Runs as an unprivileged user with no network access by default; only the workspace directory is writable. Installed packages under /workspace/.pip are available automatically via PYTHONPATH. Global skills are mounted read-only at /skills/global; per-user skills live at /workspace/.blowball/skills (read-write, managed via luban).",
 		ParametersJSON: schemaPython,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a pythonArgs
