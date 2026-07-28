@@ -24,6 +24,7 @@ FROM alpine:3.22.4
 #   ca-certificates   OpenAI / MCP / webfetch / luban 的 git clone 走 HTTPS
 #   tzdata            日志时间戳正确
 #   git               luban_install_skill 运行时 `git clone`
+#   bash              bash 执行器工具与沙箱默认 shell（Alpine 出厂仅 busybox ash）
 #   python3, py3-pip  python / pip 执行器工具
 #   bubblewrap        执行器工具的 bwrap 沙箱（仅 agent 角色使用）
 #   nodejs, npm       沙箱内经 bash 调用 node/npm（apk 源里的版本）
@@ -31,6 +32,7 @@ RUN apk add --no-cache \
         ca-certificates \
         tzdata \
         git \
+        bash \
         python3 \
         py3-pip \
         bubblewrap \
