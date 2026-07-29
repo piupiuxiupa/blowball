@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base32"
@@ -369,9 +370,199 @@ func (h *WorkspaceHandler) Content(c *gin.Context) {
 	})
 }
 
+// writeContentRequest is the JSON body for PUT /api/v1/workspace/files/*path/content.
+type writeContentRequest struct {
+	Content string `json:"content"`
+}
+
+// WriteContent handles PUT /api/v1/workspace/files/*path/content. It is the
+// symmetric write counterpart to GET .../content: an atomic, create-or-replace
+// (HTTP PUT semantics, matching xizhi_write_file) text-content write. A missing
+// target file is created (parents auto-created via MkdirAll); an existing file is
+// fully replaced through a temp-file + os.Rename so a crash mid-write never
+// truncates the destination. The body is capped at maxUploadBytes, and only text
+// is accepted: a NUL byte in content is rejected with 400 BINARY_FILE (symmetric
+// with the read side, which refuses to return binary). Binary/large files keep
+// using POST .../upload.
+//
+// Errors: 400 BAD_REQUEST (malformed body / target is an existing directory) or
+// 400 BINARY_FILE (NUL byte); 403 path outside workspace; 413 FILE_TOO_LARGE;
+// 500 INTERNAL on unexpected write failure; 401 missing/invalid JWT (AuthMW).
+func (h *WorkspaceHandler) WriteContent(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	if h.maxUploadBytes > 0 {
+		// Cap the request body BEFORE JSON decoding so an oversized payload is
+		// rejected as it arrives rather than after being buffered in full.
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxUploadBytes)
+	}
+
+	var req writeContentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
+			return
+		}
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
+		return
+	}
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	rel := strings.TrimPrefix(c.Param("path"), "/")
+
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, rel)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	// Reject a directory target before touching the filesystem: writing "into"
+	// a directory is not a text-content write.
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "path is a directory"))
+		return
+	}
+
+	// Text-only: a NUL byte means binary content the read side could not serve
+	// back, so refuse it before staging a temp file.
+	if isBinary([]byte(req.Content)) {
+		c.JSON(http.StatusBadRequest, errorBody("BINARY_FILE", "binary content, use upload endpoint"))
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		logWS(ctx, "workspace.writecontent.mkdir", filepath.Dir(abs), err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create destination dir failed"))
+		return
+	}
+
+	if _, err := atomicWriteFile(abs, []byte(req.Content), h.maxUploadBytes); err != nil {
+		if errors.Is(err, errWriteTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
+			return
+		}
+		logWS(ctx, "workspace.writecontent.persist", abs, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "write file failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"path": relPath(wsRoot, abs),
+		"size": len(req.Content),
+	})
+}
+
+// createNodeRequest is the JSON body for POST /api/v1/workspace/files/*path. The
+// body carries only the node kind; the target path comes from the URL catch-all
+// (like Rename, whose params live in the body).
+type createNodeRequest struct {
+	Type string `json:"type"`
+}
+
+// createNodeResponse is the JSON body returned by POST /api/v1/workspace/files/*path.
+type createNodeResponse struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+
+// Create handles POST /api/v1/workspace/files/*path. It is a strict create of an
+// empty file or directory selected by the body {"type": "file" | "directory"}.
+// "Strict" means a target leaf that already exists — file OR directory — is
+// rejected with 409 ALREADY_EXISTS and left untouched, with no check-then-create
+// window: file creation uses OpenFile(O_CREATE|O_EXCL) and directory creation
+// uses os.Mkdir, both of which surface EEXIST on an existing leaf (so two
+// concurrent creates of the same path resolve as one 200 and one 409). Missing
+// parent directories are auto-created (MkdirAll on the parent), so a nested path
+// like a/b/c is established in one call; the strict guarantee applies only to the
+// leaf itself. This is distinct from PUT .../content, which is a create-or-replace
+// for text content — Create produces empty nodes only.
+//
+// Creating the workspace root itself (an empty/"/" path) is rejected with 400
+// BAD_REQUEST; a missing or invalid type returns 400. Errors: 400 BAD_REQUEST,
+// 403 path outside workspace, 409 ALREADY_EXISTS, 500 INTERNAL; 401 missing JWT
+// (AuthMW).
+func (h *WorkspaceHandler) Create(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	rel := strings.TrimPrefix(c.Param("path"), "/")
+
+	// "Creating" the workspace root is meaningless — it already exists and would
+	// surface a confusing EEXIST/EISDIR. Reject it up front. This must precede
+	// ValidatePathAllowReserved, which treats an empty path as an escape error
+	// (and so would otherwise map the root-create case to 403 instead of 400).
+	if rel == "" {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "path is required"))
+		return
+	}
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, rel)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	var req createNodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
+		return
+	}
+	if req.Type != "file" && req.Type != "directory" {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", `type must be "file" or "directory"`))
+		return
+	}
+
+	// Auto-create missing parent directories (leaf-strict + auto-parents),
+	// consistent with WriteContent/Upload. MkdirAll on the parent is idempotent
+	// and never touches the leaf, so it cannot weaken the strict guarantee below.
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		logWS(ctx, "workspace.create.mkdir_parent", filepath.Dir(abs), err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create destination dir failed"))
+		return
+	}
+
+	if req.Type == "file" {
+		// O_EXCL fuses "does not exist" + "create" into one atomic step: an
+		// existing leaf surfaces EEXIST (mapped to 409) with no TOCTOU window.
+		f, ferr := os.OpenFile(abs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if ferr != nil {
+			if errors.Is(ferr, os.ErrExist) {
+				c.JSON(http.StatusConflict, errorBody("ALREADY_EXISTS", "node already exists"))
+				return
+			}
+			logWS(ctx, "workspace.create.file", abs, ferr)
+			c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create file failed"))
+			return
+		}
+		_ = f.Close()
+	} else {
+		// os.Mkdir fails with EEXIST when the leaf already exists (file or dir),
+		// giving directories the same strict-create contract as the file branch.
+		if err := os.Mkdir(abs, 0o755); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				c.JSON(http.StatusConflict, errorBody("ALREADY_EXISTS", "node already exists"))
+				return
+			}
+			logWS(ctx, "workspace.create.directory", abs, err)
+			c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create directory failed"))
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, createNodeResponse{
+		Path: relPath(wsRoot, abs),
+		Type: req.Type,
+	})
+}
+
 // renameRequest is the JSON body for PUT /api/v1/workspace/files/*path.
 type renameRequest struct {
-	NewPath string `json:"new_path"`
+	NewPath   string `json:"new_path"`
+	Overwrite bool   `json:"overwrite"`
 }
 
 // renameResponse is the JSON body for PUT /api/v1/workspace/files/*path.
@@ -381,8 +572,13 @@ type renameResponse struct {
 }
 
 // Rename handles PUT /api/v1/workspace/files/*path. It renames or moves a file
-// or directory within the user's workspace. The destination must not already
-// exist; if it does the operation returns 409 without making any changes.
+// or directory within the user's workspace. When new_path resolves to an
+// existing directory the source is moved inside it as new_path/<basename(src)>
+// (the "drag into a folder" gesture). Otherwise the destination must not already
+// exist; if it does the operation returns 409 unless the request sets
+// "overwrite": true, in which case an existing file destination is atomically
+// replaced (overwriting a directory is rejected with 409 DEST_NOT_EMPTY — tree
+// merge is not supported). No changes are made on any rejection.
 func (h *WorkspaceHandler) Rename(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	tid := middleware.TraceIDFromCtx(c)
@@ -430,13 +626,41 @@ func (h *WorkspaceHandler) Rename(c *gin.Context) {
 		return
 	}
 
-	if _, err := os.Stat(dstAbs); err == nil {
-		c.JSON(http.StatusConflict, errorBody("ALREADY_EXISTS", "destination already exists"))
-		return
-	} else if !errors.Is(err, os.ErrNotExist) {
+	// Resolve the final destination, applying move-into-folder semantics when
+	// new_path names an existing directory: the source moves inside it as
+	// new_path/<basename(src)> (the "drag into a folder" gesture). Previously
+	// this case returned 409.
+	dstStat, err := os.Stat(dstAbs)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		logWS(ctx, "workspace.rename.stat", dstAbs, err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat destination failed"))
 		return
+	}
+	if err == nil && dstStat.IsDir() {
+		// Destination is an existing directory → move inside it, then re-stat
+		// the recomputed path so the existence/overwrite check runs against
+		// dir/<basename> (which may itself already exist).
+		dstAbs = filepath.Join(dstAbs, filepath.Base(srcAbs))
+		dstStat, err = os.Stat(dstAbs)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			logWS(ctx, "workspace.rename.stat", dstAbs, err)
+			c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat destination failed"))
+			return
+		}
+	}
+	if err == nil {
+		// The final destination already exists. Without overwrite this is a
+		// conflict (the prior behavior for an existing file); with overwrite a
+		// file is atomically replaced below, but a directory is rejected —
+		// merging two trees is out of scope.
+		if !req.Overwrite {
+			c.JSON(http.StatusConflict, errorBody("ALREADY_EXISTS", "destination already exists"))
+			return
+		}
+		if dstStat.IsDir() {
+			c.JSON(http.StatusConflict, errorBody("DEST_NOT_EMPTY", "destination directory is not empty; merge not supported"))
+			return
+		}
 	}
 
 	// Ensure the destination parent directory exists so moves into new
@@ -803,11 +1027,82 @@ func (h *WorkspaceHandler) onlyOfficeURLAllowed(raw string) bool {
 	return target.Hostname() == server.Hostname()
 }
 
+// errWriteTooLarge is returned by the atomic-write helpers when the input
+// exceeds the configured byte limit. Callers distinguish it from ordinary I/O
+// errors so they can map it to 413 FILE_TOO_LARGE (or the OnlyOffice error
+// convention) rather than a generic 500.
+var errWriteTooLarge = errors.New("content exceeds size limit")
+
+// atomicWriteFromReader stages r into a freshly created temp file alongside abs
+// and atomically renames it over abs on success. Creating the temp in
+// filepath.Dir(abs) guarantees it shares the target's filesystem, so os.Rename
+// is atomic (no EXDEV) and a crash mid-write never leaves a truncated
+// destination — the previous file (if any) stays untouched until the rename.
+//
+// When limit > 0, at most limit bytes are accepted: the copy is bounded to
+// limit+1 bytes so an overflow is detectable without buffering the whole stream,
+// and anything larger is rejected with an error wrapping errWriteTooLarge (the
+// temp is removed and abs is left as-is). A non-positive limit disables the cap;
+// the caller must then bound r some other way (the OnlyOffice download path
+// refuses an unconfigured limit before reaching here). It returns the byte count
+// written, which may exceed limit on overflow before the temp is discarded.
+func atomicWriteFromReader(abs string, r io.Reader, limit int64) (int64, error) {
+	dir := filepath.Dir(abs)
+	tmp, err := os.CreateTemp(dir, ".ws-write-*")
+	if err != nil {
+		return 0, fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+
+	var n int64
+	if limit > 0 {
+		// Copy up to limit+1 bytes so an oversize input is detectable without
+		// buffering the whole thing in memory.
+		n, err = io.Copy(tmp, io.LimitReader(r, limit+1))
+	} else {
+		n, err = io.Copy(tmp, r)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		cleanup()
+		return n, fmt.Errorf("write temp: %w", err)
+	}
+	if limit > 0 && n > limit {
+		cleanup()
+		return n, fmt.Errorf("%w: %d bytes (limit %d)", errWriteTooLarge, n, limit)
+	}
+
+	if err := os.Rename(tmpName, abs); err != nil {
+		cleanup()
+		return n, fmt.Errorf("rename temp: %w", err)
+	}
+	return n, nil
+}
+
+// atomicWriteFile writes data to abs atomically via atomicWriteFromReader. It is
+// the create-or-replace primitive used by the text-content write endpoint: a
+// missing target is created (the caller ensures the parent directory exists),
+// an existing file is fully replaced, and any failure leaves the original
+// untouched. When limit > 0, data larger than limit is rejected up front —
+// before a temp is created — with an error wrapping errWriteTooLarge. It returns
+// the number of bytes written.
+func atomicWriteFile(abs string, data []byte, limit int64) (int, error) {
+	if limit > 0 && int64(len(data)) > limit {
+		return 0, errWriteTooLarge
+	}
+	n, err := atomicWriteFromReader(abs, bytes.NewReader(data), limit)
+	return int(n), err
+}
+
 // onlyOfficePersist downloads the edited document and atomically overwrites abs.
-// It streams into a temp file in the same directory (so os.Rename is atomic on
-// the same filesystem), caps the size at maxUploadBytes, and only renames on
-// full success — any failure leaves the original file untouched and the temp
-// removed.
+// It streams the download straight into the shared atomicWriteFromReader
+// primitive, which stages a temp file in the same directory (so os.Rename is
+// atomic on the same filesystem), caps the size at maxUploadBytes, and only
+// renames on full success — any failure leaves the original file untouched and
+// the temp removed.
 func (h *WorkspaceHandler) onlyOfficePersist(ctx context.Context, abs, fileURL string) error {
 	client := &http.Client{Timeout: onlyOfficeDownloadLimit}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
@@ -823,14 +1118,6 @@ func (h *WorkspaceHandler) onlyOfficePersist(ctx context.Context, abs, fileURL s
 		return fmt.Errorf("download result: status %d", resp.StatusCode)
 	}
 
-	dir := filepath.Dir(abs)
-	tmp, err := os.CreateTemp(dir, ".oo-callback-*")
-	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-
 	limit := h.maxUploadBytes
 	if limit <= 0 {
 		// No upload cap configured — refuse an unbounded download rather than
@@ -838,24 +1125,9 @@ func (h *WorkspaceHandler) onlyOfficePersist(ctx context.Context, abs, fileURL s
 		// caveat (not recommended for production).
 		return fmt.Errorf("download result: max upload bytes is not configured")
 	}
-	// Copy up to limit+1 bytes so an oversize result is detectable without
-	// buffering the whole file in memory.
-	n, err := io.Copy(tmp, io.LimitReader(resp.Body, limit+1))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		cleanup()
-		return fmt.Errorf("write temp: %w", err)
-	}
-	if n > limit {
-		cleanup()
-		return fmt.Errorf("download result: size %d exceeds max upload bytes %d", n, limit)
-	}
 
-	if err := os.Rename(tmpName, abs); err != nil {
-		cleanup()
-		return fmt.Errorf("rename temp: %w", err)
+	if _, err := atomicWriteFromReader(abs, resp.Body, limit); err != nil {
+		return fmt.Errorf("download result: %w", err)
 	}
 	return nil
 }

@@ -139,6 +139,9 @@ HTTP routes live in `internal/handler/router.go`. Protected routes use `middlewa
 | `GET`  | `/api/v1/workspace/files/*path` | Download file. |
 | `GET`  | `/api/v1/workspace/files/*path/content` | Read file text content. |
 | `GET`  | `/api/v1/workspace/files/download/*path?token=<jwt>` | Token-authenticated download for browser-native elements. |
+| `POST` | `/api/v1/workspace/files/*path` | Create an empty file or directory. Body `{"type": "file"}` or `{"type": "directory"}`. Strict create: an existing leaf of either kind returns 409 `ALREADY_EXISTS` and is left untouched (no check-then-create window — file via `O_EXCL`, directory via `os.Mkdir`); missing parent directories are auto-created (leaf-strict + auto-parents). Creating the workspace root (empty path) → 400; a missing/invalid `type` → 400. Auth required (401 missing). Distinct from `PUT .../content` (create-or-replace text). |
+| `PUT`  | `/api/v1/workspace/files/*path` | Rename/move file or directory. Body `{"new_path": "...", "overwrite": false}`. When `new_path` resolves to an existing directory the source moves inside it as `new_path/<basename>` (move-into-folder); `overwrite: true` atomically replaces an existing file destination (an existing directory destination → 409 `DEST_NOT_EMPTY`; tree merge unsupported). Default `overwrite: false` preserves the 409-on-existing-file behavior. |
+| `PUT`  | `/api/v1/workspace/files/*path/content` | Atomic create-or-replace text-content write, symmetric to `GET .../content`. Rejects binary content (NUL byte → 400 `BINARY_FILE`) and oversized bodies (413); binary/large files use `POST .../upload`. |
 | `DELETE` | `/api/v1/workspace/files/*path` | Delete file or directory. |
 | `GET`  | `/api/v1/mcp/tools` | List discovered MCP tools. |
 | `GET`  | `/api/v1/skills` | List skills visible to the authenticated user. |
@@ -157,6 +160,10 @@ Because gin does not allow a static `/download` segment alongside a `/*path` wil
 - `.../files/*path` → `WorkspaceHandler.Download` (header auth).
 
 DELETE uses the same wildcard pattern under a different method. The token-download endpoint exists so browser-native elements (`<a download>`, `<img>`, PDF.js) can access workspace files without custom `Authorization` headers.
+
+PUT shares the same catch-all and dispatches by suffix via `dispatchWorkspacePut` (mirroring the GET dispatcher): `.../files/*path/content` → `WorkspaceHandler.WriteContent` (atomic text-content write); bare `.../files/*path` → `WorkspaceHandler.Rename` (rename/move, with move-into-folder and optional `overwrite`).
+
+POST shares the same catch-all but registers directly (`authed.POST("/workspace/files/*path", deps.WorkspaceCreate)`) with no suffix dispatcher — there is no `/content` split on POST. `WorkspaceHandler.Create` does a strict create of an empty file or directory selected by the body `{"type": ...}` (409 `ALREADY_EXISTS` on an existing leaf). It does not collide with the static `POST /workspace/upload` route, which diverges at the `/workspace/{upload,files}` node.
 
 ### Agent orchestration
 

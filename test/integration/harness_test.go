@@ -515,8 +515,10 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		WorkspaceDownload:      wsH.Download,
 		WorkspaceTokenDownload: wsH.TokenDownload,
 		WorkspaceContent:       wsH.Content,
+		WorkspaceWriteContent:  wsH.WriteContent,
 		WorkspaceDelete:        wsH.Delete,
 		WorkspaceRename:        wsH.Rename,
+		WorkspaceCreate:        wsH.Create,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
 	})
@@ -597,8 +599,10 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		WorkspaceDownload:      wsH.Download,
 		WorkspaceTokenDownload: wsH.TokenDownload,
 		WorkspaceContent:       wsH.Content,
+		WorkspaceWriteContent:  wsH.WriteContent,
 		WorkspaceDelete:        wsH.Delete,
 		WorkspaceRename:        wsH.Rename,
+		WorkspaceCreate:        wsH.Create,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
 	})
@@ -697,8 +701,10 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		WorkspaceDownload:      wsH.Download,
 		WorkspaceTokenDownload: wsH.TokenDownload,
 		WorkspaceContent:       wsH.Content,
+		WorkspaceWriteContent:  wsH.WriteContent,
 		WorkspaceDelete:        wsH.Delete,
 		WorkspaceRename:        wsH.Rename,
+		WorkspaceCreate:        wsH.Create,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
 	})

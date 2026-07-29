@@ -244,6 +244,21 @@ components:
         path: {type: string}
         content: {type: string}
         size: {type: integer}
+    WriteContentRequest:
+      type: object
+      required: [content]
+      description: Body for PUT .../files/{path}/content.
+      properties:
+        content:
+          type: string
+          description: Full text body to write as a whole-file replace (create-or-replace, like xizhi_write_file).
+    FileContentWriteResponse:
+      type: object
+      required: [path, size]
+      description: Response for PUT .../files/{path}/content.
+      properties:
+        path: {type: string, description: Workspace-relative path of the written file.}
+        size: {type: integer, description: Number of bytes written.}
     UpdateTitleRequest:
       type: object
       required: [title]
@@ -269,12 +284,42 @@ components:
           type: string
           minLength: 1
           description: Workspace-relative destination path.
+        overwrite:
+          type: boolean
+          default: false
+          description: |
+            When true and the final destination is an existing file, atomically
+            replace it. Default false preserves the 409-on-existing-file behavior.
+            Overwriting an existing directory is rejected with 409 DEST_NOT_EMPTY;
+            tree merge is not supported.
     RenameResponse:
       type: object
       required: [old_path, new_path]
       properties:
         old_path: {type: string}
         new_path: {type: string}
+    CreateNodeRequest:
+      type: object
+      required: [type]
+      description: |
+        Body for POST .../files/{path}. The target path comes from the URL
+        catch-all (like Rename); the body selects whether to create a file or a
+        directory. The created node is empty — content writes use PUT .../content.
+      properties:
+        type:
+          type: string
+          enum: [file, directory]
+          description: "Kind of node to create. Strict create: an existing leaf of either kind returns 409 ALREADY_EXISTS."
+    CreateNodeResponse:
+      type: object
+      required: [path, type]
+      description: Response for POST .../files/{path}.
+      properties:
+        path: {type: string, description: Workspace-relative path of the created node.}
+        type:
+          type: string
+          enum: [file, directory]
+          description: Kind of node created (echoes the request type).
     MCPTool:
       type: object
       required: [type, name, description, parameters]
@@ -857,9 +902,14 @@ paths:
       tags: [Workspace]
       summary: Rename or move a workspace file or directory.
       description: |
-        Renames or moves a file or directory within the user's workspace. The
-        destination path must not already exist (as either a file or directory);
-        if it does, the operation returns 409 without making any changes.
+        Renames or moves a file or directory within the user's workspace. When
+        new_path resolves to an existing directory, the source is moved inside it
+        as new_path/<basename> (the "drag into a folder" gesture). Otherwise the
+        final destination must not already exist: if it does, the operation
+        returns 409 unless `overwrite` is true, in which case an existing file
+        destination is atomically replaced (overwriting a directory is rejected
+        with 409 DEST_NOT_EMPTY; tree merge is not supported). No changes are
+        made on any rejection.
       parameters:
         - name: path
           in: path
@@ -887,7 +937,79 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          $ref: '#/components/responses/AlreadyExists'
+          description: |
+            Final destination already exists, or (with overwrite) is an existing
+            directory.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                alreadyExists: {value: {error: {code: ALREADY_EXISTS, message: "destination already exists"}}}
+                destNotEmpty:  {value: {error: {code: DEST_NOT_EMPTY, message: "destination directory is not empty; merge not supported"}}}
+        '500':
+          $ref: '#/components/responses/Internal'
+    post:
+      tags: [Workspace]
+      summary: Create an empty workspace file or directory.
+      description: |
+        Strict create of an empty file or directory selected by the body
+        {"type": "file" | "directory"}. The path comes from the URL catch-all
+        (like Rename, whose params live in the body). "Strict" means a target leaf
+        that already exists — file OR directory — is rejected with 409
+        ALREADY_EXISTS and left untouched; there is no check-then-create window,
+        because file creation uses OpenFile(O_CREATE|O_EXCL) and directory
+        creation uses os.Mkdir, both of which surface EEXIST on an existing leaf
+        (so two concurrent creates of the same path resolve as one 200 and one
+        409). Missing parent directories are auto-created (MkdirAll on the
+        parent), so a nested path (e.g. a/b/c) is established in one call; the
+        strict guarantee applies only to the leaf itself. This is distinct from
+        PUT .../content, which is a create-or-replace for text content — POST
+        creates empty nodes only. POST has no /content split, so it registers
+        directly on the catch-all with no suffix dispatcher.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Workspace-relative path of the node to create (catch-all, may include `/`).
+          example: notes/hello.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateNodeRequest'}
+            examples:
+              file:      {value: {type: file}}
+              directory: {value: {type: directory}}
+      responses:
+        '200':
+          description: Node created; its relative path and kind.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreateNodeResponse'}
+              examples:
+                file:      {value: {path: notes/hello.md, type: file}}
+                directory: {value: {path: notes/hello.md, type: directory}}
+        '400':
+          description: |
+            Creating the workspace root (empty path), or a missing/invalid `type`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                badType:  {value: {error: {code: BAD_REQUEST, message: "type must be \"file\" or \"directory\""}}}
+                rootPath: {value: {error: {code: BAD_REQUEST, message: "path is required"}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A file or directory already exists at the target leaf.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                alreadyExists: {value: {error: {code: ALREADY_EXISTS, message: "node already exists"}}}
         '500':
           $ref: '#/components/responses/Internal'
   /api/v1/workspace/files/{path}/content:
@@ -918,6 +1040,53 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+    put:
+      tags: [Workspace]
+      summary: Create or replace a workspace file's text content atomically.
+      description: |
+        Symmetric write counterpart to GET .../content: an atomic, create-or-replace
+        (HTTP PUT) text-content write. A missing target file is created (missing
+        parents are auto-created); an existing file is fully replaced via a
+        temp-file + rename, so a crash mid-write never truncates the destination.
+        The body is capped at the server's max upload size, and only text is
+        accepted — a NUL byte is rejected with 400 BINARY_FILE (binary/large files
+        use POST .../upload). The `path` is the catch-all workspace-relative file
+        path; a trailing `/content` selects this operation under the PUT catch-all.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Workspace-relative file path (catch-all, may include `/`).
+          example: notes/hello.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WriteContentRequest'}
+            example: {content: "# Hello"}
+      responses:
+        '200':
+          description: Content written; the file's relative path and byte size.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FileContentWriteResponse'}
+        '400':
+          description: Malformed body, the target is an existing directory, or the content is binary.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                binaryFile: {value: {error: {code: BINARY_FILE, message: "binary content, use upload endpoint"}}}
+                directory:  {value: {error: {code: BAD_REQUEST, message: "path is a directory"}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '500':
           $ref: '#/components/responses/Internal'
   /api/v1/workspace/files/{path}/onlyoffice-config:

@@ -65,8 +65,18 @@ func newWSTestEnv(t *testing.T) *wsTestEnv {
 		}
 		h.Download(c)
 	})
-	r.PUT("/api/v1/workspace/files/*path", h.Rename)
+	r.PUT("/api/v1/workspace/files/*path", func(c *gin.Context) {
+		raw := c.Param("path")
+		if len(raw) > 8 && raw[len(raw)-8:] == "/content" {
+			trimmed := raw[:len(raw)-8]
+			c.Params = []gin.Param{{Key: "path", Value: trimmed}}
+			h.WriteContent(c)
+			return
+		}
+		h.Rename(c)
+	})
 	r.DELETE("/api/v1/workspace/files/*path", h.Delete)
+	r.POST("/api/v1/workspace/files/*path", h.Create)
 	return &wsTestEnv{handler: h, engine: r, dataDir: dataDir, fsSvc: fsSvc}
 }
 
@@ -682,8 +692,10 @@ func TestTokenDownload_ProductionRouting(t *testing.T) {
 		WorkspaceUpload:        h.Upload,
 		WorkspaceDownload:      h.Download,
 		WorkspaceContent:       h.Content,
+		WorkspaceWriteContent:  h.WriteContent,
 		WorkspaceDelete:        h.Delete,
 		WorkspaceRename:        h.Rename,
+		WorkspaceCreate:        h.Create,
 		MCPTools:               func(*gin.Context) {},
 		SkillsList:             func(*gin.Context) {},
 	})
@@ -772,6 +784,562 @@ func TestContent_PathOutsideWorkspace_403(t *testing.T) {
 	env.engine.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// --- WriteContent (PUT /api/v1/workspace/files/*path/content) tests ---
+
+// TestWriteContent_CreateNewFile verifies the create case: a missing target is
+// created and the response reports the relative path and byte size.
+func TestWriteContent_CreateNewFile(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/notes.md/content",
+		strings.NewReader(`{"content":"hello world"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Path string `json:"path"`
+		Size int    `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "notes.md", resp.Path)
+	assert.Equal(t, len("hello world"), resp.Size)
+
+	data, err := os.ReadFile(filepath.Join(ws, "notes.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", string(data))
+}
+
+// TestWriteContent_AutoCreateParentDirs verifies missing parent directories are
+// created so a write into a fresh nested path succeeds.
+func TestWriteContent_AutoCreateParentDirs(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a/b/c.md/content",
+		strings.NewReader(`{"content":"nested"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(ws, "a", "b", "c.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested", string(data))
+}
+
+// TestWriteContent_OverwriteExisting verifies an existing file is fully replaced
+// (atomic create-or-replace): old content is gone, new content in place.
+func TestWriteContent_OverwriteExisting(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "greeting.md"), []byte("old content here"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/greeting.md/content",
+		strings.NewReader(`{"content":"brand new"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(ws, "greeting.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "brand new", string(data))
+	assert.NotContains(t, string(data), "old content")
+}
+
+// TestWriteContent_BinaryRejected_400 verifies a NUL byte in content is rejected
+// with 400 BINARY_FILE and the pre-existing file is left untouched.
+func TestWriteContent_BinaryRejected_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "data.txt"), []byte("keep-me"), 0o644))
+
+	// Build the body via json.Marshal so the NUL byte in content is properly
+	// escaped as \u0000 in the JSON (a raw NUL inside a JSON string is invalid
+	// JSON). The decoded value then carries a NUL, which the read side would
+	// refuse to return, so the write side rejects it with BINARY_FILE.
+	payload, err := json.Marshal(map[string]string{"content": "bad\x00data"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/data.txt/content",
+		bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BINARY_FILE", resp.Error.Code)
+
+	data, err := os.ReadFile(filepath.Join(ws, "data.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep-me", string(data), "original file must be untouched")
+}
+
+// TestWriteContent_TooLarge_413 verifies a body exceeding maxUploadBytes is
+// rejected with 413 FILE_TOO_LARGE and the pre-existing file is untouched.
+func TestWriteContent_TooLarge_413(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "big.md"), []byte("original"), 0o644))
+
+	huge := strings.Repeat("x", testMaxUploadBytes+10)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/big.md/content",
+		strings.NewReader(`{"content":"`+huge+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "FILE_TOO_LARGE", resp.Error.Code)
+
+	data, err := os.ReadFile(filepath.Join(ws, "big.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(data), "original file must be untouched")
+}
+
+// TestWriteContent_TargetIsDirectory_400 verifies writing "into" an existing
+// directory is rejected with 400 BAD_REQUEST.
+func TestWriteContent_TargetIsDirectory_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "afolder"), 0o755))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/afolder/content",
+		strings.NewReader(`{"content":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BAD_REQUEST", resp.Error.Code)
+}
+
+// TestWriteContent_PathOutsideWorkspace_403 verifies the write path is validated
+// for traversal / escape exactly like the read endpoints.
+func TestWriteContent_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/../../etc/passwd/content",
+		strings.NewReader(`{"content":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// TestAtomicWriteFile_TooLargeLeavesOriginalUntouched verifies the atomicity
+// invariant: when the payload exceeds the limit, the original file is left
+// byte-for-byte unchanged and no staging temp leaks into the directory. This is
+// the "simulated write failure" case — the limit check fails before any rename,
+// so the destination is never touched.
+func TestAtomicWriteFile_TooLargeLeavesOriginalUntouched(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "orig.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o644))
+
+	// limit (4) is smaller than the data → errWriteTooLarge before staging a temp.
+	_, err := atomicWriteFile(target, []byte("overflow"), 4)
+	require.ErrorIs(t, err, errWriteTooLarge)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(data))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "no stale .ws-write-* temp should remain")
+}
+
+// TestAtomicWriteFile_OverwriteReplacesContent verifies the happy path of the
+// primitive: a successful write fully replaces the destination via temp+rename
+// and leaves no temp behind.
+func TestAtomicWriteFile_OverwriteReplacesContent(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0o644))
+
+	n, err := atomicWriteFile(target, []byte("replacement"), 1<<20)
+	require.NoError(t, err)
+	assert.Equal(t, len("replacement"), n)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "replacement", string(data))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "no stale .ws-write-* temp should remain")
+}
+
+// newWorkspaceRoutingEngine builds a production-style engine via RegisterRoutes
+// with the REAL AuthMiddleware (not a stub), so routing and auth-gating tests
+// exercise the PUT catch-all dispatch and JWT enforcement exactly as deployed.
+// The authenticated user is "user-rt".
+func newWorkspaceRoutingEngine(t *testing.T) (engine *gin.Engine, jwtSecret, wsRoot string) {
+	t.Helper()
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	wsRoot = filepath.Join(dataDir, "user-rt", "workspace")
+	require.NoError(t, os.MkdirAll(wsRoot, 0o755))
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
+	jwtSecret = "wc-routing-secret"
+	r := gin.New()
+	RegisterRoutes(r, RouteDeps{
+		AuthMW:                 middleware.AuthMiddleware(jwtSecret),
+		QueryTokenAuthMW:       middleware.QueryTokenAuthMiddleware(jwtSecret),
+		Login:                  func(*gin.Context) {},
+		SessionList:            func(*gin.Context) {},
+		SessionCreate:          func(*gin.Context) {},
+		SessionMessages:        func(*gin.Context) {},
+		SendMessage:            func(*gin.Context) {},
+		SessionDelete:          func(*gin.Context) {},
+		SessionUpdateTitle:     func(*gin.Context) {},
+		WorkspaceList:          h.List,
+		WorkspaceUpload:        h.Upload,
+		WorkspaceDownload:      h.Download,
+		WorkspaceTokenDownload: h.TokenDownload,
+		WorkspaceContent:       h.Content,
+		WorkspaceWriteContent:  h.WriteContent,
+		WorkspaceDelete:        h.Delete,
+		WorkspaceRename:        h.Rename,
+		WorkspaceCreate:        h.Create,
+		MCPTools:               func(*gin.Context) {},
+		SkillsList:             func(*gin.Context) {},
+	})
+	return r, jwtSecret, wsRoot
+}
+
+// TestWriteContent_MissingAuth_401 verifies the PUT /content route is gated by
+// AuthMiddleware: a request without a Bearer token is rejected with 401.
+func TestWriteContent_MissingAuth_401(t *testing.T) {
+	engine, _, _ := newWorkspaceRoutingEngine(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/notes.md/content",
+		strings.NewReader(`{"content":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestWorkspacePut_ProductionRouting asserts the PUT catch-all dispatches by
+// suffix exactly as deployed: a trailing /content reaches WriteContent, while a
+// bare /*path reaches Rename. Mirrors TestTokenDownload_ProductionRouting.
+func TestWorkspacePut_ProductionRouting(t *testing.T) {
+	engine, secret, wsRoot := newWorkspaceRoutingEngine(t)
+	require.NoError(t, os.WriteFile(filepath.Join(wsRoot, "movable.md"), []byte("move me"), 0o644))
+
+	token, err := jwt.Sign(secret, "user-rt", time.Hour)
+	require.NoError(t, err)
+
+	// /content suffix → WriteContent: creates a brand-new file.
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/made.txt/content",
+		strings.NewReader(`{"content":"written"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "WriteContent dispatch: body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(wsRoot, "made.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "written", string(data))
+
+	// bare /*path → Rename: moves movable.md → moved.md.
+	req = httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/movable.md",
+		strings.NewReader(`{"new_path":"moved.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "Rename dispatch: body: %s", w.Body.String())
+	var rr renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rr))
+	assert.Equal(t, "movable.md", rr.OldPath)
+	assert.Equal(t, "moved.md", rr.NewPath)
+
+	_, err = os.Stat(filepath.Join(wsRoot, "movable.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err = os.ReadFile(filepath.Join(wsRoot, "moved.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "move me", string(data))
+}
+
+// --- Create (POST /api/v1/workspace/files/*path) tests ---
+
+// createNodePOST issues a POST create request against the wsTestEnv engine and
+// returns the recorder. body is the raw JSON body ({"type": ...}).
+func (e *wsTestEnv) createNodePOST(t *testing.T, urlPath, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, urlPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	return w
+}
+
+// TestCreate_File verifies an authenticated create of an empty file returns 200,
+// echoes {path, type}, and leaves a 0-byte file on disk.
+func TestCreate_File(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", `{"type":"file"}`)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "notes.md", resp.Path)
+	assert.Equal(t, "file", resp.Type)
+
+	info, err := os.Stat(filepath.Join(ws, "notes.md"))
+	require.NoError(t, err)
+	assert.False(t, info.IsDir())
+	assert.Equal(t, int64(0), info.Size(), "created file must be empty")
+}
+
+// TestCreate_Directory verifies creating an empty directory returns 200 and the
+// directory exists on disk.
+func TestCreate_Directory(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/sub", `{"type":"directory"}`)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "sub", resp.Path)
+	assert.Equal(t, "directory", resp.Type)
+
+	info, err := os.Stat(filepath.Join(ws, "sub"))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+// TestCreate_NestedAutoParents verifies a nested create auto-builds the missing
+// parent directories (leaf-strict + auto-parents) in one call.
+func TestCreate_NestedAutoParents(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/a/b/c", `{"type":"directory"}`)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "a/b/c", resp.Path)
+	assert.Equal(t, "directory", resp.Type)
+
+	assert.DirExists(t, filepath.Join(ws, "a", "b", "c"))
+}
+
+// TestCreate_ExistingFile_409 verifies creating a file that already exists is
+// rejected with 409 ALREADY_EXISTS and the original is left untouched.
+func TestCreate_ExistingFile_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "notes.md"), []byte("keep"), 0o644))
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", `{"type":"file"}`)
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
+
+	data, err := os.ReadFile(filepath.Join(ws, "notes.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(data), "original file must be untouched")
+}
+
+// TestCreate_ExistingDirectory_409 verifies the 409 contract is identical when
+// the existing leaf is a directory (D4: files and directories behave the same).
+func TestCreate_ExistingDirectory_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "sub", "inner.md"), []byte("x"), 0o644))
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/sub", `{"type":"directory"}`)
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
+
+	// Directory and its contents survive untouched.
+	assert.DirExists(t, filepath.Join(ws, "sub"))
+	data, err := os.ReadFile(filepath.Join(ws, "sub", "inner.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+// TestCreate_WorkspaceRoot_400 verifies "creating" the workspace root (empty
+// path) is rejected with 400 BAD_REQUEST rather than a confusing EEXIST.
+func TestCreate_WorkspaceRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/", `{"type":"directory"}`)
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct{ Code string `json:"code"` } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+}
+
+// TestCreate_InvalidOrMissingType_400 verifies a missing or invalid type is
+// rejected with 400 BAD_REQUEST.
+func TestCreate_InvalidOrMissingType_400(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing type", `{}`},
+		{"invalid type", `{"type":"folder"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", tc.body)
+			require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+			var body struct {
+				Error struct{ Code string `json:"code"` } `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+		})
+	}
+}
+
+// TestCreate_PathOutsideWorkspace_403 verifies traversal and symlink escapes are
+// rejected with 403 before any node is created.
+func TestCreate_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	t.Run("traversal", func(t *testing.T) {
+		w := env.createNodePOST(t, "/api/v1/workspace/files/../../etc/passwd", `{"type":"file"}`)
+		require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+		var body struct {
+			Error struct{ Code string `json:"code"` } `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		assert.Equal(t, "FORBIDDEN", body.Error.Code)
+	})
+
+	t.Run("symlink_escape", func(t *testing.T) {
+		// A symlink inside the workspace pointing outside must not let a create
+		// land beyond the workspace root.
+		require.NoError(t, os.Symlink(os.TempDir(), filepath.Join(ws, "escape")))
+		w := env.createNodePOST(t, "/api/v1/workspace/files/escape/x", `{"type":"file"}`)
+		require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	})
+}
+
+// TestCreate_MissingAuth_401 verifies the POST catch-all is gated by
+// AuthMiddleware: a request without a Bearer token is rejected with 401.
+func TestCreate_MissingAuth_401(t *testing.T) {
+	engine, _, _ := newWorkspaceRoutingEngine(t)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/workspace/files/notes.md",
+		strings.NewReader(`{"type":"file"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestWorkspaceCreate_ProductionRouting asserts the POST catch-all routes to
+// WorkspaceCreate under the production route registration, and that it does not
+// collide with the static POST /workspace/upload route (both work independently).
+// Mirrors TestWorkspacePut_ProductionRouting / TestTokenDownload_ProductionRouting.
+func TestWorkspaceCreate_ProductionRouting(t *testing.T) {
+	engine, secret, wsRoot := newWorkspaceRoutingEngine(t)
+
+	token, err := jwt.Sign(secret, "user-rt", time.Hour)
+	require.NoError(t, err)
+
+	// POST /workspace/files/<path> routes to Create: a new file appears on disk.
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/workspace/files/made.txt",
+		strings.NewReader(`{"type":"file"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "Create dispatch: body: %s", w.Body.String())
+	var cr createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &cr))
+	assert.Equal(t, "made.txt", cr.Path)
+	assert.Equal(t, "file", cr.Type)
+	_, err = os.Stat(filepath.Join(wsRoot, "made.txt"))
+	require.NoError(t, err, "file must be created")
+
+	// POST /workspace/upload still routes to Upload (no catch-all collision): a
+	// multipart upload lands a file and returns the upload response shape, not
+	// Create's {path, type}.
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "up.txt")
+	require.NoError(t, err)
+	_, err = io.Copy(part, bytes.NewReader([]byte("uploaded")))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("path", ""))
+	require.NoError(t, writer.Close())
+	upReq := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", body)
+	upReq.Header.Set("Content-Type", writer.FormDataContentType())
+	upReq.Header.Set("Authorization", "Bearer "+token)
+	upW := httptest.NewRecorder()
+	engine.ServeHTTP(upW, upReq)
+	require.Equal(t, http.StatusOK, upW.Code, "Upload dispatch: body: %s", upW.Body.String())
+	var up struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(upW.Body.Bytes(), &up))
+	assert.Equal(t, "up.txt", up.Path)
+	assert.Equal(t, int64(len("uploaded")), up.Size)
 }
 
 // TestList_EmptyWorkspace verifies an empty workspace returns 200 with an
@@ -1227,6 +1795,126 @@ func TestRename_CreateDestinationParent(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(ws, "new", "sub", "f.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "f", string(data))
+}
+
+// TestRename_MoveIntoExistingFolder verifies the move-into-folder gesture: when
+// new_path is an existing directory, the source moves inside it as
+// <dir>/<basename(source)> instead of returning 409.
+func TestRename_MoveIntoExistingFolder(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "subdir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("move me"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a.md",
+		strings.NewReader(`{"new_path":"subdir"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "a.md", resp.OldPath)
+	assert.Equal(t, "subdir/a.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "a.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "subdir", "a.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "move me", string(data))
+}
+
+// TestRename_MoveDirectoryIntoExistingFolder verifies a directory source also
+// moves inside an existing destination directory.
+func TestRename_MoveDirectoryIntoExistingFolder(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "parent"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "old-dir", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "old-dir", "sub", "f.txt"), []byte("x"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/old-dir",
+		strings.NewReader(`{"new_path":"parent"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "old-dir", resp.OldPath)
+	assert.Equal(t, "parent/old-dir", resp.NewPath)
+
+	data, err := os.ReadFile(filepath.Join(ws, "parent", "old-dir", "sub", "f.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+// TestRename_OverwriteExistingFile verifies overwrite:true atomically replaces
+// an existing file destination (os.Rename over the file).
+func TestRename_OverwriteExistingFile(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "src.md"), []byte("src"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "dst.md"), []byte("dst"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/src.md",
+		strings.NewReader(`{"new_path":"dst.md","overwrite":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "src.md", resp.OldPath)
+	assert.Equal(t, "dst.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "src.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "dst.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "src", string(data), "destination must hold the source content")
+}
+
+// TestRename_OverwriteDirectoryRejected_409 verifies overwrite:true is rejected
+// with 409 DEST_NOT_EMPTY when the final destination (after move-into-folder
+// resolution) is an existing directory — tree merge is not supported.
+func TestRename_OverwriteDirectoryRejected_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	// Source file "collide"; new_path "dest" is an existing directory that
+	// already contains a directory named "collide". After move-into-folder
+	// resolution the final destination (dest/collide) is an existing directory.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "collide"), []byte("src"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "dest", "collide"), 0o755))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/collide",
+		strings.NewReader(`{"new_path":"dest","overwrite":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "DEST_NOT_EMPTY", resp.Error.Code)
+
+	// Both source and destination survive untouched (no merge).
+	srcData, err := os.ReadFile(filepath.Join(ws, "collide"))
+	require.NoError(t, err)
+	assert.Equal(t, "src", string(srcData))
+	_, err = os.Stat(filepath.Join(ws, "dest", "collide"))
+	require.NoError(t, err)
 }
 
 // TestDelete_WorkspaceRoot_400 verifies a path that resolves to the workspace

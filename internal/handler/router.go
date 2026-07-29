@@ -59,11 +59,21 @@ type RouteDeps struct {
 	// WorkspaceContent handles GET /api/v1/workspace/files/*path/content. Required.
 	WorkspaceContent gin.HandlerFunc
 
+	// WorkspaceWriteContent handles PUT /api/v1/workspace/files/*path/content
+	// (the atomic create-or-replace text write symmetric to WorkspaceContent).
+	// Required.
+	WorkspaceWriteContent gin.HandlerFunc
+
 	// WorkspaceDelete handles DELETE /api/v1/workspace/files/*path. Required.
 	WorkspaceDelete gin.HandlerFunc
 
 	// WorkspaceRename handles PUT /api/v1/workspace/files/*path. Required.
 	WorkspaceRename gin.HandlerFunc
+
+	// WorkspaceCreate handles POST /api/v1/workspace/files/*path — a strict
+	// create of an empty file or directory selected by the body {"type": ...}.
+	// Required.
+	WorkspaceCreate gin.HandlerFunc
 
 	// WorkspaceOnlyOfficeConfig handles GET /api/v1/workspace/files/*path/onlyoffice-config.
 	// It signs a DocEditor config with the OnlyOffice secret (Bearer auth, like
@@ -126,6 +136,7 @@ const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
 //	GET  /api/v1/workspace/files/*path/content     (auth, text content)
 //	GET  /api/v1/workspace/files/*path/onlyoffice-config (auth, signed editor config)
 //	PUT  /api/v1/workspace/files/*path             (auth, rename file/dir)
+//	POST /api/v1/workspace/files/*path             (auth, create empty file/dir)
 //	DELETE /api/v1/workspace/files/*path          (auth, delete file/dir)
 //	POST /api/v1/workspace/onlyoffice-callback     (query token, save callback)
 //	GET  /api/v1/mcp/tools                        (auth)         [agent]
@@ -190,8 +201,17 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	// routes per method so this coexists with the GET catch-all above.
 	authed.DELETE("/workspace/files/*path", deps.WorkspaceDelete)
 
-	// PUT also shares the catch-all for rename/move operations.
-	authed.PUT("/workspace/files/*path", deps.WorkspaceRename)
+	// PUT shares the catch-all and dispatches by suffix: a trailing "/content"
+	// selects the text-content write (WorkspaceWriteContent); everything else is
+	// a rename/move (WorkspaceRename). Mirrors the GET-side suffix dispatch.
+	authed.PUT("/workspace/files/*path", dispatchWorkspacePut(deps))
+
+	// POST on the catch-all is the strict create (empty file or directory via the
+	// body {type}). Unlike GET/PUT there is no /content split, so it registers
+	// directly with no suffix dispatcher. It does not collide with the static
+	// POST /workspace/upload route: that diverges at the /workspace/{upload,files}
+	// node (two static segments), not at the wildcard.
+	authed.POST("/workspace/files/*path", deps.WorkspaceCreate)
 
 	// OnlyOffice save callback. It is a standalone POST (not under the catch-all)
 	// so it can use the query-token middleware — OnlyOffice posts from the
@@ -264,6 +284,28 @@ func dispatchWorkspaceFile(deps RouteDeps) gin.HandlerFunc {
 			return
 		}
 		deps.WorkspaceDownload(c)
+	}
+}
+
+// dispatchWorkspacePut returns a gin handler that forwards to
+// WorkspaceWriteContent when the captured *path ends with "/content", and to
+// WorkspaceRename otherwise. It mirrors the GET-side dispatchWorkspaceFile so
+// the PUT catch-all can serve both the rename/move operation and the symmetric
+// text-content write under a single /*path wildcard — gin rejects registering a
+// static /content sibling alongside the wildcard at the same tree node, so, as
+// on the GET side, dispatch is by trailing suffix.
+func dispatchWorkspacePut(deps RouteDeps) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		raw := strings.TrimPrefix(c.Param("path"), "/")
+		if strings.HasSuffix(raw, contentRouteSuffix) {
+			trimmed := strings.TrimSuffix(raw, contentRouteSuffix)
+			// Re-set the param so WriteContent reads the trimmed value, exactly
+			// as the GET side does for WorkspaceContent.
+			c.Params = stripContentSuffix(c.Params, trimmed)
+			deps.WorkspaceWriteContent(c)
+			return
+		}
+		deps.WorkspaceRename(c)
 	}
 }
 
