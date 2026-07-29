@@ -361,8 +361,8 @@ func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 			if cfg.ReasoningEffort == "" {
 				cfg.ReasoningEffort = "medium"
 			}
-			if cfg.ReasoningEffort != "low" && cfg.ReasoningEffort != "medium" && cfg.ReasoningEffort != "high" && cfg.ReasoningEffort != "xhigh" {
-				return fmt.Errorf("agents.%s.reasoning_effort: invalid value %q (must be low, medium, or high)", name, cfg.ReasoningEffort)
+			if cfg.ReasoningEffort != "low" && cfg.ReasoningEffort != "medium" && cfg.ReasoningEffort != "high" && cfg.ReasoningEffort != "xhigh" && cfg.ReasoningEffort != "max" {
+				return fmt.Errorf("agents.%s.reasoning_effort: invalid value %q (must be low, medium, high, xhigh or max)", name, cfg.ReasoningEffort)
 			}
 		} else if cfg.ReasoningEffort != "" {
 			return fmt.Errorf("agents.%s.reasoning_effort: cannot be set when thinking is disabled", name)
