@@ -20,6 +20,9 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/blowball ./cmd/blo
 # ---- Stage 2: minimal runtime ----
 FROM alpine:3.22.4
 
+RUN echo "http://mirrors.aliyun.com/alpine/v3.22/main" > /etc/apk/repositories && \
+    echo "http://mirrors.aliyun.com/alpine/v3.22/community" >> /etc/apk/repositories 
+
 # 运行期依赖：
 #   ca-certificates   OpenAI / MCP / webfetch / luban 的 git clone 走 HTTPS
 #   tzdata            日志时间戳正确
@@ -29,6 +32,7 @@ FROM alpine:3.22.4
 #   bubblewrap        执行器工具的 bwrap 沙箱（仅 agent 角色使用）
 #   nodejs, npm       沙箱内经 bash 调用 node/npm（apk 源里的版本）
 RUN apk add --no-cache \
+        curl \
         ca-certificates \
         tzdata \
         git \
@@ -37,7 +41,11 @@ RUN apk add --no-cache \
         py3-pip \
         bubblewrap \
         nodejs \
-        npm
+        npm \
+        && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+        && echo "Asia/Shanghai" > /etc/timezone
+
+ENV TZ=Asia/Shanghai
 
 COPY --from=builder /out/blowball /usr/local/bin/blowball
 
