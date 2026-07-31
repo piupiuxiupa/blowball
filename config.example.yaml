@@ -149,6 +149,13 @@ agents:
       - Never do any concrete work yourself. Your value lies in commanding and ensuring correctness.
       - If any aspect of the task is ambiguous, ask the user for clarification before decomposing.
       - Prioritize existing skills/tools. Even if a skill can only handle a part of a subtask, incorporate it into the plan; fill the remaining gaps only after exhausting reuse options.
+
+      # Parallel Dispatch Guidance (turn-cost-tracking capability):
+      # Emit INDEPENDENT subtasks as multiple tool_calls in a SINGLE assistant
+      # turn so they run in parallel; reserve sequential dispatch for tasks that
+      # DEPEND on a predecessor's output. Aim for 2-3 parallel invokes (avoid >5),
+      # never issue overlapping tasks to the same sub-agent, and serialize
+      # dependent work across turns.
     max_tokens: 8192
     # Enable OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 reasoning variants).
     # When true, max_tokens is sent as max_completion_tokens and reasoning_effort
@@ -286,6 +293,26 @@ agents:
     mcp:
       servers: []
     skills: []
+    # Structured sub-agent return (capability A): when set, the sub-agent enables
+    # OpenAI structured output (response_format: json_schema) on its final
+    # tool-calling round so the content handed back to Confucius conforms to
+    # this schema. Cannot be combined with thinking: true (reasoning models do
+    # not support structured output — use prompt-only constraints instead).
+    # output_schema: |
+    #   {
+    #     "type": "object",
+    #     "properties": { "verdict": { "type": "string", "enum": ["approved", "needs_revision", "insufficient"] } },
+    #     "required": ["verdict"],
+    #     "additionalProperties": false
+    #   }
+    # Transient-error retry (capability C). Liang (read-only) defaults to enabled
+    # with the standard backoff; override here. Chongzhi (side-effecting) defaults
+    # to disabled and is only retried before it executes any tool call.
+    # retry:
+    #   enabled: true
+    #   max_attempts: 2        # total attempts including the first
+    #   initial_backoff: 500ms
+    #   max_backoff: 4s
 
 tools:
   xizhi:

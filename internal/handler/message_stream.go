@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -153,6 +154,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	hub := h.newHub()
 	type runResult struct {
 		events []stream.StreamEvent
+		usage  map[string]any
 		err    error
 	}
 	resultCh := make(chan runResult, 1)
@@ -162,8 +164,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// cancels the agent loop. We close the hub when Handle returns so the
 		// SSE writer drains remaining events and exits cleanly.
 		defer hub.Close()
-		events, err := h.orch.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub)
-		resultCh <- runResult{events: events, err: err}
+		events, usage, err := h.orch.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub)
+		resultCh <- runResult{events: events, usage: usage, err: err}
 	}()
 
 	// writeSSE returns when the hub is closed (orchestrator finished) or the
@@ -185,10 +187,14 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	saveCtx := trace.WithContext(context.Background(), tid)
 
 	// persistEvents writes the user message and the supplied assistant event
-	// stream using the existing SaveMessagesBatch path, then triggers title
-	// generation for a first turn. It is used for both successful and
-	// interrupted (client-canceled) turns.
-	persistEvents := func(events []stream.StreamEvent) {
+	// stream using the existing SaveMessagesBatch path, persists the turn's
+	// per-agent cost into turn_usage, then triggers title generation for a first
+	// turn. It is used for both successful and interrupted (client-canceled)
+	// turns. turn_usage write failure is logged but does NOT roll back the
+	// message batch (usage is observability data, messages are business data —
+	// see the turn-cost-tracking spec's "Usage write failure does not roll back
+	// messages" scenario).
+	persistEvents := func(events []stream.StreamEvent, usage map[string]any) {
 		// Title generation still needs a single assistant content string. We
 		// derive it from the token events emitted by Confucius so the title
 		// service contract remains unchanged.
@@ -199,7 +205,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			}
 		}
 
-		go func(events []stream.StreamEvent) {
+		go func(events []stream.StreamEvent, usage map[string]any) {
 			defer func() {
 				if r := recover(); r != nil {
 					logger.L().Error("panic saving event stream",
@@ -231,7 +237,18 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 					zap.String("session_id", sessionID),
 					zap.Error(err))
 			}
-		}(events)
+
+			// Persist per-agent token cost into turn_usage AFTER the message
+			// batch. Failure is logged only — never roll back messages.
+			if tu, ok := buildTurnUsage(sessionID, tid, userID, usage); ok {
+				if err := h.sessSvc.SaveTurnUsage(saveCtx, tu); err != nil {
+					logger.L().Warn("save turn_usage failed; messages persisted",
+						zap.String("op", "handler.send_message"),
+						zap.String("session_id", sessionID),
+						zap.Error(err))
+				}
+			}
+		}(events, usage)
 
 		if isFirstTurn && h.titleSvc != nil {
 			// Fire-and-forget; TitleService.GenerateTitle has its own recover().
@@ -251,7 +268,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				zap.String("user_id", userID),
 				zap.Int("event_count", len(res.events)),
 				zap.Error(res.err))
-			persistEvents(res.events)
+			persistEvents(res.events, res.usage)
 			return
 		}
 		logger.L().Error("orchestrator failed",
@@ -265,5 +282,53 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// Success path: persist the full turn (user message + event stream) in one
 	// asynchronous batch. The response has already been sent; there is no need
 	// to block the HTTP handler on three-layer storage.
-	persistEvents(res.events)
+	persistEvents(res.events, res.usage)
+}
+
+// buildTurnUsage materializes a model.TurnUsage from the done event's usage
+// object plus the request identifiers. The usage map is the authoritative
+// {total, by_agent, meta} object; it is serialized verbatim into UsageJSON and
+// its total.total_tokens is copied into the redundant TotalTokens column for
+// fast per-session SUM() aggregation. Returns ok=false when usage is nil or
+// missing total.total_tokens, so the caller can skip persistence cleanly
+// (e.g. a turn that errored before any LLM call produced usage).
+func buildTurnUsage(sessionID, traceID, userID string, usage map[string]any) (model.TurnUsage, bool) {
+	if len(usage) == 0 {
+		return model.TurnUsage{}, false
+	}
+	totalTokens := extractTotalTokens(usage)
+	raw, err := json.Marshal(usage)
+	if err != nil {
+		return model.TurnUsage{}, false
+	}
+	return model.TurnUsage{
+		SessionID:   sessionID,
+		TraceID:     traceID,
+		UserID:      userID,
+		UsageJSON:   string(raw),
+		TotalTokens: totalTokens,
+	}, true
+}
+
+// extractTotalTokens pulls the aggregate total_tokens out of the usage object's
+// nested `total` segment, tolerating the JSON-decoded map[string]any shape
+// (numbers arrive as float64). Returns 0 when absent.
+func extractTotalTokens(usage map[string]any) int {
+	totalRaw, ok := usage["total"]
+	if !ok {
+		return 0
+	}
+	total, ok := totalRaw.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch v := total["total_tokens"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
 }

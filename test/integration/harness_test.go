@@ -160,6 +160,12 @@ type memoryMySQL struct {
 	messages map[string][]model.Message
 	nextID   int64
 
+	// turnUsages records every TurnUsage row handed to SaveTurnUsage, keyed by
+	// session_id, so integration tests can assert per-turn cost persistence and
+	// the session-deletion cascade (DeleteSession clears the slice).
+	turnUsages       map[string][]model.TurnUsage
+	saveTurnUsageErr error
+
 	// Archive mirrors, populated by DeleteSession so integration tests can
 	// assert the source rows landed in the *_deleted tier alongside the purge.
 	deletedSessions map[string]model.Session
@@ -173,6 +179,7 @@ func newMemoryMySQL() *memoryMySQL {
 		sessions:        map[string]*model.Session{},
 		titles:          map[string]model.Title{},
 		messages:        map[string][]model.Message{},
+		turnUsages:      map[string][]model.TurnUsage{},
 		deletedSessions: map[string]model.Session{},
 		deletedTitles:   map[string]model.Title{},
 		deletedMessages: map[string][]model.Message{},
@@ -225,6 +232,9 @@ func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
 	delete(m.sessions, sessionID)
 	delete(m.titles, sessionID)
 	delete(m.messages, sessionID)
+	// turn_usage cascades with the session delete via its FK ON DELETE CASCADE
+	// (migration 010); mirror that here so integration tests can assert it.
+	delete(m.turnUsages, sessionID)
 	return nil
 }
 
@@ -388,6 +398,30 @@ func (m *memoryMySQL) messagesFor(sessionID string) []model.Message {
 	defer m.mu.Unlock()
 	out := make([]model.Message, len(m.messages[sessionID]))
 	copy(out, m.messages[sessionID])
+	return out
+}
+
+// SaveTurnUsage records the per-turn usage row, mirroring the real store. It
+// honors saveTurnUsageErr so tests can simulate a usage-write failure to
+// verify the "messages win" isolation.
+func (m *memoryMySQL) SaveTurnUsage(_ context.Context, tu model.TurnUsage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.saveTurnUsageErr != nil {
+		return m.saveTurnUsageErr
+	}
+	m.nextID++
+	tu.ID = m.nextID
+	m.turnUsages[tu.SessionID] = append(m.turnUsages[tu.SessionID], tu)
+	return nil
+}
+
+// turnUsagesFor returns the recorded turn_usage rows for sessionID. Test helper.
+func (m *memoryMySQL) turnUsagesFor(sessionID string) []model.TurnUsage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.TurnUsage, len(m.turnUsages[sessionID]))
+	copy(out, m.turnUsages[sessionID])
 	return out
 }
 

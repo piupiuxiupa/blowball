@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -98,14 +99,15 @@ func (f *fakeLLMClient) lastRequest() LLMRequest {
 // invocations and emits a deterministic token stream + lifecycle events so
 // tests can verify that the parent loop wired sub-agent events through the hub.
 type fakeAgent struct {
-	name    string
-	prompt  string
-	content string
-	tokens  []string
-	usage   Usage
-	err     error
-	mu      sync.Mutex
-	calls   []fakeAgentCall
+	name        string
+	prompt      string
+	content     string
+	tokens      []string
+	usage       Usage
+	err         error
+	retryPolicy config.AgentRetryConfig
+	mu          sync.Mutex
+	calls       []fakeAgentCall
 }
 
 type fakeAgentCall struct {
@@ -115,31 +117,35 @@ type fakeAgentCall struct {
 func (a *fakeAgent) Name() string         { return a.name }
 func (a *fakeAgent) SystemPrompt() string { return a.prompt }
 
-func (a *fakeAgent) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, error) {
+// retryPolicy lets tests configure the fake's retry behavior; defaults to a
+// disabled policy so existing tests are unaffected.
+func (a *fakeAgent) RetryPolicy() config.AgentRetryConfig { return a.retryPolicy }
+
+func (a *fakeAgent) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
 	a.mu.Lock()
 	a.calls = append(a.calls, fakeAgentCall{messages: append([]Message{}, messages...)})
 	a.mu.Unlock()
 
 	if !hub.SendCtx(ctx, stream.AgentStartEvent(a.name)) {
-		return "", Usage{}, ctx.Err()
+		return "", Usage{}, nil, ctx.Err()
 	}
 	if a.err != nil {
 		hub.SendCtx(ctx, stream.AgentErrorEvent(a.name, a.err.Error(), "agent_failed"))
 		hub.SendCtx(ctx, stream.AgentEndEvent(a.name))
-		return "", Usage{}, a.err
+		return "", Usage{}, nil, a.err
 	}
 	for _, t := range a.tokens {
 		if err := ctx.Err(); err != nil {
-			return "", Usage{}, err
+			return "", Usage{}, nil, err
 		}
 		if !hub.SendCtx(ctx, stream.TokenEvent(a.name, t)) {
-			return "", Usage{}, ctx.Err()
+			return "", Usage{}, nil, ctx.Err()
 		}
 	}
 	if !hub.SendCtx(ctx, stream.AgentEndEvent(a.name)) {
-		return "", Usage{}, ctx.Err()
+		return "", Usage{}, nil, ctx.Err()
 	}
-	return a.content, a.usage, nil
+	return a.content, a.usage, nil, nil
 }
 
 func (a *fakeAgent) callCount() int {

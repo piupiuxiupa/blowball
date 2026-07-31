@@ -67,7 +67,11 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	require.True(t, ok, "expected meta in done event")
 	usage, ok := meta["usage"].(map[string]any)
 	require.True(t, ok, "expected usage in done event meta")
-	assert.Equal(t, float64(2), usage["reasoning_tokens"], "expected reasoning_tokens in usage")
+	// New authoritative shape: reasoning_tokens lives under total (and each
+	// by_agent entry), not at the flat top level.
+	totalObj, ok := usage["total"].(map[string]any)
+	require.True(t, ok, "expected usage.total in done event")
+	assert.Equal(t, float64(2), totalObj["reasoning_tokens"], "expected reasoning_tokens in usage.total")
 
 	// Wait for the async batch save and title generation to finish so the test
 	// can clean up the temp data directory without racing the FS writer.

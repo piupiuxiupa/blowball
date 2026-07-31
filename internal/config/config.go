@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -322,6 +323,38 @@ type AgentMCPServerConfig struct {
 	Tools []string `yaml:"tools"`
 }
 
+// AgentRetryConfig is the per-agent transient-error retry policy for sub-agent
+// dispatch (capability C). It governs how Confucius retries a sub-agent's LLM
+// call when it fails with a transient error (429/5xx/timeout), subject to a
+// per-turn token budget and per-agent idempotency (Liang default-enabled /
+// Chongzhi default-disabled — a side-effecting agent is only retried before it
+// has executed any tool_call). Zero-value fields are filled by
+// applyRetryDefaults.
+type AgentRetryConfig struct {
+	Enabled        bool          `yaml:"enabled"`
+	MaxAttempts    int           `yaml:"max_attempts"`     // total attempts including the first; 0 -> default
+	InitialBackoff time.Duration `yaml:"initial_backoff"` // first retry delay; 0 -> default
+	MaxBackoff     time.Duration `yaml:"max_backoff"`     // backoff cap; 0 -> default
+	BudgetTokens   int           `yaml:"budget_tokens"`   // per-turn retry token cap; 0 -> no budget
+}
+
+// Default retry backoff parameters (design Open Question, task 7.1): a small
+// fixed budget that recovers from a transient blip without amplifying cost on
+// a sustained outage. Confirmed values; tune with real 429 data.
+const (
+	defaultRetryMaxAttempts    = 2
+	defaultRetryInitialBackoff = 500 * time.Millisecond
+	defaultRetryMaxBackoff     = 4 * time.Second
+)
+
+// DefaultRetryMaxAttempts / DefaultRetryInitialBackoff / DefaultRetryMaxBackoff
+// expose the retry defaults for callers outside the config package (the agent
+// retry wrapper uses them when a policy omits the fields). They mirror the
+// private constants above.
+func DefaultRetryMaxAttempts() int           { return defaultRetryMaxAttempts }
+func DefaultRetryInitialBackoff() time.Duration { return defaultRetryInitialBackoff }
+func DefaultRetryMaxBackoff() time.Duration     { return defaultRetryMaxBackoff }
+
 // AgentConfig describes a single agent's runtime settings.
 type AgentConfig struct {
 	Name            string         `yaml:"name"`
@@ -333,6 +366,29 @@ type AgentConfig struct {
 	Skills          []string       `yaml:"skills"`
 	Thinking        bool           `yaml:"thinking"`
 	ReasoningEffort string         `yaml:"reasoning_effort"`
+	// OutputSchema is an optional raw JSON Schema (string form) that, when set,
+	// makes the sub-agent enable OpenAI structured output
+	// (response_format: json_schema) on its FINAL tool-calling round (the
+	// round with no tool_calls, finish_reason=stop). This constrains the
+	// content returned to the parent to conform to the schema. Only meaningful
+	// for sub-agents (Liang); Confucius never sets it and Chongzhi's output is
+	// file changes, not structured text. When Thinking is true (reasoning
+	// models), structured output is incompatible, so validate() rejects the
+	// combination unless the agent is willing to degrade to a prompt-only
+	// constraint — enforced by rejecting Thinking+OutputSchema outright here
+	// (the spec's model-gate: only the prompt-only degradation path is
+	// allowed, and that path is driven purely by prompt text, not this field,
+	// so a reasoning agent MUST NOT set output_schema).
+	//
+	// Decision (task 6.1, design Open Question): the schema is inlined as a
+	// YAML multi-line string rather than referenced via output_schema_file —
+	// single-file readability wins for the small Liang schemas; split to a file
+	// only if a schema grows large.
+	OutputSchema string `yaml:"output_schema"`
+	// Retry is the per-agent transient-error retry policy (capability C).
+	// Defaults are applied per-agent by applyRetryDefaults (Liang retry enabled,
+	// Chongzhi disabled).
+	Retry AgentRetryConfig `yaml:"retry"`
 }
 
 // AgentsConfig holds the three blowball agents.
@@ -366,6 +422,35 @@ func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 			}
 		} else if cfg.ReasoningEffort != "" {
 			return fmt.Errorf("agents.%s.reasoning_effort: cannot be set when thinking is disabled", name)
+		}
+		// Structured output model-gate (capability A): thinking (reasoning
+		// models) is incompatible with OpenAI structured output. The spec's
+		// only allowed degradation path for a reasoning model is a prompt-only
+		// constraint, which is driven purely by system-prompt text and does
+		// NOT use OutputSchema. So a reasoning agent MUST NOT set output_schema;
+		// reject the contradictory config at load time rather than failing at
+		// runtime.
+		if cfg.Thinking && strings.TrimSpace(cfg.OutputSchema) != "" {
+			return fmt.Errorf("agents.%s: output_schema cannot be set when thinking is enabled (reasoning models do not support structured output; use prompt-only constraints instead)", name)
+		}
+		// Validate OutputSchema parses as JSON when set (fail fast at load
+		// rather than on the final sub-agent round).
+		if strings.TrimSpace(cfg.OutputSchema) != "" {
+			if !json.Valid([]byte(cfg.OutputSchema)) {
+				return fmt.Errorf("agents.%s.output_schema: must be valid JSON", name)
+			}
+		}
+		// Validate retry backoff parameters when retry is enabled.
+		if cfg.Retry.Enabled {
+			if cfg.Retry.MaxAttempts < 0 {
+				return fmt.Errorf("agents.%s.retry.max_attempts: must be >= 0", name)
+			}
+			if cfg.Retry.InitialBackoff < 0 || cfg.Retry.MaxBackoff < 0 {
+				return fmt.Errorf("agents.%s.retry: backoff durations must be >= 0", name)
+			}
+			if cfg.Retry.MaxBackoff > 0 && cfg.Retry.InitialBackoff > cfg.Retry.MaxBackoff {
+				return fmt.Errorf("agents.%s.retry: initial_backoff must be <= max_backoff", name)
+			}
 		}
 		for i, s := range cfg.MCP.Servers {
 			if strings.TrimSpace(s.Name) == "" {
@@ -753,6 +838,11 @@ func Load(path string) (*Config, error) {
 	cfg.Tools.Executor.Python.ApplyDefaults()
 	cfg.Tools.Executor.Pip.ApplyDefaults()
 	cfg.Tools.Executor.Sandbox.applyDefaults()
+	// Per-agent retry defaults (capability C): Liang (read-only) defaults to
+	// retry-enabled; Chongzhi (side-effecting) defaults to retry-disabled. The
+	// zero-value Enabled=false is preserved for Chongzhi (the safe default for
+	// a file-writing agent), while Liang's zero value is overridden to enabled.
+	cfg.Agents.applyRetryDefaults()
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -841,6 +931,37 @@ func (m MCPConfig) validate() error {
 		seen[s.Name] = struct{}{}
 	}
 	return nil
+}
+
+// applyRetryDefaults fills per-agent retry defaults: Liang (read-only)
+// defaults to retry-enabled; Chongzhi (side-effecting file writes) defaults to
+// retry-disabled. Confucius itself is never retried (it is the dispatcher).
+// Backoff fields use the package defaults when zero. An agent that explicitly
+// sets Retry.Enabled keeps its choice; only the zero value is overridden for
+// Liang/Chongzhi. It is idempotent.
+func (a *AgentsConfig) applyRetryDefaults() {
+	applyOne := func(cfg *AgentConfig, defaultEnabled bool) {
+		// Only override Enabled when the agent left the whole Retry block at
+		// zero (MaxAttempts==0 && !Enabled && backoffs==0), i.e. the operator
+		// did not configure retry at all. This lets an operator explicitly
+		// disable Liang retry by setting retry: { enabled: false }.
+		if cfg.Retry == (AgentRetryConfig{}) {
+			cfg.Retry.Enabled = defaultEnabled
+		}
+		if cfg.Retry.Enabled {
+			if cfg.Retry.MaxAttempts == 0 {
+				cfg.Retry.MaxAttempts = defaultRetryMaxAttempts
+			}
+			if cfg.Retry.InitialBackoff == 0 {
+				cfg.Retry.InitialBackoff = defaultRetryInitialBackoff
+			}
+			if cfg.Retry.MaxBackoff == 0 {
+				cfg.Retry.MaxBackoff = defaultRetryMaxBackoff
+			}
+		}
+	}
+	applyOne(&a.Liang, true)      // read-only: retry by default
+	applyOne(&a.Chongzhi, false)  // side-effecting: do not retry by default
 }
 
 // serverNames returns the set of declared global MCP server names.

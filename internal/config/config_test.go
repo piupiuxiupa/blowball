@@ -543,6 +543,108 @@ agents:
 	}
 }
 
+func TestLoad_OutputSchemaConfig(t *testing.T) {
+	cases := []struct {
+		name        string
+		agentBlock  string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:       "output_schema without thinking is valid",
+			agentBlock: "liang:\n    name: Liang\n    output_schema: '{\"type\":\"object\"}'",
+			wantErr:    false,
+		},
+		{
+			name:        "output_schema with thinking rejected",
+			agentBlock:  "liang:\n    name: Liang\n    thinking: true\n    output_schema: '{\"type\":\"object\"}'",
+			wantErr:     true,
+			errContains: "output_schema",
+		},
+		{
+			name:        "invalid JSON output_schema rejected",
+			agentBlock:  "liang:\n    name: Liang\n    output_schema: 'not-json'",
+			wantErr:     true,
+			errContains: "output_schema",
+		},
+		{
+			name:        "retry negative max_attempts rejected",
+			agentBlock:  "liang:\n    name: Liang\n    retry:\n        enabled: true\n        max_attempts: -1",
+			wantErr:     true,
+			errContains: "max_attempts",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, fmt.Sprintf(`
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confucius: {name: Confucius}
+  chongzhi: {name: Chongzhi}
+  %s
+`, tc.agentBlock))
+
+			cfg, err := Load(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load expected error for %q, got nil", tc.name)
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			_ = cfg
+		})
+	}
+}
+
+// TestLoad_RetryDefaults verifies the per-agent retry defaults: Liang defaults
+// to retry-enabled with the standard backoff, Chongzhi defaults to disabled,
+// and an explicit retry block is respected.
+func TestLoad_RetryDefaults(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confucius: {name: Confucius}
+  chongzhi: {name: Chongzhi}
+  liang: {name: Liang}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	// Liang (read-only) defaults to retry-enabled with standard backoffs.
+	if !cfg.Agents.Liang.Retry.Enabled {
+		t.Error("Liang retry should default to enabled")
+	}
+	if cfg.Agents.Liang.Retry.MaxAttempts != defaultRetryMaxAttempts {
+		t.Errorf("Liang MaxAttempts = %d, want %d", cfg.Agents.Liang.Retry.MaxAttempts, defaultRetryMaxAttempts)
+	}
+	if cfg.Agents.Liang.Retry.InitialBackoff != defaultRetryInitialBackoff {
+		t.Errorf("Liang InitialBackoff = %v, want %v", cfg.Agents.Liang.Retry.InitialBackoff, defaultRetryInitialBackoff)
+	}
+	if cfg.Agents.Liang.Retry.MaxBackoff != defaultRetryMaxBackoff {
+		t.Errorf("Liang MaxBackoff = %v, want %v", cfg.Agents.Liang.Retry.MaxBackoff, defaultRetryMaxBackoff)
+	}
+
+	// Chongzhi (side-effecting) defaults to retry-disabled.
+	if cfg.Agents.Chongzhi.Retry.Enabled {
+		t.Error("Chongzhi retry should default to disabled")
+	}
+}
+
 func TestLoad_ExecutorConfig(t *testing.T) {
 	path := writeTempYAML(t, `
 mysql:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/stream"
@@ -62,34 +63,57 @@ func (c *Confucius) Name() string { return c.cfg.Name }
 // SystemPrompt implements Agent.
 func (c *Confucius) SystemPrompt() string { return c.cfg.SystemPrompt }
 
+// RetryPolicy implements Agent. Confucius itself is never retried (it is the
+// dispatcher), so it always returns a disabled policy.
+func (c *Confucius) RetryPolicy() config.AgentRetryConfig { return config.AgentRetryConfig{} }
+
 // Run executes the Confucius agent loop. It streams lifecycle events to hub
-// and returns the final assistant content + aggregated usage. The loop
-// terminates when:
+// and returns the final assistant content + aggregated usage + the per-agent
+// usage breakdown. The loop terminates when:
 //   - the model returns finish_reason="stop" (or no tool_calls and no content),
 //   - ctx is cancelled,
 //   - maxConfuciusRounds is exceeded (defensive guard against infinite loops).
 //
 // On sub-agent or tool failure, an agent_error event is streamed and the
 // error text is fed back to the model as the tool result so the LLM can react.
-func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, error) {
+//
+// The returned TurnBreakdown is the per-agent cost attribution: it always
+// contains Confucius's own usage under "Confucius", plus one entry per
+// dispatched sub-agent under its display name, and the turn-level meta
+// (parallel flag + ordered invoke_* list). emitDone renders it as
+// usage.by_agent / usage.meta on the done event and it is persisted verbatim
+// into turn_usage.usage_json.
+func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
 	select {
 	case <-ctx.Done():
-		return "", Usage{}, ctx.Err()
+		return "", Usage{}, nil, ctx.Err()
 	default:
 	}
 
 	if !hub.SendCtx(ctx, stream.AgentStartEvent(c.Name())) {
-		return "", Usage{}, ctx.Err()
+		return "", Usage{}, nil, ctx.Err()
 	}
 
 	round := append([]Message{}, messages...)
 	var total Usage
 	var finalContent string
 
+	// byAgent carries per-agent usage; Confucius accumulates its own usage
+	// under the "Confucius" key, and each dispatched sub-agent under its own
+	// name. Used to render usage.by_agent on the done event.
+	byAgent := map[string]Usage{}
+	// turnMeta tracks cross-agent turn facts: which invoke_* tools fired and
+	// whether any assistant round dispatched >=2 tool_calls in parallel.
+	tmeta := newTurnMeta()
+	// retryBudget bounds the total tokens spent on sub-agent retries across the
+	// whole turn (capability C). Shared across parallel dispatches; nil-safe
+	// (an unset policy.BudgetTokens means unlimited).
+	budget := newRetryBudget(c.cfg.Retry.BudgetTokens)
+
 	for i := 0; i < maxConfuciusRounds; i++ {
 		select {
 		case <-ctx.Done():
-			return finalContent, total, ctx.Err()
+			return finalContent, total, buildBreakdown(byAgent, tmeta), ctx.Err()
 		default:
 		}
 
@@ -122,14 +146,15 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 		})
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return finalContent, total, ctxErr
+				return finalContent, total, buildBreakdown(byAgent, tmeta), ctxErr
 			}
 			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), err.Error(), "llm_error"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
-			return finalContent, total, fmt.Errorf("confucius: stream chat: %w", err)
+			return finalContent, total, buildBreakdown(byAgent, tmeta), fmt.Errorf("confucius: stream chat: %w", err)
 		}
 
 		total.Add(resp.Usage)
+		byAgent[c.Name()] = addUsage(byAgent[c.Name()], resp.Usage)
 
 		// Append the assistant turn (with any tool_calls) to the conversation
 		// so the next round sees the model's reasoning + planned calls.
@@ -150,9 +175,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 			break
 		}
 
+		// Track parallelism: a round with >=2 tool_calls counts as parallel.
+		tmeta.observeRound(resp.ToolCalls)
+
 		// Dispatch all tool_calls in parallel. Sub-agent invocations are
 		// intercepted before the registry; regular tools go through it.
-		toolResults := c.dispatchToolCalls(ctx, resp.ToolCalls, hub)
+		toolResults := c.dispatchToolCalls(ctx, resp.ToolCalls, hub, budget)
 
 		// Append one role="tool" message per tool_call_id, preserving the
 		// order OpenAI expects (each tool result references a tool_call_id).
@@ -166,6 +194,18 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 			// Registry tools incur no LLM usage, so subUsage is nil for them.
 			if result.subUsage != nil {
 				total.Add(*result.subUsage)
+				// Attribute the sub-agent's cost to its own key in the
+				// per-agent breakdown (preserved instead of being folded into
+				// the Confucius total). The sub-agent's display name is
+				// recorded on the result by dispatchSubAgent.
+				if result.subAgentName != "" {
+					byAgent[result.subAgentName] = addUsage(byAgent[result.subAgentName], *result.subUsage)
+				}
+			}
+			// Record which invoke_* sub-agents fired this turn (for
+			// usage.meta.sub_agent_invocations), regardless of success.
+			if IsInvokeTool(tc.Function.Name) {
+				tmeta.observeInvoke(tc.Function.Name)
 			}
 			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
 			round = append(round, Message{
@@ -178,26 +218,30 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 	}
 
 	if !hub.SendCtx(ctx, stream.AgentEndEvent(c.Name())) {
-		return finalContent, total, ctx.Err()
+		return finalContent, total, buildBreakdown(byAgent, tmeta), ctx.Err()
 	}
-	return finalContent, total, nil
+	return finalContent, total, buildBreakdown(byAgent, tmeta), nil
 }
 
 // toolResult is the resolved outcome of one tool_call. content is fed back to
 // the model verbatim as the role="tool" message body; isError is currently
-// informational (the content already contains the error message).
+// informational (the content already contains the error message). subUsage is
+// non-nil when this result came from a sub-agent run; subAgentName then names
+// that sub-agent so the parent can attribute cost to its per-agent key.
 type toolResult struct {
-	content  string
-	isError  bool
-	subUsage *Usage // non-nil when this result came from a sub-agent run
+	content      string
+	isError      bool
+	subUsage     *Usage // non-nil when this result came from a sub-agent run
+	subAgentName string  // display name of the producing sub-agent ("" for registry tools)
 }
 
 // dispatchToolCalls runs every tool_call in parallel via errgroup. Sub-agent
 // invocations (invoke_chongzhi / invoke_liang) are dispatched to the matching
 // Agent; everything else goes through toolRegistry.Call. Errors are streamed
 // as agent_error events and turned into error-string tool results so the LLM
-// can react. Returns a map keyed by tool_call.ID.
-func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub) map[string]toolResult {
+// can react. Returns a map keyed by tool_call.ID. budget carries the per-turn
+// retry token budget shared across all parallel dispatches (concurrency-safe).
+func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub, budget *retryBudget) map[string]toolResult {
 	results := make(map[string]toolResult, len(calls))
 	var mu sync.Mutex
 
@@ -208,7 +252,7 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 			// errgroup cancels gctx on first non-nil return; we never want
 			// one tool failure to abort the others, so we always return nil
 			// and surface failures through the result map + events.
-			res := c.dispatchOne(gctx, tc, hub)
+			res := c.dispatchOne(gctx, tc, hub, budget)
 			mu.Lock()
 			results[tc.ID] = res
 			mu.Unlock()
@@ -223,13 +267,13 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 // events is the sub-agent's own name when dispatching to a sub-agent, and
 // Confucius's own name for plain tool errors (since the tool itself has no
 // identity in the stream model).
-func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hub, budget *retryBudget) toolResult {
 	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
 
 	if IsInvokeTool(tc.Function.Name) {
-		return c.dispatchSubAgent(ctx, tc, hub)
+		return c.dispatchSubAgent(ctx, tc, hub, budget)
 	}
 	return c.dispatchRegistryTool(ctx, tc, hub)
 }
@@ -240,7 +284,17 @@ func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hu
 // up through the shared hub (already wired — same hub, the sub-agent's Run
 // emits its own agent_start/token/agent_end). Its usage is folded back into
 // the result so Confucius can aggregate.
-func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+//
+// Capability C — transient error retry: when the sub-agent's RetryPolicy is
+// enabled and the failure is transient (429/5xx/timeout), the LLM call is
+// retried up to MaxAttempts with exponential backoff (capped at MaxBackoff),
+// subject to the per-turn token budget (budget). Semantic errors (bad_args,
+// unknown_tool) are never retried; side-effecting agents (those implementing
+// ToolCallTracker) are retried only before they execute any tool call. Each
+// retry emits an agent_error event with Meta.retry=true so the frontend can
+// signal the retry. Retries are skipped entirely when the policy is disabled
+// (Chongzhi by default) or the budget is exhausted.
+func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stream.Hub, budget *retryBudget) toolResult {
 	sub, ok := c.subAgents[tc.Function.Name]
 	if !ok {
 		// Should not happen — NewConfucius validates presence — but defensive.
@@ -262,17 +316,80 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stre
 	}
 
 	userMsg := buildSubAgentUserMessage(args)
-	content, usage, err := sub.Run(ctx, []Message{{Role: "user", Content: userMsg}}, hub)
-	if err != nil {
-		msg := err.Error()
-		// sub.Run already streamed an agent_error event on its own (see
-		// agent.Run implementations); fall back to a generic code here only
-		// if it didn't. We surface the error text as the tool result so the
-		// LLM can react.
-		return toolResult{content: msg, isError: true, subUsage: &usage}
+	messages := []Message{{Role: "user", Content: userMsg}}
+
+	// First attempt.
+	content, usage, _, err := sub.Run(ctx, messages, hub)
+	if err == nil {
+		u := usage
+		return toolResult{content: content, subUsage: &u, subAgentName: sub.Name()}
 	}
-	u := usage
-	return toolResult{content: content, subUsage: &u}
+
+	// Failed. Decide retryability.
+	policy := sub.RetryPolicy()
+	if !shouldRetry(sub, err, policy, budget) {
+		return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name()}
+	}
+
+	// Retry loop: attempts are numbered from 1 (the first RETRY). MaxAttempts
+	// is the total attempt count including the initial call already performed.
+	maxAttempts := policy.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = config.DefaultRetryMaxAttempts()
+	}
+	for attempt := 1; attempt < maxAttempts; attempt++ {
+		// Charge the failed attempt's cost to the budget before deciding to
+		// retry, so a flapping downstream cannot burn unbounded tokens.
+		budget.charge(usage)
+		if !budget.allows() {
+			break
+		}
+		// Idempotency re-check before each retry: a prior attempt may have
+		// executed a tool call between this check and the failure.
+		if tracker, ok := sub.(ToolCallTracker); ok && tracker.LastRunExecutedTool() {
+			break
+		}
+		// Signal the retry to the frontend: an agent_error carrying Meta.retry=true
+		// (plus the triggering error) so the UI can distinguish a retry from a
+		// terminal failure.
+		hub.SendCtx(ctx, retryErrorEvent(sub.Name(), err))
+		select {
+		case <-time.After(computeBackoff(policy, attempt)):
+		case <-ctx.Done():
+			return toolResult{content: ctx.Err().Error(), isError: true, subUsage: &usage, subAgentName: sub.Name()}
+		}
+		content, usage, _, err = sub.Run(ctx, messages, hub)
+		if err == nil {
+			u := usage
+			return toolResult{content: content, subUsage: &u, subAgentName: sub.Name()}
+		}
+		// A non-transient follow-up error (e.g. bad_args surfaced on retry)
+		// stops the loop; the last error is surfaced to Confucius.
+		if !isTransientError(err) {
+			break
+		}
+	}
+
+	// Retries exhausted / stopped. Surface the last error to Confucius.
+	return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name()}
+}
+
+// shouldRetry reports whether a failed sub-agent dispatch should be retried:
+// the policy must be enabled, the error must be transient, the agent must not
+// have already executed a side-effecting tool call, and the budget must allow
+// at least one more attempt. It is the single retryability decision point.
+func shouldRetry(sub Agent, err error, policy config.AgentRetryConfig, budget *retryBudget) bool {
+	if !policy.Enabled {
+		return false
+	}
+	if !isTransientError(err) {
+		return false
+	}
+	// Side-effecting agents are retried only before any tool call executed.
+	if tracker, ok := sub.(ToolCallTracker); ok && tracker.LastRunExecutedTool() {
+		return false
+	}
+	return budget.allows()
 }
 
 func (c *Confucius) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
@@ -347,4 +464,79 @@ func subAgentNameFor(toolName string) string {
 		return "Liang"
 	}
 	return toolName
+}
+
+// addUsage returns base with delta merged in, returning a new map value so it
+// is safe to call when base is the zero value. Mirrors Usage.Add without the
+// pointer receiver so it composes with map lookups.
+func addUsage(base, delta Usage) Usage {
+	base.Add(delta)
+	return base
+}
+
+// buildBreakdown freezes the in-flight byAgent map + turnMeta into the
+// immutable *TurnBreakdown returned by Confucius.Run. byAgent is copied so
+// callers cannot mutate the live map; the invoke list is snapshotted via
+// tmeta.snapshot. Safe to call on every return path (including error paths)
+// so partial attribution is never lost.
+func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
+	invokes, parallel := tmeta.snapshot()
+	out := make(map[string]Usage, len(byAgent))
+	for k, v := range byAgent {
+		out[k] = v
+	}
+	return &TurnBreakdown{
+		ByAgent:             out,
+		Parallel:            parallel,
+		SubAgentInvocations: invokes,
+	}
+}
+
+// turnMeta accumulates cross-agent facts about one Confucius turn for the done
+// event's usage.meta: which invoke_* sub-agents fired (sub_agent_invocations,
+// in dispatch order, deduplicated) and whether any assistant round dispatched
+// >=2 tool_calls (parallel). It is concurrency-safe because dispatch happens
+// across goroutines; observeRound/observeInvoke may be called from multiple
+// goroutines.
+type turnMeta struct {
+	mu            sync.Mutex
+	parallel      bool
+	invokes       []string // ordered, deduplicated invoke_* tool names
+	invokesSeen   map[string]struct{}
+}
+
+func newTurnMeta() *turnMeta {
+	return &turnMeta{invokesSeen: map[string]struct{}{}}
+}
+
+// observeRound records whether one assistant round's tool_calls constitute a
+// parallel dispatch (>=2 calls in the same round).
+func (t *turnMeta) observeRound(calls []ToolCall) {
+	if len(calls) >= 2 {
+		t.mu.Lock()
+		t.parallel = true
+		t.mu.Unlock()
+	}
+}
+
+// observeInvoke records that the named invoke_* sub-agent was dispatched this
+// turn, preserving first-seen order and de-duplicating.
+func (t *turnMeta) observeInvoke(toolName string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.invokesSeen[toolName]; ok {
+		return
+	}
+	t.invokesSeen[toolName] = struct{}{}
+	t.invokes = append(t.invokes, toolName)
+}
+
+// snapshot returns the invoke list and parallel flag safe for emission. The
+// returned slice is a copy so callers may use it after further mutations.
+func (t *turnMeta) snapshot() ([]string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, len(t.invokes))
+	copy(out, t.invokes)
+	return out, t.parallel
 }

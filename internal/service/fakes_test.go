@@ -51,6 +51,10 @@ type fakeMySQLStore struct {
 	appendMessagesIDs   []int64
 	appendMessagesErr   error
 
+	saveTurnUsageCalls int
+	saveTurnUsageArg   model.TurnUsage
+	saveTurnUsageErr   error
+
 	updateSessionTimeCalls int
 	updateSessionTimeArg   string
 	updateSessionTimeErr   error
@@ -236,6 +240,16 @@ func (f *fakeMySQLStore) ListMessagesPaged(_ context.Context, sessionID, cursor 
 		return nil, "", err
 	}
 	return page, next, nil
+}
+
+// SaveTurnUsage records the turn_usage row handed to the store. It mirrors the
+// real store's write-only path (no not-found handling).
+func (f *fakeMySQLStore) SaveTurnUsage(_ context.Context, tu model.TurnUsage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saveTurnUsageCalls++
+	f.saveTurnUsageArg = tu
+	return f.saveTurnUsageErr
 }
 
 // fakeRedisStore records AppendMessage/GetMessages/SetMessages calls.

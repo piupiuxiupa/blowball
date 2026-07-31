@@ -207,12 +207,55 @@ components:
           required: [usage]
           properties:
             usage:
+              description: |
+                Per-turn token-usage breakdown. Authoritative shape (turn-cost-tracking
+                spec): `{total, by_agent, meta}`.
+
+                `total` is the aggregate turn usage. `by_agent` carries the per-agent
+                attribution keyed by agent display name (always includes "Confucius",
+                plus one entry per dispatched sub-agent). `meta` records turn-level
+                orchestration facts: `parallel` (true when any assistant round
+                dispatched >=2 tool_calls) and `sub_agent_invocations` (the invoke_*
+                tool names dispatched this turn, in dispatch order, deduplicated).
+
+                Legacy flat top-level fields (`prompt_tokens`, `completion_tokens`,
+                `total_tokens`, `reasoning_tokens`) have been MOVED under `total`;
+                consumers reading `usage.total_tokens` must migrate to
+                `usage.total.total_tokens`.
               type: object
-              required: [prompt_tokens, completion_tokens, total_tokens]
+              required: [total, by_agent, meta]
               properties:
-                prompt_tokens: {type: integer}
-                completion_tokens: {type: integer}
-                total_tokens: {type: integer}
+                total:
+                  $ref: '#/components/schemas/SSEUsageTokens'
+                by_agent:
+                  type: object
+                  additionalProperties:
+                    $ref: '#/components/schemas/SSEUsageTokens'
+                  description: Per-agent usage keyed by agent display name (Confucius, Chongzhi, Liang).
+                meta:
+                  type: object
+                  required: [sub_agent_invocations, parallel]
+                  properties:
+                    sub_agent_invocations:
+                      type: array
+                      items: {type: string}
+                      description: invoke_* tool names dispatched this turn, dispatch order, deduplicated.
+                    parallel:
+                      type: boolean
+                      description: True when any assistant round dispatched >=2 tool_calls.
+                error:
+                  type: string
+                  description: Present only when the turn completed with an error; the failure message.
+    SSEUsageTokens:
+      type: object
+      required: [prompt_tokens, completion_tokens, total_tokens]
+      properties:
+        prompt_tokens: {type: integer}
+        completion_tokens: {type: integer}
+        total_tokens: {type: integer}
+        reasoning_tokens:
+          type: integer
+          description: Present only for thinking/reasoning runs (reasoning_tokens > 0).
     FileEntry:
       type: object
       required: [name, type, size, update_time]

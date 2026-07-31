@@ -328,43 +328,59 @@ func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, use
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}
 
-	content, usage, err := confucius.Run(ctx, messages, hub)
+	content, usage, breakdown, err := confucius.Run(ctx, messages, hub)
 	if err != nil {
 		// Even on error we emit done so the SSE client terminates. The
 		// Confucius loop already emitted agent_error + agent_end for the
 		// failing turn.
 		emitDone(hub, ctx, doneUsage{
 			confucius: usage,
-			content: content,
-			err:     err,
+			breakdown: breakdown,
+			content:   content,
+			err:       err,
 		})
 		return fmt.Errorf("orchestrator: confucius run: %w", err)
 	}
 
-	emitDone(hub, ctx, doneUsage{confucius: usage, content: content})
+	emitDone(hub, ctx, doneUsage{confucius: usage, breakdown: breakdown, content: content})
 	return nil
 }
 
 // doneUsage is the payload assembled into the final done event's Meta.usage.
+// confucius is the aggregate turn usage (Confucius + all dispatched
+// sub-agents); breakdown is the per-agent attribution + orchestration meta
+// Confucius assembled during its dispatch loop (Confucius's own usage under
+// "Confucius", each dispatched sub-agent under its display name, plus the
+// parallel flag and ordered invoke_* list). Both are persisted into
+// turn_usage so historical cost is queryable per agent and per session.
 type doneUsage struct {
 	confucius Usage
-	content string
-	err     error
+	breakdown *TurnBreakdown
+	content   string
+	err       error
 }
 
-// emitDone builds the per-agent usage breakdown map and emits the terminal
-// done event. Per-agent sub-totals (Chongzhi / Liang) are folded into the
-// Confucius usage returned by Run via sub-agent Run aggregation, so the
-// top-level Confucius usage already represents the whole turn. We still emit
-// the standard per-agent shape so the frontend can render a breakdown table.
+// emitDone builds the authoritative per-agent usage object and emits the
+// terminal done event. The usage object shape is (see the turn-cost-tracking
+// spec, authoritative shape):
+//
+//	{
+//	  "total":     {prompt_tokens, completion_tokens, total_tokens, reasoning_tokens?},
+//	  "by_agent":  {<agent display name>: {prompt_tokens, ...}},
+//	  "meta":      {sub_agent_invocations: [...], parallel: bool},
+//	}
+//
+// `total` is the aggregate turn usage. `by_agent` carries the per-agent
+// breakdown Confucius assembled; it always includes "Confucius" and one entry
+// per dispatched sub-agent. `meta` records whether any assistant round
+// dispatched >=2 tool_calls (parallel) and which invoke_* sub-agents fired
+// (sub_agent_invocations, deduplicated, dispatch order). On error, an `error`
+// field is added at the top level describing the failure.
 func emitDone(hub *stream.Hub, ctx context.Context, u doneUsage) {
 	usage := map[string]any{
-		"prompt_tokens":     u.confucius.PromptTokens,
-		"completion_tokens": u.confucius.CompletionTokens,
-		"total_tokens":      u.confucius.TotalTokens,
-	}
-	if u.confucius.ReasoningTokens > 0 {
-		usage["reasoning_tokens"] = u.confucius.ReasoningTokens
+		"total":    usageObject(u.confucius),
+		"by_agent": buildByAgentObject(u.breakdown),
+		"meta":     buildMetaObject(u.breakdown),
 	}
 	if u.err != nil {
 		usage["error"] = u.err.Error()
@@ -375,4 +391,38 @@ func emitDone(hub *stream.Hub, ctx context.Context, u doneUsage) {
 	if !hub.SendCtx(ctx, stream.DoneEvent(usage)) {
 		return
 	}
+}
+
+// buildByAgentObject renders the breakdown's per-agent map into the done
+// event's usage.by_agent object: {<agent name>: usageObject(...)}. When the
+// breakdown is nil (no dispatch happened, e.g. an error before Run produced a
+// breakdown) it returns an empty object.
+func buildByAgentObject(b *TurnBreakdown) map[string]any {
+	if b == nil || len(b.ByAgent) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(b.ByAgent))
+	for name, u := range b.ByAgent {
+		out[name] = usageObject(u)
+	}
+	return out
+}
+
+// buildMetaObject renders the breakdown's orchestration meta into the done
+// event's usage.meta object: {sub_agent_invocations: [...], parallel: bool}.
+// When the breakdown is nil it returns an empty meta with a false parallel flag
+// and an empty invocations list.
+func buildMetaObject(b *TurnBreakdown) map[string]any {
+	m := map[string]any{
+		"sub_agent_invocations": []string{},
+		"parallel":              false,
+	}
+	if b == nil {
+		return m
+	}
+	m["parallel"] = b.Parallel
+	if len(b.SubAgentInvocations) > 0 {
+		m["sub_agent_invocations"] = append([]string(nil), b.SubAgentInvocations...)
+	}
+	return m
 }

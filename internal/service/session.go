@@ -255,6 +255,36 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 	return nil
 }
 
+// SaveTurnUsage persists one turn's per-agent token cost into the turn_usage
+// table. It is a thin wrapper over the MySQL store so the handler does not
+// import the store package directly. The caller (the streaming handler)
+// invokes this AFTER SaveMessagesBatch in the persist goroutine.
+//
+// Decision (task 3.5 / design D2): turn_usage is written as an INDEPENDENT
+// call, NOT inside the SaveMessagesBatch transaction. The MySQL store layer
+// has no transaction plumbing (every store method is a standalone Exec), and
+// the turn-cost-tracking spec mandates that a usage write failure MUST NOT
+// roll back the message batch (usage is observability data, messages are
+// business data). A same-transaction write would require a savepoint to honor
+// that priority, so an independent call is both simpler and faithful to the
+// "messages win" priority convention. Recorded here per task 3.5.
+func (s *SessionService) SaveTurnUsage(ctx context.Context, tu model.TurnUsage) error {
+	tid := trace.FromContext(ctx)
+	log := logger.L().With(
+		zap.String("op", "session.save_turn_usage"),
+		zap.String("session_id", tu.SessionID),
+		zap.String("trace_id", tu.TraceID),
+	)
+	if tid != "" {
+		log = log.With(zap.String("trace_id", tid))
+	}
+	if err := s.mysql.SaveTurnUsage(ctx, tu); err != nil {
+		log.Error("save turn_usage failed", zap.Error(err))
+		return fmt.Errorf("session.save_turn_usage: %w", err)
+	}
+	return nil
+}
+
 // sessionFile is the on-disk JSON shape for the warm tier. messages holds the
 // raw JSON blob of each Message (one per append) in insertion order.
 type sessionFile struct {

@@ -189,6 +189,13 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		}
 		params.Tools = tools
 	}
+	if len(req.ResponseFormat) > 0 {
+		rf, err := parseResponseFormat(req.ResponseFormat)
+		if err != nil {
+			return LLMResponse{}, fmt.Errorf("openai client: parse response_format: %w", err)
+		}
+		params.ResponseFormat = rf
+	}
 
 	logLLMRequest(ctx, req)
 
@@ -363,6 +370,38 @@ func parseOpenAITools(b []byte) ([]openai.ChatCompletionToolUnionParam, error) {
 		out = append(out, openai.ChatCompletionFunctionTool(fd))
 	}
 	return out, nil
+}
+
+// parseResponseFormat converts a raw JSON response_format payload (as set by
+// a sub-agent on its final round) into the openai-go union param. The wire
+// shape is the full OpenAI response_format object:
+//
+//	{"type":"json_schema","json_schema":{"name":"...","schema":{...},"strict":true}}
+//
+// Only the json_schema variant is supported (the structured-output shape used
+// by capability A); an unknown type is rejected so a malformed schema fails
+// fast at the LLM call rather than silently producing free text.
+func parseResponseFormat(raw json.RawMessage) (openai.ChatCompletionNewParamsResponseFormatUnion, error) {
+	var wire struct {
+		Type       string          `json:"type"`
+		JSONSchema json.RawMessage `json:"json_schema"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return openai.ChatCompletionNewParamsResponseFormatUnion{}, err
+	}
+	switch wire.Type {
+	case "json_schema":
+		var inner shared.ResponseFormatJSONSchemaJSONSchemaParam
+		if err := json.Unmarshal(wire.JSONSchema, &inner); err != nil {
+			return openai.ChatCompletionNewParamsResponseFormatUnion{}, fmt.Errorf("unmarshal json_schema: %w", err)
+		}
+		return openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{JSONSchema: inner},
+		}, nil
+	case "":
+		return openai.ChatCompletionNewParamsResponseFormatUnion{}, fmt.Errorf("response_format: missing type")
+	}
+	return openai.ChatCompletionNewParamsResponseFormatUnion{}, fmt.Errorf("response_format: unsupported type %q", wire.Type)
 }
 
 // toolCallStitcher accumulates streamed tool-call deltas keyed by Index. The

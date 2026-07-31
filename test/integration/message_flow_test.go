@@ -94,8 +94,10 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	require.True(t, ok, "done event must include meta.usage; got %v", donePayload["meta"])
 	usage, ok := usageRaw.(map[string]any)
 	require.True(t, ok, "meta.usage must be an object; got %T", usageRaw)
-	assert.NotNil(t, usage["total_tokens"], "meta.usage.total_tokens must be present")
-	assert.Greater(t, usage["total_tokens"], float64(0), "meta.usage.total_tokens must be > 0")
+	totalObj, ok := usage["total"].(map[string]any)
+	require.True(t, ok, "meta.usage.total must be an object")
+	assert.NotNil(t, totalObj["total_tokens"], "meta.usage.total.total_tokens must be present")
+	assert.Greater(t, totalObj["total_tokens"], float64(0), "meta.usage.total.total_tokens must be > 0")
 
 	// The session row must exist in the MySQL tier.
 	env.mysqlFake.mu.Lock()

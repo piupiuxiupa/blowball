@@ -133,7 +133,7 @@ func runChongzhiAndCollect(t *testing.T, c *Chongzhi, messages []Message) ([]str
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		content, usage, err := c.Run(ctx, messages, hub)
+		content, usage, _, err := c.Run(ctx, messages, hub)
 		resCh <- result{content, usage, err}
 	}()
 
@@ -323,7 +323,7 @@ func TestChongzhi_ReasoningRequest(t *testing.T) {
 	hub := stream.NewHub(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _, err = c.Run(ctx, []Message{{Role: "user", Content: "hello"}}, hub)
+	_, _, _, err = c.Run(ctx, []Message{{Role: "user", Content: "hello"}}, hub)
 	require.NoError(t, err)
 	hub.Close()
 

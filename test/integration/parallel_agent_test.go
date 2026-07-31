@@ -201,8 +201,17 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 	require.NotNil(t, donePayload)
 	usageRaw := donePayload["meta"].(map[string]any)["usage"]
 	usage := usageRaw.(map[string]any)
-	totalTokens := int64(usage["total_tokens"].(float64))
-	assert.Greater(t, totalTokens, int64(0), "aggregated total_tokens must be > 0")
+	totalObj := usage["total"].(map[string]any)
+	totalTokens := int64(totalObj["total_tokens"].(float64))
+	assert.Greater(t, totalTokens, int64(0), "aggregated total.total_tokens must be > 0")
+	// by_agent must carry all three agents (Confucius dispatched both).
+	byAgent := usage["by_agent"].(map[string]any)
+	assert.Contains(t, byAgent, stream.AgentConfucius)
+	assert.Contains(t, byAgent, stream.AgentChongzhi)
+	assert.Contains(t, byAgent, stream.AgentLiang)
+	// meta.parallel must be true (one round dispatched >=2 tool_calls).
+	metaObj := usage["meta"].(map[string]any)
+	assert.Equal(t, true, metaObj["parallel"])
 
 	// The tracking client should have observed exactly one round per
 	// sub-agent.

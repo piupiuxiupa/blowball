@@ -12,7 +12,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/stream"
 	"go.uber.org/zap"
@@ -20,7 +22,8 @@ import (
 
 // Agent is the runtime contract every agent satisfies. Run executes one
 // complete agent loop, streaming lifecycle and token events to hub and
-// returning the final assistant content and aggregated token usage.
+// returning the final assistant content, the aggregated token usage, and the
+// per-agent usage breakdown.
 type Agent interface {
 	// Name returns the agent's display name (Confucius | Chongzhi | Liang),
 	// matching model.AgentConfucius/AgentChongzhi/AgentLiang and StreamEvent.Agent.
@@ -30,12 +33,68 @@ type Agent interface {
 	// message. It is loaded from config.yaml at startup.
 	SystemPrompt() string
 
+	// RetryPolicy returns the agent's transient-error retry policy (capability
+	// C). The dispatcher (Confucius) consults it to decide whether to retry a
+	// sub-agent's failed LLM call. Leaf agents derive it from their config.
+	RetryPolicy() config.AgentRetryConfig
+
 	// Run executes the agent loop. messages is the conversation history in
 	// OpenAI chat format (without the system prompt, which the implementation
 	// prepends internally). Run streams agent_start/token/tool_call/agent_end
-	// events to hub and returns the final assistant content plus aggregated
-	// usage across every LLM round within this Run.
-	Run(ctx context.Context, messages []Message, hub *stream.Hub) (assistantContent string, usage Usage, err error)
+	// events to hub and returns:
+	//   - assistantContent: the final assistant text,
+	//   - usage: aggregated token usage across every LLM round in this Run,
+	//   - breakdown: per-agent usage + orchestration metadata. Only Confucius
+	//     (the dispatcher) populates this; leaf agents (Chongzhi/Liang)
+	//     return nil and their parent folds their usage into its own breakdown.
+	Run(ctx context.Context, messages []Message, hub *stream.Hub) (assistantContent string, usage Usage, breakdown *TurnBreakdown, err error)
+}
+
+// ToolCallTracker is an optional capability implemented by sub-agents whose
+// Run may execute side-effecting tool calls (e.g. Chongzhi's xizhi write
+// tools). The retry wrapper consults it for per-agent idempotency: a
+// side-effecting agent is retried only when its most recent Run executed NO
+// tool call. Read-only sub-agents (Liang) intentionally do NOT implement this
+// interface so they remain unconditionally retryable.
+type ToolCallTracker interface {
+	// LastRunExecutedTool reports whether the most recent Run dispatched at
+	// least one tool call that returned without error. Callers must invoke Run
+	// before reading this; the value reflects the last completed Run.
+	LastRunExecutedTool() bool
+}
+
+// TurnBreakdown is the per-agent usage attribution and orchestration metadata
+// for one Confucius turn. It is the source of the done event's
+// Meta.usage.by_agent and Meta.usage.meta, and is persisted verbatim into
+// turn_usage.usage_json. Only Confucius assembles one (it is the only agent
+// that dispatches sub-agents); leaf agents return nil and let the parent
+// aggregate.
+//
+// Decision (design Open Question "Agent.Run signature"): the original lean was
+// a bare `byAgent map[string]Usage` return value, but the done event also
+// needs turn-level meta — whether any assistant round dispatched >=2
+// tool_calls (parallel) and which invoke_* sub-agents fired, in dispatch
+// order (sub_agent_invocations). Neither is reconstructable from the usage
+// map (a map is unordered, and parallelism is per-round, not per-agent), so
+// they must be carried alongside byAgent. Bundling both into a struct keeps
+// the blast radius identical to a single new return value (one value, leaf
+// agents return nil) while cleanly carrying meta, and avoids a 5-tuple Run
+// signature. Recorded here per task 2.1.
+type TurnBreakdown struct {
+	// ByAgent maps agent display name -> that agent's aggregated usage for
+	// the turn. Always contains Confucius's own usage under "Confucius"; adds
+	// one entry per dispatched sub-agent under its display name. A sub-agent
+	// that was invoked but failed still gets an entry (possibly zero usage) so
+	// its dispatch is attributable.
+	ByAgent map[string]Usage
+
+	// Parallel reports whether any single assistant round dispatched >=2
+	// tool_calls (the per-round definition of parallel dispatch).
+	Parallel bool
+
+	// SubAgentInvocations lists the invoke_* tool names dispatched this turn,
+	// in first-seen (dispatch) order and de-duplicated.
+	SubAgentInvocations []string
 }
 
 // Usage accumulates token counts for a single Run. Totals across rounds are
@@ -54,6 +113,24 @@ func (u *Usage) Add(other Usage) {
 	u.CompletionTokens += other.CompletionTokens
 	u.TotalTokens += other.TotalTokens
 	u.ReasoningTokens += other.ReasoningTokens
+}
+
+// usageObject renders a Usage value into the per-agent object shape carried by
+// the done event's Meta.usage.by_agent and .total. reasoning_tokens is only
+// included when present (it is meaningful only for thinking/reasoning runs).
+// This is the single source of truth for the usage-object shape shared by the
+// done event (agent-orchestration spec) and turn_usage.usage_json
+// (turn-cost-tracking spec).
+func usageObject(u Usage) map[string]any {
+	o := map[string]any{
+		"prompt_tokens":     u.PromptTokens,
+		"completion_tokens": u.CompletionTokens,
+		"total_tokens":      u.TotalTokens,
+	}
+	if u.ReasoningTokens > 0 {
+		o["reasoning_tokens"] = u.ReasoningTokens
+	}
+	return o
 }
 
 // Message is the agent-package's own chat message type. It mirrors the OpenAI
@@ -99,7 +176,11 @@ type LLMClient interface {
 
 // LLMRequest is the per-call payload handed to LLMClient.StreamChat. Tools is
 // the OpenAI tools[] list already JSON-marshaled by tool.Registry.OpenAITools
-// (or nil/empty when the agent has no tools).
+// (or nil/empty when the agent has no tools). ResponseFormat, when non-empty,
+// is a raw JSON response_format payload (e.g. {"type":"json_schema",...}) the
+// client attaches to the chat completion to enable OpenAI structured output;
+// sub-agents set this on their final tool-calling round when configured with
+// an output_schema (capability A).
 type LLMRequest struct {
 	Model           string
 	Messages        []Message
@@ -108,6 +189,7 @@ type LLMRequest struct {
 	Temperature     float32
 	Thinking        bool
 	ReasoningEffort string
+	ResponseFormat  json.RawMessage
 }
 
 // LLMResponse is the aggregated result of one streaming chat completion call.

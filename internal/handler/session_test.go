@@ -39,7 +39,7 @@ type stubOrchestrator struct {
 	preCloseSleep time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub) ([]stream.StreamEvent, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub) ([]stream.StreamEvent, map[string]any, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
 	s.gotSkillsDir = skillsDir
@@ -58,14 +58,20 @@ func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir,
 		}
 	}
 	// Mimic the production adapter contract: done is forwarded to the hub for
-	// the SSE wire but is not part of the persisted event stream.
+	// the SSE wire but is not part of the persisted event stream; its usage is
+	// returned separately so the handler can persist per-agent cost.
 	var out []stream.StreamEvent
+	var usage map[string]any
 	for _, e := range s.eventsToEmit {
-		if e.Type != stream.EventDone {
-			out = append(out, e)
+		if e.Type == stream.EventDone {
+			if u, ok := e.Meta[stream.MetaUsage].(map[string]any); ok {
+				usage = u
+			}
+			continue
 		}
+		out = append(out, e)
 	}
-	return out, s.returnErr
+	return out, usage, s.returnErr
 }
 
 // msgRecorder is a handler-package-local fake MySQLStore/FSStore/RedisStore
@@ -99,6 +105,9 @@ type handlerFakeMySQL struct {
 	appendMessagesErr   error
 	listMessagesRows    []model.Message
 	listMessagesErr     error
+	saveTurnUsageCalls  int
+	saveTurnUsageArg    model.TurnUsage
+	saveTurnUsageErr    error
 }
 
 func (m *handlerFakeMySQL) CreateSession(_ context.Context, sess model.Session) error {
@@ -254,6 +263,14 @@ func (m *handlerFakeMySQL) ListMessagesPaged(_ context.Context, _, cursorStr str
 	return page, next, nil
 }
 
+func (m *handlerFakeMySQL) SaveTurnUsage(_ context.Context, tu model.TurnUsage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.saveTurnUsageCalls++
+	m.saveTurnUsageArg = tu
+	return m.saveTurnUsageErr
+}
+
 type handlerFakeRedis struct {
 	mu                  sync.Mutex
 	appendCalls         int
@@ -397,7 +414,11 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 			stream.TokenEvent(stream.AgentConfucius, "Hello, "),
 			stream.TokenEvent(stream.AgentConfucius, "world!"),
 			stream.AgentEndEvent(stream.AgentConfucius),
-			stream.DoneEvent(map[string]any{"total_tokens": 10}),
+			stream.DoneEvent(map[string]any{
+				"total":    map[string]any{"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
+				"by_agent": map[string]any{"Confucius": map[string]any{"total_tokens": 10}},
+				"meta":     map[string]any{"sub_agent_invocations": []string{}, "parallel": false},
+			}),
 		},
 	}
 	env := newSessionHandlerEnv(t, stub)

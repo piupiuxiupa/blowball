@@ -117,9 +117,18 @@ consumer:
 	require.NotNil(t, doneEvent, "expected a done event")
 	usage, ok := doneEvent.Meta[stream.MetaUsage].(map[string]any)
 	require.True(t, ok, "done event Meta.usage must be map[string]any; got %T", doneEvent.Meta[stream.MetaUsage])
-	assert.Equal(t, 11, usage["total_tokens"])
-	assert.Equal(t, 10, usage["prompt_tokens"])
-	assert.Equal(t, 1, usage["completion_tokens"])
+	// New authoritative shape (turn-cost-tracking spec): nested total/by_agent/meta.
+	total, ok := usage["total"].(map[string]any)
+	require.True(t, ok, "done event Meta.usage.total must be map[string]any; got %T", usage["total"])
+	assert.Equal(t, 11, total["total_tokens"])
+	assert.Equal(t, 10, total["prompt_tokens"])
+	assert.Equal(t, 1, total["completion_tokens"])
+	byAgent, ok := usage["by_agent"].(map[string]any)
+	require.True(t, ok, "done event Meta.usage.by_agent must be map[string]any; got %T", usage["by_agent"])
+	assert.Contains(t, byAgent, stream.AgentConfucius, "by_agent must include Confucius")
+	meta, ok := usage["meta"].(map[string]any)
+	require.True(t, ok, "done event Meta.usage.meta must be map[string]any; got %T", usage["meta"])
+	assert.Equal(t, false, meta["parallel"])
 
 	// Round 1 must have included Confucius's system prompt + user message.
 	req := client.lastRequest()
@@ -424,4 +433,46 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 	assert.Contains(t, prompt, "coding-style")
 	assert.Contains(t, prompt, "Global coding conventions")
 	assert.NotContains(t, prompt, "User override")
+}
+
+// TestOrchestrator_ConfuciusPromptIncludesParallelGuidance verifies the
+// parallel dispatch decision guidance (capability E) is present in the rendered
+// Confucius system prompt. The guidance lives in the base prompt text
+// (config.yaml), so this asserts the rendered prompt carries the key guidance
+// phrases without depending on the full prompt string.
+func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	client := newFake(fakeResponse{
+		tokens:       []string{"done"},
+		content:      "done",
+		finishReason: "stop",
+		usage:        Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	})
+	cfg := &config.Config{
+		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		Agents: config.AgentsConfig{
+			Confucius: config.AgentConfig{
+				Name:         "Confucius",
+				Model:        "gpt-test",
+				SystemPrompt: "you are confucius\n\nParallel Dispatch Guidance\n- Emit INDEPENDENT subtasks as multiple tool_calls in a SINGLE assistant turn.\n- Parallel budget: aim for 2-3 parallel invokes per turn and avoid more than 5.\n- Never issue overlapping/duplicate tasks to the same sub-agent in one turn.",
+				MaxTokens:    256,
+			},
+			Chongzhi: config.AgentConfig{Name: "Chongzhi", Model: "gpt-test", SystemPrompt: "you are chongzhi", MaxTokens: 256},
+			Liang:    config.AgentConfig{Name: "Liang", Model: "gpt-test", SystemPrompt: "you are liang", MaxTokens: 256},
+		},
+	}
+	o, err := NewOrchestrator(client, cfg, nil, nil, skill.NewLoader("", nil), nil)
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub))
+	hub.Close()
+
+	prompt := client.lastRequest().Messages[0].Content
+	assert.Contains(t, prompt, "Parallel Dispatch Guidance")
+	assert.Contains(t, prompt, "SINGLE assistant turn")
+	assert.Contains(t, prompt, "2-3 parallel invokes")
+	assert.Contains(t, prompt, "overlapping/duplicate tasks to the same sub-agent")
 }

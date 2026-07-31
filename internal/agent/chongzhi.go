@@ -30,6 +30,13 @@ type Chongzhi struct {
 	toolRegistry  *tool.Registry
 	toolsJSON     []byte
 	toolsIsNotNil bool
+	// executedToolThisRun records whether the most recent Run dispatched at
+	// least one successful tool call. It is read by the retry wrapper
+	// (capability C) to enforce idempotency: a side-effecting agent is retried
+	// only before it has touched the file system. Guarded by runMu because the
+	// retry wrapper reads it from the dispatch goroutine after Run returns.
+	runMu               sync.Mutex
+	executedToolThisRun bool
 }
 
 // NewChongzhi builds a Chongzhi agent.
@@ -53,26 +60,32 @@ func (c *Chongzhi) Name() string { return c.cfg.Name }
 // SystemPrompt implements Agent.
 func (c *Chongzhi) SystemPrompt() string { return c.cfg.SystemPrompt }
 
+// RetryPolicy implements Agent, returning the agent's configured retry policy.
+func (c *Chongzhi) RetryPolicy() config.AgentRetryConfig { return c.cfg.Retry }
+
 // Run executes the Chongzhi agent loop with streaming and tool dispatch.
-func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, error) {
+func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
 	select {
 	case <-ctx.Done():
-		return "", Usage{}, ctx.Err()
+		return "", Usage{}, nil, ctx.Err()
 	default:
 	}
 
 	if !hub.SendCtx(ctx, stream.AgentStartEvent(c.Name())) {
-		return "", Usage{}, ctx.Err()
+		return "", Usage{}, nil, ctx.Err()
 	}
 
 	round := append([]Message{}, messages...)
 	var total Usage
 	var finalContent string
+	c.runMu.Lock()
+	c.executedToolThisRun = false
+	c.runMu.Unlock()
 
 	for i := 0; i < maxChongzhiRounds; i++ {
 		select {
 		case <-ctx.Done():
-			return finalContent, total, ctx.Err()
+			return finalContent, total, nil, ctx.Err()
 		default:
 		}
 
@@ -102,11 +115,11 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 		})
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return finalContent, total, ctxErr
+				return finalContent, total, nil, ctxErr
 			}
 			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), err.Error(), "llm_error"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
-			return finalContent, total, fmt.Errorf("chongzhi: stream chat: %w", err)
+			return finalContent, total, nil, fmt.Errorf("chongzhi: stream chat: %w", err)
 		}
 
 		total.Add(resp.Usage)
@@ -132,6 +145,14 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 			if !ok {
 				result = toolResult{content: "", isError: true}
 			}
+			// A non-error tool result means the tool executed successfully; mark
+			// the Run as having produced a side effect so the retry wrapper can
+			// suppress retries after this point (capability C idempotency).
+			if !result.isError {
+				c.runMu.Lock()
+				c.executedToolThisRun = true
+				c.runMu.Unlock()
+			}
 			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
 			round = append(round, Message{
 				Role:       "tool",
@@ -143,9 +164,19 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 	}
 
 	if !hub.SendCtx(ctx, stream.AgentEndEvent(c.Name())) {
-		return finalContent, total, ctx.Err()
+		return finalContent, total, nil, ctx.Err()
 	}
-	return finalContent, total, nil
+	return finalContent, total, nil, nil
+}
+
+// LastRunExecutedTool implements ToolCallTracker. It reports whether the most
+// recent Run dispatched at least one successful tool call, so the retry
+// wrapper can suppress retries after Chongzhi has produced a file-system side
+// effect (capability C idempotency).
+func (c *Chongzhi) LastRunExecutedTool() bool {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	return c.executedToolThisRun
 }
 
 // dispatchToolCalls runs every tool_call in parallel. Unlike Confucius, there
