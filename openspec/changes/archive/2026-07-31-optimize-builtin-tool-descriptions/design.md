@@ -64,21 +64,34 @@
 **xizhi_glob_files**
 > Searches a workspace directory with a doublestar glob pattern and returns `{path, pattern, matches[]}` of relative paths. **`path` MUST be relative to the workspace root.** **`pattern` MUST be a doublestar pattern** (e.g. `src/**/*.go`, `**/*_test.go`); hidden entries are excluded unless `include_hidden` is true.
 
+**webfetch**
+> Fetch an external URL and return `{url, status_code, headers, body}`: `url` is the final URL after redirects, `status_code` is the HTTP status int, `headers` maps each response header to its value(s), and `body` is the **full** response as text (no truncation, no size cap). **`url` MUST be an absolute http(s) URL including the scheme.** Follows redirects up to a configurable limit (default 10) and uses the configured timeout (default 30s). **The body is NOT decoded for binary content** — non-text bytes pass through as-is (often garbled), so prefer this for HTML/text, not for downloading binaries. On a non-2xx response the result still carries `status_code` and `headers` (including any `Location`), so **you SHOULD retry with the resolved URL or adjusted method/headers.** A timeout, transport failure, or exceeded redirect cap returns an error (carrying the last redirect `Location` if any) instead of a result.
+
 **bash**
-> Executes a shell command inside a sandboxed workspace and returns `{output, exit_code, truncated}`: `output` is combined stdout+stderr, `exit_code` is the process exit status. **IMPORTANT: output is capped at 64KB** — when truncated it ends with `...output truncated...` and sets `truncated: true`; if you need the rest, narrow the command or redirect output to a workspace file and read it with `xizhi_read_file`. Commands time out at 30s by default. The sandbox runs as an unprivileged user with no network by default; only `/workspace` is writable. Global skills are read-only at `/skills/global`; per-user skills live at `/workspace/.blowball/skills` (managed via luban).
+> Executes a shell command inside a sandboxed workspace and returns `{output, exit_code, truncated}`.
+> - `output` is combined stdout+stderr; `exit_code` is the process exit status.
+> - **IMPORTANT: `output` is capped at 64KB** — when truncated it ends with `...output truncated...` and sets `truncated: true`; if you need the rest, narrow the command or redirect output to a workspace file and read it with `xizhi_read_file`.
+> - Commands time out at 30s by default.
+> - The sandbox runs as an unprivileged user with no network by default; only `/workspace` is writable. Global skills are read-only at `/skills/global`; per-user skills live at `/workspace/.blowball/skills` (managed via luban).
 > - **DO NOT use `cat`, `echo`/redirects, `find` or `grep` for file work — use the `xizhi_*` tools** unless a dedicated tool cannot do the job.
 
 **python**
-> Executes Python code or a Python file inside a sandboxed workspace and returns `{output, exit_code, truncated}` (same shape, 64KB cap and 30s timeout as `bash`). **Exactly one of `code` or `file` is REQUIRED (mutually exclusive).** Packages installed under `/workspace/.pip` are available automatically via `PYTHONPATH`. The sandbox runs as an unprivileged user with no network by default; only `/workspace` is writable.
+> Executes Python code or a Python file inside a sandboxed workspace and returns `{output, exit_code, truncated}` (same shape, 64KB cap and 30s timeout as `bash`).
+> - **Exactly one of `code` or `file` is REQUIRED (mutually exclusive).**
+> - Packages installed under `/workspace/.pip` are available automatically via `PYTHONPATH`.
+> - The sandbox runs as an unprivileged user with no network by default; only `/workspace` is writable.
 > - **DO NOT do file I/O from Python — use the `xizhi_*` tools** for reading/writing workspace files unless the task needs computation.
 
 **pip_install**
-> Installs Python packages into the workspace via pip (inside the sandbox) so they are available to the `python` tool via `PYTHONPATH`. **Use this ONLY to install dependencies — when `python` fails with `ModuleNotFoundError`/`ImportError`.** Returns `{output, exit_code, truncated}` (same 64KB output cap as `bash`; 120s timeout by default; network enabled by default). **DO NOT use this to run code — use `python` for that.**
+> Installs Python packages into the workspace via pip (inside the sandbox) so they are available to the `python` tool via `PYTHONPATH`.
+> - **Use this ONLY to install dependencies — when `python` fails with `ModuleNotFoundError`/`ImportError`.**
+> - Returns `{output, exit_code, truncated}` (same 64KB output cap as `bash`; 120s timeout by default; network enabled by default).
+> - **DO NOT use this to run code — use `python` for that.**
 
 **luban_read_skill**
-> Reads a skill by name and returns its `SKILL.md` markdown body (YAML frontmatter stripped). User skills take precedence over global skills. **`name` MUST be a simple skill identifier, not a path.** **DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory access rules live in the system prompt.)
+> Reads a skill by name and returns its `SKILL.md` markdown body as a **bare string** (YAML frontmatter stripped, not a JSON object). User skills take precedence over global skills. **`name` MUST be a simple skill identifier, not a path.** **DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory access rules live in the system prompt.)
 
-**luban_list_skills / luban_install_skill**：`luban_list_skills` 返回合并后的 skill 元数据列表，强指令词为 **OVERRIDE**（用户覆盖全局）与 **MUST**（先 list 发现、再 `luban_read_skill` 读取）；去掉重复整句 cross-rule。`luban_install_skill` 保留四种安装形态 + 错误恢复指引，强指令词为 **IMPORTANT**（同名覆盖）与 **SHOULD**（按 Location 重试）；去掉重复的 cross-rule 整句。
+**luban_list_skills / luban_install_skill**：`luban_list_skills` 返回数组 `[{name, description, location}, ...]`（`location` 为 `global`/`user`），强指令词为 **OVERRIDE**（用户覆盖全局）与 **MUST**（先 list 发现、再 `luban_read_skill` 读取）；去掉重复整句 cross-rule。`luban_install_skill` 保留四种安装形态 + 错误恢复指引，强指令词为 **IMPORTANT**（同名覆盖）与 **SHOULD**（按 Location 重试）；去掉重复的 cross-rule 整句。
 
 **invoke_chongzhi / invoke_liang**（去重重构来源见 D4）：保留"Invoke the Chongzhi/Liang sub-agent …"语义并按 R3/R4 强化——各加一条"何时别用我"反模式与 ≥2 处强指令词（chongzhi：**MUST** 需改文件时调 / **DO NOT** 分析类改用 `invoke_liang`；liang：**MUST NOT** 改文件 / **DO NOT** 改文件改用 `invoke_chongzhi`）。
 

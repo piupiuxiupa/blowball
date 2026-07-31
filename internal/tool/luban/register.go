@@ -67,9 +67,9 @@ func RegisterAll(r *tool.Registry, tools *Tools) error {
 func registerListSkills(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolListSkills,
-		Description: "List all available skills, both global and user-specific, and return the merged metadata. **User " +
-			"skills OVERRIDE global skills of the same name.** **You MUST discover skill names here first, then load one " +
-			"with `luban_read_skill` (by name, not path).**",
+		Description: "List all available skills and return an array `[{name, description, location}, ...]`, where each " +
+			"entry's `location` is `global` or `user`. **User skills OVERRIDE global skills of the same name.** **You " +
+			"MUST discover skill names here first, then load one with `luban_read_skill` (by name, not path).**",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {},
@@ -85,9 +85,10 @@ func registerListSkills(r *tool.Registry, tools *Tools) error {
 func registerReadSkill(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolReadSkill,
-		Description: "Reads a skill by name and returns its `SKILL.md` markdown body (YAML frontmatter stripped). User skills " +
-			"take precedence over global skills. **`name` MUST be a simple skill identifier, not a path.** **DO NOT read " +
-			"skills with `xizhi_*` — use luban.** (Skill-directory access rules live in the system prompt.)",
+		Description: "Reads a skill by name and returns its `SKILL.md` markdown body as a **bare string** (YAML frontmatter " +
+			"stripped, not a JSON object). User skills take precedence over global skills. **`name` MUST be a simple skill " +
+			"identifier, not a path.** **DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory access rules " +
+			"live in the system prompt.)",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {

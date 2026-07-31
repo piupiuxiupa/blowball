@@ -48,11 +48,15 @@ func RegisterAll(r *tool.Registry, cfg config.WebfetchConfig) {
 
 	spec := &tool.ToolSpec{
 		Name: Name,
-		Description: "Fetch an external URL and return the final URL, HTTP status code, response headers, and response body as text. " +
-			"Follows redirects up to a configurable limit (default 10) and uses the configured timeout (default 30s). " +
-			"**`url` MUST be an absolute http(s) URL including the scheme.** " +
-			"On a non-2xx response (including a redirect that exceeded the limit) the result still carries the final status code and response headers (including any Location), " +
-			"so **you SHOULD retry with the resolved URL or adjusted method/headers.**",
+		Description: "Fetch an external URL and return `{url, status_code, headers, body}`: `url` is the final URL after " +
+			"redirects, `status_code` is the HTTP status int, `headers` maps each response header to its value(s), and " +
+			"`body` is the **full** response as text (no truncation, no size cap). **`url` MUST be an absolute http(s) URL " +
+			"including the scheme.** Follows redirects up to a configurable limit (default 10) and uses the configured " +
+			"timeout (default 30s). **The body is NOT decoded for binary content** — non-text bytes pass through as-is " +
+			"(often garbled), so prefer this for HTML/text, not for downloading binaries. On a non-2xx response the result " +
+			"still carries `status_code` and `headers` (including any `Location`), so **you SHOULD retry with the resolved " +
+			"URL or adjusted method/headers.** A timeout, transport failure, or exceeded redirect cap returns an error " +
+			"(carrying the last redirect `Location` if any) instead of a result.",
 		ParametersJSON: schemaFetch,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a fetchArgs

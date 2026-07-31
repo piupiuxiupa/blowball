@@ -31,15 +31,16 @@ type pipArgs struct {
 func registerBash(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolBash,
-		Description: "Executes a shell command inside a sandboxed workspace and returns `{output, exit_code, truncated}`: " +
-			"`output` is combined stdout+stderr, `exit_code` is the process exit status. **IMPORTANT: output is capped " +
-			"at 64KB** — when truncated it ends with `...output truncated...` and sets `truncated: true`; if you need " +
-			"the rest, narrow the command or redirect output to a workspace file and read it with `xizhi_read_file`. " +
-			"Commands time out at 30s by default. The sandbox runs as an unprivileged user with no network by default; " +
-			"only `/workspace` is writable. Global skills are read-only at `/skills/global`; per-user skills live at " +
-			"`/workspace/.blowball/skills` (managed via luban).\n" +
-			"- **DO NOT use `cat`, `echo`/redirects, `find` or `grep` for file work — use the `xizhi_*` tools** unless " +
-			"a dedicated tool cannot do the job.",
+		Description: "Executes a shell command inside a sandboxed workspace and returns `{output, exit_code, truncated}`.\n" +
+			"- `output` is combined stdout+stderr; `exit_code` is the process exit status.\n" +
+			"- **IMPORTANT: `output` is capped at 64KB** — when truncated it ends with `...output truncated...` and sets " +
+			"`truncated: true`; if you need the rest, narrow the command or redirect output to a workspace file and read " +
+			"it with `xizhi_read_file`.\n" +
+			"- Commands time out at 30s by default.\n" +
+			"- The sandbox runs as an unprivileged user with no network by default; only `/workspace` is writable. Global " +
+			"skills are read-only at `/skills/global`; per-user skills live at `/workspace/.blowball/skills` (managed via luban).\n" +
+			"- **DO NOT use `cat`, `echo`/redirects, `find` or `grep` for file work — use the `xizhi_*` tools** unless a " +
+			"dedicated tool cannot do the job.",
 		ParametersJSON: schemaBash,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a bashArgs
@@ -59,10 +60,10 @@ func registerPython(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolPython,
 		Description: "Executes Python code or a Python file inside a sandboxed workspace and returns `{output, exit_code, " +
-			"truncated}` (same shape, 64KB cap and 30s timeout as `bash`). **Exactly one of `code` or `file` is REQUIRED " +
-			"(they are mutually exclusive).** Packages installed under `/workspace/.pip` are available automatically via " +
-			"`PYTHONPATH`. The sandbox runs as an unprivileged user with no network by default; only `/workspace` is " +
-			"writable.\n" +
+			"truncated}` (same shape, 64KB cap and 30s timeout as `bash`).\n" +
+			"- **Exactly one of `code` or `file` is REQUIRED (mutually exclusive).**\n" +
+			"- Packages installed under `/workspace/.pip` are available automatically via `PYTHONPATH`.\n" +
+			"- The sandbox runs as an unprivileged user with no network by default; only `/workspace` is writable.\n" +
 			"- **DO NOT do file I/O from Python — use the `xizhi_*` tools** for reading/writing workspace files unless the " +
 			"task needs computation.",
 		ParametersJSON: schemaPython,
@@ -88,10 +89,11 @@ func registerPip(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolPip,
 		Description: "Installs Python packages into the workspace via pip (inside the sandbox) so they are available to the " +
-			"`python` tool via `PYTHONPATH`. **Use this ONLY to install dependencies — when `python` fails with " +
-			"`ModuleNotFoundError`/`ImportError`.** Returns `{output, exit_code, truncated}` (same 64KB output cap as " +
-			"`bash`; 120s timeout by default; network enabled by default). **DO NOT use this to run code — use `python` " +
-			"for that.**",
+			"`python` tool via `PYTHONPATH`.\n" +
+			"- **Use this ONLY to install dependencies — when `python` fails with `ModuleNotFoundError`/`ImportError`.**\n" +
+			"- Returns `{output, exit_code, truncated}` (same 64KB output cap as `bash`; 120s timeout by default; network " +
+			"enabled by default).\n" +
+			"- **DO NOT use this to run code — use `python` for that.**",
 		ParametersJSON: schemaPip,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a pipArgs
