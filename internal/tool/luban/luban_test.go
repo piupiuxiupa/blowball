@@ -213,6 +213,30 @@ func TestRegisterAll(t *testing.T) {
 	}
 }
 
+// TestRegister_DescriptionContracts pins the luban description convergence
+// (delta spec luban-skill-tools): luban_read_skill declares the markdown body
+// return and keeps a minimal xizhi_* pointer; list/install no longer repeat the
+// verbatim cross-rule sentence.
+func TestRegister_DescriptionContracts(t *testing.T) {
+	loader := skill.NewLoader(t.TempDir(), func(string) string { return t.TempDir() })
+	tools := NewTools(loader, func(string) string { return t.TempDir() })
+	r := tool.NewRegistry()
+	require.NoError(t, RegisterAll(r, tools))
+
+	read, ok := r.Get(ToolReadSkill)
+	require.True(t, ok)
+	assert.Contains(t, read.Description, "markdown body")
+	assert.Contains(t, read.Description, "frontmatter")
+	// Minimal pointer retained.
+	assert.Contains(t, read.Description, "xizhi")
+
+	for _, name := range []string{ToolListSkills, ToolInstallSkill} {
+		spec, ok := r.Get(name)
+		require.True(t, ok, name)
+		assert.NotContains(t, spec.Description, "Never use xizhi_* tools to access the skills directory.", name)
+	}
+}
+
 func TestReadSkillTool_Execute(t *testing.T) {
 	globalDir := t.TempDir()
 	writeSkill(t, filepath.Join(globalDir, "s"), "s", "S", "# Skill")
@@ -481,6 +505,50 @@ func TestInstallSkill_ManifestFlow(t *testing.T) {
 	require.True(t, res.Installed)
 	require.Equal(t, "gildata-finance-data", res.Name)
 	assert.FileExists(t, filepath.Join(userDirFn("u1"), "gildata-finance-data", "SKILL.md"))
+}
+
+func TestInstallSkill_SingleFile_Non200SurfacesLocation(t *testing.T) {
+	loader := skill.NewLoader(t.TempDir(), func(string) string { return t.TempDir() })
+	ins := newInstaller(loader, func(string) string { return t.TempDir() })
+
+	// /skill.md redirects to /gone, which returns 404. The non-200 error must
+	// carry the status code and the last redirect Location so the agent can read
+	// the target and retry with the resolved URL.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/skill.md", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/gone", http.StatusFound)
+	})
+	mux.HandleFunc("/gone", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "gone")
+	})
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+	ins.httpClient = server.Client()
+
+	_, err := ins.installSkill(context.Background(), server.URL+"/skill.md", "", "", "u1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 404")
+	assert.Contains(t, err.Error(), "redirect location")
+	assert.Contains(t, err.Error(), "/gone")
+}
+
+func TestInstallSkill_SingleFile_RedirectLoopSurfacesLocation(t *testing.T) {
+	loader := skill.NewLoader(t.TempDir(), func(string) string { return t.TempDir() })
+	ins := newInstaller(loader, func(string) string { return t.TempDir() })
+
+	// A self-redirect loop exceeds the standard cap; the error surfaces the cap
+	// and the last redirect Location.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer server.Close()
+	ins.httpClient = server.Client()
+
+	_, err := ins.installSkill(context.Background(), server.URL+"/skill.md", "", "", "u1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stopped after 10 redirects")
+	assert.Contains(t, err.Error(), "last redirect location")
 }
 
 func writeSkill(t *testing.T, dir, name, description, body string) {

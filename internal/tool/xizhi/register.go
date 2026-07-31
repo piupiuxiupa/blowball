@@ -170,8 +170,11 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 	// compatibility; deployments that want to disable them can do so via the
 	// config by leaving them out of agent tool lists.
 	tools = append(tools, &tool.ToolSpec{
-		Name:           NameReadFile,
-		Description:    "Read a file from the user's workspace. The path must be relative to the workspace root.",
+		Name: NameReadFile,
+		Description: "Reads a workspace file and returns `{path, content, size}` with the full contents as a UTF-8 string — " +
+			"no line-number prefix, no truncation. **`path` MUST be relative to the workspace root** (absolute paths, " +
+			"`..` and symlink escapes are rejected); a missing file returns an error. **DO NOT read files with `bash`/" +
+			"`python` (`cat`) — use this tool.**",
 		ParametersJSON: schemaRead,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a readArgs
@@ -183,8 +186,10 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 	})
 
 	tools = append(tools, &tool.ToolSpec{
-		Name:           NameWriteFile,
-		Description:    "Write (create or overwrite) a file inside the user's workspace. Parent directories are created automatically.",
+		Name: NameWriteFile,
+		Description: "Creates or overwrites a workspace file with the given text content and returns `{path, size, absolute}`. " +
+			"Parent directories are created automatically. **IMPORTANT: an existing file at `path` is overwritten.** " +
+			"**DO NOT write files with `bash`/`python` (`echo`/redirects) — use this tool.**",
 		ParametersJSON: schemaWrite,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a writeArgs
@@ -196,8 +201,11 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 	})
 
 	tools = append(tools, &tool.ToolSpec{
-		Name:           NameModifyFile,
-		Description:    "Replace a unique occurrence of text in a workspace file. Fails if old_content is missing or appears more than once.",
+		Name: NameModifyFile,
+		Description: "Performs an exact string replacement in a workspace file and returns `{path, old_size, new_size}`. " +
+			"**`old_content` MUST match exactly one location** — the call fails if the match is missing or appears more " +
+			"than once. **DO NOT rewrite the whole file** — use this for targeted edits and `xizhi_write_file` for full " +
+			"rewrites.",
 		ParametersJSON: schemaModify,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a modifyArgs
@@ -210,8 +218,11 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 
 	if cfg.ListFiles.Enabled {
 		tools = append(tools, &tool.ToolSpec{
-			Name:           NameListFiles,
-			Description:    "List the files and directories in a workspace directory. Returns name, type, and file size. Hidden entries are excluded by default.",
+			Name: NameListFiles,
+			Description: "Lists the immediate children of a workspace directory and returns `{path, entries[]}` where each " +
+				"entry carries `name`, `type` (`file`/`directory`) and `size`. **`path` MUST be relative to the workspace " +
+				"root.** **This lists one level only — DO NOT expect recursion; use `xizhi_tree` for nested listings.** " +
+				"Hidden entries (names starting with `.`) are excluded unless `include_hidden` is true.",
 			ParametersJSON: schemaList,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 				var a listArgs
@@ -225,8 +236,10 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 
 	if cfg.Tree.Enabled {
 		tools = append(tools, &tool.ToolSpec{
-			Name:           NameTree,
-			Description:    "Return a nested directory tree for a workspace path. Default depth is 3 and maximum depth is 10. Hidden entries are excluded by default.",
+			Name: NameTree,
+			Description: "Returns `{path, depth, tree[]}`, a nested representation of a workspace directory. **`path` MUST " +
+				"be relative to the workspace root.** **`depth` defaults to 3 and MUST NOT exceed 10.** Hidden entries are " +
+				"excluded unless `include_hidden` is true.",
 			ParametersJSON: schemaTree,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 				var a treeArgs
@@ -240,8 +253,11 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 
 	if cfg.GlobFiles.Enabled {
 		tools = append(tools, &tool.ToolSpec{
-			Name:           NameGlobFiles,
-			Description:    "Search the workspace for files and directories matching a doublestar glob pattern such as 'src/**/*.go'. Returns a list of relative paths. Hidden entries are excluded by default.",
+			Name: NameGlobFiles,
+			Description: "Searches a workspace directory with a doublestar glob pattern and returns `{path, pattern, " +
+				"matches[]}` of relative paths. **`path` MUST be relative to the workspace root.** **`pattern` MUST be a " +
+				"doublestar pattern** (e.g. `src/**/*.go`, `**/*_test.go`); hidden entries are excluded unless " +
+				"`include_hidden` is true.",
 			ParametersJSON: schemaGlob,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 				var a globArgs

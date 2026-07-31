@@ -19,11 +19,11 @@ var schemaPython = json.RawMessage(`{
   "properties": {
     "code": {
       "type": "string",
-      "description": "Python code to run inline via python3 -c."
+      "description": "Python code to run inline via python3 -c. Mutually exclusive with file - provide exactly one."
     },
     "file": {
       "type": "string",
-      "description": "Relative path to a Python file inside the workspace to execute."
+      "description": "Relative path to a Python file inside the workspace to execute; absolute paths are only for read-only skill-directory scripts. Mutually exclusive with code."
     }
   },
   "oneOf": [
@@ -38,7 +38,7 @@ var schemaPip = json.RawMessage(`{
   "properties": {
     "packages": {
       "type": "array",
-      "description": "Python packages to install via pip (e.g. [\"requests\", \"numpy>=2.0\"]).",
+      "description": "Python packages to install via pip - at least one, each optionally with a version constraint (e.g. [\"requests\", \"numpy>=2.0\"]).",
       "items": { "type": "string" },
       "minItems": 1
     },

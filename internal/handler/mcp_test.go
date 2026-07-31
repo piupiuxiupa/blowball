@@ -74,6 +74,37 @@ func TestMCPTools_ReturnsXizhiAndInvokeTools(t *testing.T) {
 	assert.True(t, names[agent.ToolInvokeLiang], "invoke_liang must be present")
 }
 
+// TestMCPTools_InvokeDescriptionsFromAgentPackage pins that the MCP catalogue
+// reuses the agent package's single source of truth for the invoke_* tool
+// descriptions, so it can never drift from the model-facing tools[] array.
+func TestMCPTools_InvokeDescriptionsFromAgentPackage(t *testing.T) {
+	reg := tool.NewRegistry()
+	h := NewMCPHandler(reg)
+	r := gin.New()
+	r.GET("/api/v1/mcp/tools", h.Tools)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/tools", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Tools []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	desc := make(map[string]string, len(resp.Tools))
+	for _, t2 := range resp.Tools {
+		desc[t2.Name] = t2.Description
+	}
+	assert.Equal(t, agent.InvokeToolDescription(agent.ToolInvokeChongzhi), desc[agent.ToolInvokeChongzhi])
+	assert.Equal(t, agent.InvokeToolDescription(agent.ToolInvokeLiang), desc[agent.ToolInvokeLiang])
+}
+
 func TestMCPTools_ReturnsExternalMCPTools(t *testing.T) {
 	reg := tool.NewRegistry()
 

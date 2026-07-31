@@ -290,10 +290,7 @@ agents:
       - review-checklist
 ```
 
-When an agent has skills configured, the skill catalogue is injected into its system prompt. Agents can load skill instructions on demand via:
-
-- `luban_read_skill(name)` — recommended for new configs.
-- `read_skill(name)` — legacy tool kept for backward compatibility.
+When an agent has skills configured, the skill catalogue is injected into its system prompt. Agents load skill instructions on demand via `luban_read_skill(name)`.
 
 The `luban_*` tools (`luban_list_skills`, `luban_read_skill`, `luban_install_skill`) are registered only when an agent explicitly lists them in its `tools`.
 

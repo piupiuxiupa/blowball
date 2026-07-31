@@ -396,8 +396,9 @@ type XizhiConfig struct {
 
 // WebfetchConfig holds the process-level webfetch tool settings.
 type WebfetchConfig struct {
-	Enabled bool          `yaml:"enabled"`
-	Timeout time.Duration `yaml:"timeout"`
+	Enabled      bool          `yaml:"enabled"`
+	Timeout      time.Duration `yaml:"timeout"`
+	MaxRedirects int           `yaml:"max_redirects"`
 }
 
 // ExecutorToolConfig holds the per-tool settings for bash/python executors.

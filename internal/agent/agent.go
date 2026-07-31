@@ -162,6 +162,31 @@ func InvokeToolSchema(name string) []byte {
 	return nil
 }
 
+// InvokeToolDescription returns the human-readable description Confucius uses
+// for the named sub-agent invocation tool. It is the single source of truth
+// shared by the model-facing tools[] array (internal/agent/tools.go) and the
+// MCP catalogue (internal/handler/mcp.go) so the two can never drift apart.
+// Returns "" if name is not a recognized sub-agent invocation.
+func InvokeToolDescription(name string) string {
+	switch name {
+	case ToolInvokeChongzhi:
+		return InvokeChongzhiDescription
+	case ToolInvokeLiang:
+		return InvokeLiangDescription
+	}
+	return ""
+}
+
+// InvokeChongzhiDescription / InvokeLiangDescription are the descriptions
+// Confucius attaches to the synthetic invoke_chongzhi / invoke_liang tools.
+const (
+	InvokeChongzhiDescription = "Invoke the Chongzhi (coding) sub-agent for code editing, file writing, or any task " +
+		"that requires modifying files in the user's workspace. **Use it when a task MUST modify workspace files.** " +
+		"**DO NOT use it for analysis-only tasks — use `invoke_liang`.**"
+	InvokeLiangDescription = "Invoke the Liang (analysis) sub-agent for analysis, explanation, or reasoning; " +
+		"**it MUST NOT modify files.** **DO NOT use it for file edits — use `invoke_chongzhi`.**"
+)
+
 // IsInvokeTool reports whether name is a sub-agent invocation tool recognized
 // by the Confucius dispatch loop.
 func IsInvokeTool(name string) bool {

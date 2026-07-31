@@ -16,7 +16,7 @@ var schemaFetch = json.RawMessage(`{
   "properties": {
     "url": {
       "type": "string",
-      "description": "URL to fetch."
+      "description": "Absolute http(s) URL to fetch (must include the scheme)."
     },
     "method": {
       "type": "string",
@@ -47,15 +47,19 @@ func RegisterAll(r *tool.Registry, cfg config.WebfetchConfig) {
 	}
 
 	spec := &tool.ToolSpec{
-		Name:           Name,
-		Description:    "Fetch an external URL and return the final URL, HTTP status code, response headers, and response body as text. Follows redirects and uses the configured timeout (default 30s).",
+		Name: Name,
+		Description: "Fetch an external URL and return the final URL, HTTP status code, response headers, and response body as text. " +
+			"Follows redirects up to a configurable limit (default 10) and uses the configured timeout (default 30s). " +
+			"**`url` MUST be an absolute http(s) URL including the scheme.** " +
+			"On a non-2xx response (including a redirect that exceeded the limit) the result still carries the final status code and response headers (including any Location), " +
+			"so **you SHOULD retry with the resolved URL or adjusted method/headers.**",
 		ParametersJSON: schemaFetch,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a fetchArgs
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("webfetch: parse args: %w", err)
 			}
-			return Fetch(a.URL, a.Method, a.Headers, cfg.Timeout)
+			return Fetch(a.URL, a.Method, a.Headers, cfg.Timeout, cfg.MaxRedirects)
 		},
 	}
 	if err := r.Register(spec); err != nil {

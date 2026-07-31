@@ -1,33 +1,4 @@
-# webfetch Specification
-
-## Purpose
-
-TBD
-
-## Requirements
-
-### Requirement: Webfetch tool
-系统 SHALL 提供抓取外部网页并返回文本响应的工具，所有 Agent 均可使用。
-
-#### Scenario: Fetch HTML page
-- **WHEN** Agent 调用 `webfetch`，url 为 `"https://example.com"`
-- **THEN** 系统返回最终 URL、HTTP 状态码、响应头和文本响应体
-
-#### Scenario: Follow redirects
-- **WHEN** Agent 调用 `webfetch`，目标 URL 返回 302 重定向
-- **THEN** 系统自动跟随重定向，并返回最终 URL 的响应
-
-#### Scenario: Custom HTTP method and headers
-- **WHEN** Agent 调用 `webfetch`，method 为 `"POST"`，headers 包含 `"Content-Type": "application/json"`
-- **THEN** 系统使用指定方法和请求头发起请求
-
-#### Scenario: Request timeout
-- **WHEN** Agent 调用 `webfetch`，请求在 30 秒内未完成
-- **THEN** 系统取消请求并返回超时错误
-
-#### Scenario: Invalid URL
-- **WHEN** Agent 调用 `webfetch`，url 格式不合法
-- **THEN** 系统返回错误，提示 URL 无效
+## ADDED Requirements
 
 ### Requirement: Bounded redirect following
 `webfetch` SHALL 自动跟随 HTTP 重定向，但 SHALL 将跟随次数限制在可配置的 `max_redirects` 以内（默认 10；零值或负值回退为 10）。当重定向次数达到上限时 SHALL 停止跟随并返回错误，且该错误 SHALL 同时包含"已达重定向上限"的提示与最后一次重定向目标地址（`Location`）。重定向跳数在上限以内的合法重定向链 SHALL 仍被自动跟随，行为与既有"Follow redirects"一致。此上限与 Go 标准库默认行为对齐，修正既有实现中 `CheckRedirect` 恒返回 `nil`、无上限跟随导致重定向死循环耗到超时的问题。

@@ -304,6 +304,7 @@ tools:
   webfetch:
     enabled: true
     timeout: 30s
+    # max_redirects: 10   # optional; HTTP redirect cap (default 10, 0/negative -> 10)
 
   # Sandboxed command execution via bubblewrap (Linux only).
   # Requires bwrap to be installed and unprivileged user namespaces available.

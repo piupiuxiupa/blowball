@@ -40,7 +40,7 @@ type AgentFactory interface {
 type orchestratorFactory struct {
 	cfg          *config.Config
 	client       LLMClient
-	baseRegistry *tool.Registry      // holds process-wide tools (webfetch, MCP proxies, luban skill tools, optional read_skill)
+	baseRegistry *tool.Registry      // holds process-wide tools (webfetch, MCP proxies, luban skill tools)
 	serverTools  map[string][]string // server name -> prefixed tool names
 	skillLoader  *skill.Loader       // discovers global and per-user skills
 }

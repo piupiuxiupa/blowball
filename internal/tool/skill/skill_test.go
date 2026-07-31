@@ -1,16 +1,12 @@
 package skill
 
 import (
-	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/lush/blowball/internal/tool"
 )
 
 func TestLoader_Discover_GlobalAndUser(t *testing.T) {
@@ -179,24 +175,6 @@ func TestFilter(t *testing.T) {
 	filtered := Filter(skills, []string{"b", "d"})
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "b", filtered[0].Name)
-}
-
-func TestRegisterReadSkill(t *testing.T) {
-	globalDir := t.TempDir()
-	writeSkill(t, filepath.Join(globalDir, "s"), "s", "S", "# Skill")
-
-	loader := NewLoader(globalDir, nil)
-	r := tool.NewRegistry()
-	err := RegisterReadSkill(r, loader)
-	require.NoError(t, err)
-
-	spec, ok := r.Get(ToolName)
-	require.True(t, ok)
-
-	ctx := WithUserID(context.Background(), "")
-	out, err := spec.Execute(ctx, json.RawMessage(`{"name":"s"}`))
-	require.NoError(t, err)
-	assert.Equal(t, "# Skill", out)
 }
 
 func writeSkill(t *testing.T, dir, name, description, body string) {

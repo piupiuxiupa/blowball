@@ -467,13 +467,6 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		}
 	}
 
-	// Keep read_skill registered for backward compatibility when an agent still explicitly references it. New configurations should use luban_read_skill.
-	if needsReadSkill(cfg.Agents) {
-		if err := skill.RegisterReadSkill(reg, skillLoader); err != nil {
-			log.Fatal("register read_skill failed", zap.Error(err))
-		}
-	}
-
 	// External MCP servers. Connect, discover tools, and register proxy specs into the process-wide registry. Startup fails fast on connection or tool-list errors.
 	mcpManager, err := mcpclient.RegisterAllWithManager(context.Background(), reg, cfg.MCP)
 	if err != nil {
@@ -577,16 +570,6 @@ func needsLubanTools(agents config.AgentsConfig) bool {
 			if slices.Contains(cfg.Tools, name) {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// needsReadSkill reports whether any agent explicitly lists read_skill in its tools. read_skill is kept as a backward-compatibility entry point; new configurations should use luban_read_skill.
-func needsReadSkill(agents config.AgentsConfig) bool {
-	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Chongzhi, agents.Liang} {
-		if slices.Contains(cfg.Tools, skill.ToolName) {
-			return true
 		}
 	}
 	return false

@@ -5,18 +5,15 @@ package skill
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/lush/blowball/internal/tool"
 )
 
-// DefaultMaxSize is the maximum SKILL.md content size read_skill will load.
+// DefaultMaxSize is the maximum SKILL.md content size the loader will read.
 const DefaultMaxSize int64 = 500 * 1024 // 500KB
 
 // MaxDiscoveryDepth limits how deeply discover walks when looking for
@@ -233,56 +230,13 @@ func ParseFrontmatter(data []byte) (Skill, []byte, error) {
 	return meta, body, nil
 }
 
-// Reader is the subset of *Loader needed by read_skill.
-type Reader interface {
-	Read(name, userID string) ([]byte, error)
-}
-
-// RegisterReadSkill registers the read_skill tool into r. Callers should only
-// invoke this when at least one agent has skills configured.
-func RegisterReadSkill(r *tool.Registry, loader Reader) error {
-	spec := &tool.ToolSpec{
-		Name:        ToolName,
-		Description: "Load a skill by name and return its markdown instructions. User skills take precedence over global skills.",
-		ParametersJSON: json.RawMessage(`{
-			"type": "object",
-			"properties": {
-				"name": {
-					"type": "string",
-					"description": "The canonical skill name."
-				}
-			},
-			"required": ["name"],
-			"additionalProperties": false
-		}`),
-		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
-			var a readArgs
-			if err := json.Unmarshal(args, &a); err != nil {
-				return nil, fmt.Errorf("read_skill: parse args: %w", err)
-			}
-			body, err := loader.Read(a.Name, userIDFromContext(ctx))
-			if err != nil {
-				return nil, err
-			}
-			return string(body), nil
-		},
-	}
-	return r.Register(spec)
-}
-
-// ToolName is the registered name of the read_skill tool.
-const ToolName = "read_skill"
-
-type readArgs struct {
-	Name string `json:"name"`
-}
-
 // contextKey is the type used for context values in this package.
 type contextKey int
 
 const userIDKey contextKey = 0
 
-// WithUserID attaches a userID to ctx so read_skill can resolve user skills.
+// WithUserID attaches a userID to ctx so skill and executor tools can resolve
+// per-user state (e.g. a user's skills directory).
 func WithUserID(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, userIDKey, userID)
 }
@@ -295,8 +249,6 @@ func UserIDFromContext(ctx context.Context) string {
 	}
 	return ""
 }
-
-func userIDFromContext(ctx context.Context) string { return UserIDFromContext(ctx) }
 
 // Filter filters skills by the allowed names in names, preserving order.
 func Filter(skills []Skill, names []string) []Skill {

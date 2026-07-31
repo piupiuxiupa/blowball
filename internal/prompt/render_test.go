@@ -94,7 +94,7 @@ func TestRenderSystemPrompt_Skills(t *testing.T) {
 	assert.Contains(t, out, "    <description>Global coding conventions</description>")
 	assert.Contains(t, out, "    <location>skills/coding-style</location>")
 	assert.Contains(t, out, "</skills>")
-	assert.Contains(t, out, "Use luban_list_skills to discover skills")
+	assert.Contains(t, out, "Use luban_list_skills / luban_read_skill / luban_install_skill for skill operations. Never use xizhi_* tools to access the skills directory.")
 	assert.Contains(t, out, "luban_read_skill")
 	assert.Contains(t, out, "luban_install_skill")
 	// Multi-form install guidance: supported shapes and install-doc flow.

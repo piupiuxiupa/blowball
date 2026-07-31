@@ -96,7 +96,7 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 			fmt.Fprintf(&b, "  </skill>\n")
 		}
 		b.WriteString("</skills>\n\n")
-		b.WriteString("Use luban_list_skills to discover skills, luban_read_skill to load a skill's full instructions, and luban_install_skill to install a skill collection from a URL.\n")
+		b.WriteString("Use luban_list_skills / luban_read_skill / luban_install_skill for skill operations. Never use xizhi_* tools to access the skills directory.\n")
 		b.WriteString("luban_install_skill supports several install shapes: a whole git repository is cloned as one entry; a git collection combined with the optional `skill` parameter installs only the selected sub-skill (matched by frontmatter name, else by repo-relative subpath) and discards the rest; and a single SKILL.md URL ending in .md is downloaded and installed directly.\n")
 		b.WriteString("If a .md URL is not itself a valid skill, luban_install_skill returns the fetched content as an install document (result kind \"install-doc\") instead of installing. When a user asks to install a skill from an instruction or landing page, read the returned install-document content, follow it to the real skill source URL it points at, and call luban_install_skill again with that source - do not treat the instruction page itself as the skill.\n")
 		b.WriteString("You may use the bash or python tools to read and execute files under the exposed skill directories. Global skill directories are read-only and must not be modified. Per-user skills live under the workspace at .blowball/skills and are managed exclusively via the luban_* tools; never use xizhi_* tools to access .blowball or any skill directory.\n")

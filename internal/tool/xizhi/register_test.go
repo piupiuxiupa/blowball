@@ -37,12 +37,12 @@ func TestRegisterAll_PanicsOnDuplicate(t *testing.T) {
 
 func TestRegisterAll_SchemasAreValidJSON(t *testing.T) {
 	for name, raw := range map[string]json.RawMessage{
-		"read":       schemaRead,
-		"write":      schemaWrite,
-		"modify":     schemaModify,
-		"list":       schemaList,
-		"tree":       schemaTree,
-		"glob":       schemaGlob,
+		"read":   schemaRead,
+		"write":  schemaWrite,
+		"modify": schemaModify,
+		"list":   schemaList,
+		"tree":   schemaTree,
+		"glob":   schemaGlob,
 	} {
 		var decoded map[string]any
 		if err := json.Unmarshal(raw, &decoded); err != nil {
@@ -97,4 +97,29 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 	assert.False(t, ok, "tree should not be registered")
 	_, ok = r.Get(NameGlobFiles)
 	assert.True(t, ok, "glob_files should be registered")
+}
+
+// TestRegisterAll_DescriptionDeclaresResultShape pins the output contract each
+// xizhi read/write/modify description promises the model (delta spec
+// "Xizhi tool descriptions declare result shape").
+func TestRegisterAll_DescriptionDeclaresResultShape(t *testing.T) {
+	r := newTestRegistry(t)
+	RegisterAll(r, t.TempDir(), testXizhiConfig())
+
+	read, ok := r.Get(NameReadFile)
+	require.True(t, ok)
+	assert.Contains(t, read.Description, "content")
+	assert.Contains(t, read.Description, "size")
+
+	write, ok := r.Get(NameWriteFile)
+	require.True(t, ok)
+	assert.Contains(t, write.Description, "absolute")
+	assert.Contains(t, write.Description, "size")
+
+	modify, ok := r.Get(NameModifyFile)
+	require.True(t, ok)
+	assert.Contains(t, modify.Description, "old_size")
+	assert.Contains(t, modify.Description, "new_size")
+	// Unique-match failure semantics.
+	assert.Contains(t, modify.Description, "exactly one")
 }

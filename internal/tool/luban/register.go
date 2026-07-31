@@ -66,8 +66,10 @@ func RegisterAll(r *tool.Registry, tools *Tools) error {
 
 func registerListSkills(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
-		Name:        ToolListSkills,
-		Description: "List all available skills, both global and user-specific. User skills override global skills of the same name. Use luban_list_skills to discover skills, then luban_read_skill to load one. Never use xizhi_* tools to access the skills directory.",
+		Name: ToolListSkills,
+		Description: "List all available skills, both global and user-specific, and return the merged metadata. **User " +
+			"skills OVERRIDE global skills of the same name.** **You MUST discover skill names here first, then load one " +
+			"with `luban_read_skill` (by name, not path).**",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {},
@@ -82,8 +84,10 @@ func registerListSkills(r *tool.Registry, tools *Tools) error {
 
 func registerReadSkill(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
-		Name:        ToolReadSkill,
-		Description: "Read a skill by name and return its markdown instructions. User skills take precedence over global skills. Use luban_read_skill, not xizhi_read_file, to access skills. Never use xizhi_* tools to access the skills directory.",
+		Name: ToolReadSkill,
+		Description: "Reads a skill by name and returns its `SKILL.md` markdown body (YAML frontmatter stripped). User skills " +
+			"take precedence over global skills. **`name` MUST be a simple skill identifier, not a path.** **DO NOT read " +
+			"skills with `xizhi_*` — use luban.** (Skill-directory access rules live in the system prompt.)",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -116,7 +120,8 @@ func registerInstallSkill(r *tool.Registry, tools *Tools) error {
 			"(2) a git repository that is a collection of sub-skills, combined with the optional `skill` parameter, installs only the selected sub-skill (matched by frontmatter `name`, else by repo-relative subpath) and discards the rest of the clone; " +
 			"(3) a URL ending in .md pointing at a single SKILL.md is downloaded and installed directly; " +
 			"(4) a .md URL whose body is NOT a valid SKILL.md is returned as an install document (result kind \"install-doc\") carrying the fetched content and a hint - read it, find the real skill source it describes, and call luban_install_skill again with that source URL. " +
-			"Existing skills with the same name are overwritten. All writes stay inside your user skills directory. Never use xizhi_* tools to access the skills directory.",
+			"**IMPORTANT: existing skills with the same name are overwritten**, and all writes stay inside your user skills directory. " +
+			"**If a single-file (.md) download fails due to a redirect or non-200 status, you SHOULD retry with the resolved HTTPS URL** — the error includes the HTTP status code and the last redirect Location (you may first call webfetch to discover the final URL and response headers).",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {

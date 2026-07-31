@@ -22,12 +22,12 @@ func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string) ([]b
 	invokeTools := openAIToolList{
 		{Type: "function", Function: openAIToolFunc{
 			Name:        ToolInvokeChongzhi,
-			Description: "Invoke the Chongzhi (coding) sub-agent. Use for code editing, file writing, or any task that requires modifying files in the user's workspace.",
+			Description: InvokeToolDescription(ToolInvokeChongzhi),
 			Parameters:  invokeArgsSchema,
 		}},
 		{Type: "function", Function: openAIToolFunc{
 			Name:        ToolInvokeLiang,
-			Description: "Invoke the Liang (analysis) sub-agent. Use for analysis, explanation, or reasoning tasks that do not require file modification.",
+			Description: InvokeToolDescription(ToolInvokeLiang),
 			Parameters:  invokeArgsSchema,
 		}},
 	}

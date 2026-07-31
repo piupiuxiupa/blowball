@@ -20,6 +20,11 @@ import (
 // installed via luban_install_skill.
 const MaxInstallSize int64 = 500 * 1024 // 500KB
 
+// defaultDownloadRedirects caps how many HTTP redirects the single-file download
+// follows, matching net/http's standard defaultRedirectLimit. It is not
+// configurable; legitimate short redirect chains are followed transparently.
+const defaultDownloadRedirects = 10
+
 // installResult is the discriminated JSON shape returned by luban_install_skill.
 // Kind distinguishes a successful install ("install") from an install-document
 // return ("install-doc"), where the fetched body was not a skill and is handed
@@ -326,18 +331,47 @@ func (ins *installer) installGitRepo(ctx context.Context, urlStr, userSkillsDir,
 
 // download fetches url with an optional size limit. Only HTTP 200 responses
 // with a text content type are accepted; anything else is an error so a binary
-// blob or error page is never mistaken for an install document.
+// blob or error page is never mistaken for an install document. Redirect
+// failures and non-200 responses report the HTTP status code and the last
+// redirect Location (when any redirect occurred) so the calling agent can read
+// the target and retry with the resolved HTTPS URL.
 func (ins *installer) download(ctx context.Context, urlStr string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, fmt.Errorf("luban_install_skill: create request: %w", err)
 	}
-	resp, err := ins.httpClient.Do(req)
+
+	// Shallow-copy the shared client so this call gets its own CheckRedirect
+	// closure (avoiding a data race when concurrent installs mutate a shared
+	// client's policy) while reusing the injected Transport/Timeout/Jar. The
+	// closure records the most recent redirect target so a failure that happens
+	// after one or more redirects can surface where the server was pointing.
+	var lastLocation string
+	client := *ins.httpClient
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		lastLocation = req.URL.String()
+		if len(via) >= defaultDownloadRedirects {
+			return fmt.Errorf("stopped after %d redirects", defaultDownloadRedirects)
+		}
+		return nil
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
+		if lastLocation != "" {
+			return nil, fmt.Errorf("luban_install_skill: download failed: %w; last redirect location: %s", err, lastLocation)
+		}
 		return nil, fmt.Errorf("luban_install_skill: download failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		loc := resp.Header.Get("Location")
+		if loc == "" {
+			loc = lastLocation
+		}
+		if loc != "" {
+			return nil, fmt.Errorf("luban_install_skill: download returned status %d; redirect location: %s", resp.StatusCode, loc)
+		}
 		return nil, fmt.Errorf("luban_install_skill: download returned status %d", resp.StatusCode)
 	}
 	ct := resp.Header.Get("Content-Type")

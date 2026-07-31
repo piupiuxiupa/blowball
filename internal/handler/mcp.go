@@ -58,24 +58,10 @@ func (h *MCPHandler) Tools(c *gin.Context) {
 		tools = append(tools, mcpTool{
 			Type:        "function",
 			Name:        name,
-			Description: invokeDescription(name),
+			Description: agent.InvokeToolDescription(name),
 			Parameters:  params,
 		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"tools": tools})
-}
-
-// invokeDescription returns the human-readable description Confucius uses for the
-// named sub-agent invocation tool. It mirrors the strings in
-// internal/agent/tools.go so the MCP catalogue matches what the agent loop
-// actually presents to the model.
-func invokeDescription(name string) string {
-	switch name {
-	case agent.ToolInvokeChongzhi:
-		return "Invoke the Chongzhi (coding) sub-agent. Use for code editing, file writing, or any task that requires modifying files in the user's workspace."
-	case agent.ToolInvokeLiang:
-		return "Invoke the Liang (analysis) sub-agent. Use for analysis, explanation, or reasoning tasks that do not require file modification."
-	}
-	return ""
 }
