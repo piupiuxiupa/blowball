@@ -365,7 +365,7 @@ components:
           description: Kind of node created (echoes the request type).
     MCPTool:
       type: object
-      required: [type, name, description, parameters]
+      required: [type, name, description, parameters, server]
       properties:
         type:
           type: string
@@ -377,6 +377,9 @@ components:
           type: object
           additionalProperties: true
           description: JSON Schema describing the tool's input parameters.
+        server:
+          type: string
+          description: The MCP source this tool belongs to — an operator (global) MCP server name or a per-user MCP server name.
     MCPToolsResponse:
       type: object
       required: [tools]
@@ -1239,12 +1242,21 @@ paths:
   /api/v1/mcp/tools:
     get:
       tags: [MCP]
-      summary: List the combined MCP tool catalogue.
+      summary: List the MCP-sourced tool catalogue.
       description: |
-        Returns the combined tool catalogue: regular Xizhi registry tools,
-        tools advertised by configured external MCP servers, and the synthetic
-        `invoke_chongzhi` / `invoke_liang` agent-invocation tools. Each entry
-        follows the OpenAI function-tool shape (`type: function`).
+        Returns only MCP-sourced tools. The catalogue has two parts: proxy
+        tools advertised by configured operator (global) MCP servers, and the
+        cached tools of the caller's per-user MCP servers (read from the
+        workspace config cache; no live connections are made). Built-in tools
+        (`xizhi_*`, `webfetch`, executor, `luban_*`) and synthetic `invoke_*`
+        dispatch tools are excluded. Each entry follows the OpenAI
+        function-tool shape (`type: function`) and carries a `server` field
+        attributing it to its MCP source (an operator server name or a
+        per-user server name). The per-user view is cache-based; freshness is
+        maintained by the agent-runtime cache writers (`mcp_list_tools`,
+        `mcp_add_server`, `mcp_call`). A missing/empty per-user config yields
+        only the operator tools; a single malformed per-user server is
+        omitted while the rest still return.
       responses:
         '200':
           description: Tool list.

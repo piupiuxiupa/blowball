@@ -97,9 +97,13 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 
 	if len(input.UserMCP) > 0 {
 		b.WriteString("## User MCP Servers\n")
-		b.WriteString("Per-user MCP servers configured in your workspace (`.blowball/mcp/config.json`). " +
-			"Use `mcp_list_servers` to inspect them and `mcp_call(server, tool, args)` to invoke a tool. " +
-			"Credentials are managed server-side and are never shown to you.\n")
+		b.WriteString("Per-user MCP servers configured in your workspace (`.blowball/mcp/`). " +
+			"Use `mcp_list_servers` to inspect them. Before calling a server's tool with " +
+			"`mcp_call(server, tool, args)`, you MUST first call `mcp_list_tools(server)` to " +
+			"discover that server's exact tool names and input schemas; never guess a tool " +
+			"name or construct an argument shape from memory, because a wrong guess is " +
+			"rejected before the remote call is even made. Credentials are managed " +
+			"server-side and are never shown to you.\n")
 		for _, s := range input.UserMCP {
 			if s.Description != "" {
 				fmt.Fprintf(&b, "- %s: %s (%s)\n", s.Name, s.Description, s.URL)

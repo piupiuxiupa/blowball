@@ -77,8 +77,8 @@ type ManagerOptions struct {
 }
 
 // NewManager builds a turn-scoped manager bound to workspaceRoot (the caller's
-// workspace). The workspace root determines which `.blowball/mcp/config.json`
-// is read and to which user every connection authenticates.
+// workspace). The workspace root determines which `.blowball/mcp/` server
+// directory tree is read and to which user every connection authenticates.
 func NewManager(opts ManagerOptions) *Manager {
 	if opts.ConnectTimeout <= 0 {
 		opts.ConnectTimeout = defaultConnectTimeout

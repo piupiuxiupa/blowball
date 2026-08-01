@@ -510,7 +510,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 
 	orchAdapter := handler.NewOrchestratorAdapter(orch)
 	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, orchAdapter, dataDir)
-	mcpHandler := handler.NewMCPHandler(reg)
+	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn)
 
 	return handler.RouteDeps{
 		AuthMW:      middleware.AuthMiddleware(cfg.JWT.Secret),

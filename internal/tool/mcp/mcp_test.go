@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +31,8 @@ type fakeTransport struct {
 	tools      []mcpclient.Tool
 	callResult *mcpclient.ToolsCallResult
 	callErr    error
+	initErr    error
+	listErr    error
 	initDelay  time.Duration
 	listDelay  time.Duration
 	callDelay  time.Duration
@@ -40,7 +43,11 @@ func (f *fakeTransport) Initialize(ctx context.Context, _ mcpclient.InitializePa
 	f.mu.Lock()
 	f.initCount++
 	delay := f.initDelay
+	initErr := f.initErr
 	f.mu.Unlock()
+	if initErr != nil {
+		return nil, initErr
+	}
 	if delay > 0 {
 		select {
 		case <-time.After(delay):
@@ -56,7 +63,11 @@ func (f *fakeTransport) ListTools(ctx context.Context) (*mcpclient.ToolsListResu
 	f.listCount++
 	delay := f.listDelay
 	tools := f.tools
+	listErr := f.listErr
 	f.mu.Unlock()
+	if listErr != nil {
+		return nil, listErr
+	}
 	if delay > 0 {
 		select {
 		case <-time.After(delay):
@@ -110,53 +121,168 @@ func newManagerWithFake(t *testing.T, ft *fakeTransport, opts ManagerOptions) (*
 	t.Helper()
 	ws := t.TempDir()
 	opts.WorkspaceRoot = ws
-	factoryCalls := 0
-	_ = factoryCalls
 	opts.TransportFactory = func(server Server, _ TimeoutConfig) (mcpclient.Transport, error) {
 		return ft, nil
 	}
 	return NewManager(opts), ws
 }
 
+// writeServers stands up one or more servers on disk by writing each to its own
+// per-server config file (mirroring WriteServer / mcp_add_server output),
+// without any network activity.
+func writeServers(t *testing.T, ws string, servers ...Server) {
+	t.Helper()
+	for _, s := range servers {
+		require.NoError(t, WriteServer(ws, s))
+	}
+}
+
+// writeServerRaw writes raw bytes as {name}/config.json (creating the
+// directory), bypassing validation. Used to set up malformed / hand-crafted
+// fixtures.
+func writeServerRaw(t *testing.T, ws, name, body string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(serversDir(ws), name), 0o755))
+	require.NoError(t, os.WriteFile(serverConfigPath(ws, name), []byte(body), 0o644))
+}
+
 // ---------------------------------------------------------------------------
-// Config: load / validate / write (tasks 1.2, 1.3, 1.4)
+// Name validation (tasks 1.1, 5.2, 4.2)
 // ---------------------------------------------------------------------------
 
-func TestLoadConfig_MissingFileIsEmpty(t *testing.T) {
+func TestValidateName(t *testing.T) {
+	for _, n := range []string{"github", "my-mcp", "svc_2", "a", "A1", strings.Repeat("a", 64)} {
+		assert.NoError(t, ValidateName(n), "expected %q to be valid", n)
+	}
+	// Each of these is rejected: path separators, leading dot, dots, spaces,
+	// other punctuation, and oversize.
+	for _, n := range []string{
+		"",        // empty
+		".h",      // leading dot
+		"a b",     // whitespace
+		"a.b",     // dot
+		"a/b",     // path separator
+		"../x",    // traversal
+		`a\b`,     // backslash separator
+		"a:b",     // other punctuation
+		"-lead",   // leading hyphen (not alphanumeric)
+		"_lead",   // leading underscore (not alphanumeric)
+		strings.Repeat("a", 65), // oversize
+	} {
+		assert.Error(t, ValidateName(n), "expected %q to be rejected", n)
+	}
+}
+
+func TestValidateName_ErrorMentionsRulesAndExamples(t *testing.T) {
+	// task 4.2: an invalid name yields a message with the rule and
+	// positive/negative examples so the agent can self-correct.
+	err := ValidateName("a.b")
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "a.b", "error should name the offending value")
+	assert.Contains(t, msg, "github", "error should show a positive example")
+	assert.Contains(t, msg, "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", "error should state the rule")
+}
+
+// ---------------------------------------------------------------------------
+// Config: load / validate / write / add / remove (tasks 1.2-1.4, 2.1-2.5)
+// ---------------------------------------------------------------------------
+
+func TestLoadConfig_MissingDirIsEmpty(t *testing.T) {
 	cfg, err := LoadConfig(t.TempDir())
+	require.NoError(t, err)
+	require.Empty(t, cfg.Servers)
+}
+
+func TestLoadConfig_EmptyServersDirIsEmpty(t *testing.T) {
+	ws := t.TempDir()
+	require.NoError(t, os.MkdirAll(serversDir(ws), 0o755))
+	cfg, err := LoadConfig(ws)
 	require.NoError(t, err)
 	require.Empty(t, cfg.Servers)
 }
 
 func TestLoadConfig_Valid(t *testing.T) {
 	ws := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(ws, configDir), 0o755))
-	body := `{"servers":[{"name":"calc","url":"http://x/mcp","transport":"http","auth":{"type":"bearer","value":"tok"}}]}`
-	require.NoError(t, os.WriteFile(ConfigPath(ws), []byte(body), 0o644))
-
+	writeServers(t, ws, Server{
+		Name: "calc", URL: "http://x/mcp", Transport: "http",
+		Auth: Auth{Type: AuthBearer, Value: "tok"},
+	})
 	cfg, err := LoadConfig(ws)
 	require.NoError(t, err)
 	require.Len(t, cfg.Servers, 1)
 	assert.Equal(t, "calc", cfg.Servers[0].Name)
 	assert.Equal(t, AuthBearer, cfg.Servers[0].Auth.Type)
+	assert.Equal(t, "tok", cfg.Servers[0].Auth.Value)
 }
 
-func TestLoadConfig_BareArrayForm(t *testing.T) {
+func TestLoadConfig_NameTakenFromDirectoryNotFileBody(t *testing.T) {
+	// task 1.3 / spec: the directory name is authoritative; a stray `name`
+	// field inside the file body is ignored.
 	ws := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(ws, configDir), 0o755))
-	body := `[{"name":"calc","url":"http://x/mcp","transport":"http"}]`
-	require.NoError(t, os.WriteFile(ConfigPath(ws), []byte(body), 0o644))
+	writeServerRaw(t, ws, "github", `{"name":"should-be-ignored","url":"http://x","transport":"http"}`)
 	cfg, err := LoadConfig(ws)
 	require.NoError(t, err)
 	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "github", cfg.Servers[0].Name, "name must come from the directory")
 }
 
-func TestLoadConfig_MalformedReturnsError(t *testing.T) {
+func TestLoadConfig_MalformedServerSkipped(t *testing.T) {
+	// task 5.1 / spec: a single corrupted server is unavailable but does not
+	// crash or break the other servers.
 	ws := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(ws, configDir), 0o755))
-	require.NoError(t, os.WriteFile(ConfigPath(ws), []byte("{not json"), 0o644))
-	_, err := LoadConfig(ws)
-	require.Error(t, err)
+	writeServers(t, ws, Server{Name: "good", URL: "http://x", Transport: "http"})
+	writeServerRaw(t, ws, "bad", "{not json")
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err, "a malformed server must not fail the whole load")
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "good", cfg.Servers[0].Name)
+	_, ok := cfg.Server("bad")
+	assert.False(t, ok, "malformed server must be unavailable")
+}
+
+func TestLoadConfig_InvalidFieldsServerSkipped(t *testing.T) {
+	// A directory that parses but fails field validation (e.g. missing url,
+	// bad transport) is skipped too — the server is unavailable, not a crash.
+	ws := t.TempDir()
+	writeServers(t, ws, Server{Name: "good", URL: "http://x", Transport: "http"})
+	writeServerRaw(t, ws, "nourl", `{"transport":"http"}`)
+	writeServerRaw(t, ws, "stdio", `{"url":"http://x","transport":"stdio"}`)
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "good", cfg.Servers[0].Name)
+}
+
+func TestLoadConfig_MissingConfigJSONSkipped(t *testing.T) {
+	// A server directory with no config.json is not a usable server.
+	ws := t.TempDir()
+	writeServers(t, ws, Server{Name: "good", URL: "http://x", Transport: "http"})
+	require.NoError(t, os.MkdirAll(filepath.Join(serversDir(ws), "empty"), 0o755))
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "good", cfg.Servers[0].Name)
+}
+
+func TestLoadConfig_SkipsNonServerEntries(t *testing.T) {
+	// task 5.4: enumeration skips non-directories, hidden directories, and
+	// directories whose name fails ValidateName.
+	ws := t.TempDir()
+	writeServers(t, ws, Server{Name: "good", URL: "http://x", Transport: "http"})
+	// stray top-level file (not a directory).
+	require.NoError(t, os.WriteFile(filepath.Join(serversDir(ws), "stray.txt"), []byte("x"), 0o644))
+	// hidden directory.
+	require.NoError(t, os.MkdirAll(filepath.Join(serversDir(ws), ".hidden"), 0o755))
+	// invalid-name directory (contains a dot).
+	require.NoError(t, os.MkdirAll(filepath.Join(serversDir(ws), "a.b"), 0o755))
+	// leftover atomic-write temp file inside a server directory.
+	require.NoError(t, os.WriteFile(filepath.Join(serversDir(ws), "good", ".mcp-config-tmp"), []byte("x"), 0o644))
+
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "good", cfg.Servers[0].Name)
 }
 
 func TestValidate_RejectsNonHTTP(t *testing.T) {
@@ -181,41 +307,127 @@ func TestValidate_RejectsDuplicateName(t *testing.T) {
 	require.Error(t, c.Validate())
 }
 
+func TestValidate_RejectsInvalidName(t *testing.T) {
+	c := &Config{Servers: []Server{{Name: "a.b", URL: "http://x", Transport: "http"}}}
+	err := c.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+}
+
 func TestValidate_RequiresNameAndURL(t *testing.T) {
 	require.Error(t, (&Config{Servers: []Server{{URL: "http://x", Transport: "http"}}}).Validate())
 	require.Error(t, (&Config{Servers: []Server{{Name: "s", Transport: "http"}}}).Validate())
 }
 
-func TestWriteConfig_AtomicAndRoundTrips(t *testing.T) {
+func TestWriteServer_AtomicAndRoundTrips(t *testing.T) {
 	ws := t.TempDir()
-	c := &Config{Servers: []Server{{Name: "calc", URL: "http://x/mcp", Transport: "http", Auth: Auth{Type: AuthBearer, Value: "tok"}, Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object"}`)}}}}}
-	require.NoError(t, WriteConfig(ws, c))
+	s := Server{
+		Name: "calc", URL: "http://x/mcp", Transport: "http",
+		Auth:  Auth{Type: AuthBearer, Value: "tok"},
+		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}
+	require.NoError(t, WriteServer(ws, s))
 
-	// No leftover temp files.
-	entries, err := os.ReadDir(filepath.Join(ws, configDir))
+	// The server lives in its own directory with exactly one file (no leftover
+	// temp from the atomic write).
+	dir := filepath.Join(serversDir(ws), "calc")
+	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
-	assert.Len(t, entries, 1)
+	require.Len(t, entries, 1)
+	assert.Equal(t, ConfigFile, entries[0].Name())
+
+	// The file body must NOT carry a server-level name — it is
+	// directory-resident. (Tool entries legitimately have their own "name".)
+	body, err := os.ReadFile(serverConfigPath(ws, "calc"))
+	require.NoError(t, err)
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &top))
+	_, hasServerName := top["name"]
+	assert.False(t, hasServerName, "server name must not be persisted in the file body")
 
 	loaded, err := LoadConfig(ws)
 	require.NoError(t, err)
 	require.Len(t, loaded.Servers, 1)
+	assert.Equal(t, "calc", loaded.Servers[0].Name, "name back-filled from directory")
 	assert.Equal(t, "tok", loaded.Servers[0].Auth.Value)
 	require.Len(t, loaded.Servers[0].Tools, 1)
+	assert.Equal(t, "add", loaded.Servers[0].Tools[0].Name)
+}
+
+func TestWriteServer_RejectsInvalidName(t *testing.T) {
+	ws := t.TempDir()
+	err := WriteServer(ws, Server{Name: "a/b", URL: "http://x", Transport: "http"})
+	require.Error(t, err)
+	// Nothing is written for an invalid name.
+	_, statErr := os.Stat(serversDir(ws))
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestWriteServer_RejectsBadFields(t *testing.T) {
+	ws := t.TempDir()
+	err := WriteServer(ws, Server{Name: "s", Transport: "stdio"})
+	require.Error(t, err)
+}
+
+func TestAddServer_CreatesDirectoryAndFile(t *testing.T) {
+	// task 5.3: AddServer creates the directory and writes config.json.
+	ws := t.TempDir()
+	require.NoError(t, AddServer(ws, Server{Name: "github", URL: "http://x", Transport: "http"}))
+	_, err := os.Stat(filepath.Join(serversDir(ws), "github", ConfigFile))
+	require.NoError(t, err, "config.json must exist after AddServer")
 }
 
 func TestAddServer_DuplicateRejected(t *testing.T) {
-	c := &Config{Servers: []Server{{Name: "s", URL: "http://x", Transport: "http"}}}
-	err := c.AddServer(Server{Name: "s", URL: "http://y"})
+	ws := t.TempDir()
+	require.NoError(t, AddServer(ws, Server{Name: "s", URL: "http://x", Transport: "http"}))
+	err := AddServer(ws, Server{Name: "s", URL: "http://y", Transport: "http"})
 	require.Error(t, err)
-	assert.Len(t, c.Servers, 1, "duplicate must not mutate")
+	assert.Contains(t, err.Error(), "already exists")
+	// The original entry is untouched.
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "http://x", cfg.Servers[0].URL)
 }
 
-func TestRemoveServer_PreservesOthers(t *testing.T) {
-	c := &Config{Servers: []Server{{Name: "a", URL: "http://a", Transport: "http"}, {Name: "b", URL: "http://b", Transport: "http"}}}
-	assert.True(t, c.RemoveServer("a"))
-	require.Len(t, c.Servers, 1)
-	assert.Equal(t, "b", c.Servers[0].Name)
-	assert.False(t, c.RemoveServer("missing"))
+func TestAddServer_RejectsInvalidName(t *testing.T) {
+	ws := t.TempDir()
+	err := AddServer(ws, Server{Name: "a.b", URL: "http://x", Transport: "http"})
+	require.Error(t, err)
+	_, statErr := os.Stat(filepath.Join(serversDir(ws), "a.b"))
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestRemoveServer_RemovesDirectoryAndPreservesOthers(t *testing.T) {
+	// task 5.3: RemoveServer deletes the directory and leaves other servers.
+	ws := t.TempDir()
+	writeServers(t, ws,
+		Server{Name: "a", URL: "http://a", Transport: "http"},
+		Server{Name: "b", URL: "http://b", Transport: "http"})
+
+	ok, err := RemoveServer(ws, "a")
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	// Directory gone.
+	_, statErr := os.Stat(filepath.Join(serversDir(ws), "a"))
+	assert.True(t, os.IsNotExist(statErr))
+
+	// The other server survives.
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "b", cfg.Servers[0].Name)
+
+	// Removing a missing server is a clean no-op (ok=false, no error).
+	ok, err = RemoveServer(ws, "missing")
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	// An invalid name is treated as not-present rather than an error.
+	ok, err = RemoveServer(ws, "a/b")
+	require.NoError(t, err)
+	assert.False(t, ok)
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +438,7 @@ func TestManager_ConnectionReuseWithinTurn(t *testing.T) {
 	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{Name: "calc", URL: "http://x", Transport: "http"}}}))
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
 
 	ctx := context.Background()
 	c1, err := m.Conn(ctx, "calc")
@@ -243,7 +455,7 @@ func TestManager_ConnectTimeoutAvoidsHandshakeHang(t *testing.T) {
 	ft := &fakeTransport{initDelay: 200 * time.Millisecond}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: 20 * time.Millisecond, CallTimeout: time.Second})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{Name: "calc", URL: "http://x", Transport: "http"}}}))
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
 
 	_, err := m.Conn(context.Background(), "calc")
 	require.Error(t, err)
@@ -257,10 +469,10 @@ func TestManager_TotalCallTimeout(t *testing.T) {
 	}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: 40 * time.Millisecond})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{
+	writeServers(t, ws, Server{
 		Name: "calc", URL: "http://x", Transport: "http",
 		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object"}`)}},
-	}}}))
+	})
 
 	// callTool wraps the whole op in the total-call timeout; a slow call must
 	// surface a deadline error.
@@ -272,7 +484,7 @@ func TestManager_TotalCallTimeout(t *testing.T) {
 func TestManager_CloseDropsConnections(t *testing.T) {
 	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{})
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{Name: "calc", URL: "http://x", Transport: "http"}}}))
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
 	_, err := m.Conn(context.Background(), "calc")
 	require.NoError(t, err)
 	require.NoError(t, m.Close())
@@ -311,9 +523,11 @@ func TestValidateArgs_EmptySchemaAccepts(t *testing.T) {
 
 func TestListServers_RedactsCredentials(t *testing.T) {
 	ws := t.TempDir()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{
-		{Name: "a", URL: "http://a", Transport: "http", Auth: Auth{Type: AuthBearer, Value: "super-secret-token"}, Tools: []ToolCache{{Name: "x"}}},
-	}}))
+	writeServers(t, ws, Server{
+		Name: "a", URL: "http://a", Transport: "http",
+		Auth:  Auth{Type: AuthBearer, Value: "super-secret-token"},
+		Tools: []ToolCache{{Name: "x"}},
+	})
 	m := NewManager(ManagerOptions{WorkspaceRoot: ws})
 
 	out, err := listServers(m)
@@ -343,9 +557,11 @@ func TestAddServer_ConnectsAndCachesTools(t *testing.T) {
 	assert.Equal(t, 1, res.Tools)
 	assert.Equal(t, redacted, res.Auth.Value)
 
-	// Config persisted with the tools/list cache.
+	// Config persisted as a per-server file with the tools/list cache.
 	cfg, err := LoadConfig(ws)
 	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "calc", cfg.Servers[0].Name)
 	require.Len(t, cfg.Servers[0].Tools, 1)
 	assert.Equal(t, "add", cfg.Servers[0].Tools[0].Name)
 
@@ -358,15 +574,30 @@ func TestAddServer_ConnectsAndCachesTools(t *testing.T) {
 	assert.True(t, ok)
 }
 
+func TestAddServer_InvalidNameRejected(t *testing.T) {
+	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
+	m, _ := newManagerWithFake(t, ft, ManagerOptions{})
+	defer m.Close()
+
+	_, err := addServer(context.Background(), m, "a.b", "http://x", "", "http", Auth{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+	assert.Contains(t, err.Error(), "github") // rule/example guidance present
+	_, _, calls := ft.snapshot()
+	assert.Equal(t, 0, calls, "an invalid name must not contact the server")
+}
+
 func TestAddServer_DuplicateNameRejected(t *testing.T) {
 	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{Name: "calc", URL: "http://x", Transport: "http"}}}))
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
 
 	_, err := addServer(context.Background(), m, "calc", "http://y", "", "http", Auth{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
+	ini, _, _ := ft.snapshot()
+	assert.Equal(t, 0, ini, "a duplicate must be rejected before connecting")
 }
 
 func TestAddServer_RejectsNonHTTP(t *testing.T) {
@@ -376,6 +607,8 @@ func TestAddServer_RejectsNonHTTP(t *testing.T) {
 	_, err := addServer(context.Background(), m, "calc", "http://x", "", "stdio", Auth{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "http")
+	ini, _, _ := ft.snapshot()
+	assert.Equal(t, 0, ini, "a bad transport must be rejected before connecting")
 }
 
 func TestRemoveServer_RemovesAndDropsConnection(t *testing.T) {
@@ -394,16 +627,26 @@ func TestRemoveServer_RemovesAndDropsConnection(t *testing.T) {
 	cfg, err := LoadConfig(ws)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.Servers)
+	_, statErr := os.Stat(filepath.Join(serversDir(ws), "calc"))
+	assert.True(t, os.IsNotExist(statErr), "server directory must be removed")
+}
+
+func TestRemoveServer_NotConfigured(t *testing.T) {
+	m := NewManager(ManagerOptions{WorkspaceRoot: t.TempDir()})
+	defer m.Close()
+	_, err := removeServer(m, "missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured")
 }
 
 func TestCallTool_RejectsUnknownToolBeforeCall(t *testing.T) {
 	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{
+	writeServers(t, ws, Server{
 		Name: "calc", URL: "http://x", Transport: "http",
 		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object"}`)}},
-	}}}))
+	})
 
 	_, err := callTool(context.Background(), m, "calc", "nope", json.RawMessage(`{}`))
 	require.Error(t, err)
@@ -416,10 +659,10 @@ func TestCallTool_RejectsBadArgsBeforeCall(t *testing.T) {
 	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{
+	writeServers(t, ws, Server{
 		Name: "calc", URL: "http://x", Transport: "http",
 		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object","required":["a"],"properties":{"a":{"type":"integer"}}}`)}},
-	}}}))
+	})
 
 	_, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`))
 	require.Error(t, err)
@@ -435,10 +678,10 @@ func TestCallTool_Success(t *testing.T) {
 	}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{
+	writeServers(t, ws, Server{
 		Name: "calc", URL: "http://x", Transport: "http",
 		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object","required":["a","b"]}`)}},
-	}}}))
+	})
 
 	out, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{"a":1,"b":2}`))
 	require.NoError(t, err)
@@ -453,10 +696,10 @@ func TestCallTool_RemoteError(t *testing.T) {
 	}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{
+	writeServers(t, ws, Server{
 		Name: "calc", URL: "http://x", Transport: "http",
 		Tools: []ToolCache{{Name: "boom", InputSchema: json.RawMessage(`{"type":"object"}`)}},
-	}}}))
+	})
 
 	_, err := callTool(context.Background(), m, "calc", "boom", json.RawMessage(`{}`))
 	require.Error(t, err)
@@ -469,21 +712,22 @@ func TestCallTool_RefreshOnMiss(t *testing.T) {
 	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
-	require.NoError(t, WriteConfig(ws, &Config{Servers: []Server{{Name: "calc", URL: "http://x", Transport: "http"}}}))
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
 
 	out, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`))
 	require.NoError(t, err)
 	require.Len(t, out.Content, 1)
 
-	// The refreshed cache is persisted.
+	// The refreshed cache is persisted to the server's own file.
 	cfg, err := LoadConfig(ws)
 	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
 	require.Len(t, cfg.Servers[0].Tools, 1)
 	assert.Equal(t, "add", cfg.Servers[0].Tools[0].Name)
 }
 
 // ---------------------------------------------------------------------------
-// Log redaction (task 5.2) — auth never appears in structured logs.
+// Log redaction — auth never appears in structured logs.
 // ---------------------------------------------------------------------------
 
 func TestLog_NoPlaintextAuth(t *testing.T) {
@@ -524,18 +768,20 @@ func fieldString(f zapcore.Field) string {
 }
 
 // ---------------------------------------------------------------------------
-// Per-user isolation (task 8.2)
+// Per-user isolation
 // ---------------------------------------------------------------------------
 
 func TestPerUserIsolation(t *testing.T) {
 	aliceWS := t.TempDir()
 	bobWS := t.TempDir()
-	require.NoError(t, WriteConfig(aliceWS, &Config{Servers: []Server{
-		{Name: "alice-srv", URL: "http://alice/mcp", Transport: "http", Auth: Auth{Type: AuthBearer, Value: "alice-secret"}},
-	}}))
-	require.NoError(t, WriteConfig(bobWS, &Config{Servers: []Server{
-		{Name: "bob-srv", URL: "http://bob/mcp", Transport: "http", Auth: Auth{Type: AuthBearer, Value: "bob-secret"}},
-	}}))
+	writeServers(t, aliceWS, Server{
+		Name: "alice-srv", URL: "http://alice/mcp", Transport: "http",
+		Auth: Auth{Type: AuthBearer, Value: "alice-secret"},
+	})
+	writeServers(t, bobWS, Server{
+		Name: "bob-srv", URL: "http://bob/mcp", Transport: "http",
+		Auth: Auth{Type: AuthBearer, Value: "bob-secret"},
+	})
 
 	aliceMgr := NewManager(ManagerOptions{WorkspaceRoot: aliceWS, ConnectTimeout: time.Second, CallTimeout: time.Second})
 	bobMgr := NewManager(ManagerOptions{WorkspaceRoot: bobWS, ConnectTimeout: time.Second, CallTimeout: time.Second})
@@ -576,7 +822,7 @@ func mustJSON(v any) string {
 }
 
 // ---------------------------------------------------------------------------
-// Default transport factory builds auth-bearing headers (task 4.4)
+// Default transport factory builds auth-bearing headers
 // ---------------------------------------------------------------------------
 
 func TestAuthHeaders(t *testing.T) {
@@ -599,10 +845,136 @@ func TestAuthHeaders(t *testing.T) {
 func TestIsMCPTool(t *testing.T) {
 	assert.True(t, IsMCPTool(ToolCall))
 	assert.True(t, IsMCPTool(ToolListServers))
+	assert.True(t, IsMCPTool(ToolListTools))
 	assert.False(t, IsMCPTool("xizhi_read_file"))
 }
 
 func TestAnyMCPTool(t *testing.T) {
 	assert.False(t, AnyMCPTool([]string{"xizhi_read_file"}, []string{"luban_list_skills"}))
 	assert.True(t, AnyMCPTool([]string{"xizhi_read_file"}, []string{ToolCall}))
+	assert.True(t, AnyMCPTool([]string{"xizhi_read_file"}, []string{ToolListTools}))
+}
+
+// ---------------------------------------------------------------------------
+// mcp_list_tools: live discovery + async cache write-back (tasks 6.1, 6.2)
+// ---------------------------------------------------------------------------
+
+func TestListTools_ReturnsLiveToolList(t *testing.T) {
+	// task 6.1: mcp_list_tools connects live and returns the server's tools
+	// with name/description/input_schema.
+	ft := &fakeTransport{tools: []mcpclient.Tool{
+		{Name: "add", Description: "adds", InputSchema: json.RawMessage(`{"type":"object","required":["a","b"]}`)},
+		{Name: "mul", Description: "multiplies", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}}
+	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
+	defer m.Close()
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
+
+	out, err := listTools(context.Background(), m, "calc")
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Equal(t, "add", out[0].Name)
+	assert.Equal(t, "adds", out[0].Description)
+	assert.JSONEq(t, `{"type":"object","required":["a","b"]}`, string(out[0].InputSchema))
+	assert.Equal(t, "mul", out[1].Name)
+}
+
+func TestListTools_UnknownServerRejected(t *testing.T) {
+	// task 6.1: an unconfigured server is rejected before any connection; no
+	// write-back occurs.
+	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
+	m, ws := newManagerWithFake(t, ft, ManagerOptions{})
+	defer m.Close()
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
+
+	_, err := listTools(context.Background(), m, "ghost")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured")
+	ini, list, calls := ft.snapshot()
+	assert.Equal(t, 0, ini+list+calls, "unknown server must not contact the server")
+}
+
+func TestListTools_ListFailureErrorsWithoutWriteBack(t *testing.T) {
+	// task 6.1: a tools/list failure surfaces a clear error and triggers no
+	// cache write-back.
+	ft := &fakeTransport{listErr: errors.New("boom")}
+	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
+	defer m.Close()
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
+
+	_, err := listTools(context.Background(), m, "calc")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mcp_list_tools")
+
+	// The server's cache stays empty (no write-back on failure).
+	require.Eventually(t, func() bool {
+		cfg, _ := LoadConfig(ws)
+		s, ok := cfg.Server("calc")
+		return ok && len(s.Tools) == 0
+	}, time.Second, 5*time.Millisecond)
+}
+
+func TestListTools_WriteBackUpdatesCacheAndDoesNotBlock(t *testing.T) {
+	// task 6.2: the live result is returned immediately and the cache is
+	// written back asynchronously (the return is not blocked by the write).
+	ft := &fakeTransport{tools: []mcpclient.Tool{
+		{Name: "add", Description: "adds", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}}
+	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
+	defer m.Close()
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
+
+	out, err := listTools(context.Background(), m, "calc")
+	require.NoError(t, err)
+	require.Len(t, out, 1, "result returned before the write-back completes")
+
+	// The async write-back eventually persists the discovered tools.
+	require.Eventually(t, func() bool {
+		cfg, _ := LoadConfig(ws)
+		s, ok := cfg.Server("calc")
+		return ok && len(s.Tools) == 1 && s.Tools[0].Name == "add"
+	}, time.Second, 5*time.Millisecond)
+}
+
+func TestListTools_WriteBackSurvivesTurnCancellation(t *testing.T) {
+	// task 6.2: cancelling the turn ctx after the result returned does not
+	// abort the write-back, which runs on an independent background context.
+	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
+	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
+	defer m.Close()
+	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out, err := listTools(ctx, m, "calc")
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	cancel() // cancel the turn ctx once the result is in hand
+
+	require.Eventually(t, func() bool {
+		cfg, _ := LoadConfig(ws)
+		s, ok := cfg.Server("calc")
+		return ok && len(s.Tools) == 1 && s.Tools[0].Name == "add"
+	}, time.Second, 5*time.Millisecond)
+}
+
+func TestWriteBackToolsAsync_FailureOnlyLogs(t *testing.T) {
+	// task 6.2: a write-back failure is logged as a warning and never panics
+	// or affects the caller.
+	core, recorded := observer.New(zapcore.WarnLevel)
+	prev := logger.L()
+	logger.SetDefault(zap.New(core))
+	t.Cleanup(func() { logger.SetDefault(prev) })
+
+	ws := t.TempDir()
+	// "ghost" is not configured → persist returns an error inside the goroutine.
+	writeBackToolsAsync(ws, "ghost", []mcpclient.Tool{{Name: "add"}})
+
+	require.Eventually(t, func() bool {
+		return recorded.FilterMessage("mcp_list_tools: async cache write-back failed (non-fatal)").Len() > 0
+	}, time.Second, 5*time.Millisecond, "write-back failure must be logged as a warning")
+
+	// Nothing was written.
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Servers)
 }

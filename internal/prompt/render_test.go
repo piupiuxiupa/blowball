@@ -172,6 +172,25 @@ func TestRenderSystemPrompt_UserMCPServers(t *testing.T) {
 	assert.Contains(t, out, "mcp_list_servers")
 }
 
+func TestRenderSystemPrompt_UserMCPListBeforeCallConvention(t *testing.T) {
+	// task 6.4: the User MCP Servers section states the list-before-call
+	// convention — call mcp_list_tools before mcp_call, never guess.
+	out, err := RenderSystemPrompt(RenderInput{
+		Workspace: "/data/u-1/workspace",
+		UserID:    "u-1",
+		Platform:  "amd64",
+		OS:        "linux",
+		Cutoff:    "August 2025",
+		UserMCP:   []MCPServerInfo{{Name: "github", URL: "https://mcp/mcp"}},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "## User MCP Servers")
+	assert.Contains(t, out, "mcp_list_tools", "convention must name the discovery tool")
+	assert.Contains(t, out, "mcp_call")
+	assert.Contains(t, out, "never guess", "convention must forbid guessing tool names/args")
+	assert.Contains(t, out, "rejected before the remote call", "convention must explain the rejection")
+}
+
 func TestRenderSystemPrompt_ProactiveSelectionNudge(t *testing.T) {
 	// 6.2: the important notice nudges the agent to proactively evaluate and
 	// select a per-user MCP service when appropriate.

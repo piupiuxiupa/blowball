@@ -529,7 +529,7 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
-	mcpH := handler.NewMCPHandler(tool.NewRegistry())
+	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
 
 	r := gin.New()
@@ -613,7 +613,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
-	mcpH := handler.NewMCPHandler(baseReg)
+	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
 
 	r := gin.New()
@@ -715,7 +715,7 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
-	mcpH := handler.NewMCPHandler(tool.NewRegistry())
+	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
 
 	r := gin.New()
