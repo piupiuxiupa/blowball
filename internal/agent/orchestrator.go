@@ -12,6 +12,7 @@ import (
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/luban"
+	"github.com/lush/blowball/internal/tool/mcp"
 	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/lush/blowball/internal/tool/xizhi"
 	"go.uber.org/zap"
@@ -31,9 +32,16 @@ import (
 type AgentFactory interface {
 	// Build returns a freshly-constructed Confucius agent for the request whose
 	// user owns workspaceRoot. The returned Confucius owns its own Chongzhi /
-	// Liang sub-agents, all wired to the same LLMClient.
-	Build(workspaceRoot, skillsDir, userID string) (Agent, error)
+	// Liang sub-agents, all wired to the same LLMClient. The returned TurnCloser
+	// releases per-turn resources (the per-user MCP connection manager) once the
+	// turn's Run completes; it is nil when no per-turn resources were created.
+	Build(workspaceRoot, skillsDir, userID string) (Agent, TurnCloser, error)
 }
+
+// TurnCloser releases per-turn resources created by AgentFactory.Build (the
+// turn-scoped, per-user MCP connection manager). The orchestrator invokes it
+// after the turn's Run completes. A nil TurnCloser means nothing to clean up.
+type TurnCloser func()
 
 // orchestratorFactory is the production AgentFactory. It clones the base
 // config and rebuilds the per-agent tool registry and system prompt per request.
@@ -43,57 +51,84 @@ type orchestratorFactory struct {
 	baseRegistry *tool.Registry      // holds process-wide tools (webfetch, MCP proxies, luban skill tools)
 	serverTools  map[string][]string // server name -> prefixed tool names
 	skillLoader  *skill.Loader       // discovers global and per-user skills
+	userMCP      config.UserMCPConfig // per-user MCP tool timeouts/enabled flag
 }
 
 // Build implements AgentFactory.
-func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Agent, error) {
+func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Agent, TurnCloser, error) {
 	// agent.skills must reference global skills only; user skills are discovered
 	// at runtime via luban tools.
 	if err := f.cfg.ValidateAgentSkills(userID, func(name, _ string) bool {
 		return f.skillLoader.HasSkill(name, "")
 	}); err != nil {
-		return nil, fmt.Errorf("agent factory: validate skills: %w", err)
+		return nil, nil, fmt.Errorf("agent factory: validate skills: %w", err)
 	}
 
 	globalSkillsDir := f.skillLoader.GlobalDir()
 
-	chongzhi, err := f.buildChongzhi(workspaceRoot, globalSkillsDir, skillsDir, userID)
-	if err != nil {
-		return nil, fmt.Errorf("agent factory: build chongzhi: %w", err)
+	// Per-user MCP connection manager is created once per turn and shared
+	// across Confucius + its sub-agents so connections are reused within the
+	// turn and destroyed at turn end. It is only created when at least one agent
+	// lists an mcp_* tool, to avoid needless allocation otherwise. The manager
+	// is bound to this user's workspaceRoot, so credential isolation holds by
+	// construction (see design D1/D5).
+	var mcpMgr *mcp.Manager
+	var closer TurnCloser
+	if mcp.AnyMCPTool(f.cfg.Agents.Confucius.Tools, f.cfg.Agents.Chongzhi.Tools, f.cfg.Agents.Liang.Tools) {
+		mcpMgr = mcp.NewManager(mcp.ManagerOptions{
+			WorkspaceRoot:  workspaceRoot,
+			ConnectTimeout: f.userMCP.ConnectTimeout,
+			CallTimeout:    f.userMCP.CallTimeout,
+		})
+		closer = func() { _ = mcpMgr.Close() }
 	}
-	liang, err := f.buildLiang(workspaceRoot, globalSkillsDir, skillsDir, userID)
+
+	chongzhi, err := f.buildChongzhi(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
 	if err != nil {
-		return nil, fmt.Errorf("agent factory: build liang: %w", err)
+		if closer != nil {
+			closer()
+		}
+		return nil, nil, fmt.Errorf("agent factory: build chongzhi: %w", err)
+	}
+	liang, err := f.buildLiang(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+	if err != nil {
+		if closer != nil {
+			closer()
+		}
+		return nil, nil, fmt.Errorf("agent factory: build liang: %w", err)
 	}
 	subAgents := map[string]Agent{
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    liang,
 	}
-	confucius, err := f.buildConfucius(workspaceRoot, globalSkillsDir, skillsDir, userID, subAgents)
+	confucius, err := f.buildConfucius(workspaceRoot, globalSkillsDir, skillsDir, userID, subAgents, mcpMgr)
 	if err != nil {
-		return nil, fmt.Errorf("agent factory: build confucius: %w", err)
+		if closer != nil {
+			closer()
+		}
+		return nil, nil, fmt.Errorf("agent factory: build confucius: %w", err)
 	}
-	return confucius, nil
+	return confucius, closer, nil
 }
 
-func (f *orchestratorFactory) buildConfucius(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]Agent) (*Confucius, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confucius, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
+func (f *orchestratorFactory) buildConfucius(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]Agent, mcpMgr *mcp.Manager) (*Confucius, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confucius, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
 	return NewConfucius(cfg, f.client, reg, subAgents)
 }
 
-func (f *orchestratorFactory) buildChongzhi(workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (*Chongzhi, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
+func (f *orchestratorFactory) buildChongzhi(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*Chongzhi, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
 	return NewChongzhi(cfg, f.client, reg)
 }
 
-func (f *orchestratorFactory) buildLiang(workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (*Liang, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
+func (f *orchestratorFactory) buildLiang(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*Liang, error) {
+	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +137,10 @@ func (f *orchestratorFactory) buildLiang(workspaceRoot, globalSkillsDir, userSki
 
 // buildAgentRegistry creates a registry scoped to workspaceRoot containing the
 // tools this agent is allowed to use: built-ins listed in cfg.Tools, MCP tools
-// allowed by cfg.MCP, and luban skill tools when they are configured.
-func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (*tool.Registry, config.AgentConfig, error) {
+// allowed by cfg.MCP, luban skill tools when they are configured, and the
+// per-user mcp_* tools when the agent lists one and a turn-scoped manager is
+// available.
+func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
 	fullToolNames = append(fullToolNames, mcpToolNames...)
@@ -130,13 +167,34 @@ func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspa
 		}
 	}
 
-	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID)
+	// Per-user mcp_* tools. They are registered per-turn (bound to the
+	// turn-scoped, per-user manager) rather than copied from the base registry,
+	// because they hold per-turn connection state. Only registered when the
+	// agent lists one and a manager exists (created once per turn in Build).
+	if mcpMgr != nil && agentListsMCPTool(cfg.Tools) {
+		if err := mcp.RegisterAll(reg, mcp.NewTools(mcpMgr)); err != nil {
+			return nil, cfg, fmt.Errorf("agent factory: register mcp tools: %w", err)
+		}
+	}
+
+	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, reg, mcpMgr)
 	if err != nil {
 		return nil, cfg, err
 	}
 	cfg.Tools = fullToolNames
 	cfg.SystemPrompt = rendered
 	return reg, cfg, nil
+}
+
+// agentListsMCPTool reports whether the agent's configured tools include any
+// per-user mcp_* tool.
+func agentListsMCPTool(tools []string) bool {
+	for _, name := range tools {
+		if mcp.IsMCPTool(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // allowedMCPTools returns the prefixed tool names this agent is allowed to use
@@ -173,8 +231,20 @@ func isLubanTool(name string) bool {
 }
 
 // renderSystemPrompt builds the complete system prompt for an agent.
-func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string) (string, error) {
-	return prompt.RenderSystemPrompt(prompt.RenderInput{
+func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, reg *tool.Registry, mcpMgr *mcp.Manager) (string, error) {
+	tools := f.collectTools(cfg)
+	// Per-user mcp_* tools are registered per-turn (not in the base registry),
+	// so surface them from the per-agent registry so the prompt advertises the
+	// same tools the model can actually call.
+	if reg != nil {
+		for _, spec := range reg.List() {
+			if mcp.IsMCPTool(spec.Name) {
+				tools = append(tools, prompt.ToolInfo{Name: spec.Name, Description: spec.Description})
+			}
+		}
+	}
+
+	input := prompt.RenderInput{
 		BasePrompt:      cfg.SystemPrompt,
 		Workspace:       workspaceRoot,
 		GlobalSkillsDir: "/skills/global",
@@ -183,9 +253,35 @@ func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspa
 		Platform:        runtime.GOARCH,
 		OS:              runtime.GOOS,
 		Cutoff:          "August 2025",
-		Tools:           f.collectTools(cfg),
+		Tools:           tools,
 		Skills:          f.collectSkills(cfg),
-	})
+	}
+	// Advertise the caller's per-user MCP servers (server-level name +
+	// description only) when the family is active. Credentials are never loaded
+	// into the prompt — only name/url/description are rendered.
+	if mcpMgr != nil {
+		input.UserMCP = collectUserMCPServers(workspaceRoot)
+	}
+	return prompt.RenderSystemPrompt(input)
+}
+
+// collectUserMCPServers reads the caller's per-user MCP config and returns the
+// server-level descriptions for system-prompt advertisement. A missing or
+// unreadable config yields no servers (the read error is logged but never
+// crashes the turn — see the "malformed config does not crash" requirement).
+func collectUserMCPServers(workspaceRoot string) []prompt.MCPServerInfo {
+	cfg, err := mcp.LoadConfig(workspaceRoot)
+	if err != nil {
+		logger.L().Warn("load per-user mcp config for prompt failed; skipping user mcp advertisement",
+			zap.String("workspace", workspaceRoot),
+			zap.Error(err))
+		return nil
+	}
+	out := make([]prompt.MCPServerInfo, 0, len(cfg.Servers))
+	for _, s := range cfg.SortedServers() {
+		out = append(out, prompt.MCPServerInfo{Name: s.Name, Description: s.Description, URL: s.URL})
+	}
+	return out
 }
 
 // collectTools converts the tools allowed for this agent into prompt.ToolInfo
@@ -303,6 +399,7 @@ func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Re
 		baseRegistry: baseRegistry,
 		serverTools:  serverTools,
 		skillLoader:  skillLoader,
+		userMCP:      cfg.Tools.UserMCP,
 	}
 	return &Orchestrator{factory: factory, workspaceRootForUser: workspaceRootForUser}, nil
 }
@@ -323,9 +420,15 @@ type WorkspaceRootForUser = func(userID string) string
 // factory can load user-specific skills and validate skill permissions.
 func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub) error {
 	ctx = skill.WithUserID(ctx, userID)
-	confucius, err := o.factory.Build(workspaceRoot, skillsDir, userID)
+	confucius, closer, err := o.factory.Build(workspaceRoot, skillsDir, userID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
+	}
+	// Release per-turn resources (the per-user MCP connection manager) once the
+	// turn's Run completes, regardless of success/failure. The closer is nil
+	// when no per-turn resources were created.
+	if closer != nil {
+		defer closer()
 	}
 
 	content, usage, breakdown, err := confucius.Run(ctx, messages, hub)

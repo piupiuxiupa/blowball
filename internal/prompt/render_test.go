@@ -147,3 +147,65 @@ func TestRenderSystemPrompt_NoDuplicateEnvironment(t *testing.T) {
 	// not embed their own.
 	assert.Contains(t, out, "# Environment")
 }
+
+func TestRenderSystemPrompt_UserMCPServers(t *testing.T) {
+	out, err := RenderSystemPrompt(RenderInput{
+		Workspace: "/data/u-1/workspace",
+		UserID:    "u-1",
+		Platform:  "amd64",
+		OS:        "linux",
+		Cutoff:    "August 2025",
+		UserMCP: []MCPServerInfo{
+			{Name: "github", Description: "GitHub issues & PRs", URL: "https://mcp/mcp"},
+			{Name: "linear", URL: "https://linear/mcp"},
+		},
+	})
+	require.NoError(t, err)
+
+	// 6.1: per-user servers rendered in their own section, distinct from
+	// operator MCP.
+	assert.Contains(t, out, "## User MCP Servers")
+	assert.Contains(t, out, "github")
+	assert.Contains(t, out, "GitHub issues & PRs")
+	assert.Contains(t, out, "linear")
+	assert.Contains(t, out, "mcp_call")
+	assert.Contains(t, out, "mcp_list_servers")
+}
+
+func TestRenderSystemPrompt_ProactiveSelectionNudge(t *testing.T) {
+	// 6.2: the important notice nudges the agent to proactively evaluate and
+	// select a per-user MCP service when appropriate.
+	out, err := RenderSystemPrompt(RenderInput{
+		Workspace: "/data/u-1/workspace",
+		UserID:    "u-1",
+		Platform:  "amd64",
+		OS:        "linux",
+		Cutoff:    "August 2025",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "proactively evaluate")
+	assert.Contains(t, out, "User MCP Servers")
+}
+
+func TestRenderSystemPrompt_BlowballMCPConstraint(t *testing.T) {
+	// 6.3: the .blowball/mcp management constraint is stated only when the
+	// per-user MCP section is present.
+	without := mustRender(t, RenderInput{
+		Workspace: "/data/u-1/workspace", UserID: "u-1", Platform: "amd64", OS: "linux", Cutoff: "August 2025",
+	})
+	assert.NotContains(t, without, ".blowball/mcp/")
+
+	with := mustRender(t, RenderInput{
+		Workspace: "/data/u-1/workspace", UserID: "u-1", Platform: "amd64", OS: "linux", Cutoff: "August 2025",
+		UserMCP: []MCPServerInfo{{Name: "github", URL: "https://mcp/mcp"}},
+	})
+	assert.Contains(t, with, "`.blowball/mcp/` namespace is managed exclusively via the `mcp_*` tools")
+	assert.Contains(t, with, "never use `xizhi_*` tools")
+}
+
+func mustRender(t *testing.T, in RenderInput) string {
+	t.Helper()
+	out, err := RenderSystemPrompt(in)
+	require.NoError(t, err)
+	return out
+}

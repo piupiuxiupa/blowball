@@ -486,6 +486,15 @@ type WebfetchConfig struct {
 	MaxRedirects int           `yaml:"max_redirects"`
 }
 
+// UserMCPConfig holds per-user MCP tool settings. Per-user MCP activates
+// automatically when an agent lists an mcp_* tool; the configurable knobs are
+// the connect handshake timeout and the total per-call timeout. Zero values
+// fall back to package defaults (connect 5s, total 10s).
+type UserMCPConfig struct {
+	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+	CallTimeout    time.Duration `yaml:"call_timeout"`
+}
+
 // ExecutorToolConfig holds the per-tool settings for bash/python executors.
 type ExecutorToolConfig struct {
 	Enabled            bool          `yaml:"enabled"`
@@ -728,9 +737,10 @@ func boolPtr(b bool) *bool {
 
 // ToolsConfig groups all tool configuration.
 type ToolsConfig struct {
-	Xizhi    XizhiConfig    `yaml:"xizhi"`
-	Webfetch WebfetchConfig `yaml:"webfetch"`
-	Executor ExecutorConfig `yaml:"executor"`
+	Xizhi     XizhiConfig     `yaml:"xizhi"`
+	Webfetch  WebfetchConfig  `yaml:"webfetch"`
+	Executor  ExecutorConfig  `yaml:"executor"`
+	UserMCP   UserMCPConfig   `yaml:"user_mcp"`
 }
 
 // MCPConfig holds external MCP server configuration.

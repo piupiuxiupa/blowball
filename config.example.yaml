@@ -166,6 +166,13 @@ agents:
     tools: 
       - luban_list_skills
       - luban_read_skill
+      # Per-user MCP tools (mcp_list_servers / mcp_add_server /
+      # mcp_remove_server / mcp_call) let this agent manage and call the user's
+      # own MCP servers declared in their workspace.
+      # - mcp_list_servers
+      # - mcp_add_server
+      # - mcp_remove_server
+      # - mcp_call
 
 
     # Optional: declare MCP servers and tools this agent may use.
@@ -332,6 +339,14 @@ tools:
     enabled: true
     timeout: 30s
     # max_redirects: 10   # optional; HTTP redirect cap (default 10, 0/negative -> 10)
+
+  # Per-user (workspace-resident) MCP tools: mcp_list_servers / mcp_add_server /
+  # mcp_remove_server / mcp_call. Each user configures their own servers in
+  # {workspaceRoot}/.blowball/mcp/config.json with HTTP transport + static
+  # credentials. The family activates when any agent lists an mcp_* tool.
+  user_mcp:
+    # connect_timeout: 5s   # MCP handshake timeout (default 5s)
+    # call_timeout: 10s     # total per mcp_call budget (default 10s)
 
   # Sandboxed command execution via bubblewrap (Linux only).
   # Requires bwrap to be installed and unprivileged user namespaces available.

@@ -467,6 +467,15 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		}
 	}
 
+	// Per-user mcp_* tools (mcp_list_servers / mcp_add_server / mcp_remove_server /
+	// mcp_call) are NOT registered into this process-wide registry. Unlike luban,
+	// they hold per-turn, per-user connection state (the turn-scoped MCP
+	// connection manager), so the orchestrator's per-request AgentFactory builds
+	// and binds them fresh for each turn against the requesting user's workspace.
+	// Only the agent/all role builds the orchestrator, so the api role never
+	// surfaces these tools (its SessionHandler is CRUD-only). The family activates
+	// automatically when any agent lists an mcp_* tool in config.
+
 	// External MCP servers. Connect, discover tools, and register proxy specs into the process-wide registry. Startup fails fast on connection or tool-list errors.
 	mcpManager, err := mcpclient.RegisterAllWithManager(context.Background(), reg, cfg.MCP)
 	if err != nil {

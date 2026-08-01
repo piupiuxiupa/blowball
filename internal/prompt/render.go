@@ -24,6 +24,16 @@ type SkillInfo struct {
 	Location    string
 }
 
+// MCPServerInfo describes a per-user MCP server to advertise in the system
+// prompt. Only server-level name/description/url are rendered (never
+// credentials); the agent discovers the per-server tool catalogue on demand
+// via the mcp_* tools.
+type MCPServerInfo struct {
+	Name        string
+	Description string
+	URL         string
+}
+
 // RenderInput is the plain-data input to RenderSystemPrompt.
 type RenderInput struct {
 	BasePrompt      string
@@ -35,8 +45,9 @@ type RenderInput struct {
 	OS              string
 	Cutoff          string
 
-	Tools  []ToolInfo
-	Skills []SkillInfo
+	Tools   []ToolInfo
+	Skills  []SkillInfo
+	UserMCP []MCPServerInfo
 }
 
 // RenderSystemPrompt renders a complete system prompt from the provided input.
@@ -81,6 +92,24 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 				fmt.Fprintf(&b, "- %s: %s\n", t.Name, t.Description)
 			}
 		}
+		b.WriteString("\n")
+	}
+
+	if len(input.UserMCP) > 0 {
+		b.WriteString("## User MCP Servers\n")
+		b.WriteString("Per-user MCP servers configured in your workspace (`.blowball/mcp/config.json`). " +
+			"Use `mcp_list_servers` to inspect them and `mcp_call(server, tool, args)` to invoke a tool. " +
+			"Credentials are managed server-side and are never shown to you.\n")
+		for _, s := range input.UserMCP {
+			if s.Description != "" {
+				fmt.Fprintf(&b, "- %s: %s (%s)\n", s.Name, s.Description, s.URL)
+			} else {
+				fmt.Fprintf(&b, "- %s (%s)\n", s.Name, s.URL)
+			}
+		}
+		b.WriteString("\n")
+		b.WriteString("The `.blowball/mcp/` namespace is managed exclusively via the `mcp_*` tools; " +
+			"never use `xizhi_*` tools to read or modify `.blowball` or any MCP config.\n")
 		b.WriteString("\n")
 	}
 
@@ -140,6 +169,7 @@ func renderImportantNotice() string {
 	return `
 	**NOTICE**:
 	- Before processing a task, you will first check whether the most suitable skill is available for use, and only then look for other callable tools. 
+	- Before executing a task, also proactively evaluate whether a configured per-user MCP service (see the "User MCP Servers" section, if present) is the best way to accomplish it, and select it when appropriate.
 	- You must not repeat the content of the skill itself to the user; instead, you should strictly follow the specifications of the skill to complete the task.
 	- When replying to users, try to use few or no emojis.
 	`
