@@ -30,6 +30,7 @@ type loginRequest struct {
 
 // loginResponse is the JSON body returned on a successful login.
 type loginResponse struct {
+	UserID      string `json:"user_id"`
 	AccessToken string `json:"access_token"`
 	Expire      int64  `json:"expire"`
 	TokenType   string `json:"token_type"`
@@ -45,13 +46,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	token, expireAt, err := h.svc.Login(c.Request.Context(), req.Username, req.Password)
+	token, userID, expireAt, err := h.svc.Login(c.Request.Context(), req.Username, req.Password)
 	if err != nil {
 		writeAuthError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusOK, loginResponse{
+		UserID:      userID,
 		AccessToken: token,
 		Expire:      expireAt.Unix(),
 		TokenType:   "Bearer",

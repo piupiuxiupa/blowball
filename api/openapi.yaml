@@ -55,8 +55,11 @@ components:
             in passwordless mode the password, if sent, is ignored.
     LoginResponse:
       type: object
-      required: [access_token, expire, token_type]
+      required: [user_id, access_token, expire, token_type]
       properties:
+        user_id:
+          type: string
+          description: The authenticated user's unique ID.
         access_token:
           type: string
           description: Signed JWT to send as `Bearer` in subsequent requests.

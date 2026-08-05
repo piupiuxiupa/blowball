@@ -63,17 +63,18 @@ func NewAuthService(us UserStore, secret string, expire time.Duration, passwordR
 	}
 }
 
-// Login authenticates username/password and returns a freshly signed JWT plus
-// the absolute time at which it expires. When the service is configured for
-// passwordless login the bcrypt comparison is skipped entirely — any active
-// user is logged in regardless of the supplied password. Otherwise the password
-// is verified against the stored bcrypt hash and a mismatch yields
-// ErrInvalidCredentials. The lookup still returns ErrUserNotFound immediately
-// when the username misses, which keeps the failure mode crisp.
+// Login authenticates username/password and returns a freshly signed JWT, the
+// authenticated user's ID, and the absolute time at which the token expires.
+// When the service is configured for passwordless login the bcrypt comparison
+// is skipped entirely — any active user is logged in regardless of the supplied
+// password. Otherwise the password is verified against the stored bcrypt hash
+// and a mismatch yields ErrInvalidCredentials. The lookup still returns
+// ErrUserNotFound immediately when the username misses, which keeps the failure
+// mode crisp.
 //
 // Passwords are never logged; only the outcome (success/failure) and the
 // reason are recorded, always with the request trace_id attached.
-func (s *AuthService) Login(ctx context.Context, username, password string) (string, time.Time, error) {
+func (s *AuthService) Login(ctx context.Context, username, password string) (string, string, time.Time, error) {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(zap.String("op", "auth.login"))
 	if tid != "" {
@@ -83,22 +84,22 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (str
 	user, err := s.userStore.GetUserByUsername(ctx, username)
 	if err != nil {
 		log.Error("user lookup failed", zap.String("username", username), zap.Error(err))
-		return "", time.Time{}, fmt.Errorf("auth.login: lookup: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("auth.login: lookup: %w", err)
 	}
 	if user == nil {
 		log.Info("login failed: user not found", zap.String("username", username))
-		return "", time.Time{}, ErrUserNotFound
+		return "", "", time.Time{}, ErrUserNotFound
 	}
 
 	if user.Status != model.UserStatusActive {
 		log.Info("login failed: user disabled", zap.String("username", username), zap.String("status", user.Status))
-		return "", time.Time{}, ErrUserDisabled
+		return "", "", time.Time{}, ErrUserDisabled
 	}
 
 	if s.passwordRequired {
 		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
 			log.Info("login failed: invalid credentials", zap.String("username", username))
-			return "", time.Time{}, ErrInvalidCredentials
+			return "", "", time.Time{}, ErrInvalidCredentials
 		}
 	}
 
@@ -106,9 +107,9 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (str
 	token, err := jwt.Sign(s.jwtSecret, user.UserID, s.jwtExpire)
 	if err != nil {
 		log.Error("jwt sign failed", zap.String("username", username), zap.Error(err))
-		return "", time.Time{}, fmt.Errorf("auth.login: sign: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("auth.login: sign: %w", err)
 	}
 
 	log.Info("login succeeded", zap.String("username", username), zap.String("user_id", user.UserID))
-	return token, expireAt, nil
+	return token, user.UserID, expireAt, nil
 }

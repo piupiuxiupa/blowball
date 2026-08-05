@@ -68,6 +68,7 @@ func mustHash(t *testing.T, pw string) string {
 }
 
 type loginResp struct {
+	UserID      string `json:"user_id"`
 	AccessToken string `json:"access_token"`
 	Expire      int64  `json:"expire"`
 	TokenType   string `json:"token_type"`
@@ -109,6 +110,7 @@ func TestLoginHandler_Success(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.AccessToken)
 	assert.Equal(t, "Bearer", resp.TokenType)
+	assert.Equal(t, userID, resp.UserID)
 	assert.Greater(t, resp.Expire, time.Now().Unix())
 
 	// The issued token verifies and carries the right user_id.

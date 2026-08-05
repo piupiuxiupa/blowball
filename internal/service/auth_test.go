@@ -70,10 +70,11 @@ func TestLogin_Success(t *testing.T) {
 	})
 
 	before := time.Now()
-	token, expireAt, err := svc.Login(context.Background(), username, password)
+	token, gotUserID, expireAt, err := svc.Login(context.Background(), username, password)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, token)
+	assert.Equal(t, userID, gotUserID, "Login should return the authenticated user's ID")
 
 	gotUserID, verifyErr := jwt.Verify(testSecret, token)
 	require.NoError(t, verifyErr, "issued token must verify")
@@ -87,7 +88,7 @@ func TestLogin_Success(t *testing.T) {
 func TestLogin_UserNotFound(t *testing.T) {
 	svc, _ := newSvc(t)
 
-	_, _, err := svc.Login(context.Background(), "ghost", "whatever")
+	_, _, _, err := svc.Login(context.Background(), "ghost", "whatever")
 	assert.ErrorIs(t, err, ErrUserNotFound)
 }
 
@@ -103,7 +104,7 @@ func TestLogin_InvalidPassword(t *testing.T) {
 		Status:   model.UserStatusActive,
 	})
 
-	_, _, err := svc.Login(context.Background(), username, "wrong-password")
+	_, _, _, err := svc.Login(context.Background(), username, "wrong-password")
 	assert.ErrorIs(t, err, ErrInvalidCredentials)
 
 	// Sanity: errors.Is must not match the sibling sentinels.
@@ -123,7 +124,7 @@ func TestLogin_DisabledUser(t *testing.T) {
 		Status:   model.UserStatusDisabled,
 	})
 
-	_, _, err := svc.Login(context.Background(), username, "any")
+	_, _, _, err := svc.Login(context.Background(), username, "any")
 	assert.ErrorIs(t, err, ErrUserDisabled)
 }
 
@@ -149,7 +150,7 @@ func TestLogin_ActualBcryptHash(t *testing.T) {
 	})
 
 	// Correct password verifies and yields a token whose user_id matches.
-	token, _, err := svc.Login(context.Background(), username, password)
+	token, _, _, err := svc.Login(context.Background(), username, password)
 	require.NoError(t, err)
 	gotUserID, err := jwt.Verify(testSecret, token)
 	require.NoError(t, err)
@@ -157,7 +158,7 @@ func TestLogin_ActualBcryptHash(t *testing.T) {
 
 	// A single-character mutation must flip the result to ErrInvalidCredentials,
 	// proving the comparison actually runs the hash through bcrypt.
-	_, _, err = svc.Login(context.Background(), username, password+"x")
+	_, _, _, err = svc.Login(context.Background(), username, password+"x")
 	assert.ErrorIs(t, err, ErrInvalidCredentials)
 }
 
@@ -176,17 +177,17 @@ func TestLogin_PasswordlessMode(t *testing.T) {
 	})
 
 	// A wrong password still succeeds — bcrypt is skipped entirely.
-	token, _, err := svc.Login(context.Background(), username, "totally-wrong")
+	token, _, _, err := svc.Login(context.Background(), username, "totally-wrong")
 	require.NoError(t, err)
 	gotUserID, verifyErr := jwt.Verify(testSecret, token)
 	require.NoError(t, verifyErr)
 	assert.Equal(t, userID, gotUserID)
 
 	// An empty password also succeeds.
-	_, _, err = svc.Login(context.Background(), username, "")
+	_, _, _, err = svc.Login(context.Background(), username, "")
 	require.NoError(t, err)
 
 	// Lookup and status gating are still enforced in passwordless mode.
-	_, _, err = svc.Login(context.Background(), "nope", "anything")
+	_, _, _, err = svc.Login(context.Background(), "nope", "anything")
 	assert.ErrorIs(t, err, ErrUserNotFound)
 }
