@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
 	"errors"
 	"fmt"
@@ -45,12 +46,16 @@ type WorkspaceHandler struct {
 // into WorkspaceHandler. Secret signs the editor config (HS256); ServerURL is
 // the browser-facing api.js origin and the host allowlist base for callback
 // result URLs; InternalBackend is the container-reachable backend origin used to
-// build document.url and callbackUrl. When Secret is empty the editor-config and
-// callback endpoints return 503 rather than signing an unverifiable config.
+// build document.url and callbackUrl. VersionServiceURL is the base URL of the
+// external office-vers service that the version-view config endpoint points
+// document.url at. When Secret is empty the editor-config and callback endpoints
+// return 503 rather than signing an unverifiable config; the version-view
+// endpoint additionally requires VersionServiceURL.
 type OnlyOfficeSettings struct {
-	Secret          string
-	ServerURL       string
-	InternalBackend string
+	Secret            string
+	ServerURL         string
+	InternalBackend   string
+	VersionServiceURL string
 }
 
 // configured reports whether OnlyOffice editing is enabled. The editor-config
@@ -58,6 +63,14 @@ type OnlyOfficeSettings struct {
 // disables both endpoints (503).
 func (o OnlyOfficeSettings) configured() bool {
 	return strings.TrimSpace(o.Secret) != ""
+}
+
+// versionConfigured reports whether the historical-version view config endpoint
+// is enabled. It needs BOTH the signing secret and the office-vers service base
+// URL, because document.url points at office-vers (not the backend). Either
+// missing → 503.
+func (o OnlyOfficeSettings) versionConfigured() bool {
+	return strings.TrimSpace(o.Secret) != "" && strings.TrimSpace(o.VersionServiceURL) != ""
 }
 
 // NewWorkspaceHandler wires the handler. maxUploadBytes is the per-file upload
@@ -850,7 +863,69 @@ func (h *WorkspaceHandler) signOnlyOfficeConfig(c *gin.Context, ctx context.Cont
 	return token, true
 }
 
-// OnlyOfficeCallback handles POST /api/v1/workspace/onlyoffice-callback?path=<>&token=<jwt>.
+// onlyOfficeVersionConfigResponse is the JSON body returned by the version-view
+// editor-config endpoint. It mirrors the shape of one mode of
+// onlyOfficeConfigResponse (a {config, token} pair nested under "view"), but
+// returns ONLY the view mode: a historical version is immutable and has no edit
+// semantics. The frontend can thus reuse its existing resp.view.{config, token}
+// consumption path unchanged.
+type onlyOfficeVersionConfigResponse struct {
+	ServerURL string               `json:"server_url"`
+	View      onlyOfficeModeConfig `json:"view"`
+}
+
+// OnlyOfficeVersionConfig handles GET /api/v1/workspace/files/*path/onlyoffice-version-config?versionId=<vid>.
+// It builds a view-only DocEditor config pointing at a specific historical
+// version stored in the external office-vers service (MinIO-backed, no auth),
+// signs it with the OnlyOffice secret, and returns {server_url, view:{config, token}}.
+//
+// Unlike OnlyOfficeConfig (the live-file endpoint): document.url targets
+// office-vers ({version_service_url}/documents/{userUUID}/{path}?action=version&versionId=<vid>)
+// and carries NO credential (office-vers is unauthenticated by design); the
+// document.key is derived deterministically from (path, versionId) so OnlyOffice
+// caches and shares the conversion across opens/users (a historical version is
+// immutable, so a stable key never serves stale content); and the config carries
+// no callbackUrl (nothing to save back to an immutable version).
+//
+// 503 when the OnlyOffice secret or version_service_url is not configured; 400
+// when versionId is missing; 403 on path escape. The local workspace file is NOT
+// stat-checked — the version's source of truth is office-vers, so a missing local
+// file must not block previewing a version that exists there (lazy validation).
+func (h *WorkspaceHandler) OnlyOfficeVersionConfig(c *gin.Context) {
+	if !h.oo.versionConfigured() {
+		c.JSON(http.StatusServiceUnavailable, errorBody("ONLYOFFICE_DISABLED", "onlyoffice is not configured"))
+		return
+	}
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	versionID := strings.TrimSpace(c.Query("versionId"))
+	if versionID == "" {
+		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "versionId is required"))
+		return
+	}
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	rel := strings.TrimPrefix(c.Param("path"), "/")
+	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, rel)
+	if err != nil {
+		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	cfg := h.buildOnlyOfficeVersionConfig(rel, versionID, userID)
+	token, ok := h.signOnlyOfficeConfig(c, ctx, abs, cfg)
+	if !ok {
+		return
+	}
+
+	c.JSON(http.StatusOK, onlyOfficeVersionConfigResponse{
+		ServerURL: h.oo.ServerURL,
+		View:      onlyOfficeModeConfig{Config: cfg, Token: token},
+	})
+}
+
 // It receives OnlyOffice document-save callbacks from the DocumentServer. For
 // save statuses (2/6) it downloads the result URL — host-allowlisted to the
 // configured DocumentServer to mitigate SSRF — and atomically overwrites the
@@ -981,6 +1056,67 @@ func (h *WorkspaceHandler) buildOnlyOfficeConfigs(rel, userJWT string) (edit, vi
 		},
 	}
 	return edit, view, nil
+}
+
+// buildOnlyOfficeVersionConfig constructs a view-only DocEditor config for a
+// specific historical version stored in the external office-vers service. Unlike
+// buildOnlyOfficeConfigs (the live-file endpoint):
+//   - document.url targets office-vers and carries NO credential (office-vers is
+//     unauthenticated by design; the document bytes come from MinIO, not the backend);
+//   - document.key is DERIVED deterministically from (rel, versionID) so OnlyOffice
+//     caches and shares the conversion — a historical version is immutable, so a
+//     stable key never serves stale content (contrast the live endpoint's per-open
+//     random key, which forces a reconvert precisely because the file may have changed);
+//   - there is no callbackUrl (an immutable version has no save semantics) and no
+//     customization.forcesave.
+func (h *WorkspaceHandler) buildOnlyOfficeVersionConfig(rel, versionID, userUUID string) map[string]any {
+	title := filepath.Base(rel)
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(rel), "."))
+
+	key := deriveOnlyOfficeVersionKey(rel, versionID)
+	docURL := h.oo.VersionServiceURL + "/documents/" + url.PathEscape(userUUID) + "/" + escapeOnlyOfficePath(rel) + "?action=version&versionId=" + url.QueryEscape(versionID)
+
+	return map[string]any{
+		"documentType": onlyOfficeDocumentType(ext),
+		"document": gin.H{
+			"fileType": ext,
+			"key":      key,
+			"title":    title,
+			"url":      docURL,
+			"permissions": gin.H{
+				"edit":     false,
+				"download": true,
+			},
+		},
+		"editorConfig": gin.H{
+			"mode": "view",
+			"user": gin.H{"id": "blowball", "name": "blowball"},
+		},
+	}
+}
+
+// deriveOnlyOfficeVersionKey returns a deterministic document key for a given
+// (logical path, version id): base32(sha256(path + ":" + versionID)), lowercase
+// and unpadded to match randomOnlyOfficeKey's encoding. A historical MinIO
+// version is immutable, so a stable key lets OnlyOffice cache and share the
+// conversion across opens and users without ever serving stale content; a
+// different versionId yields a different key. versionId is a MinIO UUID (no ':'),
+// so the separator is cosmetic (no collision risk).
+func deriveOnlyOfficeVersionKey(rel, versionID string) string {
+	sum := sha256.Sum256([]byte(rel + ":" + versionID))
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:]))
+}
+
+// escapeOnlyOfficePath percent-escapes each "/"-separated segment of a logical
+// path for use in a URL path, preserving the literal separators. Escaping per
+// segment (rather than the whole path) keeps the directory structure visible to
+// office-vers's *filepath catch-all and avoids %2F ambiguity.
+func escapeOnlyOfficePath(rel string) string {
+	parts := strings.Split(rel, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }
 
 // onlyOfficeDocumentType maps an extension (no dot) to OnlyOffice's documentType

@@ -202,13 +202,17 @@ func isAbs(p string) bool {
 // is the browser-facing origin the editor loads api.js from AND the host
 // allowlist base for callback result URLs. InternalBackend is the origin the
 // DocumentServer container uses to reach the blowball backend (for document.url
-// and callbackUrl). All three expand ${VAR} like every other config value; when
-// Secret is empty the editor endpoints return 503 instead of signing an
-// unverifiable config.
+// and callbackUrl). VersionServiceURL is the base URL of the external office-vers
+// service that the historical-version view config endpoint
+// (.../onlyoffice-version-config) points document.url at. All four expand ${VAR}
+// like every other config value; when Secret is empty the editor endpoints return
+// 503 instead of signing an unverifiable config, and the version-view endpoint
+// additionally requires VersionServiceURL.
 type OnlyOfficeConfig struct {
-	Secret          string `yaml:"secret"`
-	ServerURL       string `yaml:"server_url"`
-	InternalBackend string `yaml:"internal_backend"`
+	Secret            string `yaml:"secret"`
+	ServerURL         string `yaml:"server_url"`
+	InternalBackend   string `yaml:"internal_backend"`
+	VersionServiceURL string `yaml:"version_service_url"`
 }
 
 // applyDefaults fills the OnlyOffice ServerURL default when omitted. The browser
@@ -332,7 +336,7 @@ type AgentMCPServerConfig struct {
 // applyRetryDefaults.
 type AgentRetryConfig struct {
 	Enabled        bool          `yaml:"enabled"`
-	MaxAttempts    int           `yaml:"max_attempts"`     // total attempts including the first; 0 -> default
+	MaxAttempts    int           `yaml:"max_attempts"`    // total attempts including the first; 0 -> default
 	InitialBackoff time.Duration `yaml:"initial_backoff"` // first retry delay; 0 -> default
 	MaxBackoff     time.Duration `yaml:"max_backoff"`     // backoff cap; 0 -> default
 	BudgetTokens   int           `yaml:"budget_tokens"`   // per-turn retry token cap; 0 -> no budget
@@ -351,7 +355,7 @@ const (
 // expose the retry defaults for callers outside the config package (the agent
 // retry wrapper uses them when a policy omits the fields). They mirror the
 // private constants above.
-func DefaultRetryMaxAttempts() int           { return defaultRetryMaxAttempts }
+func DefaultRetryMaxAttempts() int              { return defaultRetryMaxAttempts }
 func DefaultRetryInitialBackoff() time.Duration { return defaultRetryInitialBackoff }
 func DefaultRetryMaxBackoff() time.Duration     { return defaultRetryMaxBackoff }
 
@@ -737,10 +741,10 @@ func boolPtr(b bool) *bool {
 
 // ToolsConfig groups all tool configuration.
 type ToolsConfig struct {
-	Xizhi     XizhiConfig     `yaml:"xizhi"`
-	Webfetch  WebfetchConfig  `yaml:"webfetch"`
-	Executor  ExecutorConfig  `yaml:"executor"`
-	UserMCP   UserMCPConfig   `yaml:"user_mcp"`
+	Xizhi    XizhiConfig    `yaml:"xizhi"`
+	Webfetch WebfetchConfig `yaml:"webfetch"`
+	Executor ExecutorConfig `yaml:"executor"`
+	UserMCP  UserMCPConfig  `yaml:"user_mcp"`
 }
 
 // MCPConfig holds external MCP server configuration.
@@ -970,8 +974,8 @@ func (a *AgentsConfig) applyRetryDefaults() {
 			}
 		}
 	}
-	applyOne(&a.Liang, true)      // read-only: retry by default
-	applyOne(&a.Chongzhi, false)  // side-effecting: do not retry by default
+	applyOne(&a.Liang, true)     // read-only: retry by default
+	applyOne(&a.Chongzhi, false) // side-effecting: do not retry by default
 }
 
 // serverNames returns the set of declared global MCP server names.

@@ -388,33 +388,35 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	titleSvc := service.NewTitleService(nil, rt.mysqlStore, cfg.OpenAI)
 	sessionHandler := handler.NewSessionHandler(sessSvc, titleSvc)
 	workspaceHandler := handler.NewWorkspaceHandler(rt.fsStore, MaxUploadBytes, handler.OnlyOfficeSettings{
-		Secret:          cfg.OnlyOffice.Secret,
-		ServerURL:       cfg.OnlyOffice.ServerURL,
-		InternalBackend: cfg.OnlyOffice.InternalBackend,
+		Secret:            cfg.OnlyOffice.Secret,
+		ServerURL:         cfg.OnlyOffice.ServerURL,
+		InternalBackend:   cfg.OnlyOffice.InternalBackend,
+		VersionServiceURL: cfg.OnlyOffice.VersionServiceURL,
 	})
 	skillHandler := handler.NewSkillHandler(rt.fsStore)
 
 	return handler.RouteDeps{
-		AuthMW:                      middleware.AuthMiddleware(cfg.JWT.Secret),
-		QueryTokenAuthMW:            middleware.QueryTokenAuthMiddleware(cfg.JWT.Secret),
-		Login:                       authHandler.Login,
-		SessionList:                 sessionHandler.ListSessions,
-		SessionCreate:               sessionHandler.CreateSession,
-		SessionMessages:             sessionHandler.GetSessionMessages,
-		SessionDelete:               sessionHandler.DeleteSession,
-		SessionUpdateTitle:          sessionHandler.UpdateTitle,
-		WorkspaceList:               workspaceHandler.List,
-		WorkspaceUpload:             workspaceHandler.Upload,
-		WorkspaceDownload:           workspaceHandler.Download,
-		WorkspaceTokenDownload:      workspaceHandler.TokenDownload,
-		WorkspaceContent:            workspaceHandler.Content,
-		WorkspaceWriteContent:       workspaceHandler.WriteContent,
-		WorkspaceDelete:             workspaceHandler.Delete,
-		WorkspaceRename:             workspaceHandler.Rename,
-		WorkspaceCreate:             workspaceHandler.Create,
-		WorkspaceOnlyOfficeConfig:   workspaceHandler.OnlyOfficeConfig,
-		WorkspaceOnlyOfficeCallback: workspaceHandler.OnlyOfficeCallback,
-		SkillsList:                  skillHandler.List,
+		AuthMW:                           middleware.AuthMiddleware(cfg.JWT.Secret),
+		QueryTokenAuthMW:                 middleware.QueryTokenAuthMiddleware(cfg.JWT.Secret),
+		Login:                            authHandler.Login,
+		SessionList:                      sessionHandler.ListSessions,
+		SessionCreate:                    sessionHandler.CreateSession,
+		SessionMessages:                  sessionHandler.GetSessionMessages,
+		SessionDelete:                    sessionHandler.DeleteSession,
+		SessionUpdateTitle:               sessionHandler.UpdateTitle,
+		WorkspaceList:                    workspaceHandler.List,
+		WorkspaceUpload:                  workspaceHandler.Upload,
+		WorkspaceDownload:                workspaceHandler.Download,
+		WorkspaceTokenDownload:           workspaceHandler.TokenDownload,
+		WorkspaceContent:                 workspaceHandler.Content,
+		WorkspaceWriteContent:            workspaceHandler.WriteContent,
+		WorkspaceDelete:                  workspaceHandler.Delete,
+		WorkspaceRename:                  workspaceHandler.Rename,
+		WorkspaceCreate:                  workspaceHandler.Create,
+		WorkspaceOnlyOfficeConfig:        workspaceHandler.OnlyOfficeConfig,
+		WorkspaceOnlyOfficeVersionConfig: workspaceHandler.OnlyOfficeVersionConfig,
+		WorkspaceOnlyOfficeCallback:      workspaceHandler.OnlyOfficeCallback,
+		SkillsList:                       skillHandler.List,
 	}
 }
 

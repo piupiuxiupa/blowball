@@ -2,6 +2,8 @@ package handler
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -678,7 +680,9 @@ func TestTokenDownload_ProductionRouting(t *testing.T) {
 		c.Next()
 	})
 	RegisterRoutes(r, RouteDeps{
-		AuthMW:                 func(c *gin.Context) { c.AbortWithStatusJSON(401, gin.H{"error": gin.H{"code": "UNAUTHORIZED", "message": "header auth required"}}) },
+		AuthMW: func(c *gin.Context) {
+			c.AbortWithStatusJSON(401, gin.H{"error": gin.H{"code": "UNAUTHORIZED", "message": "header auth required"}})
+		},
 		QueryTokenAuthMW:       middleware.QueryTokenAuthMiddleware(secret),
 		WorkspaceTokenDownload: h.TokenDownload,
 		Login:                  func(*gin.Context) {},
@@ -1178,7 +1182,9 @@ func TestCreate_ExistingFile_409(t *testing.T) {
 	w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", `{"type":"file"}`)
 	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
@@ -1199,7 +1205,9 @@ func TestCreate_ExistingDirectory_409(t *testing.T) {
 	w := env.createNodePOST(t, "/api/v1/workspace/files/sub", `{"type":"directory"}`)
 	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
@@ -1219,7 +1227,9 @@ func TestCreate_WorkspaceRoot_400(t *testing.T) {
 	w := env.createNodePOST(t, "/api/v1/workspace/files/", `{"type":"directory"}`)
 	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
@@ -1242,7 +1252,9 @@ func TestCreate_InvalidOrMissingType_400(t *testing.T) {
 			w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", tc.body)
 			require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
 			var body struct {
-				Error struct{ Code string `json:"code"` } `json:"error"`
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 			assert.Equal(t, "BAD_REQUEST", body.Error.Code)
@@ -1260,7 +1272,9 @@ func TestCreate_PathOutsideWorkspace_403(t *testing.T) {
 		w := env.createNodePOST(t, "/api/v1/workspace/files/../../etc/passwd", `{"type":"file"}`)
 		require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
 		var body struct {
-			Error struct{ Code string `json:"code"` } `json:"error"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 		assert.Equal(t, "FORBIDDEN", body.Error.Code)
@@ -1621,7 +1635,9 @@ func TestRename_DestinationExists_409(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
@@ -1648,7 +1664,9 @@ func TestRename_SourceMissing_404(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "NOT_FOUND", body.Error.Code)
@@ -1680,7 +1698,9 @@ func TestRename_PathOutsideWorkspace_403(t *testing.T) {
 
 			require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
 			var body struct {
-				Error struct{ Code string `json:"code"` } `json:"error"`
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 			assert.Equal(t, "FORBIDDEN", body.Error.Code)
@@ -1957,13 +1977,14 @@ func TestDelete_WorkspaceRoot_400(t *testing.T) {
 // DocumentServer for the callback download (its URL is also ServerURL, so the
 // host allowlist accepts its result URLs).
 type ooTestEnv struct {
-	engine    *gin.Engine
-	dataDir   string
-	jwtSecret string // blowball user-JWT secret (AuthMiddleware)
-	ooSecret  string // OnlyOffice editor-config signing secret
-	serverURL string // OnlyOffice ServerURL = backing server URL
-	backend   string // InternalBackend (host the container reaches the backend at)
-	dlServer  *httptest.Server
+	engine            *gin.Engine
+	dataDir           string
+	jwtSecret         string // blowball user-JWT secret (AuthMiddleware)
+	ooSecret          string // OnlyOffice editor-config signing secret
+	serverURL         string // OnlyOffice ServerURL = backing server URL
+	backend           string // InternalBackend (host the container reaches the backend at)
+	versionServiceURL string // office-vers base URL for the version-view config endpoint
+	dlServer          *httptest.Server
 }
 
 func newOnlyOfficeTestEnv(t *testing.T) *ooTestEnv {
@@ -1991,9 +2012,10 @@ func newOnlyOfficeTestEnv(t *testing.T) *ooTestEnv {
 	jwtSecret := "oo-user-jwt-secret"
 	ooSecret := "oo-editor-secret"
 	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{
-		Secret:          ooSecret,
-		ServerURL:       dlServer.URL,
-		InternalBackend: "http://oo-backend.local",
+		Secret:            ooSecret,
+		ServerURL:         dlServer.URL,
+		InternalBackend:   "http://oo-backend.local",
+		VersionServiceURL: "http://office-vers.local",
 	})
 
 	r := gin.New()
@@ -2006,6 +2028,11 @@ func newOnlyOfficeTestEnv(t *testing.T) *ooTestEnv {
 			h.OnlyOfficeConfig(c)
 			return
 		}
+		if strings.HasSuffix(raw, onlyOfficeVersionConfigSuffix) {
+			c.Params = []gin.Param{{Key: "path", Value: strings.TrimSuffix(raw, onlyOfficeVersionConfigSuffix)}}
+			h.OnlyOfficeVersionConfig(c)
+			return
+		}
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": "not found"}})
 	})
 	// Callback endpoint: standalone POST with query-token auth.
@@ -2013,7 +2040,8 @@ func newOnlyOfficeTestEnv(t *testing.T) *ooTestEnv {
 
 	return &ooTestEnv{
 		engine: r, dataDir: dataDir, jwtSecret: jwtSecret, ooSecret: ooSecret,
-		serverURL: dlServer.URL, backend: "http://oo-backend.local", dlServer: dlServer,
+		serverURL: dlServer.URL, backend: "http://oo-backend.local",
+		versionServiceURL: "http://office-vers.local", dlServer: dlServer,
 	}
 }
 
@@ -2155,7 +2183,9 @@ func TestOnlyOfficeConfig_PathOutsideWorkspace_403(t *testing.T) {
 
 	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "FORBIDDEN", body.Error.Code)
@@ -2172,7 +2202,9 @@ func TestOnlyOfficeConfig_NotFound_404(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "NOT_FOUND", body.Error.Code)
@@ -2192,7 +2224,9 @@ func TestOnlyOfficeConfig_Directory_400(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
@@ -2233,10 +2267,193 @@ func TestOnlyOfficeConfig_Disabled_503(t *testing.T) {
 
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "ONLYOFFICE_DISABLED", body.Error.Code)
+}
+
+// onlyOfficeVersionConfigBody decodes the single-mode (view) version-view
+// editor-config response: { server_url, view: { config, token } }.
+type onlyOfficeVersionConfigBody struct {
+	ServerURL string             `json:"server_url"`
+	View      onlyOfficeModeBody `json:"view"`
+}
+
+// expectedVersionKey mirrors deriveOnlyOfficeVersionKey for deterministic-key
+// test assertions: base32(sha256(path + ":" + versionID)), lowercase, unpadded.
+func expectedVersionKey(rel, versionID string) string {
+	sum := sha256.Sum256([]byte(rel + ":" + versionID))
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:]))
+}
+
+// versionConfigKeyFor requests the version-view config for (path, versionID) on
+// the env engine and returns the resulting document.key.
+func versionConfigKeyFor(t *testing.T, env *ooTestEnv, auth, rel, versionID string) string {
+	t.Helper()
+	target := "/api/v1/workspace/files/" + url.PathEscape(rel) + onlyOfficeVersionConfigSuffix + "?versionId=" + url.QueryEscape(versionID)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", auth)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp onlyOfficeVersionConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	doc := resp.View.Config["document"].(map[string]any)
+	k, ok := doc["key"].(string)
+	require.True(t, ok, "document.key must be a string")
+	return k
+}
+
+// TestOnlyOfficeVersionConfig_SignedConfig verifies the happy path: the endpoint
+// returns a single view-mode config + token. The local file need NOT exist (the
+// version's source of truth is office-vers, so the endpoint does not stat it).
+// document.url targets office-vers (rooted at version_service_url, namespaced by
+// the user UUID) and carries NO credential; the config is view-only (mode:view,
+// edit:false, download:true, no callbackUrl, no forcesave); the token verifies
+// with the secret and carries exactly the returned config as payload.
+func TestOnlyOfficeVersionConfig_SignedConfig(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+
+	target := "/api/v1/workspace/files/" + url.PathEscape("report.docx") + onlyOfficeVersionConfigSuffix + "?versionId=vid-123"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp onlyOfficeVersionConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, env.serverURL, resp.ServerURL)
+
+	view := resp.View.Config
+	doc := view["document"].(map[string]any)
+	editorCfg := view["editorConfig"].(map[string]any)
+
+	// View-only content constraints.
+	assert.Equal(t, "view", editorCfg["mode"])
+	docPerms := doc["permissions"].(map[string]any)
+	assert.Equal(t, false, docPerms["edit"])
+	assert.Equal(t, true, docPerms["download"])
+	assert.NotContains(t, editorCfg, "callbackUrl")
+	assert.NotContains(t, editorCfg, "customization")
+
+	// document.url → office-vers, namespaced by the user UUID, no credential.
+	docURL, ok := doc["url"].(string)
+	require.True(t, ok, "document.url must be a string")
+	assert.Contains(t, docURL, env.versionServiceURL+"/documents/user-1/report.docx")
+	assert.Contains(t, docURL, "action=version")
+	assert.Contains(t, docURL, "versionId=vid-123")
+	assert.NotContains(t, docURL, "token=")
+	assert.NotContains(t, docURL, "Bearer")
+
+	// Token verifies with the secret and carries exactly the returned config.
+	verifyOnlyOfficeToken(t, resp.View.Token, env.ooSecret, resp.View.Config)
+}
+
+// TestOnlyOfficeVersionConfig_DeterministicKey verifies document.key is derived
+// deterministically from (path, versionId): the same pair always yields the same
+// key (== base32(sha256(path+":"+versionId))), and a different versionId yields
+// a different key. A historical version is immutable, so a stable key lets
+// OnlyOffice cache and share the conversion across opens and users.
+func TestOnlyOfficeVersionConfig_DeterministicKey(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	auth := "Bearer " + env.userJWT(t)
+
+	k1 := versionConfigKeyFor(t, env, auth, "report.docx", "vid-A")
+	k2 := versionConfigKeyFor(t, env, auth, "report.docx", "vid-A") // same pair
+	k3 := versionConfigKeyFor(t, env, auth, "report.docx", "vid-B") // different versionId
+
+	assert.Equal(t, expectedVersionKey("report.docx", "vid-A"), k1)
+	assert.Equal(t, k1, k2, "same (path, versionId) must yield the same key")
+	assert.NotEqual(t, k1, k3, "different versionId must yield a different key")
+}
+
+// TestOnlyOfficeVersionConfig_MissingVersionId_400 verifies that omitting the
+// versionId query parameter returns 400.
+func TestOnlyOfficeVersionConfig_MissingVersionId_400(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/report.docx" + onlyOfficeVersionConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+}
+
+// TestOnlyOfficeVersionConfig_PathOutsideWorkspace_403 verifies a traversal
+// attempt is rejected before any office-vers URL is built.
+func TestOnlyOfficeVersionConfig_PathOutsideWorkspace_403(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/" + url.PathEscape("../../etc/passwd") + onlyOfficeVersionConfigSuffix + "?versionId=vid"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// TestOnlyOfficeVersionConfig_Unauthenticated_401 verifies a request without a
+// Bearer token is rejected by AuthMiddleware.
+func TestOnlyOfficeVersionConfig_Unauthenticated_401(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/report.docx" + onlyOfficeVersionConfigSuffix + "?versionId=vid"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestOnlyOfficeVersionConfig_Disabled_503 verifies the endpoint returns 503 when
+// either the signing secret OR version_service_url is not configured (both are
+// required: the secret to sign, the base URL to build document.url).
+func TestOnlyOfficeVersionConfig_Disabled_503(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		oo   OnlyOfficeSettings
+	}{
+		{"both empty", OnlyOfficeSettings{}},
+		{"secret only", OnlyOfficeSettings{Secret: "s"}},                                                // no version_service_url
+		{"version_service_url only", OnlyOfficeSettings{VersionServiceURL: "http://office-vers.local"}}, // no secret
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			fsSvc, err := fs.New(dataDir)
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
+			h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, tc.oo)
+
+			r := gin.New()
+			r.GET("/api/v1/workspace/files/*path", func(c *gin.Context) {
+				c.Set(middleware.UserIDKey, "user-1")
+				c.Params = []gin.Param{{Key: "path", Value: strings.TrimPrefix(c.Param("path"), "/")}}
+				h.OnlyOfficeVersionConfig(c)
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/report.docx"+onlyOfficeVersionConfigSuffix+"?versionId=vid", nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusServiceUnavailable, w.Code, "body: %s", w.Body.String())
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "ONLYOFFICE_DISABLED", body.Error.Code)
+		})
+	}
 }
 
 // TestOnlyOfficeCallback_SaveStatus_Persists verifies status 2 and 6 download the
@@ -2373,7 +2590,9 @@ func TestOnlyOfficeCallback_MissingToken_401(t *testing.T) {
 
 	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Message string `json:"message"` } `json:"error"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "missing token", body.Error.Message)
@@ -2387,7 +2606,9 @@ func TestOnlyOfficeCallback_PathOutsideWorkspace_403(t *testing.T) {
 
 	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "FORBIDDEN", body.Error.Code)

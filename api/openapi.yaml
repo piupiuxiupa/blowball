@@ -456,6 +456,29 @@ components:
         token:
           type: string
           description: HS256 JWT signing this mode's `config` with the OnlyOffice secret; edit and view tokens differ.
+    OnlyOfficeVersionConfigResponse:
+      type: object
+      required: [server_url, view]
+      description: |
+        Server-signed OnlyOffice DocEditor config for viewing a specific
+        historical version (view-only). Mirrors one mode of
+        OnlyOfficeConfigResponse — a single `{config, token}` pair nested under
+        `view` — so the frontend reuses its existing `view` consumption path. A
+        historical version is immutable, so only the view mode is returned (no
+        edit). `document.url` points at the external office-vers service
+        (`{version_service_url}/documents/{userUUID}/{path}?action=version&versionId=<vid>`)
+        and carries NO credential (office-vers is unauthenticated by design);
+        `document.key` is derived deterministically from `(path, versionId)`
+        (`base32(sha256(path + ":" + versionId))`) so OnlyOffice caches and shares
+        the conversion across opens/users; the config carries no `callbackUrl`
+        and no `customization.forcesave` (nothing to save back to an immutable
+        version).
+      properties:
+        server_url:
+          type: string
+          description: Browser-facing DocumentServer origin (api.js is loaded from here).
+        view:
+          $ref: '#/components/schemas/OnlyOfficeModeConfig'
     OnlyOfficeCallbackRequest:
       type: object
       description: |
@@ -1178,6 +1201,64 @@ paths:
           $ref: '#/components/responses/NotFound'
         '503':
           description: OnlyOffice is not configured (secret empty); editing is disabled.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                disabled: {value: {error: {code: ONLYOFFICE_DISABLED, message: "onlyoffice is not configured"}}}
+  /api/v1/workspace/files/{path}/onlyoffice-version-config:
+    get:
+      tags: [Workspace]
+      summary: Build and sign an OnlyOffice view-only config for a historical version.
+      description: |
+        Returns a server-signed view-only DocEditor config
+        (`{server_url, view:{config, token}}`) so the browser can preview a
+        specific historical version of a workspace office file in OnlyOffice.
+        The caller supplies the `versionId` (obtained elsewhere from the
+        office-vers service); `document.url` points at office-vers for that
+        version and carries no credential. The OnlyOffice secret lives only in
+        the backend; `view.token` is an HS256 JWT whose payload is the
+        `view.config`. Unlike the live-file `/onlyoffice-config` endpoint:
+        `document.url` targets office-vers (not the backend), `document.key` is
+        deterministic per `(path, versionId)` (so conversions are cached/shared),
+        the config is view-only with no `callbackUrl`/`forcesave`, and the local
+        workspace file is NOT stat-checked (the version's source of truth is
+        office-vers). Shares the workspace catch-all, dispatching on the
+        trailing `/onlyoffice-version-config` suffix.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Workspace-relative office file path (catch-all, may include `/`).
+          example: reports/2026-q2.docx
+        - name: versionId
+          in: query
+          required: true
+          description: |
+            The office-vers (MinIO) version id of the historical version to
+            preview. Obtained from the office-vers version-history listing.
+          schema: {type: string}
+          example: 7a604dc7-719f-426f-88c4-642313fd2860
+      responses:
+        '200':
+          description: Signed view-only editor config for the requested version.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OnlyOfficeVersionConfigResponse'}
+        '400':
+          description: The `versionId` query parameter is missing.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                missing_version: {value: {error: {code: BAD_REQUEST, message: "versionId is required"}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: OnlyOffice is not configured (`secret` or `version_service_url` empty).
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}

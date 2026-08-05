@@ -106,6 +106,13 @@ onlyoffice:
   # document.url and the save callbackUrl. Must be an address the container can
   # actually route to that serves the blowball API.
   internal_backend: ${ONLYOFFICE_INTERNAL_BACKEND:http://127.0.0.1:8080}
+  # Base URL of the external office-vers service (MinIO-backed versioned file
+  # storage, deployed on a private network). The historical-version view config
+  # endpoint (GET .../onlyoffice-version-config?versionId=) points document.url
+  # at {version_service_url}/documents/{userUUID}/{path}?action=version&versionId=.
+  # Leave empty to disable the version-view endpoint (it returns 503); the
+  # edit/view config endpoint above is unaffected and needs only secret.
+  version_service_url: ${ONLYOFFICE_VERSION_SERVICE_URL:}
 
 agents:
   confucius:

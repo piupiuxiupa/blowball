@@ -80,6 +80,12 @@ type RouteDeps struct {
 	// /content). Required; nil panics if hit, so callers must always wire it.
 	WorkspaceOnlyOfficeConfig gin.HandlerFunc
 
+	// WorkspaceOnlyOfficeVersionConfig handles GET /api/v1/workspace/files/*path/onlyoffice-version-config?versionId=.
+	// It signs a view-only DocEditor config pointing at a specific historical
+	// version in office-vers (Bearer auth, like /onlyoffice-config). Required;
+	// nil panics if hit, so callers must always wire it.
+	WorkspaceOnlyOfficeVersionConfig gin.HandlerFunc
+
 	// WorkspaceOnlyOfficeCallback handles POST /api/v1/workspace/onlyoffice-callback.
 	// It persists document-save callbacks from the DocumentServer (query-token
 	// auth, like token-download). Required.
@@ -109,6 +115,11 @@ const tokenDownloadPath = "download"
 // editor-config signing handler over the download handler. Like /content it
 // shares the single catch-all route and dispatches on this trailing suffix.
 const onlyOfficeConfigSuffix = "/onlyoffice-config"
+
+// onlyOfficeVersionConfigSuffix is the URL suffix that selects the historical-
+// version view-config signing handler. It shares the same catch-all and
+// dispatches on this trailing suffix, exactly like onlyOfficeConfigSuffix.
+const onlyOfficeVersionConfigSuffix = "/onlyoffice-version-config"
 
 // onlyOfficeCallbackRoute is the static POST route that receives OnlyOffice
 // document-save callbacks. Unlike the catch-all GETs it is a standalone route so
@@ -281,6 +292,12 @@ func dispatchWorkspaceFile(deps RouteDeps) gin.HandlerFunc {
 			trimmed := strings.TrimSuffix(raw, onlyOfficeConfigSuffix)
 			c.Params = setPathParam(c.Params, trimmed)
 			deps.WorkspaceOnlyOfficeConfig(c)
+			return
+		}
+		if strings.HasSuffix(raw, onlyOfficeVersionConfigSuffix) {
+			trimmed := strings.TrimSuffix(raw, onlyOfficeVersionConfigSuffix)
+			c.Params = setPathParam(c.Params, trimmed)
+			deps.WorkspaceOnlyOfficeVersionConfig(c)
 			return
 		}
 		deps.WorkspaceDownload(c)
