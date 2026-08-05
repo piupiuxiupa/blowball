@@ -379,7 +379,7 @@ tools:
       enabled: false
       timeout: 30s
       max_output_bytes: 65536
-      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM"]
+      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "NODE_USE_ENV_PROXY"]
       network: false
     python:
       enabled: false
