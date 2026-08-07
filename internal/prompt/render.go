@@ -153,7 +153,9 @@ func renderWorkspaceConvention() string {
 	return "## Workspace path convention\n" +
 		"- All `xizhi_*` paths must be relative to the workspace root. Use paths like `tmp/hello.txt` or `src/main.go`, not `/workspace/...` or absolute paths.\n" +
 		"- The `bash` and `python` sandboxes run with `/workspace` as the working directory.\n" +
-		"- The sandbox's `/tmp` is mapped to the workspace's `./tmp/` directory. Files written to `/tmp` persist at `tmp/` and can be read with `xizhi_read_file` using a relative path such as `tmp/hello.txt`."
+		"- The sandbox's `/tmp` is mapped to the workspace's `./tmp/` directory. Files written to `/tmp` persist at `tmp/` and can be read with `xizhi_read_file` using a relative path such as `tmp/hello.txt`.\n" +
+		"- **Where generated files go:** write temporary or intermediate artifacts (exploratory calculations, debug dumps, test scaffolding — anything that is NOT a final deliverable) to `tmp/`. Write final deliverables directly in the workspace (not under `tmp/`), organized into meaningful directories by topic or task, and keep related files together in the same directory rather than scattering them.\n" +
+		"- **Keep `tmp/` clean:** `tmp/` is a scratch area whose contents are temporary. Once a scratch file has served its purpose, remove it promptly with `xizhi_delete` (or `bash rm` when `xizhi_delete` is unavailable). **Never hand a `tmp/` path to the user as a deliverable** — move the result into the workspace first, or delete the scratch."
 }
 
 func classifyTools(tools []ToolInfo) ([]ToolInfo, map[string][]ToolInfo) {

@@ -51,6 +51,34 @@ func TestRenderSystemPrompt_WorkspacePathConvention(t *testing.T) {
 	assert.NotContains(t, out, "/data/u-1/workspace")
 }
 
+// TestRenderSystemPrompt_FileOutputConvention pins the workspace output +
+// tmp-cleanup guidance added to renderWorkspaceConvention (delta spec
+// "Workspace file output convention and tmp cleanup guidance").
+func TestRenderSystemPrompt_FileOutputConvention(t *testing.T) {
+	out, err := RenderSystemPrompt(RenderInput{
+		Workspace: "/data/u-1/workspace",
+		UserID:    "u-1",
+		Platform:  "amd64",
+		OS:        "linux",
+		Cutoff:    "August 2025",
+	})
+	require.NoError(t, err)
+
+	// (a) temporary vs deliverables split.
+	assert.Contains(t, out, "Where generated files go")
+	assert.Contains(t, out, "tmp/")
+	// (b) grouping related files.
+	assert.Contains(t, out, "keep related files together")
+	// (c) timely tmp cleanup via xizhi_delete.
+	assert.Contains(t, out, "Keep `tmp/` clean")
+	assert.Contains(t, out, "xizhi_delete")
+	// (d) forbid handing tmp paths as deliverables.
+	assert.Contains(t, out, "Never hand a `tmp/` path to the user as a deliverable")
+	// Coexists with the pre-existing relative-path / tmp-mapping guidance.
+	assert.Contains(t, out, "All `xizhi_*` paths must be relative to the workspace root")
+	assert.Contains(t, out, "sandbox's `/tmp` is mapped")
+}
+
 func TestRenderSystemPrompt_Tools(t *testing.T) {
 	out, err := RenderSystemPrompt(RenderInput{
 		Workspace: "/data/u-1/workspace",

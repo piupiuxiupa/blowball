@@ -85,9 +85,11 @@ func registerListSkills(r *tool.Registry, tools *Tools) error {
 func registerReadSkill(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolReadSkill,
-		Description: "Reads a skill by name and returns its `SKILL.md` markdown body as a **bare string** (YAML frontmatter " +
+		Description: "Reads a skill by name and returns its markdown body as a **bare string** (YAML frontmatter " +
 			"stripped, not a JSON object). User skills take precedence over global skills. **`name` MUST be a simple skill " +
-			"identifier, not a path.** **DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory access rules " +
+			"identifier, not a path.** With `path` omitted it reads the skill's `SKILL.md`; with `path` provided it reads the " +
+			"`.md` file at that path relative to the skill's directory root (confined to the skill directory; only `.md` " +
+			"files). **DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory access rules " +
 			"live in the system prompt.)",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
@@ -95,6 +97,10 @@ func registerReadSkill(r *tool.Registry, tools *Tools) error {
 				"name": {
 					"type": "string",
 					"description": "The canonical skill name. Must be a simple identifier, not a path."
+				},
+				"path": {
+					"type": "string",
+					"description": "Optional. A path relative to the skill's directory root pointing at a .md file to read (e.g. \"examples/guide.md\"). When omitted, the skill's SKILL.md is read. Absolute paths, .., symlinks escaping the skill directory, and non-.md files are rejected."
 				}
 			},
 			"required": ["name"],
@@ -103,11 +109,12 @@ func registerReadSkill(r *tool.Registry, tools *Tools) error {
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
 				Name string `json:"name"`
+				Path string `json:"path"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("luban_read_skill: parse args: %w", err)
 			}
-			return readSkill(tools.loader, a.Name, skill.UserIDFromContext(ctx))
+			return readSkill(tools.loader, a.Name, a.Path, skill.UserIDFromContext(ctx))
 		},
 	}
 	return r.Register(spec)

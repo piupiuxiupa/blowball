@@ -89,22 +89,22 @@ func TestReadSkill(t *testing.T) {
 
 	loader := skill.NewLoader(globalDir, userDirFn)
 
-	body, err := readSkill(loader, "s", "u1")
+	body, err := readSkill(loader, "s", "", "u1")
 	require.NoError(t, err)
 	assert.Equal(t, "# User", body)
 
-	body, err = readSkill(loader, "s", "")
+	body, err = readSkill(loader, "s", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "# Global", body)
 
-	_, err = readSkill(loader, "missing", "")
+	_, err = readSkill(loader, "missing", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
 
 func TestReadSkill_RejectsPathLikeName(t *testing.T) {
 	loader := skill.NewLoader(t.TempDir(), nil)
-	_, err := readSkill(loader, "../workspace/secrets", "u1")
+	_, err := readSkill(loader, "../workspace/secrets", "", "u1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "luban_read_skill")
 }
@@ -549,6 +549,70 @@ func TestInstallSkill_SingleFile_RedirectLoopSurfacesLocation(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stopped after 10 redirects")
 	assert.Contains(t, err.Error(), "last redirect location")
+}
+
+func TestReadSkill_ByPath(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Skill")
+	require.NoError(t, os.MkdirAll(filepath.Join(skillDir, "examples"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "examples", "guide.md"), []byte("# Guide"), 0o644))
+
+	loader := skill.NewLoader(globalDir, nil)
+
+	// path reads the sub-document.
+	body, err := readSkill(loader, "s", "examples/guide.md", "")
+	require.NoError(t, err)
+	assert.Equal(t, "# Guide", body)
+
+	// path omitted reads SKILL.md (backward compatible).
+	body, err = readSkill(loader, "s", "", "")
+	require.NoError(t, err)
+	assert.Equal(t, "# Skill", body)
+}
+
+func TestReadSkill_ByPath_RejectsTraversal(t *testing.T) {
+	globalDir := t.TempDir()
+	writeSkill(t, filepath.Join(globalDir, "s"), "s", "S", "# Body")
+	loader := skill.NewLoader(globalDir, nil)
+
+	_, err := readSkill(loader, "s", "../../shared.md", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "luban_read_skill")
+}
+
+// TestRegister_ReadDescriptionDeclaresPath pins that luban_read_skill's
+// description tells the model about the optional `path` sub-document reading
+// (delta spec "luban_read_skill description declares markdown body return").
+func TestRegister_ReadDescriptionDeclaresPath(t *testing.T) {
+	r := tool.NewRegistry()
+	require.NoError(t, RegisterAll(r, NewTools(skill.NewLoader(t.TempDir(), nil), func(string) string { return "" })))
+
+	spec, ok := r.Get(ToolReadSkill)
+	require.True(t, ok)
+	assert.Contains(t, spec.Description, "path")
+	assert.Contains(t, spec.Description, "SKILL.md")
+	assert.Contains(t, spec.Description, "markdown body")
+}
+
+func TestReadSkillTool_ExecuteWithPath(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Skill")
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "extra.md"), []byte("# Extra"), 0o644))
+
+	r := tool.NewRegistry()
+	loader := skill.NewLoader(globalDir, nil)
+	require.NoError(t, RegisterAll(r, NewTools(loader, func(string) string { return "" })))
+
+	spec, ok := r.Get(ToolReadSkill)
+	require.True(t, ok)
+
+	args, err := json.Marshal(map[string]string{"name": "s", "path": "extra.md"})
+	require.NoError(t, err)
+	res, err := spec.Execute(context.Background(), args)
+	require.NoError(t, err)
+	assert.Equal(t, "# Extra", res)
 }
 
 func writeSkill(t *testing.T, dir, name, description, body string) {

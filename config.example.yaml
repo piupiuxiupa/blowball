@@ -173,6 +173,7 @@ agents:
     tools: 
       - luban_list_skills
       - luban_read_skill
+      - luban_install_skill
       # Per-user MCP tools (mcp_list_servers / mcp_add_server /
       # mcp_remove_server / mcp_call) let this agent manage and call the user's
       # own MCP servers declared in their workspace.

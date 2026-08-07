@@ -166,6 +166,111 @@ func TestLoader_Discover_UserOverridesGlobal_Recursive(t *testing.T) {
 	assert.Equal(t, "global", global[0].Location)
 }
 
+func TestLoader_ReadPath_NestedSubDocument(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "my-skill")
+	writeSkill(t, skillDir, "my-skill", "My skill", "# Skill")
+	// Nested sub-document under the skill directory.
+	subDir := filepath.Join(skillDir, "references")
+	require.NoError(t, os.MkdirAll(subDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "api.md"), []byte("# API reference"), 0o644))
+
+	loader := NewLoader(globalDir, nil)
+	body, err := loader.ReadPath("my-skill", "references/api.md", "")
+	require.NoError(t, err)
+	assert.Equal(t, "# API reference", string(body))
+}
+
+func TestLoader_ReadPath_StripsFrontmatter(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "my-skill")
+	writeSkill(t, skillDir, "my-skill", "My skill", "# Skill")
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "guide.md"),
+		[]byte("---\nauthor: someone\n---\n# Guide body"), 0o644))
+
+	loader := NewLoader(globalDir, nil)
+	body, err := loader.ReadPath("my-skill", "guide.md", "")
+	require.NoError(t, err)
+	assert.Equal(t, "# Guide body", string(body))
+}
+
+func TestLoader_ReadPath_RejectsAbsolute(t *testing.T) {
+	globalDir := t.TempDir()
+	writeSkill(t, filepath.Join(globalDir, "s"), "s", "S", "# Body")
+
+	loader := NewLoader(globalDir, nil)
+	_, err := loader.ReadPath("s", "/etc/passwd", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absolute paths are not allowed")
+}
+
+func TestLoader_ReadPath_RejectsParentTraversal(t *testing.T) {
+	globalDir := t.TempDir()
+	writeSkill(t, filepath.Join(globalDir, "s"), "s", "S", "# Body")
+
+	loader := NewLoader(globalDir, nil)
+	_, err := loader.ReadPath("s", "../../shared.md", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path traversal rejected")
+}
+
+func TestLoader_ReadPath_RejectsSymlinkEscape(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Body")
+	// A file OUTSIDE the skill directory (but inside globalDir).
+	outside := filepath.Join(globalDir, "outside.md")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o644))
+	// A symlink inside the skill dir whose target escapes it.
+	require.NoError(t, os.Symlink(outside, filepath.Join(skillDir, "evil.md")))
+
+	loader := NewLoader(globalDir, nil)
+	_, err := loader.ReadPath("s", "evil.md", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the skill directory")
+}
+
+func TestLoader_ReadPath_RejectsNonMarkdown(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Body")
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "data.csv"), []byte("a,b"), 0o644))
+
+	loader := NewLoader(globalDir, nil)
+	_, err := loader.ReadPath("s", "data.csv", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not markdown")
+}
+
+func TestLoader_ReadPath_RejectsOversized(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Body")
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "big.md"), []byte("hello"), 0o644))
+
+	loader := NewLoader(globalDir, nil).WithMaxSize(2)
+	_, err := loader.ReadPath("s", "big.md", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds size limit")
+}
+
+func TestLoader_ReadPath_MissingFile(t *testing.T) {
+	globalDir := t.TempDir()
+	writeSkill(t, filepath.Join(globalDir, "s"), "s", "S", "# Body")
+
+	loader := NewLoader(globalDir, nil)
+	_, err := loader.ReadPath("s", "nope.md", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "file not found")
+}
+
+func TestLoader_ReadPath_UnknownSkill(t *testing.T) {
+	loader := NewLoader(t.TempDir(), nil)
+	_, err := loader.ReadPath("missing", "guide.md", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
 func TestFilter(t *testing.T) {
 	skills := []Skill{
 		{Name: "a"},

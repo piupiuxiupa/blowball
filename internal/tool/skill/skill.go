@@ -5,10 +5,12 @@ package skill
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -154,6 +156,94 @@ func (l *Loader) Read(name, userID string) ([]byte, error) {
 		return body, nil
 	}
 	return nil, fmt.Errorf("skill %q not found", name)
+}
+
+// ReadPath returns the markdown body of a .md file located at relPath within
+// the named skill's directory tree, with YAML frontmatter stripped if present.
+// relPath is resolved relative to the matched skill's directory (the directory
+// containing its SKILL.md) and MUST stay inside it: absolute paths, parent-
+// traversal escapes, and symlinks that resolve outside the skill directory are
+// rejected. Only files whose extension is .md are readable. The named skill is
+// resolved the same way as Read (user skills override global skills of the same
+// name). The same size limit (DefaultMaxSize unless overridden) applies.
+func (l *Loader) ReadPath(name, relPath, userID string) ([]byte, error) {
+	for _, s := range l.List(userID) {
+		if s.Name != name {
+			continue
+		}
+		skillRoot := filepath.Dir(s.Path)
+		absPath, err := validateSkillSubPath(skillRoot, relPath)
+		if err != nil {
+			return nil, fmt.Errorf("luban_read_skill: %w", err)
+		}
+		info, err := os.Stat(absPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("luban_read_skill: file not found: %q", relPath)
+			}
+			return nil, fmt.Errorf("luban_read_skill: stat %q: %w", relPath, err)
+		}
+		if info.Size() > l.maxSize {
+			return nil, fmt.Errorf("luban_read_skill: %q exceeds size limit (%d > %d)", relPath, info.Size(), l.maxSize)
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("luban_read_skill: read %q: %w", relPath, err)
+		}
+		_, body, err := parseFrontmatter(data)
+		if err != nil {
+			return nil, fmt.Errorf("luban_read_skill: parse %q: %w", relPath, err)
+		}
+		return body, nil
+	}
+	return nil, fmt.Errorf("luban_read_skill: skill %q not found", name)
+}
+
+// validateSkillSubPath resolves relPath against skillRoot and verifies the real
+// path stays inside skillRoot. It rejects absolute paths, parent-traversal
+// escapes, symlinks that resolve outside skillRoot, and non-markdown targets.
+// When the target does not exist it returns the joined (non-symlink-resolved)
+// path so the caller's subsequent Stat surfaces a clean "file not found".
+func validateSkillSubPath(skillRoot, relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("absolute paths are not allowed; use a path relative to the skill directory such as examples/guide.md")
+	}
+	cleaned := filepath.Clean(relPath)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path traversal rejected; use a path relative to the skill directory such as examples/guide.md")
+	}
+	if strings.ToLower(filepath.Ext(cleaned)) != ".md" {
+		return "", fmt.Errorf("only markdown (.md) files are readable; %q is not markdown", relPath)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(skillRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve skill directory: %w", err)
+	}
+	joinedResolved := filepath.Join(resolvedRoot, cleaned)
+	resolvedAbs, err := filepath.EvalSymlinks(joinedResolved)
+	if err != nil {
+		// Target does not exist (or an intermediate parent is missing). Return
+		// the non-resolved joined path; the caller's Stat will fail with
+		// ErrNotExist and surface "file not found".
+		return joinedResolved, nil
+	}
+	if !pathWithin(resolvedAbs, resolvedRoot) {
+		return "", fmt.Errorf("path %q resolves outside the skill directory", relPath)
+	}
+	return resolvedAbs, nil
+}
+
+// pathWithin reports whether target is the same as root or a path beneath
+// root, using a separator-aware prefix check so "root-evil" is not treated as
+// inside "root".
+func pathWithin(target, root string) bool {
+	if target == root {
+		return true
+	}
+	return strings.HasPrefix(target, root+string(filepath.Separator))
 }
 
 // discover scans dir recursively for SKILL.md entries and parses their
