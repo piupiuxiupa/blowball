@@ -242,6 +242,7 @@ agents:
       - xizhi_list_files
       - xizhi_tree
       - xizhi_glob_files
+      - xizhi_delete
       - webfetch
       - luban_list_skills
       - luban_read_skill
@@ -342,6 +343,8 @@ tools:
       enabled: true
     glob_files:
       enabled: true
+    delete:
+      enabled: true   # enables xizhi_delete; also add "xizhi_delete" to an agent's tools list to use it
   webfetch:
     enabled: true
     timeout: 30s

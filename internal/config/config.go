@@ -481,6 +481,7 @@ type XizhiConfig struct {
 	ListFiles XizhiToolConfig `yaml:"list_files"`
 	Tree      XizhiToolConfig `yaml:"tree"`
 	GlobFiles XizhiToolConfig `yaml:"glob_files"`
+	Delete   XizhiToolConfig `yaml:"delete"`
 }
 
 // WebfetchConfig holds the process-level webfetch tool settings.

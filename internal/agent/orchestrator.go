@@ -216,7 +216,7 @@ func (f *orchestratorFactory) allowedMCPTools(mcp config.AgentMCPConfig) []strin
 func isXizhiTool(name string) bool {
 	switch name {
 	case xizhi.NameReadFile, xizhi.NameWriteFile, xizhi.NameModifyFile,
-		xizhi.NameListFiles, xizhi.NameTree, xizhi.NameGlobFiles:
+		xizhi.NameListFiles, xizhi.NameTree, xizhi.NameGlobFiles, xizhi.NameDeleteFile:
 		return true
 	}
 	return false

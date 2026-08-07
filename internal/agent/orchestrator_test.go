@@ -14,6 +14,7 @@ import (
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/luban"
 	"github.com/lush/blowball/internal/tool/skill"
+	"github.com/lush/blowball/internal/tool/xizhi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -53,6 +54,64 @@ func newTestOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 	o, err := NewOrchestrator(client, cfg, nil, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 	return o
+}
+
+// TestOrchestrator_Build_AllXizhiToolsInBaseRegistry is a regression test for
+// the duplicate-registration crash when a new xizhi tool (e.g. xizhi_delete) is
+// enabled. The base registry is populated at startup via xizhi.RegisterAll (see
+// cmd/blowball/serve.go), so it already holds a copy of every enabled xizhi
+// tool. buildAgentRegistry then re-registers xizhi tools against the per-user
+// workspace root and MUST skip the base-registry copies via isXizhiTool. If a
+// new xizhi tool is missing from isXizhiTool's switch, the skip fails and the
+// second Register returns "already registered".
+func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	xizhiCfg := config.XizhiConfig{
+		Read:      config.XizhiToolConfig{Enabled: true},
+		Write:     config.XizhiToolConfig{Enabled: true},
+		Modify:    config.XizhiToolConfig{Enabled: true},
+		ListFiles: config.XizhiToolConfig{Enabled: true},
+		Tree:      config.XizhiToolConfig{Enabled: true},
+		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Delete:    config.XizhiToolConfig{Enabled: true},
+	}
+	// Mirror startup: the base registry is populated with ALL enabled xizhi tools.
+	baseReg := tool.NewRegistry()
+	xizhi.RegisterAll(baseReg, t.TempDir(), xizhiCfg)
+
+	client := newFake(fakeResponse{
+		tokens:       []string{"done"},
+		content:      "done",
+		finishReason: "stop",
+		usage:        Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
+	})
+	cfg := &config.Config{
+		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		Tools:  config.ToolsConfig{Xizhi: xizhiCfg},
+		Agents: config.AgentsConfig{
+			Confucius: config.AgentConfig{
+				Name: "Confucius", Model: "gpt-test", SystemPrompt: "you are confucius", MaxTokens: 256,
+			},
+			Chongzhi: config.AgentConfig{
+				Name: "Chongzhi", Model: "gpt-test", SystemPrompt: "you are chongzhi", MaxTokens: 256,
+				Tools: []string{"xizhi_write_file", "xizhi_delete"},
+			},
+			Liang: config.AgentConfig{
+				Name: "Liang", Model: "gpt-test", SystemPrompt: "you are liang", MaxTokens: 256,
+			},
+		},
+	}
+
+	o, err := NewOrchestrator(client, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
+	require.NoError(t, err)
+
+	hub := stream.NewHub(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)
+	require.NoError(t, err)
+	hub.Close()
 }
 
 func TestOrchestrator_Handle_FullFlow(t *testing.T) {

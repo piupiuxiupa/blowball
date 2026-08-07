@@ -24,5 +24,6 @@ func testXizhiConfig() config.XizhiConfig {
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: true},
 		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Delete:    config.XizhiToolConfig{Enabled: true},
 	}
 }

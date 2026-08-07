@@ -18,6 +18,7 @@ const (
 	NameListFiles  = "xizhi_list_files"
 	NameTree       = "xizhi_tree"
 	NameGlobFiles  = "xizhi_glob_files"
+	NameDeleteFile = "xizhi_delete"
 )
 
 // Per-tool parameter JSON Schemas. They are JSON objects (not wrapped in an
@@ -126,6 +127,18 @@ var (
   "required": ["path", "pattern"],
   "additionalProperties": false
 }`)
+
+	schemaDelete = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file or directory to delete, relative to the workspace root."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
 )
 
 // readArgs / writeArgs / modifyArgs decode the model-supplied tool arguments.
@@ -156,6 +169,10 @@ type globArgs struct {
 	Path          string `json:"path"`
 	Pattern       string `json:"pattern"`
 	IncludeHidden bool   `json:"include_hidden"`
+}
+
+type deleteArgs struct {
+	Path string `json:"path"`
 }
 
 // RegisterAll registers the enabled Xizhi file tools against r, scoping every
@@ -265,6 +282,25 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 					return nil, fmt.Errorf("xizhi_glob_files: parse args: %w", err)
 				}
 				return GlobFiles(workspaceRoot, a.Path, a.Pattern, a.IncludeHidden)
+			},
+		})
+	}
+
+	if cfg.Delete.Enabled {
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameDeleteFile,
+			Description: "Deletes a workspace file or directory and returns `{path, deleted, type}` (type is \"file\", " +
+				"\"directory\", or \"none\"). A directory is removed recursively; a path that does not exist is a " +
+				"successful no-op (`deleted: false`, `type: \"none\"`). **`path` MUST be relative to the workspace root** " +
+				"(absolute paths, `..` and symlink escapes are rejected). Use this to clean up scratch/intermediate files " +
+				"under `tmp/` once they have served their purpose.",
+			ParametersJSON: schemaDelete,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a deleteArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_delete: parse args: %w", err)
+				}
+				return DeletePath(workspaceRoot, a.Path)
 			},
 		})
 	}

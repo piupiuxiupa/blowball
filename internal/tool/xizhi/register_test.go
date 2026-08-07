@@ -15,7 +15,7 @@ func TestRegisterAll_RegistersEnabledTools(t *testing.T) {
 	r := newTestRegistry(t)
 	RegisterAll(r, t.TempDir(), testXizhiConfig())
 
-	for _, name := range []string{NameReadFile, NameWriteFile, NameModifyFile, NameListFiles, NameTree, NameGlobFiles} {
+	for _, name := range []string{NameReadFile, NameWriteFile, NameModifyFile, NameListFiles, NameTree, NameGlobFiles, NameDeleteFile} {
 		spec, ok := r.Get(name)
 		require.True(t, ok, "tool %q missing", name)
 		assert.NotEmpty(t, spec.Description)
@@ -43,6 +43,7 @@ func TestRegisterAll_SchemasAreValidJSON(t *testing.T) {
 		"list":   schemaList,
 		"tree":   schemaTree,
 		"glob":   schemaGlob,
+		"delete": schemaDelete,
 	} {
 		var decoded map[string]any
 		if err := json.Unmarshal(raw, &decoded); err != nil {
@@ -79,6 +80,7 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: false},
 		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Delete:    config.XizhiToolConfig{Enabled: false},
 	}
 	RegisterAll(r, t.TempDir(), cfg)
 
@@ -97,6 +99,8 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 	assert.False(t, ok, "tree should not be registered")
 	_, ok = r.Get(NameGlobFiles)
 	assert.True(t, ok, "glob_files should be registered")
+	_, ok = r.Get(NameDeleteFile)
+	assert.False(t, ok, "delete should not be registered when disabled")
 }
 
 // TestRegisterAll_DescriptionDeclaresResultShape pins the output contract each
@@ -122,4 +126,12 @@ func TestRegisterAll_DescriptionDeclaresResultShape(t *testing.T) {
 	assert.Contains(t, modify.Description, "new_size")
 	// Unique-match failure semantics.
 	assert.Contains(t, modify.Description, "exactly one")
+
+	// xizhi_delete declares its result shape and cleanup role.
+	del, ok := r.Get(NameDeleteFile)
+	require.True(t, ok)
+	assert.Contains(t, del.Description, "deleted")
+	assert.Contains(t, del.Description, "type")
+	assert.Contains(t, del.Description, "recursively")
+	assert.Contains(t, del.Description, "tmp/")
 }
