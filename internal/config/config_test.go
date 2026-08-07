@@ -659,12 +659,6 @@ tools:
       max_output_bytes: 8192
       allowed_env_patterns: ["PATH", "HOME"]
       network: true
-    python:
-      enabled: false
-      timeout: 20s
-      max_output_bytes: 4096
-      allowed_env_patterns: ["PATH", "PYTHON*"]
-      network: false
 `)
 
 	cfg, err := Load(path)
@@ -685,22 +679,117 @@ tools:
 	if len(bash.AllowedEnvPatterns) != 2 || bash.AllowedEnvPatterns[0] != "PATH" {
 		t.Errorf("unexpected bash env patterns: %v", bash.AllowedEnvPatterns)
 	}
-	if !bash.Network {
+	if !bash.NetworkEnabled() {
 		t.Error("Tools.Executor.Bash.Network = false, want true")
 	}
+}
 
-	python := cfg.Tools.Executor.Python
-	if python.Enabled {
-		t.Error("Tools.Executor.Python.Enabled = true, want false")
+// TestLoad_ExecutorEnv pins the executor-tools spec's operator env-literal
+// requirement: valid env round-trips, an empty map is a zero-behavior-change,
+// and values are subject to the global ${VAR} / ${VAR:default} expansion applied
+// to the whole YAML document at load (secrets may reference the host env).
+func TestLoad_ExecutorEnv(t *testing.T) {
+	t.Run("valid env passes and round-trips", func(t *testing.T) {
+		path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+tools:
+  executor:
+    bash:
+      enabled: true
+      env:
+        PIP_INDEX_URL: "https://pypi.example.com/simple"
+        NODE_USE_ENV_PROXY: "1"
+`)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		env := cfg.Tools.Executor.Bash.Env
+		if got, want := env["PIP_INDEX_URL"], "https://pypi.example.com/simple"; got != want {
+			t.Errorf("env[PIP_INDEX_URL] = %q, want %q", got, want)
+		}
+		if got, want := env["NODE_USE_ENV_PROXY"], "1"; got != want {
+			t.Errorf("env[NODE_USE_ENV_PROXY] = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty map is zero behavior change", func(t *testing.T) {
+		path := writeTempYAML(t, minimalValidYAML+`
+tools:
+  executor:
+    bash:
+      env: {}
+`)
+		if _, err := Load(path); err != nil {
+			t.Fatalf("Load with empty env map returned error: %v", err)
+		}
+	})
+
+	t.Run("${VAR} value expands from host environment", func(t *testing.T) {
+		t.Setenv("BLOWBALL_TEST_HOST_VAR", "from-host")
+		path := writeTempYAML(t, minimalValidYAML+`
+tools:
+  executor:
+    bash:
+      env:
+        KEY: "${BLOWBALL_TEST_HOST_VAR}"
+`)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if got, want := cfg.Tools.Executor.Bash.Env["KEY"], "from-host"; got != want {
+			t.Errorf("env[KEY] = %q, want %q (host var expansion)", got, want)
+		}
+	})
+
+	t.Run("${VAR:default} value expands with default when unset", func(t *testing.T) {
+		os.Unsetenv("BLOWBALL_TEST_UNSET_VAR")
+		path := writeTempYAML(t, minimalValidYAML+`
+tools:
+  executor:
+    bash:
+      env:
+        LOG_LEVEL: "${BLOWBALL_TEST_UNSET_VAR:info}"
+`)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if got, want := cfg.Tools.Executor.Bash.Env["LOG_LEVEL"], "info"; got != want {
+			t.Errorf("env[LOG_LEVEL] = %q, want %q (default expansion)", got, want)
+		}
+	})
+}
+
+// TestLoad_ExecutorEnvRejections pins the fail-fast env guards: HOME is a
+// reserved key and an invalid key name (space, empty, or digit-led) is rejected
+// at config load, in the ParseMounts style.
+func TestLoad_ExecutorEnvRejections(t *testing.T) {
+	cases := []struct {
+		name    string
+		entry   string
+		wantErr string
+	}{
+		{"HOME reserved", "HOME: /custom\n", "HOME is reserved"},
+		{"key with space", `"bad key": v` + "\n", "invalid key name"},
+		{"empty key", `"": v` + "\n", "invalid key name"},
+		{"digit-led key", `"1ABC": v` + "\n", "invalid key name"},
 	}
-	if python.Timeout != 20*time.Second {
-		t.Errorf("Tools.Executor.Python.Timeout = %v, want 20s", python.Timeout)
-	}
-	if python.MaxOutputBytes != 4096 {
-		t.Errorf("Tools.Executor.Python.MaxOutputBytes = %d, want 4096", python.MaxOutputBytes)
-	}
-	if python.Network {
-		t.Error("Tools.Executor.Python.Network = true, want false")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			block := "tools:\n  executor:\n    bash:\n      env:\n        " + tc.entry
+			_, err := Load(writeTempYAML(t, minimalValidYAML+block))
+			if err == nil {
+				t.Fatalf("Load expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -728,15 +817,21 @@ tools:
 	if bash.MaxOutputBytes != 65536 {
 		t.Errorf("Tools.Executor.Bash.MaxOutputBytes default = %d, want 65536", bash.MaxOutputBytes)
 	}
-	if bash.Network {
-		t.Error("Tools.Executor.Bash.Network default = true, want false")
+	if !bash.NetworkEnabled() {
+		t.Error("Tools.Executor.Bash.Network default = false, want true")
 	}
 	if len(bash.AllowedEnvPatterns) == 0 {
 		t.Error("Tools.Executor.Bash.AllowedEnvPatterns should have defaults")
 	}
 }
 
-func TestLoad_PipConfig(t *testing.T) {
+// TestLoad_ExecutorConfig_PythonPipBlocksIgnored pins the executor-tools spec
+// scenario "python/pip config blocks are ignored": residual
+// tools.executor.python / tools.executor.pip blocks (left over after upgrading
+// a config that pre-dates the executor slim-down) are parsed by non-strict YAML
+// unmarshal and silently ignored — no tools are registered from them and startup
+// succeeds. Python/pip now run via bash.
+func TestLoad_ExecutorConfig_PythonPipBlocksIgnored(t *testing.T) {
 	path := writeTempYAML(t, `
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
@@ -744,127 +839,21 @@ jwt:
   secret: "ok"
 tools:
   executor:
+    bash:
+      enabled: true
+    python:
+      enabled: true
     pip:
       enabled: true
-      timeout: 90s
-      max_output_bytes: 32768
-      allowed_env_patterns: ["PATH", "PYTHON*"]
-      network: false
       index_url: https://pypi.tuna.tsinghua.edu.cn/simple
-      extra_index_urls:
-        - https://extra.example.com/simple
-      trusted_hosts:
-        - pypi.tuna.tsinghua.edu.cn
 `)
 
 	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
+		t.Fatalf("Load should succeed with residual python/pip blocks: %v", err)
 	}
-
-	pip := cfg.Tools.Executor.Pip
-	if !pip.Enabled {
-		t.Error("Tools.Executor.Pip.Enabled = false, want true")
-	}
-	if pip.Timeout != 90*time.Second {
-		t.Errorf("Tools.Executor.Pip.Timeout = %v, want 90s", pip.Timeout)
-	}
-	if pip.MaxOutputBytes != 32768 {
-		t.Errorf("Tools.Executor.Pip.MaxOutputBytes = %d, want 32768", pip.MaxOutputBytes)
-	}
-	if len(pip.AllowedEnvPatterns) != 2 || pip.AllowedEnvPatterns[0] != "PATH" {
-		t.Errorf("unexpected pip env patterns: %v", pip.AllowedEnvPatterns)
-	}
-	if pip.NetworkEnabled() {
-		t.Error("Tools.Executor.Pip.Network = true, want false")
-	}
-	if pip.IndexURL != "https://pypi.tuna.tsinghua.edu.cn/simple" {
-		t.Errorf("Tools.Executor.Pip.IndexURL = %q, want %q", pip.IndexURL, "https://pypi.tuna.tsinghua.edu.cn/simple")
-	}
-	if len(pip.ExtraIndexURLs) != 1 || pip.ExtraIndexURLs[0] != "https://extra.example.com/simple" {
-		t.Errorf("unexpected pip extra index URLs: %v", pip.ExtraIndexURLs)
-	}
-	if len(pip.TrustedHosts) != 1 || pip.TrustedHosts[0] != "pypi.tuna.tsinghua.edu.cn" {
-		t.Errorf("unexpected pip trusted hosts: %v", pip.TrustedHosts)
-	}
-}
-
-func TestLoad_PipConfigDefaults(t *testing.T) {
-	path := writeTempYAML(t, `
-mysql:
-  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
-jwt:
-  secret: "ok"
-tools:
-  executor:
-    pip:
-      enabled: true
-`)
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-
-	pip := cfg.Tools.Executor.Pip
-	if pip.Timeout != 120*time.Second {
-		t.Errorf("Tools.Executor.Pip.Timeout default = %v, want 120s", pip.Timeout)
-	}
-	if pip.MaxOutputBytes != 65536 {
-		t.Errorf("Tools.Executor.Pip.MaxOutputBytes default = %d, want 65536", pip.MaxOutputBytes)
-	}
-	if !pip.NetworkEnabled() {
-		t.Error("Tools.Executor.Pip.Network default = false, want true")
-	}
-	if len(pip.AllowedEnvPatterns) == 0 {
-		t.Error("Tools.Executor.Pip.AllowedEnvPatterns should have defaults")
-	}
-}
-
-func TestPipToolConfig_NetworkEnabledDefaultsToTrue(t *testing.T) {
-	cfg := PipToolConfig{}
-	if !cfg.NetworkEnabled() {
-		t.Error("NetworkEnabled should default to true when Network is nil")
-	}
-
-	f := false
-	cfg.Network = &f
-	if cfg.NetworkEnabled() {
-		t.Error("NetworkEnabled should return false when Network is explicitly false")
-	}
-
-	tr := true
-	cfg.Network = &tr
-	if !cfg.NetworkEnabled() {
-		t.Error("NetworkEnabled should return true when Network is explicitly true")
-	}
-}
-
-func TestPipToolConfig_ToExecutorToolConfig(t *testing.T) {
-	f := false
-	cfg := PipToolConfig{
-		Enabled:            true,
-		Timeout:            90 * time.Second,
-		MaxOutputBytes:     32768,
-		AllowedEnvPatterns: []string{"PATH"},
-		Network:            &f,
-	}
-
-	exec := cfg.ToExecutorToolConfig()
-	if !exec.Enabled {
-		t.Error("Enabled mismatch")
-	}
-	if exec.Timeout != 90*time.Second {
-		t.Errorf("Timeout mismatch: %v", exec.Timeout)
-	}
-	if exec.MaxOutputBytes != 32768 {
-		t.Errorf("MaxOutputBytes mismatch: %d", exec.MaxOutputBytes)
-	}
-	if len(exec.AllowedEnvPatterns) != 1 || exec.AllowedEnvPatterns[0] != "PATH" {
-		t.Errorf("AllowedEnvPatterns mismatch: %v", exec.AllowedEnvPatterns)
-	}
-	if exec.Network {
-		t.Error("Network mismatch")
+	if !cfg.Tools.Executor.Bash.Enabled {
+		t.Error("bash should remain enabled")
 	}
 }
 

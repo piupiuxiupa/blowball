@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"maps"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -17,7 +18,7 @@ func defaultSandbox() config.ExecutorSandboxConfig {
 
 func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 	cfg := config.ExecutorToolConfig{
-		Network:            false,
+		Network:            config.BoolPtr(false),
 		AllowedEnvPatterns: []string{"PATH"},
 	}
 	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
@@ -59,12 +60,22 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 
 func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 	cfg := config.ExecutorToolConfig{
-		Network:            true,
+		Network:            config.BoolPtr(true),
 		AllowedEnvPatterns: []string{"PATH"},
 	}
 	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
 	if slices.Contains(args, "--unshare-net") {
 		t.Error("expected --unshare-net to be absent when network is enabled")
+	}
+}
+
+// Network defaults to enabled for bash (D3): an omitted Network (nil) yields no
+// --unshare-net so pip-via-bash (python3 -m pip install) reaches PyPI.
+func TestBuildBwrapArgsNetworkEnabledByDefault(t *testing.T) {
+	cfg := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}} // Network unset
+	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
+	if slices.Contains(args, "--unshare-net") {
+		t.Error("expected --unshare-net to be absent when Network is omitted (default enabled)")
 	}
 }
 
@@ -385,5 +396,92 @@ func TestBuildBwrapArgsExtraMountsComeAfterInvariants(t *testing.T) {
 	}
 	if extraIdx < tmpfsIdx || extraIdx < bindIdx {
 		t.Errorf("extra mount (idx %d) must come after tmpfs (idx %d) and tools bind (idx %d)", extraIdx, tmpfsIdx, bindIdx)
+	}
+}
+
+// setenvMap returns the {KEY: value} map of every --setenv entry in args. Each
+// forced key (HOME/PATH/PYTHONPATH) is emitted exactly once, so collapsing later
+// occurrences onto earlier ones is unambiguous for the keys under test.
+func setenvMap(args []string) map[string]string {
+	out := map[string]string{}
+	for i := 0; i+2 < len(args); i++ {
+		if args[i] == "--setenv" {
+			out[args[i+1]] = args[i+2]
+		}
+	}
+	return out
+}
+
+// TestBuildBwrapArgsEnvLiterals pins the three-tier env construction (design D2):
+// host allowlist (lowest) < operator env literals (middle) < forced invariants
+// (HOME/PATH/PYTHONPATH, highest). Operator literals override host allowlist
+// variables; the forced layer always applies last and always wins.
+func TestBuildBwrapArgsEnvLiterals(t *testing.T) {
+	// (a) env literal overrides an allowed host variable.
+	t.Run("env literal overrides allowed host var", func(t *testing.T) {
+		t.Setenv("FOO", "host-value")
+		cfg := config.ExecutorToolConfig{
+			AllowedEnvPatterns: []string{"FOO"},
+			Env:                map[string]string{"FOO": "cfg-value"},
+		}
+		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
+		if got := setenvValue(args, "FOO"); got != "cfg-value" {
+			t.Errorf("FOO = %q, want %q (env literal overrides host allowlist)", got, "cfg-value")
+		}
+	})
+
+	// (b) forced PATH prepend wins over an env literal PATH.
+	t.Run("forced PATH prepend wins over env literal", func(t *testing.T) {
+		cfg := config.ExecutorToolConfig{
+			AllowedEnvPatterns: []string{"PATH"},
+			Env:                map[string]string{"PATH": "/opt/bin"},
+		}
+		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
+		want := toolsBinPath + ":/opt/bin"
+		if got := setenvValue(args, "PATH"); got != want {
+			t.Errorf("PATH = %q, want %q (tools bin prepend wins)", got, want)
+		}
+	})
+
+	// (c) forced PYTHONPATH prepend wins over an env literal PYTHONPATH.
+	t.Run("forced PYTHONPATH prepend wins over env literal", func(t *testing.T) {
+		cfg := config.ExecutorToolConfig{
+			AllowedEnvPatterns: nil,
+			Env:                map[string]string{"PYTHONPATH": "/x"},
+		}
+		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
+		want := pipTargetPath + ":/x"
+		if got := setenvValue(args, "PYTHONPATH"); got != want {
+			t.Errorf("PYTHONPATH = %q, want %q (pip target prepend wins)", got, want)
+		}
+	})
+
+	// (e) an empty-value env literal is still emitted as --setenv FOO "".
+	t.Run("empty-value env literal is set", func(t *testing.T) {
+		cfg := config.ExecutorToolConfig{
+			AllowedEnvPatterns: nil,
+			Env:                map[string]string{"FOO": ""},
+		}
+		args := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), cfg)
+		if n := countSetenv(args, "FOO"); n != 1 {
+			t.Errorf("expected exactly one --setenv FOO, got %d (args=%v)", n, args)
+		}
+	})
+}
+
+// TestBuildBwrapArgsEmptyEnvIsZeroRegression pins the "no env block reproduces
+// existing behavior" scenario: the merge layer adds nothing when Env is unset or
+// an empty map, so the --setenv set is identical either way.
+func TestBuildBwrapArgsEmptyEnvIsZeroRegression(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+	base := config.ExecutorToolConfig{AllowedEnvPatterns: []string{"PATH"}}
+	emptyEnv := base
+	emptyEnv.Env = map[string]string{}
+
+	nilArgs := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), base)
+	emptyArgs := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", defaultSandbox(), emptyEnv)
+
+	if got, want := setenvMap(emptyArgs), setenvMap(nilArgs); !maps.Equal(got, want) {
+		t.Errorf("empty Env setenv set = %v, want nil Env setenv set = %v (zero regression)", got, want)
 	}
 }

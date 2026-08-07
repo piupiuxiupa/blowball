@@ -158,12 +158,16 @@ func (l *Loader) Read(name, userID string) ([]byte, error) {
 	return nil, fmt.Errorf("skill %q not found", name)
 }
 
-// ReadPath returns the markdown body of a .md file located at relPath within
-// the named skill's directory tree, with YAML frontmatter stripped if present.
+// ReadPath returns the text body of a file located at relPath within the named
+// skill's directory tree, with YAML frontmatter stripped if present (only when
+// the file begins with `---`, so non-markdown text files are returned verbatim).
 // relPath is resolved relative to the matched skill's directory (the directory
 // containing its SKILL.md) and MUST stay inside it: absolute paths, parent-
 // traversal escapes, and symlinks that resolve outside the skill directory are
-// rejected. Only files whose extension is .md are readable. The named skill is
+// rejected. Any text file in the skill directory tree is readable (no longer
+// limited to .md); binary files (content containing a NUL byte, aligning with
+// the workspace WriteContent BINARY_FILE judgment) are rejected with a clear
+// error so binary garbage never pollutes the context. The named skill is
 // resolved the same way as Read (user skills override global skills of the same
 // name). The same size limit (DefaultMaxSize unless overridden) applies.
 func (l *Loader) ReadPath(name, relPath, userID string) ([]byte, error) {
@@ -190,6 +194,12 @@ func (l *Loader) ReadPath(name, relPath, userID string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("luban_read_skill: read %q: %w", relPath, err)
 		}
+		// Binary rejection: a NUL byte means the file is binary; return a clear
+		// error instead of garbled content (aligns with workspace WriteContent's
+		// BINARY_FILE judgment).
+		if bytes.IndexByte(data, 0) >= 0 {
+			return nil, fmt.Errorf("luban_read_skill: %q is a binary file; only text files are readable", relPath)
+		}
 		_, body, err := parseFrontmatter(data)
 		if err != nil {
 			return nil, fmt.Errorf("luban_read_skill: parse %q: %w", relPath, err)
@@ -201,9 +211,11 @@ func (l *Loader) ReadPath(name, relPath, userID string) ([]byte, error) {
 
 // validateSkillSubPath resolves relPath against skillRoot and verifies the real
 // path stays inside skillRoot. It rejects absolute paths, parent-traversal
-// escapes, symlinks that resolve outside skillRoot, and non-markdown targets.
-// When the target does not exist it returns the joined (non-symlink-resolved)
-// path so the caller's subsequent Stat surfaces a clean "file not found".
+// escapes, and symlinks that resolve outside skillRoot. Any text file in the
+// skill directory tree is readable (no extension restriction); binary content
+// is rejected by the caller after reading. When the target does not exist it
+// returns the joined (non-symlink-resolved) path so the caller's subsequent
+// Stat surfaces a clean "file not found".
 func validateSkillSubPath(skillRoot, relPath string) (string, error) {
 	if relPath == "" {
 		return "", fmt.Errorf("path is empty")
@@ -214,9 +226,6 @@ func validateSkillSubPath(skillRoot, relPath string) (string, error) {
 	cleaned := filepath.Clean(relPath)
 	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path traversal rejected; use a path relative to the skill directory such as examples/guide.md")
-	}
-	if strings.ToLower(filepath.Ext(cleaned)) != ".md" {
-		return "", fmt.Errorf("only markdown (.md) files are readable; %q is not markdown", relPath)
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(skillRoot)
 	if err != nil {

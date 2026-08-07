@@ -59,3 +59,55 @@ func TestFilterEnvDoesNotMutateProcess(t *testing.T) {
 		t.Error("filterEnv should not modify the host environment")
 	}
 }
+
+// TestMergeEnv pins the operator env-literal layer (design D2): overrides are
+// written into dst, overriding same-named host allowlist variables, while the
+// overrides map itself (the operator config) is not mutated.
+func TestMergeEnv(t *testing.T) {
+	dst := map[string]string{"FOO": "host", "BAR": "keep"}
+	overrides := map[string]string{"FOO": "cfg", "BAZ": "new"}
+
+	mergeEnv(dst, overrides)
+
+	wantDst := map[string]string{"FOO": "cfg", "BAR": "keep", "BAZ": "new"}
+	if !equalMap(dst, wantDst) {
+		t.Errorf("dst = %v, want %v (override semantics)", dst, wantDst)
+	}
+
+	// The overrides (operator config) must not be polluted.
+	wantOverrides := map[string]string{"FOO": "cfg", "BAZ": "new"}
+	if !equalMap(overrides, wantOverrides) {
+		t.Errorf("overrides mutated to %v, want %v (input not polluted)", overrides, wantOverrides)
+	}
+}
+
+// TestMergeEnvEmptyOverridesIsNoop pins the zero-behavior-change guarantee: an
+// unset or empty overrides map leaves dst untouched.
+func TestMergeEnvEmptyOverridesIsNoop(t *testing.T) {
+	dst := map[string]string{"FOO": "host"}
+	before := map[string]string{"FOO": "host"}
+
+	mergeEnv(dst, nil)
+	if !equalMap(dst, before) {
+		t.Errorf("dst = %v after mergeEnv(nil), want unchanged %v", dst, before)
+	}
+
+	mergeEnv(dst, map[string]string{})
+	if !equalMap(dst, before) {
+		t.Errorf("dst = %v after mergeEnv({}), want unchanged %v", dst, before)
+	}
+}
+
+// equalMap is a small value equality check for two string maps (test-only; the
+// standard library has no generic map equality on this Go line for our use).
+func equalMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}

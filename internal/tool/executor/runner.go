@@ -25,7 +25,7 @@ const truncationMarker = "\n...output truncated..."
 // commands. This is a warning-only check; execution is not blocked.
 var dangerousCommandPattern = regexp.MustCompile(`\b(rm|curl|wget|sudo|sshd)\b`)
 
-// ExecutionResult is the JSON-serializable return value for bash/python tools.
+// ExecutionResult is the JSON-serializable return value for the bash tool.
 type ExecutionResult struct {
 	Output    string `json:"output"`
 	ExitCode  int    `json:"exit_code"`

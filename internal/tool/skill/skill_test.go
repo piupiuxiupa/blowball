@@ -230,16 +230,37 @@ func TestLoader_ReadPath_RejectsSymlinkEscape(t *testing.T) {
 	assert.Contains(t, err.Error(), "outside the skill directory")
 }
 
-func TestLoader_ReadPath_RejectsNonMarkdown(t *testing.T) {
+func TestLoader_ReadPath_ReadsNonMarkdownText(t *testing.T) {
 	globalDir := t.TempDir()
 	skillDir := filepath.Join(globalDir, "s")
 	writeSkill(t, skillDir, "s", "S", "# Body")
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "data.csv"), []byte("a,b"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "run.py"), []byte("print('hi')"), 0o644))
 
 	loader := NewLoader(globalDir, nil)
-	_, err := loader.ReadPath("s", "data.csv", "")
+
+	// Non-markdown text assets are now readable (returned verbatim, no frontmatter).
+	body, err := loader.ReadPath("s", "data.csv", "")
+	require.NoError(t, err)
+	assert.Equal(t, "a,b", string(body))
+
+	body, err = loader.ReadPath("s", "run.py", "")
+	require.NoError(t, err)
+	assert.Equal(t, "print('hi')", string(body))
+}
+
+func TestLoader_ReadPath_RejectsBinary(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Body")
+	// A binary file (NUL byte) under the skill directory.
+	bin := append([]byte("\x89PNG\r\n"), 0, 0, 0, 0x0a)
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "logo.png"), bin, 0o644))
+
+	loader := NewLoader(globalDir, nil)
+	_, err := loader.ReadPath("s", "logo.png", "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not markdown")
+	assert.Contains(t, err.Error(), "binary file")
 }
 
 func TestLoader_ReadPath_RejectsOversized(t *testing.T) {

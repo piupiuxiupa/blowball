@@ -214,9 +214,9 @@ func TestRegisterAll(t *testing.T) {
 }
 
 // TestRegister_DescriptionContracts pins the luban description convergence
-// (delta spec luban-skill-tools): luban_read_skill declares the markdown body
-// return and keeps a minimal xizhi_* pointer; list/install no longer repeat the
-// verbatim cross-rule sentence.
+// (delta spec luban-skill-tools): luban_read_skill declares the text body
+// return (any text file, binary rejected) and keeps a minimal xizhi_* pointer;
+// list/install no longer repeat the verbatim cross-rule sentence.
 func TestRegister_DescriptionContracts(t *testing.T) {
 	loader := skill.NewLoader(t.TempDir(), func(string) string { return t.TempDir() })
 	tools := NewTools(loader, func(string) string { return t.TempDir() })
@@ -225,8 +225,9 @@ func TestRegister_DescriptionContracts(t *testing.T) {
 
 	read, ok := r.Get(ToolReadSkill)
 	require.True(t, ok)
-	assert.Contains(t, read.Description, "markdown body")
+	assert.Contains(t, read.Description, "text body")
 	assert.Contains(t, read.Description, "frontmatter")
+	assert.Contains(t, read.Description, "binary files are rejected")
 	// Minimal pointer retained.
 	assert.Contains(t, read.Description, "xizhi")
 
@@ -583,7 +584,7 @@ func TestReadSkill_ByPath_RejectsTraversal(t *testing.T) {
 
 // TestRegister_ReadDescriptionDeclaresPath pins that luban_read_skill's
 // description tells the model about the optional `path` sub-document reading
-// (delta spec "luban_read_skill description declares markdown body return").
+// (delta spec "luban_read_skill description declares text body return").
 func TestRegister_ReadDescriptionDeclaresPath(t *testing.T) {
 	r := tool.NewRegistry()
 	require.NoError(t, RegisterAll(r, NewTools(skill.NewLoader(t.TempDir(), nil), func(string) string { return "" })))
@@ -592,7 +593,10 @@ func TestRegister_ReadDescriptionDeclaresPath(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, spec.Description, "path")
 	assert.Contains(t, spec.Description, "SKILL.md")
-	assert.Contains(t, spec.Description, "markdown body")
+	assert.Contains(t, spec.Description, "text body")
+	// path can read any text file (not limited to .md), binary rejected.
+	assert.Contains(t, spec.Description, "text file")
+	assert.Contains(t, spec.Description, "binary files are rejected")
 }
 
 func TestReadSkillTool_ExecuteWithPath(t *testing.T) {
@@ -613,6 +617,57 @@ func TestReadSkillTool_ExecuteWithPath(t *testing.T) {
 	res, err := spec.Execute(context.Background(), args)
 	require.NoError(t, err)
 	assert.Equal(t, "# Extra", res)
+}
+
+// TestReadSkillTool_ReadsNonMarkdownTextAsset pins the loosened path policy
+// (delta spec luban-skill-tools): a non-.md text asset under the skill tree is
+// readable, returned verbatim (no frontmatter stripping).
+func TestReadSkillTool_ReadsNonMarkdownTextAsset(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Skill")
+	require.NoError(t, os.MkdirAll(filepath.Join(skillDir, "templates"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "templates", "config.yaml"), []byte("key: value\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "demo.py"), []byte("print('hi')"), 0o644))
+
+	r := tool.NewRegistry()
+	loader := skill.NewLoader(globalDir, nil)
+	require.NoError(t, RegisterAll(r, NewTools(loader, func(string) string { return "" })))
+	spec, ok := r.Get(ToolReadSkill)
+	require.True(t, ok)
+
+	for path, want := range map[string]string{
+		"templates/config.yaml": "key: value",
+		"demo.py":               "print('hi')",
+	} {
+		args, err := json.Marshal(map[string]string{"name": "s", "path": path})
+		require.NoError(t, err)
+		res, err := spec.Execute(context.Background(), args)
+		require.NoError(t, err, "path %q", path)
+		assert.Equal(t, want, res, "path %q", path)
+	}
+}
+
+// TestReadSkillTool_RejectsBinaryAsset pins that a binary file (NUL byte) is
+// rejected with a clear error rather than returning garbled content.
+func TestReadSkillTool_RejectsBinaryAsset(t *testing.T) {
+	globalDir := t.TempDir()
+	skillDir := filepath.Join(globalDir, "s")
+	writeSkill(t, skillDir, "s", "S", "# Skill")
+	bin := append([]byte("\x89PNG\r\n"), 0, 0, 0, 0x0a)
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "logo.png"), bin, 0o644))
+
+	r := tool.NewRegistry()
+	loader := skill.NewLoader(globalDir, nil)
+	require.NoError(t, RegisterAll(r, NewTools(loader, func(string) string { return "" })))
+	spec, ok := r.Get(ToolReadSkill)
+	require.True(t, ok)
+
+	args, err := json.Marshal(map[string]string{"name": "s", "path": "logo.png"})
+	require.NoError(t, err)
+	_, err = spec.Execute(context.Background(), args)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "binary file")
 }
 
 func writeSkill(t *testing.T, dir, name, description, body string) {

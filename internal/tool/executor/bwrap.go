@@ -34,9 +34,10 @@ func detectBwrap() bool {
 	return true
 }
 
-// pipTargetPath is the in-sandbox location where pip_install writes packages.
-// It is bound to {workspaceRoot}/.pip on the host and prepended to PYTHONPATH
-// so the python tool can import installed packages without sys.path changes.
+// pipTargetPath is the in-sandbox location where pip-via-bash writes packages
+// (python3 -m pip install --target /workspace/.pip). It is bound to
+// {workspaceRoot}/.pip on the host and prepended to PYTHONPATH so python3 run
+// in a later bash sandbox can import installed packages without sys.path changes.
 const pipTargetPath = "/workspace/.pip"
 
 // sandboxHome is the synthetic, in-namespace home directory established as a
@@ -103,12 +104,18 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir strin
 		args = append(args, "--bind", m.Host, m.Target)
 	}
 
-	if !cfg.Network {
+	if !cfg.NetworkEnabled() {
 		args = append(args, "--unshare-net")
 	}
 
 	args = append(args, "--clearenv")
 	env := filterEnv(cfg.AllowedEnvPatterns)
+	// D2: operator env-literal layer — apply AFTER the host allowlist layer and
+	// BEFORE the forced-invariant layer. Operator literals override same-named
+	// host allowlist variables; the forced layer (HOME/PATH/PYTHONPATH below)
+	// still applies last and always wins, so the load-bearing invariants are
+	// preserved.
+	mergeEnv(env, cfg.Env)
 	if existing, ok := env["PYTHONPATH"]; ok && existing != "" {
 		env["PYTHONPATH"] = pipTargetPath + ":" + existing
 	} else {

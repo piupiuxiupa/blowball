@@ -29,7 +29,7 @@ var systemROBindDirs = []string{"/usr", "/bin", "/lib", "/lib64"}
 // mounted under dataDir. This catches the single most common shared-mode
 // misconfiguration: JuiceFS mounted WITHOUT --allow-other (or without
 // user_allow_other in /etc/fuse.conf), which leaves /workspace accessible only
-// to the mounting uid and makes every agent bash/python call fail with EACCES
+// to the mounting uid and makes every agent bash call fail with EACCES
 // at runtime. Running the probe at startup surfaces the problem before any agent
 // turn does.
 //

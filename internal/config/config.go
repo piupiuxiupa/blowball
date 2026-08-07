@@ -93,8 +93,8 @@ func (w WorkspaceStorageConfig) validate() error {
 
 // LandlockConfig holds the process-level Landlock sandbox directory policy (see
 // the sandbox-directory-configuration spec). Enabled defaults to true via the
-// *bool nil→enabled pattern (matching PipToolConfig.Network): omitting the block
-// preserves the historical landlock-protected behavior, while an explicit false
+// *bool nil→enabled pattern: omitting the block preserves the historical
+// landlock-protected behavior, while an explicit false
 // skips ApplyLandlock entirely (warning-only). SystemReadOnly is the
 // stat-guarded read-only system baseline; ExtraReadWrite / ExtraReadOnly are
 // additional process-level RW/RO directories. All three lists default to the
@@ -481,7 +481,8 @@ type XizhiConfig struct {
 	ListFiles XizhiToolConfig `yaml:"list_files"`
 	Tree      XizhiToolConfig `yaml:"tree"`
 	GlobFiles XizhiToolConfig `yaml:"glob_files"`
-	Delete   XizhiToolConfig `yaml:"delete"`
+	Grep      XizhiToolConfig `yaml:"grep"`
+	Delete    XizhiToolConfig `yaml:"delete"`
 }
 
 // WebfetchConfig holds the process-level webfetch tool settings.
@@ -500,20 +501,37 @@ type UserMCPConfig struct {
 	CallTimeout    time.Duration `yaml:"call_timeout"`
 }
 
-// ExecutorToolConfig holds the per-tool settings for bash/python executors.
+// ExecutorToolConfig holds the per-tool settings for the bash executor. Network
+// is a *bool so an omitted value defaults to ENABLED (true) — bash ships with
+// network on so pip-via-bash (python3 -m pip install) reaches PyPI out of the
+// box; operators set network: false to tighten. Use NetworkEnabled() to read the
+// effective value (nil → true).
 type ExecutorToolConfig struct {
 	Enabled            bool          `yaml:"enabled"`
 	Timeout            time.Duration `yaml:"timeout"`
 	MaxOutputBytes     int           `yaml:"max_output_bytes"`
 	AllowedEnvPatterns []string      `yaml:"allowed_env_patterns"`
-	Network            bool          `yaml:"network"`
+	// Env is the operator-defined environment-literal map (KEY: value) injected
+	// into every bash sandbox as the middle layer of the three-tier env
+	// construction: host allowlist (filterEnv, lowest) < Env literals (middle) <
+	// forced invariants (HOME, PATH prepend, PYTHONPATH prepend, highest). An Env
+	// entry overrides a same-named host allowlist variable and is itself
+	// overridden by the forced invariants. Values are subject to the global
+	// ${VAR} / ${VAR:default} expansion applied to the whole YAML document at
+	// load, so secrets may reference the host environment rather than being
+	// hard-coded. HOME is a reserved key (rejected by validate); key names must
+	// match ^[A-Za-z_][A-Za-z0-9_]*$. Omitted/empty → zero behavior change.
+	Env     map[string]string `yaml:"env"`
+	Network *bool             `yaml:"network"`
 }
 
-// ExecutorConfig groups the sandboxed command execution tools.
+// ExecutorConfig groups the sandboxed command execution tools. Only the bash
+// executor remains; the dedicated python/pip_install executors were removed
+// (Python code and pip installs run via bash). The persistent PYTHONPATH bridge
+// (/workspace/.pip) is still injected into every bash sandbox so pip-via-bash
+// installs remain importable by later python3 invocations.
 type ExecutorConfig struct {
 	Bash    ExecutorToolConfig    `yaml:"bash"`
-	Python  ExecutorToolConfig    `yaml:"python"`
-	Pip     PipToolConfig         `yaml:"pip"`
 	Sandbox ExecutorSandboxConfig `yaml:"sandbox"`
 }
 
@@ -645,67 +663,25 @@ func (s *ExecutorSandboxConfig) validate() error {
 	return nil
 }
 
-// DefaultExecutorToolConfig returns the recommended defaults for an executor
-// tool. It is used when a tool block is omitted or fields are zero-valued.
+// DefaultExecutorToolConfig returns the recommended defaults for the bash
+// executor. It is used when the tool block is omitted or fields are zero-valued.
+// Network defaults to true so pip-via-bash (python3 -m pip install) can reach
+// PyPI out of the box; operators may set bash.network: false to tighten.
 func DefaultExecutorToolConfig() ExecutorToolConfig {
 	return ExecutorToolConfig{
 		Enabled:            false,
 		Timeout:            30 * time.Second,
 		MaxOutputBytes:     65536,
 		AllowedEnvPatterns: []string{"PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"},
-		Network:            false,
-	}
-}
-
-// PipToolConfig holds the per-tool settings for the pip_install executor tool.
-// It mirrors ExecutorToolConfig but defaults network to true because pip
-// requires network access in most deployments.
-type PipToolConfig struct {
-	Enabled            bool          `yaml:"enabled"`
-	Timeout            time.Duration `yaml:"timeout"`
-	MaxOutputBytes     int           `yaml:"max_output_bytes"`
-	AllowedEnvPatterns []string      `yaml:"allowed_env_patterns"`
-	Network            *bool         `yaml:"network"`
-	IndexURL           string        `yaml:"index_url"`
-	ExtraIndexURLs     []string      `yaml:"extra_index_urls"`
-	TrustedHosts       []string      `yaml:"trusted_hosts"`
-}
-
-// DefaultPipToolConfig returns the recommended defaults for pip_install.
-func DefaultPipToolConfig() PipToolConfig {
-	return PipToolConfig{
-		Enabled:            false,
-		Timeout:            120 * time.Second,
-		MaxOutputBytes:     65536,
-		AllowedEnvPatterns: []string{"PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"},
-		Network:            boolPtr(true),
-	}
-}
-
-// NetworkEnabled reports whether pip_install should have network access,
-// defaulting to true when the config leaves the field unset.
-func (p *PipToolConfig) NetworkEnabled() bool {
-	if p.Network == nil {
-		return true
-	}
-	return *p.Network
-}
-
-// ToExecutorToolConfig converts the pip-specific config into the generic
-// executor tool shape used by the sandbox runner.
-func (p *PipToolConfig) ToExecutorToolConfig() ExecutorToolConfig {
-	return ExecutorToolConfig{
-		Enabled:            p.Enabled,
-		Timeout:            p.Timeout,
-		MaxOutputBytes:     p.MaxOutputBytes,
-		AllowedEnvPatterns: p.AllowedEnvPatterns,
-		Network:            p.NetworkEnabled(),
+		Network:            BoolPtr(true),
 	}
 }
 
 // ApplyDefaults fills zero-valued executor fields with the recommended defaults.
 // A negative MaxOutputBytes is left as-is so the caller can reject it;
-// a zero value is replaced with the default.
+// a zero value is replaced with the default. Network is a *bool: an unset (nil)
+// value is filled with the default (true) so the effective value round-trips;
+// an explicit false survives unchanged.
 func (e *ExecutorToolConfig) ApplyDefaults() {
 	def := DefaultExecutorToolConfig()
 	if e.Timeout == 0 {
@@ -717,26 +693,47 @@ func (e *ExecutorToolConfig) ApplyDefaults() {
 	if len(e.AllowedEnvPatterns) == 0 {
 		e.AllowedEnvPatterns = def.AllowedEnvPatterns
 	}
-}
-
-// ApplyDefaults fills zero-valued pip fields with the recommended defaults.
-func (p *PipToolConfig) ApplyDefaults() {
-	def := DefaultPipToolConfig()
-	if p.Timeout == 0 {
-		p.Timeout = def.Timeout
-	}
-	if p.MaxOutputBytes == 0 {
-		p.MaxOutputBytes = def.MaxOutputBytes
-	}
-	if len(p.AllowedEnvPatterns) == 0 {
-		p.AllowedEnvPatterns = def.AllowedEnvPatterns
-	}
-	if p.Network == nil {
-		p.Network = def.Network
+	if e.Network == nil {
+		e.Network = def.Network
 	}
 }
 
-func boolPtr(b bool) *bool {
+// NetworkEnabled reports the effective network policy for the bash sandbox:
+// true when Network is unset (the default, so pip-via-bash reaches PyPI) or
+// explicitly true; false only when explicitly set to false.
+func (e ExecutorToolConfig) NetworkEnabled() bool {
+	if e.Network == nil {
+		return true
+	}
+	return *e.Network
+}
+
+// envKeyNameRe matches a legal environment-variable name: an ASCII letter or
+// underscore followed by letters, digits, or underscores. It is the fail-fast
+// guard for tools.executor.bash.env keys (design D5).
+var envKeyNameRe = regexpMustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validate enforces the operator env-literal guards on
+// tools.executor.bash.env (fail-fast, in the ParseMounts style): HOME is a
+// reserved key (the forced invariant layer always wins it, so an operator value
+// would be silently ignored — reject it explicitly), and every key name must be
+// a legal environment-variable name. An omitted or empty Env is valid.
+func (e ExecutorToolConfig) validate() error {
+	for key := range e.Env {
+		if key == "HOME" {
+			return fmt.Errorf("tools.executor.bash.env: HOME is reserved (forced to the synthetic sandbox home)")
+		}
+		if !envKeyNameRe.MatchString(key) {
+			return fmt.Errorf("tools.executor.bash.env: invalid key name %q (must match ^[A-Za-z_][A-Za-z0-9_]*)", key)
+		}
+	}
+	return nil
+}
+
+// BoolPtr returns a pointer to b. It is the helper used for *bool config
+// defaults such as ExecutorToolConfig.Network and LandlockConfig.Enabled, and is
+// exported so callers (e.g. tests in other packages) can construct those fields.
+func BoolPtr(b bool) *bool {
 	return &b
 }
 
@@ -850,8 +847,6 @@ func Load(path string) (*Config, error) {
 	cfg.Storage.Workspace.applyDefaults()
 	cfg.Landlock.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
-	cfg.Tools.Executor.Python.ApplyDefaults()
-	cfg.Tools.Executor.Pip.ApplyDefaults()
 	cfg.Tools.Executor.Sandbox.applyDefaults()
 	// Per-agent retry defaults (capability C): Liang (read-only) defaults to
 	// retry-enabled; Chongzhi (side-effecting) defaults to retry-disabled. The
@@ -890,6 +885,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Tools.Executor.Sandbox.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Tools.Executor.Bash.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	return nil

@@ -15,7 +15,7 @@ func TestRegisterAll_RegistersEnabledTools(t *testing.T) {
 	r := newTestRegistry(t)
 	RegisterAll(r, t.TempDir(), testXizhiConfig())
 
-	for _, name := range []string{NameReadFile, NameWriteFile, NameModifyFile, NameListFiles, NameTree, NameGlobFiles, NameDeleteFile} {
+	for _, name := range []string{NameReadFile, NameWriteFile, NameModifyFile, NameListFiles, NameTree, NameGlobFiles, NameGrep, NameDeleteFile} {
 		spec, ok := r.Get(name)
 		require.True(t, ok, "tool %q missing", name)
 		assert.NotEmpty(t, spec.Description)
@@ -43,6 +43,7 @@ func TestRegisterAll_SchemasAreValidJSON(t *testing.T) {
 		"list":   schemaList,
 		"tree":   schemaTree,
 		"glob":   schemaGlob,
+		"grep":   schemaGrep,
 		"delete": schemaDelete,
 	} {
 		var decoded map[string]any
@@ -80,6 +81,7 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: false},
 		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Grep:      config.XizhiToolConfig{Enabled: false},
 		Delete:    config.XizhiToolConfig{Enabled: false},
 	}
 	RegisterAll(r, t.TempDir(), cfg)
@@ -99,6 +101,8 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 	assert.False(t, ok, "tree should not be registered")
 	_, ok = r.Get(NameGlobFiles)
 	assert.True(t, ok, "glob_files should be registered")
+	_, ok = r.Get(NameGrep)
+	assert.False(t, ok, "grep should not be registered when disabled")
 	_, ok = r.Get(NameDeleteFile)
 	assert.False(t, ok, "delete should not be registered when disabled")
 }

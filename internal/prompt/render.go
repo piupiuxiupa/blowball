@@ -132,7 +132,7 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 		b.WriteString("Use luban_list_skills / luban_read_skill / luban_install_skill for skill operations. Never use xizhi_* tools to access the skills directory.\n")
 		b.WriteString("luban_install_skill supports several install shapes: a whole git repository is cloned as one entry; a git collection combined with the optional `skill` parameter installs only the selected sub-skill (matched by frontmatter name, else by repo-relative subpath) and discards the rest; and a single SKILL.md URL ending in .md is downloaded and installed directly.\n")
 		b.WriteString("If a .md URL is not itself a valid skill, luban_install_skill returns the fetched content as an install document (result kind \"install-doc\") instead of installing. When a user asks to install a skill from an instruction or landing page, read the returned install-document content, follow it to the real skill source URL it points at, and call luban_install_skill again with that source - do not treat the instruction page itself as the skill.\n")
-		b.WriteString("You may use the bash or python tools to read and execute files under the exposed skill directories. Global skill directories are read-only and must not be modified. Per-user skills live under the workspace at .blowball/skills and are managed exclusively via the luban_* tools; never use xizhi_* tools to access .blowball or any skill directory.\n")
+		b.WriteString("You may use the bash tool to read and execute files under the exposed skill directories (run Python scripts via `bash` calling `python3`). Global skill directories are read-only and must not be modified. Per-user skills live under the workspace at .blowball/skills and are managed exclusively via the luban_* tools; never use xizhi_* tools to access .blowball or any skill directory.\n")
 		b.WriteString("\n")
 	}
 
@@ -152,7 +152,7 @@ func renderEnvironment(input RenderInput) string {
 func renderWorkspaceConvention() string {
 	return "## Workspace path convention\n" +
 		"- All `xizhi_*` paths must be relative to the workspace root. Use paths like `tmp/hello.txt` or `src/main.go`, not `/workspace/...` or absolute paths.\n" +
-		"- The `bash` and `python` sandboxes run with `/workspace` as the working directory.\n" +
+		"- The `bash` sandbox runs with `/workspace` as the working directory.\n" +
 		"- The sandbox's `/tmp` is mapped to the workspace's `./tmp/` directory. Files written to `/tmp` persist at `tmp/` and can be read with `xizhi_read_file` using a relative path such as `tmp/hello.txt`.\n" +
 		"- **Where generated files go:** write temporary or intermediate artifacts (exploratory calculations, debug dumps, test scaffolding — anything that is NOT a final deliverable) to `tmp/`. Write final deliverables directly in the workspace (not under `tmp/`), organized into meaningful directories by topic or task, and keep related files together in the same directory rather than scattering them.\n" +
 		"- **Keep `tmp/` clean:** `tmp/` is a scratch area whose contents are temporary. Once a scratch file has served its purpose, remove it promptly with `xizhi_delete` (or `bash rm` when `xizhi_delete` is unavailable). **Never hand a `tmp/` path to the user as a deliverable** — move the result into the workspace first, or delete the scratch."

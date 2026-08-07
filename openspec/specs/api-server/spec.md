@@ -150,7 +150,7 @@
 - **THEN** 系统以 `agent` 角色启动，仅注册 agent 侧路由并在 `server.agent_port` 监听
 
 ### Requirement: Runtime data root
-系统 SHALL 从 `-d`/`--data-dir` 指定的单一运行时根目录派生四类落盘位置：每用户数据 `{data-dir}/data`、日志文件 `{data-dir}/logs`、全局 skills `{data-dir}/skills`、操作员工具目录 `{data-dir}/tools`；若根目录或所需子目录不存在，则 SHALL 在启动时创建。`{data-dir}/tools` 用于存放操作者为沙箱内 `bash`/`python`/`pip_install` 工具提供的 CLI 二进制，将在沙箱内以只读方式挂载到 `$HOME/.local/bin`。
+系统 SHALL 从 `-d`/`--data-dir` 指定的单一运行时根目录派生四类落盘位置：每用户数据 `{data-dir}/data`、日志文件 `{data-dir}/logs`、全局 skills `{data-dir}/skills`、操作员工具目录 `{data-dir}/tools`；若根目录或所需子目录不存在，则 SHALL 在启动时创建。`{data-dir}/tools` 用于存放操作者为沙箱内 `bash` 工具提供的 CLI 二进制（`python`/`pip_install` 专用执行器已移除），将在沙箱内以只读方式挂载到 `$HOME/.local/bin`。
 
 #### Scenario: 默认根解析到当前工作目录
 - **WHEN** 未指定 `-d`

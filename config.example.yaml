@@ -243,14 +243,13 @@ agents:
       - xizhi_list_files
       - xizhi_tree
       - xizhi_glob_files
+      - xizhi_grep
       - xizhi_delete
       - webfetch
       - luban_list_skills
       - luban_read_skill
       - luban_install_skill
       - bash
-      - python
-      - pip_install   # requires tools.executor.pip.enabled: true
     mcp:
       servers: []
     skills: []
@@ -306,6 +305,7 @@ agents:
       - xizhi_list_files
       - xizhi_tree
       - xizhi_glob_files
+      - xizhi_grep
     mcp:
       servers: []
     skills: []
@@ -346,6 +346,8 @@ tools:
       enabled: true
     delete:
       enabled: true   # enables xizhi_delete; also add "xizhi_delete" to an agent's tools list to use it
+    grep:
+      enabled: true   # enables xizhi_grep (RE2 content search with glob filter, line numbers, context lines); also add "xizhi_grep" to an agent's tools list to use it
   webfetch:
     enabled: true
     timeout: 30s
@@ -362,6 +364,12 @@ tools:
   # Sandboxed command execution via bubblewrap (Linux only).
   # Requires bwrap to be installed and unprivileged user namespaces available.
   #
+  # The dedicated python/pip_install executors were removed; run Python code
+  # and pip installs through bash (e.g. `python3 ...`,
+  # `python3 -m pip install --target /workspace/.pip <pkg>`). The persistent
+  # PYTHONPATH=/workspace/.pip bridge is still injected into every bash sandbox,
+  # so packages installed by pip-via-bash are importable by later python3 runs.
+  #
   # Operator tools: binaries placed in {data-dir}/tools are mounted read-only at
   # the in-sandbox $HOME/.local/bin (/home/blowball/.local/bin) and prepended to
   # PATH, so agents can invoke them by bare name. The sandbox always gets a real
@@ -374,54 +382,62 @@ tools:
   #   enabled              - required; set to true to register the tool.
   #   timeout              - optional; per-command timeout (default 30s).
   #   max_output_bytes     - optional; combined stdout/stderr cap (default 65536).
-  #   allowed_env_patterns - optional; host env vars passed to the sandbox (default
-  #                          PATH, HOME, LANG, USER, TERM, PYTHON*).
-  #   network              - optional; when false the sandbox has no network access
-  #                          via --unshare-net (default false).
+  #   allowed_env_patterns - optional; host env vars whose VALUE travels from the
+  #                          host process (glob via filepath.Match, so PYTHON*
+  #                          matches PYTHONPATH/PYTHONHOME). Default PATH, HOME,
+  #                          LANG, USER, TERM, PYTHON*. Lowest env tier.
+  #   env                  - optional; operator env literals (KEY: value map)
+  #                          injected into every bash sandbox as literal values,
+  #                          overriding same-named allowed_env_patterns vars. Best
+  #                          for shared, operator-owned config (pip/npm mirrors,
+  #                          corporate proxies, feature flags). Values expand
+  #                          ${VAR} / ${VAR:default} from the host like any config
+  #                          string, so reference secrets via ${SECRET} instead of
+  #                          hard-coding them. HOME is reserved (rejected at load);
+  #                          key names must match ^[A-Za-z_][A-Za-z0-9_]*$. Middle
+  #                          env tier.
+  #   network              - optional; defaults to true so pip-via-bash
+  #                          (python3 -m pip install) can reach PyPI out of the
+  #                          box. Set to false to disable network access
+  #                          (--unshare-net) and tighten the sandbox.
+  #
+  #   Env precedence (low -> high): host allowlist (allowed_env_patterns) <
+  #   env literals (env) < forced invariants (HOME forced to the synthetic sandbox
+  #   home, $HOME/.local/bin prepended to PATH, /workspace/.pip prepended to
+  #   PYTHONPATH). The forced tier always wins, so the load-bearing invariants
+  #   cannot be weakened by operator config.
   executor:
     bash:
       enabled: false
       timeout: 30s
       max_output_bytes: 65536
-      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "NODE_USE_ENV_PROXY"]
-      network: false
-    python:
-      enabled: false
-      timeout: 30s
-      max_output_bytes: 65536
-      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"]
-      network: false
-    # Sandboxed Python package installation via pip (Linux only).
-    # Requires bwrap and network access. Installed packages are persisted under
-    # data/{userID}/workspace/.pip and are automatically available to the python
-    # tool via PYTHONPATH.
-    #
-    # Fields:
-    #   enabled              - required; set to true to register pip_install.
-    #   timeout              - optional; per-command timeout (default 120s).
-    #   max_output_bytes     - optional; combined stdout/stderr cap (default 65536).
-    #   allowed_env_patterns - optional; host env vars passed to the sandbox.
-    #   network              - optional; default true. Set to false to disable
-    #                          network access (--unshare-net).
-    #   index_url            - optional; PyPI mirror, e.g.
-    #                          https://pypi.tuna.tsinghua.edu.cn/simple
-    #   extra_index_urls     - optional; additional package indexes.
-    #   trusted_hosts        - optional; hostnames passed to --trusted-host for
-    #                          HTTP mirrors or self-signed HTTPS.
-    pip:
-      enabled: false
-      timeout: 120s
-      max_output_bytes: 65536
-      allowed_env_patterns: ["PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"]
+      allowed_env_patterns:
+        - "PATH"
+        - "HOME"
+        - "LANG"
+        - "USER"
+        - "TERM"
+        - "PYTHON*"
+      # env: operator-owned literals injected into every bash sandbox. Prefer
+      # this over host-export + allowed_env_patterns for shared config so
+      # config.yaml is the single source of truth. Values expand ${VAR}.
+      # env:
+      #   PIP_INDEX_URL: "https://pypi.mirrors.example.com/simple"
+      #   PIP_TRUSTED_HOST: "pypi.mirrors.example.com"
+      #   npm_config_registry: "https://npm.mirrors.example.com"
+      #   # Corporate proxy — set both cases, and include the mirror host in
+      #   # NO_PROXY so internal mirror traffic bypasses the proxy.
+      #   HTTP_PROXY:  "${CORP_PROXY}"
+      #   http_proxy:  "${CORP_PROXY}"
+      #   HTTPS_PROXY: "${CORP_PROXY}"
+      #   https_proxy: "${CORP_PROXY}"
+      #   NO_PROXY:  "localhost,127.0.0.1,pypi.mirrors.example.com"
+      #   no_proxy:  "localhost,127.0.0.1,pypi.mirrors.example.com"
+      #   NODE_USE_ENV_PROXY: "1"
       network: true
-      # index_url: https://pypi.tuna.tsinghua.edu.cn/simple
-      # extra_index_urls:
-      #   - https://extra.example.com/simple
-      # trusted_hosts:
-      #   - pypi.tuna.tsinghua.edu.cn
 
     # Per-command bwrap sandbox directory policy (Linux only). Applied to every
-    # bash/python/pip_install command. The load-bearing invariants
+    # bash command. The load-bearing invariants
     # (/workspace, synthetic $HOME, $HOME/.local/bin, skills targets, --chdir,
     # PYTHONPATH) are fixed and NOT configurable here. Omit the whole block for
     # byte-for-byte pre-configurability behavior (defaults below).

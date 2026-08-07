@@ -320,7 +320,7 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		log.Fatal("create skills dir failed", zap.Error(err))
 	}
 
-	// Ensure the operator tools directory exists (always created, even when empty) so the landlock rule and the in-sandbox --ro-bind always resolve. Operators place CLI binaries here to expose them inside the bash/python/pip sandboxes at $HOME/.local/bin.
+	// Ensure the operator tools directory exists (always created, even when empty) so the landlock rule and the in-sandbox --ro-bind always resolve. Operators place CLI binaries here to expose them inside the bash sandbox at $HOME/.local/bin.
 	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
 		log.Fatal("create tools dir failed", zap.Error(err))
 	}
@@ -437,7 +437,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
-	// Sandboxed bash/python/pip execution. Only registered on Linux where bwrap is available; on other platforms enabled tools are ignored. If a tool is explicitly enabled but bwrap is missing on Linux, startup fails fast.
+	// Sandboxed bash execution. Only registered on Linux where bwrap is available; on other platforms the enabled tool is ignored. If bash is explicitly enabled but bwrap is missing on Linux, startup fails fast. (The dedicated python/pip_install executors were removed; Python code and pip installs run via bash.)
 	if executorConfigured(cfg) {
 		if !executor.IsAvailable() {
 			log.Fatal("executor tools enabled but bubblewrap (bwrap) is not available",
@@ -566,11 +566,12 @@ func routeGroups(role string) []string {
 	}
 }
 
-// executorConfigured reports whether any sandboxed executor tool (bash/python/
-// pip) is enabled in config. It gates both executor registration in wireAgent
-// and the shared-mode bwrap self-check in setupRuntime.
+// executorConfigured reports whether the sandboxed bash executor tool is
+// enabled in config. It gates both executor registration in wireAgent and the
+// shared-mode bwrap self-check in setupRuntime. (The dedicated python/pip_install
+// executors were removed; Python and pip run via bash.)
 func executorConfigured(cfg *config.Config) bool {
-	return cfg.Tools.Executor.Bash.Enabled || cfg.Tools.Executor.Python.Enabled || cfg.Tools.Executor.Pip.Enabled
+	return cfg.Tools.Executor.Bash.Enabled
 }
 
 // needsLubanTools reports whether any agent explicitly lists one of the luban skill tools in its tools list.

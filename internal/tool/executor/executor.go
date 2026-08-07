@@ -1,9 +1,13 @@
-// Package executor registers sandboxed bash, python and pip command execution tools.
+// Package executor registers the sandboxed bash command execution tool.
 //
 // Each invocation runs inside a bubblewrap (bwrap) sandbox on Linux. The sandbox
 // isolates the command in its own user, mount, pid and (by default) network
 // namespaces, binds the user's workspace to /workspace, and restricts the
 // inherited environment to variables matching an explicit allow-list.
+//
+// The dedicated python/pip_install executors were removed; run Python code and
+// pip installs through bash. The persistent PYTHONPATH=/workspace/.pip bridge is
+// injected into every bash sandbox so pip-via-bash installs remain importable.
 //
 // On non-Linux platforms the package is a no-op: RegisterAll returns without
 // registering tools and IsAvailable reports false.
@@ -20,9 +24,7 @@ import (
 
 // Tool names registered by this package.
 const (
-	ToolBash   = "bash"
-	ToolPython = "python"
-	ToolPip    = "pip_install"
+	ToolBash = "bash"
 )
 
 // Tools bundles the dependencies required by the executor tools.
@@ -50,10 +52,11 @@ func NewTools(cfg config.ExecutorConfig, workspaceFn func(userID string) string,
 	}
 }
 
-// RegisterAll registers the bash, python and pip_install tools into r when they
-// are enabled in cfg and the current platform supports bubblewrap. An error is
-// returned if a tool is enabled but cannot be registered (for example, bwrap is
-// missing on Linux).
+// RegisterAll registers the bash tool into r when it is enabled in cfg and the
+// current platform supports bubblewrap. An error is returned if the tool is
+// enabled but cannot be registered (for example, bwrap is missing on Linux).
+// (The dedicated python/pip_install executors were removed; Python and pip run
+// via bash.)
 func RegisterAll(r *tool.Registry, tools *Tools) error {
 	if !available {
 		return nil
@@ -61,16 +64,6 @@ func RegisterAll(r *tool.Registry, tools *Tools) error {
 
 	if tools.cfg.Bash.Enabled {
 		if err := registerBash(r, tools); err != nil {
-			return err
-		}
-	}
-	if tools.cfg.Python.Enabled {
-		if err := registerPython(r, tools); err != nil {
-			return err
-		}
-	}
-	if tools.cfg.Pip.Enabled {
-		if err := registerPip(r, tools); err != nil {
 			return err
 		}
 	}

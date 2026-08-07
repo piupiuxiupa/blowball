@@ -18,6 +18,7 @@ const (
 	NameListFiles  = "xizhi_list_files"
 	NameTree       = "xizhi_tree"
 	NameGlobFiles  = "xizhi_glob_files"
+	NameGrep       = "xizhi_grep"
 	NameDeleteFile = "xizhi_delete"
 )
 
@@ -128,6 +129,42 @@ var (
   "additionalProperties": false
 }`)
 
+	schemaGrep = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path relative to the workspace root to search within. Defaults to the workspace root."
+    },
+    "pattern": {
+      "type": "string",
+      "description": "RE2 regular expression to match against file contents (e.g. 'func Foo\\(' or 'TODO')."
+    },
+    "glob": {
+      "type": "string",
+      "description": "Optional doublestar file-name filter such as '*.go' or '*.py'; only files whose base name matches are searched."
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "description": "Whether to match case-insensitively. Defaults to false."
+    },
+    "include_hidden": {
+      "type": "boolean",
+      "description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+    },
+    "context_before": {
+      "type": "integer",
+      "description": "Number of lines to include before each match. Defaults to 0."
+    },
+    "context_after": {
+      "type": "integer",
+      "description": "Number of lines to include after each match. Defaults to 0."
+    }
+  },
+  "required": ["pattern"],
+  "additionalProperties": false
+}`)
+
 	schemaDelete = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -169,6 +206,17 @@ type globArgs struct {
 	Path          string `json:"path"`
 	Pattern       string `json:"pattern"`
 	IncludeHidden bool   `json:"include_hidden"`
+}
+
+// grepArgs decodes arguments for xizhi_grep.
+type grepArgs struct {
+	Path          string `json:"path"`
+	Pattern       string `json:"pattern"`
+	Glob          string `json:"glob"`
+	IgnoreCase    bool   `json:"ignore_case"`
+	IncludeHidden bool   `json:"include_hidden"`
+	ContextBefore int    `json:"context_before"`
+	ContextAfter  int    `json:"context_after"`
 }
 
 type deleteArgs struct {
@@ -282,6 +330,26 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 					return nil, fmt.Errorf("xizhi_glob_files: parse args: %w", err)
 				}
 				return GlobFiles(workspaceRoot, a.Path, a.Pattern, a.IncludeHidden)
+			},
+		})
+	}
+
+	if cfg.Grep.Enabled {
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameGrep,
+			Description: "Searches workspace file contents with an RE2 regex and returns `{path, pattern, glob, " +
+				"ignore_case, matches[]}` where each match carries `file`, `line_number`, `line`, and (when requested) " +
+				"`context_before`/`context_after`. **`path` MUST be relative to the workspace root** (absolute paths, `..` " +
+				"and the `.blowball` namespace are rejected). **Prefer this over `bash grep`** — it is cheaper and returns " +
+				"line numbers. Binary files are skipped; the result is capped (~200 matches, lines truncated) and sets " +
+				"`truncated: true` when the cap is hit. Use `glob` to filter by file name (e.g. `*.go`).",
+			ParametersJSON: schemaGrep,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a grepArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_grep: parse args: %w", err)
+				}
+				return GrepFiles(workspaceRoot, a.Path, a.Pattern, a.Glob, a.IgnoreCase, a.IncludeHidden, a.ContextBefore, a.ContextAfter)
 			},
 		})
 	}

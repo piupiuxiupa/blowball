@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,4 +32,14 @@ func matchesAny(s string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// mergeEnv applies the operator env-literal layer (design D2): every entry in
+// overrides is written into dst, overriding any same-named host allowlist
+// variable already present. It runs AFTER filterEnv (host layer) and BEFORE the
+// forced-invariant layer (HOME/PATH/PYTHONPATH), so the forced layer always
+// applies last and always wins. dst is the env map being constructed and is
+// mutated in place; overrides (the operator config) is only read, never mutated.
+func mergeEnv(dst, overrides map[string]string) {
+	maps.Copy(dst, overrides)
 }

@@ -63,40 +63,6 @@ func TestExecutorBashEcho(t *testing.T) {
 	require.False(t, m.Truncated)
 }
 
-func TestExecutorPythonCode(t *testing.T) {
-	if !executor.IsAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	tools, _ := newExecutorTools(t, config.ExecutorConfig{
-		Python: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
-	})
-	reg := newRegistryWithExecutor(t, tools)
-
-	res, err := reg.Call(executorCtx("u1"), executor.ToolPython, json.RawMessage(`{"code":"print(1+1)"}`))
-	require.NoError(t, err)
-	m := res.(*executor.ExecutionResult)
-	require.Equal(t, "2\n", m.Output)
-	require.Equal(t, 0, m.ExitCode)
-}
-
-func TestExecutorPythonFile(t *testing.T) {
-	if !executor.IsAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	tools, ws := newExecutorTools(t, config.ExecutorConfig{
-		Python: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
-	})
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "script.py"), []byte("print('from file')"), 0o644))
-
-	reg := newRegistryWithExecutor(t, tools)
-	res, err := reg.Call(executorCtx("u1"), executor.ToolPython, json.RawMessage(`{"file":"script.py"}`))
-	require.NoError(t, err)
-	m := res.(*executor.ExecutionResult)
-	require.Equal(t, "from file\n", m.Output)
-}
-
 func TestExecutorSkillDirectoryAccess(t *testing.T) {
 	if !executor.IsAvailable() {
 		t.Skip("bwrap not available")
@@ -154,22 +120,6 @@ func TestExecutorWorkspaceIsolation(t *testing.T) {
 	require.Empty(t, m.Output, "should see only /workspace outside bind mounts")
 }
 
-func TestExecutorNetworkIsolation(t *testing.T) {
-	if !executor.IsAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	tools, _ := newExecutorTools(t, config.ExecutorConfig{
-		Python: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096, Network: false},
-	})
-	reg := newRegistryWithExecutor(t, tools)
-
-	res, err := reg.Call(executorCtx("u1"), executor.ToolPython, json.RawMessage(`{"code":"import socket; socket.create_connection(('127.0.0.1', 53), timeout=2)"}`))
-	require.NoError(t, err)
-	m := res.(*executor.ExecutionResult)
-	require.NotEqual(t, 0, m.ExitCode, "network connection should fail")
-}
-
 func TestExecutorOutputTruncation(t *testing.T) {
 	if !executor.IsAvailable() {
 		t.Skip("bwrap not available")
@@ -201,62 +151,34 @@ func TestExecutorTimeout(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestExecutorPipInstallAndImport(t *testing.T) {
+// TestExecutorPipViaBashAndImport guards the executor-tools spec: a package
+// installed via bash (python3 -m pip install --target /workspace/.pip) is
+// importable from a later bash run thanks to the injected PYTHONPATH bridge.
+func TestExecutorPipViaBashAndImport(t *testing.T) {
 	if !executor.IsAvailable() {
 		t.Skip("bwrap not available")
 	}
 
 	tools, _ := newExecutorTools(t, config.ExecutorConfig{
-		Python: config.ExecutorToolConfig{Enabled: true, Timeout: defaultTimeout, MaxOutputBytes: 4096},
-		Pip:    config.PipToolConfig{Enabled: true, Timeout: 120 * time.Second, MaxOutputBytes: 65536},
+		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: 120 * time.Second, MaxOutputBytes: 65536, Network: config.BoolPtr(true)},
 	})
 	reg := newRegistryWithExecutor(t, tools)
 
-	// Install a small, pure-Python package.
-	res, err := reg.Call(executorCtx("u1"), executor.ToolPip, json.RawMessage(`{"packages":["colorama"],"upgrade":false}`))
+	// Install a small, pure-Python package via bash (the pip-via-bash path).
+	res, err := reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"python3 -m pip install --target /workspace/.pip colorama"}`))
 	require.NoError(t, err)
 	m := res.(*executor.ExecutionResult)
-	require.Equal(t, 0, m.ExitCode, "pip install failed: %s", m.Output)
+	require.Equal(t, 0, m.ExitCode, "pip-via-bash install failed: %s", m.Output)
 
-	// Verify it is importable from the python tool without sys.path changes.
-	res, err = reg.Call(executorCtx("u1"), executor.ToolPython, json.RawMessage(`{"code":"import colorama; print(colorama.__version__)"}`))
+	// The installed package is importable from a later bash run without sys.path
+	// changes (PYTHONPATH=/workspace/.pip is injected into every bash sandbox).
+	res, err = reg.Call(executorCtx("u1"), executor.ToolBash, json.RawMessage(`{"command":"python3 -c 'import colorama; print(colorama.__version__)'"}`))
 	require.NoError(t, err)
 	m = res.(*executor.ExecutionResult)
 	require.Equal(t, 0, m.ExitCode, "import failed: %s", m.Output)
 	require.NotEmpty(t, m.Output)
 }
 
-func TestExecutorPipInstallUsesMirror(t *testing.T) {
-	if !executor.IsAvailable() {
-		t.Skip("bwrap not available")
-	}
-
-	cfg := config.PipToolConfig{
-		Enabled:        true,
-		Timeout:        120 * time.Second,
-		MaxOutputBytes: 65536,
-		IndexURL:       "https://pypi.tuna.tsinghua.edu.cn/simple",
-		TrustedHosts:   []string{"pypi.tuna.tsinghua.edu.cn"},
-	}
-	// Network is enabled by default; explicit false should make pip fail to reach
-	// the configured mirror.
-	f := false
-	cfg.Network = &f
-
-	tools, _ := newExecutorTools(t, config.ExecutorConfig{
-		Pip: cfg,
-	})
-	reg := newRegistryWithExecutor(t, tools)
-
-	res, err := reg.Call(executorCtx("u1"), executor.ToolPip, json.RawMessage(`{"packages":["colorama"]}`))
-	require.NoError(t, err)
-	m := res.(*executor.ExecutionResult)
-	require.NotEqual(t, 0, m.ExitCode, "pip install should fail when network is disabled")
-}
-
-// TestExecutorSandboxHomeForced guards the executor-tools spec: HOME is forced to
-// the synthetic writable path and resolves to a real mounted directory, so
-// commands that cache/config under $HOME keep working.
 func TestExecutorSandboxHomeForced(t *testing.T) {
 	if !executor.IsAvailable() {
 		t.Skip("bwrap not available")

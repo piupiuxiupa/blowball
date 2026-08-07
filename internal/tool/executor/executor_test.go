@@ -14,8 +14,7 @@ func TestRegisterAllSkipsWhenUnavailable(t *testing.T) {
 
 	reg := tool.NewRegistry()
 	tools := NewTools(config.ExecutorConfig{
-		Bash:   config.ExecutorToolConfig{Enabled: true},
-		Python: config.ExecutorToolConfig{Enabled: true},
+		Bash: config.ExecutorToolConfig{Enabled: true},
 	}, func(string) string { return "/workspace" }, "/skills/global", "/tools")
 
 	if err := RegisterAll(reg, tools); err != nil {
@@ -25,16 +24,12 @@ func TestRegisterAllSkipsWhenUnavailable(t *testing.T) {
 	if _, ok := reg.Get(ToolBash); ok {
 		t.Error("expected bash tool to be absent")
 	}
-	if _, ok := reg.Get(ToolPython); ok {
-		t.Error("expected python tool to be absent")
-	}
 }
 
 func TestRegisterAllDisabled(t *testing.T) {
 	reg := tool.NewRegistry()
 	tools := NewTools(config.ExecutorConfig{
-		Bash:   config.ExecutorToolConfig{Enabled: false},
-		Python: config.ExecutorToolConfig{Enabled: false},
+		Bash: config.ExecutorToolConfig{Enabled: false},
 	}, func(string) string { return "/workspace" }, "/skills/global", "/tools")
 
 	if err := RegisterAll(reg, tools); err != nil {
@@ -43,9 +38,6 @@ func TestRegisterAllDisabled(t *testing.T) {
 
 	if _, ok := reg.Get(ToolBash); ok {
 		t.Error("expected bash tool to be absent when disabled")
-	}
-	if _, ok := reg.Get(ToolPython); ok {
-		t.Error("expected python tool to be absent when disabled")
 	}
 }
 
