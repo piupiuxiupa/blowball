@@ -55,7 +55,10 @@ func init() {
 
 // scriptedLLMResponse is one entry in a scriptedLLMClient's queue. The client
 // pops these FIFO across StreamChat calls, emitting tokens via onToken before
-// returning the aggregated response. err short-circuits StreamChat if set.
+// returning the aggregated response. err short-circuits StreamChat before any
+// token is emitted, unless errAfterTokens is set, in which case the tokens are
+// streamed first and err is returned afterwards (modelling a mid-stream
+// provider failure such as a 429 that lands after partial content was sent).
 type scriptedLLMResponse struct {
 	tokens           []string
 	reasoningTokens  []string
@@ -65,6 +68,10 @@ type scriptedLLMResponse struct {
 	toolCalls        []agent.ToolCall
 	usage            agent.Usage
 	err              error
+	// errAfterTokens, when true together with err, streams tokens/reasoningTokens
+	// via the callbacks first and then returns err — modelling a provider failure
+	// that lands mid-stream after partial content was already emitted.
+	errAfterTokens bool
 	// tokenDelay is inserted before each content token so tests can interrupt
 	// the stream mid-response.
 	tokenDelay time.Duration
@@ -96,7 +103,7 @@ func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest
 	c.calls = append(c.calls, req)
 	c.mu.Unlock()
 
-	if resp.err != nil {
+	if resp.err != nil && !resp.errAfterTokens {
 		return agent.LLMResponse{}, resp.err
 	}
 
@@ -123,6 +130,11 @@ func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest
 				return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, err
 			}
 		}
+	}
+	// errAfterTokens: the partial stream has been emitted; now surface the
+	// modelled provider failure so the orchestrator takes its error path.
+	if resp.err != nil {
+		return agent.LLMResponse{}, resp.err
 	}
 	return agent.LLMResponse{
 		FinishReason:     resp.finishReason,

@@ -257,10 +257,17 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	}
 
 	if res.err != nil {
-		// Client-initiated cancellation means the user explicitly interrupted
-		// the assistant turn. Persist the partial stream so the session can be
-		// resumed from where it was cut off. Non-cancellation errors are still
-		// transient/malformed and are discarded unchanged.
+		// Any orchestrator error interrupts the turn after content may
+		// already have been streamed to the client. That includes a client-
+		// initiated cancellation (context.Canceled) AND upstream/transport/
+		// timeout failures such as a model-provider 429 or 5xx, which can land
+		// mid-turn after several rounds of assistant tokens/tool results. In
+		// both cases we persist the partial event stream so the reloaded
+		// session history matches what the user saw and the user's own message
+		// is never silently lost. The persistEvents closure records the user
+		// message, the merged assistant events, the turn's token cost into
+		// turn_usage (the done event carries usage on the error path too), and
+		// fires first-turn title generation from the partial assistant content.
 		if errors.Is(res.err, context.Canceled) {
 			logger.L().Warn("client disconnected; persisting partial interrupted turn",
 				zap.String("op", "handler.send_message"),
@@ -268,14 +275,15 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				zap.String("user_id", userID),
 				zap.Int("event_count", len(res.events)),
 				zap.Error(res.err))
-			persistEvents(res.events, res.usage)
-			return
+		} else {
+			logger.L().Error("orchestrator failed; persisting partial turn",
+				zap.String("op", "handler.send_message"),
+				zap.String("session_id", sessionID),
+				zap.String("user_id", userID),
+				zap.Int("event_count", len(res.events)),
+				zap.Error(res.err))
 		}
-		logger.L().Error("orchestrator failed",
-			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
-			zap.String("user_id", userID),
-			zap.Error(res.err))
+		persistEvents(res.events, res.usage)
 		return
 	}
 

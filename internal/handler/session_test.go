@@ -905,10 +905,12 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	assert.Equal(t, "invoke_chongzhi", payload["name"])
 }
 
-// TestSendMessage_OrchestratorFailure_PersistsNothing verifies that when the
-// orchestrator returns an error, neither the user message nor any assistant
-// event rows are written.
-func TestSendMessage_OrchestratorFailure_PersistsNothing(t *testing.T) {
+// TestSendMessage_OrchestratorFailure_PersistsPartialTurn verifies that when
+// the orchestrator returns a non-cancellation error (e.g. a model-provider
+// 429/5xx) after streaming some events, the user message and the partial
+// assistant events ARE persisted in a single batch so the session history
+// matches what the client saw.
+func TestSendMessage_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
 			stream.AgentStartEvent(stream.AgentConfucius),
@@ -927,12 +929,32 @@ func TestSendMessage_OrchestratorFailure_PersistsNothing(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// No persistence calls should happen when the orchestrator fails.
-	time.Sleep(50 * time.Millisecond)
+	// One combined batch must land despite the failure.
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected single batch for failed turn")
+
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
-	assert.Equal(t, 0, env.mysql.appendMessagesCalls, "expected zero persistence calls on orchestrator failure")
-	assert.Empty(t, env.mysql.appendMessagesArg, "expected no messages persisted on orchestrator failure")
+
+	// 1 user message + 2 merged assistant events (agent_start, token).
+	require.Len(t, env.mysql.appendMessagesArg, 3, "batch must contain user + partial assistant events")
+	userMsg := env.mysql.appendMessagesArg[0]
+	assert.Equal(t, model.AgentUser, userMsg.Agent)
+	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
+	assert.Equal(t, model.RoleUser, userMsg.Role)
+	assert.Equal(t, "hi", userMsg.Content)
+
+	wantTypes := []string{
+		model.EventTypeAgentStart,
+		model.EventTypeToken,
+	}
+	for i, want := range wantTypes {
+		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+	}
+	assert.Equal(t, "oops", env.mysql.appendMessagesArg[2].Content, "partial token should be persisted")
 }
 
 // TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents verifies that a
@@ -1067,6 +1089,169 @@ func TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle(t *testing.T) {
 	defer env.mysql.mu.Unlock()
 	assert.Equal(t, "sess-cancel-title", env.mysql.upsertTitleArg.SessionID)
 	assert.Equal(t, "Canceled Title", env.mysql.upsertTitleArg.Title)
+}
+
+// TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialEvents
+// verifies that a non-cancellation orchestrator error (e.g. a model-provider
+// 429) returned after several events have been streamed results in a single
+// persisted batch containing the user message and the merged partial assistant
+// events.
+func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialEvents(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "partial "),
+			stream.TokenEvent(stream.AgentConfucius, "reply"),
+			stream.AgentEndEvent(stream.AgentConfucius),
+		},
+		returnErr: errors.New("confucius: stream chat: 429 Too Many Requests"),
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-fail-partial/messages",
+		strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected single batch for failed turn")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+
+	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
+	require.Len(t, env.mysql.appendMessagesArg, 4, "batch must contain user + partial assistant events")
+	assert.Equal(t, model.RoleUser, env.mysql.appendMessagesArg[0].Role)
+	assert.Equal(t, "hi", env.mysql.appendMessagesArg[0].Content)
+
+	wantTypes := []string{
+		model.EventTypeAgentStart,
+		model.EventTypeToken,
+		model.EventTypeAgentEnd,
+	}
+	for i, want := range wantTypes {
+		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+	}
+	assert.Equal(t, "partial reply", env.mysql.appendMessagesArg[2].Content, "partial tokens should be merged")
+}
+
+// TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser
+// verifies that a non-cancellation orchestrator error returned before any
+// assistant event still persists the user message (never silently lost).
+func TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{},
+		returnErr:    errors.New("confucius: stream chat: 500 Internal Server Error"),
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-fail-empty/messages",
+		strings.NewReader(`{"content":"hello?"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.appendMessagesCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected single batch for user-only failed turn")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	require.Len(t, env.mysql.appendMessagesArg, 1, "only the user message should be persisted")
+	assert.Equal(t, model.RoleUser, env.mysql.appendMessagesArg[0].Role)
+	assert.Equal(t, "hello?", env.mysql.appendMessagesArg[0].Content)
+}
+
+// TestSendMessage_OrchestratorFailure_FirstTurnGeneratesTitle verifies that a
+// non-cancellation orchestrator error on a first turn still triggers title
+// generation using the partial assistant content emitted before the failure.
+func TestSendMessage_OrchestratorFailure_FirstTurnGeneratesTitle(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "partial title content"),
+			stream.AgentEndEvent(stream.AgentConfucius),
+		},
+		returnErr: errors.New("confucius: stream chat: 429 Too Many Requests"),
+	}
+	env := newSessionHandlerEnv(t, stub)
+	deps := sessionDeps(env.mysql, env.redis, env.fs)
+	env.stream.titleSvc = newTitleSvcWithFake(t, deps, "Failure Title")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-fail-title/messages",
+		strings.NewReader(`{"content":"first failed"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.upsertTitleCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected title generation on failed first turn")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, "sess-fail-title", env.mysql.upsertTitleArg.SessionID)
+	assert.Equal(t, "Failure Title", env.mysql.upsertTitleArg.Title)
+}
+
+// TestSendMessage_OrchestratorFailure_RecordsTurnUsage verifies that a failed
+// turn whose done event carries usage still records its token cost in
+// turn_usage (the orchestrator emits done with usage on the error path too).
+func TestSendMessage_OrchestratorFailure_RecordsTurnUsage(t *testing.T) {
+	stub := &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "partial"),
+			stream.AgentEndEvent(stream.AgentConfucius),
+			stream.DoneEvent(map[string]any{
+				"total":    map[string]any{"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+				"by_agent": map[string]any{"Confucius": map[string]any{"total_tokens": 120}},
+				"meta":     map[string]any{"sub_agent_invocations": []string{}, "parallel": false},
+				"error":    "confucius: stream chat: 429 Too Many Requests",
+			}),
+		},
+		returnErr: errors.New("confucius: stream chat: 429 Too Many Requests"),
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-fail-usage/messages",
+		strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.saveTurnUsageCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected turn_usage recorded for failed turn")
+
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Equal(t, "sess-fail-usage", env.mysql.saveTurnUsageArg.SessionID)
+	assert.Equal(t, 120, env.mysql.saveTurnUsageArg.TotalTokens, "total_tokens should be copied from usage.total")
+	// The error field rides along inside the serialized usage JSON.
+	assert.Contains(t, env.mysql.saveTurnUsageArg.UsageJSON, "429 Too Many Requests")
 }
 
 // TestDeleteSession_Success_204 verifies the owner deleting their own session

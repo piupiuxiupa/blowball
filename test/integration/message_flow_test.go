@@ -172,17 +172,20 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.Equal(t, model.EventTypeAgentEnd, recovered[3].EventType)
 }
 
-// TestMessageFlow_OrchestratorFailure_PersistsNothing verifies that when the
-// orchestrator returns an error, neither the user message nor any assistant
-// event rows are written.
-func TestMessageFlow_OrchestratorFailure_PersistsNothing(t *testing.T) {
+// TestMessageFlow_OrchestratorFailure_PersistsPartialTurn verifies that when
+// the orchestrator returns a non-cancellation error mid-stream (here a provider
+// failure that lands AFTER the model has already streamed a token), the user
+// message and the partial assistant token ARE persisted to the MySQL tier so
+// the reloaded history matches what the client saw.
+func TestMessageFlow_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 	llm := newScriptedLLMClient(
 		scriptedLLMResponse{
-			tokens:       []string{"Hello"},
-			content:      "Hello",
-			finishReason: "stop",
-			usage:        agent.Usage{TotalTokens: 1},
-			err:          assert.AnError,
+			tokens:         []string{"Hello"},
+			content:        "Hello",
+			finishReason:   "stop",
+			usage:          agent.Usage{TotalTokens: 1},
+			err:            assert.AnError,
+			errAfterTokens: true,
 		},
 	)
 	env := newTestEnv(t, llm)
@@ -194,13 +197,25 @@ func TestMessageFlow_OrchestratorFailure_PersistsNothing(t *testing.T) {
 	// is observed; the stream simply terminates early.
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// No messages should be persisted when the orchestrator fails.
+	// Wait for the detached-context persistence goroutine to land.
 	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 0
-	}, 2*time.Second, 10*time.Millisecond, "expected zero messages in MySQL tier on orchestrator failure")
+		return len(env.mysqlFake.messagesFor(defaultSessionID)) > 0
+	}, 2*time.Second, 10*time.Millisecond, "expected failed turn to be persisted")
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
-	require.Empty(t, msgs, "expected no messages persisted on orchestrator failure")
+	require.GreaterOrEqual(t, len(msgs), 2, "expected user message plus at least one assistant event")
+	assert.Equal(t, model.RoleUser, msgs[0].Role)
+	assert.Equal(t, "hello", msgs[0].Content)
+
+	var sawToken bool
+	for _, m := range msgs[1:] {
+		if m.EventType == model.EventTypeToken {
+			assert.Equal(t, "Hello", m.Content, "partial assistant token should be persisted")
+			sawToken = true
+			break
+		}
+	}
+	assert.True(t, sawToken, "expected the partial assistant token emitted before the failure to be persisted")
 }
 
 // TestMessageFlow_Unauthenticated_401 verifies that the real AuthMiddleware is

@@ -1,10 +1,4 @@
-# interrupted-turn-persistence Specification
-
-## Purpose
-
-TBD
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Interrupted assistant turn is persisted
 
