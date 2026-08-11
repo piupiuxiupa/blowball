@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,4 +204,59 @@ func writeError(t *testing.T, w http.ResponseWriter, id, code int, message strin
 	resp := Response{JSONRPC: jsonRPCVersion, ID: id, Error: &ErrorObject{Code: code, Message: message}}
 	w.Header().Set("Content-Type", "application/json")
 	require.NoError(t, json.NewEncoder(w).Encode(resp))
+}
+
+// TestHTTPTransport_LargeSSEResponse guards against the regression where a
+// single SSE `data:` line exceeding the prior 1 MiB bufio.Scanner cap failed
+// with `bufio.Scanner: token too long`. The whole JSON-RPC response sits on
+// one `data:` line, so a large tool result must be read in full.
+func TestHTTPTransport_LargeSSEResponse(t *testing.T) {
+	big := strings.Repeat("x", 2<<20) // 2 MiB, well over the old 1 MiB cap
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req Request
+		require.NoError(t, json.Unmarshal(body, &req))
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok)
+		raw, err := json.Marshal(Response{
+			JSONRPC: jsonRPCVersion,
+			ID:      req.ID,
+			Result:  mustMarshal(ToolsCallResult{Content: []Content{{Type: "text", Text: big}}}),
+		})
+		require.NoError(t, err)
+		fmt.Fprintf(w, "event:message\ndata:%s\n\n", string(raw))
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	tr := NewHTTPTransport(srv.URL, nil, 5*time.Second)
+	defer tr.Close()
+
+	res, err := tr.CallTool(context.Background(), ToolsCallParams{Name: "add"})
+	require.NoError(t, err)
+	require.Len(t, res.Content, 1)
+	require.Equal(t, big, res.Content[0].Text)
+}
+
+// TestReadSSEData_Oversized verifies that a single `data:` line over the
+// (reduced) limit yields a clear errMessageTooLarge instead of the opaque
+// scanner error or silent truncation.
+func TestReadSSEData_Oversized(t *testing.T) {
+	payload := "data:" + strings.Repeat("x", 200) + "\n"
+	_, err := readSSEDataLimited(strings.NewReader(payload), 64)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errMessageTooLarge)
+	require.NotContains(t, err.Error(), "token too long")
+}
+
+// TestReadSSEData_LargeUnderLimit verifies a line under the limit is returned
+// in full.
+func TestReadSSEData_LargeUnderLimit(t *testing.T) {
+	big := strings.Repeat("y", 2000)
+	payload := "event:message\ndata:" + big + "\n\n"
+	out, err := readSSEDataLimited(strings.NewReader(payload), 4096)
+	require.NoError(t, err)
+	require.Equal(t, big, string(out))
 }

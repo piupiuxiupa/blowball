@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 )
 
 type request struct {
@@ -54,8 +56,17 @@ func main() {
 				"tools": []tool{{Name: "add", Description: "adds", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 			})
 		case "tools/call":
+			text := "done"
+			// Test hook: emit a large result to exercise the transport's
+			// per-line size handling. Default keeps the small "done" payload so
+			// other tests are unaffected.
+			if n := os.Getenv("STDIO_BIG_RESULT_BYTES"); n != "" {
+				if size, err := strconv.Atoi(n); err == nil && size > 0 {
+					text = strings.Repeat("x", size)
+				}
+			}
 			resp.Result = mustMarshal(map[string]any{
-				"content": []map[string]string{{"type": "text", "text": "done"}},
+				"content": []map[string]string{{"type": "text", "text": text}},
 			})
 		default:
 			resp.Error = &errorObj{Code: -32601, Message: "method not found"}

@@ -187,8 +187,7 @@ func (t *SSETransport) readLoop(body io.ReadCloser) {
 	defer t.readerWg.Done()
 	defer body.Close()
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	br := bufio.NewReader(body)
 
 	var current sseEvent
 	for {
@@ -198,8 +197,10 @@ func (t *SSETransport) readLoop(body io.ReadCloser) {
 		default:
 		}
 
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
+		line, err := readCappedLine(br, maxMessageBytes)
+		// No line and an error (clean EOF or a read failure): terminate.
+		if err != nil && line == "" {
+			if !errors.Is(err, io.EOF) {
 				select {
 				case t.errCh <- err:
 				default:
@@ -207,17 +208,18 @@ func (t *SSETransport) readLoop(body io.ReadCloser) {
 			}
 			return
 		}
-
-		line := scanner.Text()
+		// A blank line dispatches the accumulated event (SSE event separator).
 		if line == "" {
 			t.dispatchEvent(current)
 			current = sseEvent{}
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
+		} else if strings.HasPrefix(line, "event:") {
 			current.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		} else if strings.HasPrefix(line, "data:") {
 			current.data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+		// io.EOF with a final partial line has been handled above; stop reading.
+		if err != nil {
+			return
 		}
 	}
 }

@@ -20,6 +20,9 @@ type testMCPSSEServer struct {
 	endpoint string
 	mu       sync.Mutex
 	clients  []chan *Response
+	// callText overrides the tools/call result text when non-empty (defaults to
+	// "done"), used by tests that need a large single-line payload.
+	callText string
 }
 
 func newTestMCPSSEServer(t *testing.T) *testMCPSSEServer {
@@ -77,7 +80,11 @@ func (s *testMCPSSEServer) handleMessages(w http.ResponseWriter, r *http.Request
 	case "tools/list":
 		resp.Result = mustMarshalJSON(ToolsListResult{Tools: []Tool{{Name: "add", Description: "adds"}}})
 	case "tools/call":
-		resp.Result = mustMarshalJSON(ToolsCallResult{Content: []Content{{Type: "text", Text: "done"}}})
+		text := "done"
+		if s.callText != "" {
+			text = s.callText
+		}
+		resp.Result = mustMarshalJSON(ToolsCallResult{Content: []Content{{Type: "text", Text: text}}})
 	default:
 		resp.Error = &ErrorObject{Code: -32601, Message: "method not found"}
 	}
@@ -145,3 +152,23 @@ func TestSSETransport_CallTool(t *testing.T) {
 
 // silence unused warning for strings import used by server construction.
 var _ = strings.Contains
+
+// TestSSETransport_LargeMessage guards against the regression where a single
+// SSE message line over the prior 1 MiB bufio.Scanner cap failed with
+// `bufio.Scanner: token too long`.
+func TestSSETransport_LargeMessage(t *testing.T) {
+	ts := newTestMCPSSEServer(t)
+	ts.callText = strings.Repeat("x", 2<<20) // 2 MiB on one `data:` line
+	defer ts.server.Close()
+
+	tr := NewSSETransport(ts.server.URL, nil, 5*time.Second)
+	defer tr.Close()
+
+	_, err := tr.Initialize(context.Background(), InitializeParams{ProtocolVersion: "2024-11-05"})
+	require.NoError(t, err)
+
+	res, err := tr.CallTool(context.Background(), ToolsCallParams{Name: "add", Arguments: json.RawMessage(`{"a":1}`)})
+	require.NoError(t, err)
+	require.Len(t, res.Content, 1)
+	require.Len(t, res.Content[0].Text, 2<<20)
+}

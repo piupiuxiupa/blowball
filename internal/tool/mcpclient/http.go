@@ -222,21 +222,33 @@ func (t *HTTPTransport) readResponse(httpResp *http.Response) ([]byte, error) {
 	return body, nil
 }
 
-// readSSEData scans an SSE stream and returns the payload of the first
-// `event:message` data line. It ignores the SSE `id:` and `event:` fields.
+// readSSEData reads an SSE stream and returns the payload of the first
+// `data:` line. It ignores the SSE `id:` and `event:` fields. Each line is
+// bounded by maxMessageBytes via readCappedLine, so a large tool result
+// (whose entire JSON-RPC response sits on one `data:` line) is read in full
+// instead of tripping bufio.Scanner's token limit.
 func readSSEData(r io.Reader) ([]byte, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if _, data, ok := strings.Cut(line, "data:"); ok {
-			return []byte(strings.TrimSpace(data)), nil
+	return readSSEDataLimited(r, maxMessageBytes)
+}
+
+// readSSEDataLimited is the testable core of readSSEData; limit is the per-line
+// byte cap. It is exported only to tests via the package boundary.
+func readSSEDataLimited(r io.Reader, limit int64) ([]byte, error) {
+	br := bufio.NewReader(r)
+	for {
+		line, err := readCappedLine(br, limit)
+		if line != "" {
+			if _, data, ok := strings.Cut(line, "data:"); ok {
+				return []byte(strings.TrimSpace(data)), nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, errors.New("no sse data line found")
+			}
+			return nil, fmt.Errorf("read sse data: %w", err)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read sse data: %w", err)
-	}
-	return nil, fmt.Errorf("no sse data line found")
 }
 
 // isSessionExpiredError detects JSON-RPC session expiration errors. The MCP

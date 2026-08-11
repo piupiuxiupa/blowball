@@ -183,8 +183,7 @@ func (t *StdioTransport) buildEnv() []string {
 
 func (t *StdioTransport) readLoop(r io.Reader) {
 	defer t.wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	br := bufio.NewReader(r)
 	for {
 		select {
 		case <-t.stopCh:
@@ -192,31 +191,29 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 		default:
 		}
 
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
+		line, err := readCappedLine(br, maxMessageBytes)
+		if line != "" {
+			var resp Response
+			if uerr := json.Unmarshal([]byte(line), &resp); uerr != nil {
+				select {
+				case t.errCh <- fmt.Errorf("stdio unmarshal: %w", uerr):
+				default:
+				}
+			} else {
+				select {
+				case t.respCh <- &resp:
+				default:
+				}
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
 				select {
 				case t.errCh <- err:
 				default:
 				}
 			}
 			return
-		}
-
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var resp Response
-		if err := json.Unmarshal(line, &resp); err != nil {
-			select {
-			case t.errCh <- fmt.Errorf("stdio unmarshal: %w", err):
-			default:
-			}
-			continue
-		}
-		select {
-		case t.respCh <- &resp:
-		default:
 		}
 	}
 }
