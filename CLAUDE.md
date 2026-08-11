@@ -136,9 +136,10 @@ HTTP routes live in `internal/handler/router.go`. Protected routes use `middlewa
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `POST` | `/api/v1/auth/login` | Public; returns JWT. |
+| `POST` | `/api/v1/auth/login` | Public; returns JWT, `username`, `user_id`, and `expire_at`. |
 | `GET`  | `/api/v1/sessions` | List sessions. |
 | `POST` | `/api/v1/sessions` | Create session. |
+| `PATCH` | `/api/v1/sessions/:session_id` | Update session title (manual; user-set titles are preserved over async AI generation via `titles.is_manual`, migration `009_titles_manual.sql`). |
 | `GET`  | `/api/v1/sessions/:session_id/messages` | Paginated history. |
 | `POST` | `/api/v1/sessions/:session_id/messages` | Send a message; returns SSE stream. |
 | `DELETE` | `/api/v1/sessions/:session_id` | Archive + purge; 404 if missing/non-owner. |
@@ -151,6 +152,9 @@ HTTP routes live in `internal/handler/router.go`. Protected routes use `middlewa
 | `PUT`  | `/api/v1/workspace/files/*path` | Rename/move file or directory. Body `{"new_path": "...", "overwrite": false}`. When `new_path` resolves to an existing directory the source moves inside it as `new_path/<basename>` (move-into-folder); `overwrite: true` atomically replaces an existing file destination (an existing directory destination → 409 `DEST_NOT_EMPTY`; tree merge unsupported). Default `overwrite: false` preserves the 409-on-existing-file behavior. |
 | `PUT`  | `/api/v1/workspace/files/*path/content` | Atomic create-or-replace text-content write, symmetric to `GET .../content`. Rejects binary content (NUL byte → 400 `BINARY_FILE`) and oversized bodies (413); binary/large files use `POST .../upload`. |
 | `DELETE` | `/api/v1/workspace/files/*path` | Delete file or directory. |
+| `GET`  | `/api/v1/workspace/files/*path/onlyoffice-config` | Sign an OnlyOffice DocEditor editor config for the file (Bearer auth; 404 when `onlyoffice.secret` is unset). |
+| `GET`  | `/api/v1/workspace/files/*path/onlyoffice-version-config?versionId=` | Sign a view-only DocEditor config pointing at a historical version in the external office-vers service (Bearer auth). |
+| `POST` | `/api/v1/workspace/onlyoffice-callback` | OnlyOffice DocumentServer document-save callback (query-token auth via `QueryTokenAuthMW`, like token-download — the DocumentServer posts from its container and cannot send the Bearer header). |
 | `GET`  | `/api/v1/mcp/tools` | List discovered MCP tools. |
 | `GET`  | `/api/v1/skills` | List skills visible to the authenticated user. |
 | `GET`  | `/healthz` | Unauthenticated health check. |
@@ -165,9 +169,13 @@ Because gin does not allow a static `/download` segment alongside a `/*path` wil
 
 - `.../files/download/*path` → `WorkspaceHandler.TokenDownload` (query-token auth via `QueryTokenAuthMW`).
 - `.../files/*path/content` → `WorkspaceHandler.Content` (text content; rejects binary files).
+- `.../files/*path/onlyoffice-config` → `WorkspaceHandler.OnlyOfficeConfig` (signs a DocEditor config; header auth).
+- `.../files/*path/onlyoffice-version-config?versionId=` → `WorkspaceHandler.OnlyOfficeVersionConfig` (view-only config for a historical office-vers version; header auth).
 - `.../files/*path` → `WorkspaceHandler.Download` (header auth).
 
 DELETE uses the same wildcard pattern under a different method. The token-download endpoint exists so browser-native elements (`<a download>`, `<img>`, PDF.js) can access workspace files without custom `Authorization` headers.
+
+OnlyOffice integration: the two `onlyoffice-config` GETs are dispatched by the same GET catch-all (trailing-suffix, like `/content`); the save callback is a standalone `POST /workspace/onlyoffice-callback` registered outside the catch-all so it can carry `QueryTokenAuthMW`. Config is the top-level `onlyoffice` block (`OnlyOfficeConfig` in `internal/config/config.go`): `secret` (HS256, must match the DocumentServer `local.json` secret — when empty the editor-config endpoints return 404), `server_url` (the backing server URL the DocumentServer container uses to reach blowball for `document.url`/`callbackUrl`; defaults to `http://localhost`), plus `version_service_url`/`fileserver` for historical-version rendering. All fields `${VAR}`-expand. Editor configs are HS256-signed server-side so the secret never reaches the browser.
 
 PUT shares the same catch-all and dispatches by suffix via `dispatchWorkspacePut` (mirroring the GET dispatcher): `.../files/*path/content` → `WorkspaceHandler.WriteContent` (atomic text-content write); bare `.../files/*path` → `WorkspaceHandler.Rename` (rename/move, with move-into-folder and optional `overwrite`).
 
@@ -211,7 +219,7 @@ Agent tool visibility is strictly configured:
 - `agents.<name>.tools` lists built-in tools the agent may use.
 - `agents.<name>.mcp.servers` grants access to specific MCP servers/tools (`["*"]` for all tools from that server).
 - `agents.<name>.skills` lists skill names injected into the system prompt and enables `luban_read_skill`.
-- `agents.<name>.thinking` enables OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 variants): `max_tokens` is sent as `max_completion_tokens` and `reasoning_effort` (`low`/`medium`/`high`) is included. `reasoning_effort` may only be set when `thinking: true` — config validation in `internal/config/config.go` rejects it otherwise.
+- `agents.<name>.thinking` enables OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 variants): `max_tokens` is sent as `max_completion_tokens` and `reasoning_effort` (`low`/`medium`/`high`/`xhigh`/`max`) is included. `reasoning_effort` may only be set when `thinking: true` — config validation in `internal/config/config.go` rejects it otherwise.
 
 Skills are `{skill-name}/SKILL.md` files with YAML frontmatter (`name`, `description`). Global skills live in `{data-dir}/skills/` (default `./skills/`); per-user skills live in `data/{userID}/skills/`. User skills override global skills of the same name.
 

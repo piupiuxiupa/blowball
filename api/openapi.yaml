@@ -123,7 +123,7 @@ components:
           enum: [user, assistant, tool, ""]
         event_type:
           type: string
-          enum: [message, token, tool_call, agent_start, agent_end, agent_error, reasoning]
+          enum: [message, token, tool_call, tool_result, agent_start, agent_end, agent_error, reasoning]
         content:
           type: string
         trace_id:
@@ -181,8 +181,30 @@ components:
         content: {type: string, description: Tool name.}
         meta:
           type: object
+          required: [tool_call_id]
           properties:
+            tool_call_id: {type: string, description: Correlates this call with its tool_result event.}
             args: {type: object, additionalProperties: true}
+    SSEToolResult:
+      type: object
+      required: [type, agent, content]
+      description: |
+        Outcome of a tool invocation. Pairs with the preceding `tool_call` event
+        via `meta.tool_call_id`. `content` is the same string fed back to the
+        model as the role="tool" message body: for registry tools the uniform
+        status envelope `{"status":0,"result":...}` / `{"status":1,"error":...}`;
+        for invoke_* sub-agent dispatches, the sub-agent's output (or error text)
+        verbatim. A registry-tool failure also fires an independent `agent_error`
+        event (code `tool_error`) for the frontend; both channels fire regardless.
+      properties:
+        type: {type: string, enum: [tool_result]}
+        agent: {type: string}
+        content: {type: string, description: "Serialized tool result (status/result envelope), sub-agent output, or error text."}
+        meta:
+          type: object
+          required: [tool_call_id]
+          properties:
+            tool_call_id: {type: string, description: Matches the meta.tool_call_id of the originating tool_call event.}
     SSEAgentEnd:
       type: object
       required: [type, agent]
@@ -751,8 +773,8 @@ paths:
           description: |
             Server-Sent Events stream. Each event is two lines:
             `event: <type>` and `data: <json>` followed by a blank line.
-            Event types: `agent_start`, `token`, `reasoning`, `tool_call`, `agent_end`,
-            `agent_error`, `done`. The `done` event is always the final event.
+            Event types: `agent_start`, `token`, `reasoning`, `tool_call`, `tool_result`,
+            `agent_end`, `agent_error`, `done`. The `done` event is always the final event.
           content:
             text/event-stream:
               schema:
@@ -761,6 +783,7 @@ paths:
                   - $ref: '#/components/schemas/SSEToken'
                   - $ref: '#/components/schemas/SSEReasoning'
                   - $ref: '#/components/schemas/SSEToolCall'
+                  - $ref: '#/components/schemas/SSEToolResult'
                   - $ref: '#/components/schemas/SSEAgentEnd'
                   - $ref: '#/components/schemas/SSEAgentError'
                   - $ref: '#/components/schemas/SSEDone'
