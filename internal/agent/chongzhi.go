@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/lush/blowball/internal/config"
@@ -11,11 +12,6 @@ import (
 	"github.com/lush/blowball/internal/tool"
 	"golang.org/x/sync/errgroup"
 )
-
-// maxChongzhiRounds bounds Chongzhi's tool-calling loop. Coding tasks tend to
-// need more rounds than Confucius (read → write → verify), so the cap is more
-// generous than the orchestrator's.
-const maxChongzhiRounds = 32
 
 // Chongzhi is the coding agent. It runs with Xizhi file tools configured via
 // cfg.Tools and dispatches tool_calls straight to the tool registry. Per the
@@ -30,13 +26,21 @@ type Chongzhi struct {
 	toolRegistry  *tool.Registry
 	toolsJSON     []byte
 	toolsIsNotNil bool
+	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
+	// (default config.DefaultAgentMaxRounds) at construction.
+	maxRounds int
+	// runMu guards the two "last Run" flags below, which are read by the
+	// dispatcher (Confucius) / retry wrapper from a separate goroutine after
+	// Run returns.
+	runMu sync.Mutex
 	// executedToolThisRun records whether the most recent Run dispatched at
-	// least one successful tool call. It is read by the retry wrapper
-	// (capability C) to enforce idempotency: a side-effecting agent is retried
-	// only before it has touched the file system. Guarded by runMu because the
-	// retry wrapper reads it from the dispatch goroutine after Run returns.
-	runMu               sync.Mutex
+	// least one successful tool call (capability C idempotency: a
+	// side-effecting agent is retried only before it touches the file system).
 	executedToolThisRun bool
+	// hitCapThisRun records whether the most recent Run exited via the cap
+	// path; exposed via LastRunHitCap so Confucius can propagate a sub-agent
+	// cap into usage.meta.round_capped.
+	hitCapThisRun bool
 }
 
 // NewChongzhi builds a Chongzhi agent.
@@ -45,12 +49,17 @@ func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry) (
 	if err != nil {
 		return nil, fmt.Errorf("agent: build chongzhi tools: %w", err)
 	}
+	maxRounds := cfg.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = config.DefaultAgentMaxRounds()
+	}
 	return &Chongzhi{
 		cfg:           cfg,
 		client:        client,
 		toolRegistry:  reg,
 		toolsJSON:     toolsJSON,
 		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:     maxRounds,
 	}, nil
 }
 
@@ -80,9 +89,11 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 	var finalContent string
 	c.runMu.Lock()
 	c.executedToolThisRun = false
+	c.hitCapThisRun = false
 	c.runMu.Unlock()
+	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
-	for i := 0; i < maxChongzhiRounds; i++ {
+	for i := 0; i < c.maxRounds; i++ {
 		select {
 		case <-ctx.Done():
 			return finalContent, total, nil, ctx.Err()
@@ -161,6 +172,43 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub)
 				Name:       tc.Function.Name,
 			})
 		}
+		// This iteration dispatched tools and did not break; flag a cap exit
+		// when it was the last allowed round so the post-loop wrap-up runs.
+		capped = i+1 == c.maxRounds
+	}
+
+	// Round cap reached without a natural stop: give the model one
+	// tool-disabled wrap-up round to synthesize a final answer instead of
+	// ending empty. WARN log + hitCapThisRun always; agent_error only if the
+	// wrap-up recovers no content (genuine empty-end).
+	if capped {
+		c.runMu.Lock()
+		c.hitCapThisRun = true
+		c.runMu.Unlock()
+		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
+		wrapReq := LLMRequest{
+			Model:           c.cfg.Model,
+			Messages:        withSystem(c.cfg.SystemPrompt, round),
+			MaxTokens:       c.cfg.MaxTokens,
+			Thinking:        c.cfg.Thinking,
+			ReasoningEffort: c.cfg.ReasoningEffort,
+			// Tools intentionally omitted: force a prose answer, no dispatch.
+		}
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq)
+		if wrapErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return finalContent, total, nil, ctxErr
+			}
+			emitCapExhaustedError(ctx, hub, c.Name())
+			return finalContent, total, nil, fmt.Errorf("chongzhi: round cap exhausted: %w", wrapErr)
+		}
+		total.Add(wrapUsage)
+		if strings.TrimSpace(wrapContent) != "" {
+			finalContent = wrapContent
+		} else {
+			emitCapExhaustedError(ctx, hub, c.Name())
+			return finalContent, total, nil, fmt.Errorf("chongzhi: round cap exhausted: wrap-up round produced no content")
+		}
 	}
 
 	if !hub.SendCtx(ctx, stream.AgentEndEvent(c.Name())) {
@@ -177,6 +225,15 @@ func (c *Chongzhi) LastRunExecutedTool() bool {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	return c.executedToolThisRun
+}
+
+// LastRunHitCap implements RoundCapTracker so Confucius can propagate a
+// Chongzhi cap into usage.meta.round_capped. Guarded by runMu alongside
+// executedToolThisRun (read by the dispatcher after Run returns).
+func (c *Chongzhi) LastRunHitCap() bool {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	return c.hitCapThisRun
 }
 
 // dispatchToolCalls runs every tool_call in parallel. Unlike Confucius, there
@@ -214,9 +271,9 @@ func (c *Chongzhi) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub
 	}
 	out, err := c.toolRegistry.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 	if err != nil {
-		msg := err.Error()
-		streamAgentError(hub, ctx, c.Name(), msg, "tool_error")
-		return toolResult{content: msg, isError: true}
+		// Frontend channel: agent_error still fires; the model-facing error is
+		// carried in-band by the status envelope (capability: tool-result-envelope).
+		streamAgentError(hub, ctx, c.Name(), err.Error(), "tool_error")
 	}
-	return toolResult{content: marshalToolResult(out)}
+	return toolResult{content: renderToolResult(out, err), isError: err != nil}
 }

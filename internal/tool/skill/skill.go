@@ -209,6 +209,30 @@ func (l *Loader) ReadPath(name, relPath, userID string) ([]byte, error) {
 	return nil, fmt.Errorf("luban_read_skill: skill %q not found", name)
 }
 
+// SkillDir returns the absolute directory containing the named skill's
+// SKILL.md, resolving user skills over global skills of the same name (identical
+// precedence to Read / ReadPath). It is the directory-resolution half of
+// ReadPath, exposed so sibling tools (e.g. luban list/tree) can enumerate a
+// skill's directory tree without re-implementing name→directory resolution.
+// Returns ("", false) when the named skill does not exist for userID.
+func (l *Loader) SkillDir(name, userID string) (string, bool) {
+	for _, s := range l.List(userID) {
+		if s.Name == name {
+			return filepath.Dir(s.Path), true
+		}
+	}
+	return "", false
+}
+
+// ValidateSubPath is the exported form of validateSkillSubPath: it resolves
+// relPath against skillRoot and verifies the real path stays inside skillRoot,
+// rejecting absolute paths, parent-traversal escapes, and symlinks that resolve
+// outside skillRoot. Shared by ReadPath and sibling directory-enumeration tools
+// so the confinement logic lives in one place.
+func ValidateSubPath(skillRoot, relPath string) (string, error) {
+	return validateSkillSubPath(skillRoot, relPath)
+}
+
 // validateSkillSubPath resolves relPath against skillRoot and verifies the real
 // path stays inside skillRoot. It rejects absolute paths, parent-traversal
 // escapes, and symlinks that resolve outside skillRoot. Any text file in the

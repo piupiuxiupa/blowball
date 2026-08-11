@@ -151,6 +151,10 @@ func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspa
 	}
 
 	reg := tool.NewRegistry()
+	// This per-request registry is the actual tool-execution path during a turn,
+	// so the per-tool timeout map (tools.timeouts) must be applied here for the
+	// timeouts to take effect (capability: tool-execution-timeout).
+	reg.SetTimeouts(f.cfg.Tools.Timeouts)
 	xizhi.RegisterAll(reg, workspaceRoot, f.cfg.Tools.Xizhi)
 
 	for _, spec := range f.baseRegistry.List() {
@@ -526,6 +530,11 @@ func buildMetaObject(b *TurnBreakdown) map[string]any {
 	m["parallel"] = b.Parallel
 	if len(b.SubAgentInvocations) > 0 {
 		m["sub_agent_invocations"] = append([]string(nil), b.SubAgentInvocations...)
+	}
+	// round_capped is emitted ONLY when an agent hit its cap this turn, so
+	// non-capped turns serialize identically to before (additive key).
+	if b.RoundCapped {
+		m["round_capped"] = true
 	}
 	return m
 }

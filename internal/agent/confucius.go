@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,11 +13,6 @@ import (
 	"github.com/lush/blowball/internal/tool"
 	"golang.org/x/sync/errgroup"
 )
-
-// maxConfuciusRounds bounds the agent loop to prevent runaway tool-call chains
-// from looping forever. 16 is generous; a healthy Confucius finishes in 1-3
-// rounds.
-const maxConfuciusRounds = 16
 
 // Confucius is the central orchestrator agent. It owns its own tool-calling
 // loop and is the only agent permitted to dispatch sub-agents (Chongzhi,
@@ -30,6 +26,14 @@ type Confucius struct {
 	subAgents     map[string]Agent // keyed by ToolInvokeChongzhi / ToolInvokeLiang
 	toolsJSON     []byte           // pre-rendered OpenAI tools[] including invoke_*
 	toolsIsNotNil bool
+	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
+	// (default config.DefaultAgentMaxRounds) at construction.
+	maxRounds int
+	// hitCapThisRun records whether the most recent Run exited via the cap
+	// path; exposed via LastRunHitCap. Confucius is never consulted as a
+	// sub-agent, but it implements RoundCapTracker for uniformity with the
+	// leaf agents. Reset at the top of each Run.
+	hitCapThisRun bool
 }
 
 // NewConfucius builds a Confucius agent. subAgents maps invoke_chongzhi /
@@ -47,6 +51,10 @@ func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, 
 	if err != nil {
 		return nil, fmt.Errorf("agent: build confucius tools: %w", err)
 	}
+	maxRounds := cfg.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = config.DefaultAgentMaxRounds()
+	}
 	return &Confucius{
 		cfg:           cfg,
 		client:        client,
@@ -54,6 +62,7 @@ func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, 
 		subAgents:     subAgents,
 		toolsJSON:     toolsJSON,
 		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:     maxRounds,
 	}, nil
 }
 
@@ -66,6 +75,10 @@ func (c *Confucius) SystemPrompt() string { return c.cfg.SystemPrompt }
 // RetryPolicy implements Agent. Confucius itself is never retried (it is the
 // dispatcher), so it always returns a disabled policy.
 func (c *Confucius) RetryPolicy() config.AgentRetryConfig { return config.AgentRetryConfig{} }
+
+// LastRunHitCap implements RoundCapTracker (uniformity; Confucius is never
+// consulted as a sub-agent).
+func (c *Confucius) LastRunHitCap() bool { return c.hitCapThisRun }
 
 // Run executes the Confucius agent loop. It streams lifecycle events to hub
 // and returns the final assistant content + aggregated usage + the per-agent
@@ -109,8 +122,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 	// whole turn (capability C). Shared across parallel dispatches; nil-safe
 	// (an unset policy.BudgetTokens means unlimited).
 	budget := newRetryBudget(c.cfg.Retry.BudgetTokens)
+	c.hitCapThisRun = false
+	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
-	for i := 0; i < maxConfuciusRounds; i++ {
+	for i := 0; i < c.maxRounds; i++ {
 		select {
 		case <-ctx.Done():
 			return finalContent, total, buildBreakdown(byAgent, tmeta), ctx.Err()
@@ -202,6 +217,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 					byAgent[result.subAgentName] = addUsage(byAgent[result.subAgentName], *result.subUsage)
 				}
 			}
+			// Propagate a sub-agent cap into the turn-level meta: a capped
+			// sub-agent marks usage.meta.round_capped even if Confucius itself
+			// never hit its own cap.
+			if result.subCapped {
+				tmeta.observeRoundCapped()
+			}
 			// Record which invoke_* sub-agents fired this turn (for
 			// usage.meta.sub_agent_invocations), regardless of success.
 			if IsInvokeTool(tc.Function.Name) {
@@ -214,6 +235,48 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 				ToolCallID: tc.ID,
 				Name:       tc.Function.Name,
 			})
+		}
+		// This iteration dispatched tools and did not break; flag a cap exit
+		// when it was the last allowed round so the post-loop wrap-up runs.
+		capped = i+1 == c.maxRounds
+	}
+
+	// Round cap reached without a natural stop: give the model one
+	// tool-disabled wrap-up round to synthesize a final answer instead of
+	// ending empty. Emit the always-on WARN log + meta.round_capped; the
+	// user-facing agent_error fires only if the wrap-up recovers no content.
+	if capped {
+		c.hitCapThisRun = true
+		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
+		tmeta.observeRoundCapped()
+		wrapReq := LLMRequest{
+			Model:           c.cfg.Model,
+			Messages:        withSystem(c.cfg.SystemPrompt, round),
+			MaxTokens:       c.cfg.MaxTokens,
+			Thinking:        c.cfg.Thinking,
+			ReasoningEffort: c.cfg.ReasoningEffort,
+			// Tools intentionally omitted: force a prose answer, no dispatch.
+		}
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq)
+		if wrapErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return finalContent, total, buildBreakdown(byAgent, tmeta), ctxErr
+			}
+			emitCapExhaustedError(ctx, hub, c.Name())
+			return finalContent, total, buildBreakdown(byAgent, tmeta), fmt.Errorf("confucius: round cap exhausted: %w", wrapErr)
+		}
+		total.Add(wrapUsage)
+		byAgent[c.Name()] = addUsage(byAgent[c.Name()], wrapUsage)
+		if strings.TrimSpace(wrapContent) != "" {
+			finalContent = wrapContent
+		} else {
+			// Wrap-up produced no content: genuine empty-end. Emit the loud
+			// signal and return a non-nil error so the orchestrator's done
+			// event carries `error` (spec: "Cap hit with empty wrap-up round
+			// surfaces error"). emitCapExhaustedError already emitted
+			// agent_end, so return directly (skip the normal agent_end below).
+			emitCapExhaustedError(ctx, hub, c.Name())
+			return finalContent, total, buildBreakdown(byAgent, tmeta), fmt.Errorf("confucius: round cap exhausted: wrap-up round produced no content")
 		}
 	}
 
@@ -232,7 +295,8 @@ type toolResult struct {
 	content      string
 	isError      bool
 	subUsage     *Usage // non-nil when this result came from a sub-agent run
-	subAgentName string  // display name of the producing sub-agent ("" for registry tools)
+	subAgentName string // display name of the producing sub-agent ("" for registry tools)
+	subCapped    bool   // true when the producing sub-agent hit its max_rounds cap this Run
 }
 
 // dispatchToolCalls runs every tool_call in parallel via errgroup. Sub-agent
@@ -322,13 +386,13 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stre
 	content, usage, _, err := sub.Run(ctx, messages, hub)
 	if err == nil {
 		u := usage
-		return toolResult{content: content, subUsage: &u, subAgentName: sub.Name()}
+		return toolResult{content: content, subUsage: &u, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
 	}
 
 	// Failed. Decide retryability.
 	policy := sub.RetryPolicy()
 	if !shouldRetry(sub, err, policy, budget) {
-		return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name()}
+		return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
 	}
 
 	// Retry loop: attempts are numbered from 1 (the first RETRY). MaxAttempts
@@ -361,7 +425,7 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stre
 		content, usage, _, err = sub.Run(ctx, messages, hub)
 		if err == nil {
 			u := usage
-			return toolResult{content: content, subUsage: &u, subAgentName: sub.Name()}
+			return toolResult{content: content, subUsage: &u, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
 		}
 		// A non-transient follow-up error (e.g. bad_args surfaced on retry)
 		// stops the loop; the last error is surfaced to Confucius.
@@ -371,7 +435,7 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stre
 	}
 
 	// Retries exhausted / stopped. Surface the last error to Confucius.
-	return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name()}
+	return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
 }
 
 // shouldRetry reports whether a failed sub-agent dispatch should be retried:
@@ -392,6 +456,17 @@ func shouldRetry(sub Agent, err error, policy config.AgentRetryConfig, budget *r
 	return budget.allows()
 }
 
+// subHitCap reports whether the sub-agent's most recent Run hit its
+// max_rounds cap, so the dispatcher can propagate "a sub-agent was capped"
+// into the turn-level usage.meta.round_capped. Agents without the
+// RoundCapTracker capability are treated as never capped.
+func subHitCap(sub Agent) bool {
+	if t, ok := sub.(RoundCapTracker); ok {
+		return t.LastRunHitCap()
+	}
+	return false
+}
+
 func (c *Confucius) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
 	if c.toolRegistry == nil {
 		msg := fmt.Sprintf("tool %q not available: no tool registry", tc.Function.Name)
@@ -400,11 +475,13 @@ func (c *Confucius) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub *
 	}
 	out, err := c.toolRegistry.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 	if err != nil {
-		msg := err.Error()
-		streamAgentError(hub, ctx, c.Name(), msg, "tool_error")
-		return toolResult{content: msg, isError: true}
+		// Frontend channel: keep emitting agent_error for tool failures so the
+		// UI can signal them. The model-facing error is carried in-band by
+		// renderToolResult's envelope ({"status":1,"error":...}); both channels
+		// fire independently (capability: tool-result-envelope).
+		streamAgentError(hub, ctx, c.Name(), err.Error(), "tool_error")
 	}
-	return toolResult{content: marshalToolResult(out)}
+	return toolResult{content: renderToolResult(out, err), isError: err != nil}
 }
 
 // withSystem prepends a system message to msgs iff prompt is non-empty.
@@ -424,25 +501,49 @@ func buildSubAgentUserMessage(args InvokeToolArgs) string {
 	return fmt.Sprintf("Task: %s\n\nContext:\n%s", args.Task, args.Context)
 }
 
-// marshalToolResult renders a tool.Execute return value into the string body
-// of the role="tool" message. Objects/arrays are JSON-encoded; scalars use
-// fmt. nil becomes the empty string.
-func marshalToolResult(v any) string {
-	if v == nil {
-		return ""
-	}
-	switch x := v.(type) {
-	case string:
-		return x
-	case []byte:
-		return string(x)
-	case error:
-		return x.Error()
-	}
-	b, err := json.Marshal(v)
+// toolEnvelope is the uniform shape every registry-tool result is rendered
+// into before becoming the role="tool" message body. Field order is fixed
+// (status, result, error) so the rendered JSON is stable; omitempty drops
+// result on failure and error on success.
+type toolEnvelope struct {
+	Status int             `json:"status"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+// renderToolResult renders a tool.Execute return value and its error into the
+// uniform status envelope that becomes the role="tool" message body:
+//
+//	success → {"status":0,"result":<JSON-encoded out>}
+//	failure → {"status":1,"error":"<err.Error()>"}
+//
+// It is the single rendering point shared by every agent's registry-tool
+// dispatch path (Confucius, Chongzhi, Liang). On success a []byte return is
+// normalized to a Go string before encoding so it is emitted as text rather
+// than base64 (matching the prior marshalToolResult semantics); nil renders as
+// result:null. (json.RawMessage is a distinct named type from []byte, so it is
+// NOT normalized here — it marshals natively to its raw bytes.) On failure the
+// envelope carries the error message and no result field; the caller still
+// emits the independent agent_error SSE event for the frontend.
+func renderToolResult(out any, err error) string {
 	if err != nil {
-		return fmt.Sprintf("%v", v)
+		b, _ := json.Marshal(toolEnvelope{Status: 1, Error: err.Error()})
+		return string(b)
 	}
+	// Normalize a plain []byte return to a string so it JSON-encodes as text,
+	// not base64. json.RawMessage (a named []byte type) is excluded by Go's
+	// type switch and left to marshal as raw JSON.
+	if b, ok := out.([]byte); ok {
+		out = string(b)
+	}
+	raw, mErr := json.Marshal(out)
+	if mErr != nil {
+		// A non-serializable return is itself a tool failure: surface it via the
+		// error branch rather than emitting malformed JSON.
+		b, _ := json.Marshal(toolEnvelope{Status: 1, Error: fmt.Sprintf("render tool result: %v", mErr)})
+		return string(b)
+	}
+	b, _ := json.Marshal(toolEnvelope{Status: 0, Result: raw})
 	return string(b)
 }
 
@@ -480,7 +581,7 @@ func addUsage(base, delta Usage) Usage {
 // tmeta.snapshot. Safe to call on every return path (including error paths)
 // so partial attribution is never lost.
 func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
-	invokes, parallel := tmeta.snapshot()
+	invokes, parallel, roundCapped := tmeta.snapshot()
 	out := make(map[string]Usage, len(byAgent))
 	for k, v := range byAgent {
 		out[k] = v
@@ -489,6 +590,7 @@ func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
 		ByAgent:             out,
 		Parallel:            parallel,
 		SubAgentInvocations: invokes,
+		RoundCapped:         roundCapped,
 	}
 }
 
@@ -499,10 +601,11 @@ func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
 // across goroutines; observeRound/observeInvoke may be called from multiple
 // goroutines.
 type turnMeta struct {
-	mu            sync.Mutex
-	parallel      bool
-	invokes       []string // ordered, deduplicated invoke_* tool names
-	invokesSeen   map[string]struct{}
+	mu          sync.Mutex
+	parallel    bool
+	roundCapped bool
+	invokes     []string // ordered, deduplicated invoke_* tool names
+	invokesSeen map[string]struct{}
 }
 
 func newTurnMeta() *turnMeta {
@@ -519,6 +622,15 @@ func (t *turnMeta) observeRound(calls []ToolCall) {
 	}
 }
 
+// observeRoundCapped marks the turn as having seen at least one agent hit its
+// max_rounds cap (Confucius itself or any dispatched sub-agent), so the done
+// event's usage.meta.round_capped reflects it. Safe under concurrent dispatch.
+func (t *turnMeta) observeRoundCapped() {
+	t.mu.Lock()
+	t.roundCapped = true
+	t.mu.Unlock()
+}
+
 // observeInvoke records that the named invoke_* sub-agent was dispatched this
 // turn, preserving first-seen order and de-duplicating.
 func (t *turnMeta) observeInvoke(toolName string) {
@@ -531,12 +643,13 @@ func (t *turnMeta) observeInvoke(toolName string) {
 	t.invokes = append(t.invokes, toolName)
 }
 
-// snapshot returns the invoke list and parallel flag safe for emission. The
-// returned slice is a copy so callers may use it after further mutations.
-func (t *turnMeta) snapshot() ([]string, bool) {
+// snapshot returns the invoke list, parallel flag, and round-capped flag safe
+// for emission. The returned slice is a copy so callers may use it after
+// further mutations.
+func (t *turnMeta) snapshot() ([]string, bool, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make([]string, len(t.invokes))
 	copy(out, t.invokes)
-	return out, t.parallel
+	return out, t.parallel, t.roundCapped
 }

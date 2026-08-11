@@ -13,11 +13,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// maxLiangRounds bounds Liang's tool-calling loop. Analysis tasks occasionally
-// need to fetch context with webfetch or query an MCP tool, but they should
-// converge quickly.
-const maxLiangRounds = 16
-
 // Liang is the analysis agent. It runs a tool-calling loop for the tools listed
 // in its config (built-ins and MCP proxies), but unlike Confucius it never
 // dispatches sub-agents.
@@ -27,6 +22,14 @@ type Liang struct {
 	toolRegistry  *tool.Registry
 	toolsJSON     []byte
 	toolsIsNotNil bool
+	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
+	// (default config.DefaultAgentMaxRounds) at construction.
+	maxRounds int
+	// hitCapThisRun records whether the most recent Run exited via the cap
+	// path; exposed via LastRunHitCap so Confucius can propagate a sub-agent
+	// cap into usage.meta.round_capped. Liang's Run is single-threaded and the
+	// dispatcher reads this only after Run returns, so no mutex is needed.
+	hitCapThisRun bool
 	// responseFormat is the pre-built OpenAI response_format payload derived
 	// from cfg.OutputSchema (nil/ok=false when no schema is configured). It is
 	// attached to the terminal round's LLMRequest to enable structured output
@@ -41,12 +44,17 @@ func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry) (*Li
 	if err != nil {
 		return nil, fmt.Errorf("agent: build liang tools: %w", err)
 	}
+	maxRounds := cfg.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = config.DefaultAgentMaxRounds()
+	}
 	return &Liang{
 		cfg:            cfg,
 		client:         client,
 		toolRegistry:   reg,
 		toolsJSON:      toolsJSON,
 		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:      maxRounds,
 		responseFormat: buildResponseFormatPayload(cfg.OutputSchema, cfg.Name),
 	}, nil
 }
@@ -59,6 +67,10 @@ func (l *Liang) SystemPrompt() string { return l.cfg.SystemPrompt }
 
 // RetryPolicy implements Agent, returning the agent's configured retry policy.
 func (l *Liang) RetryPolicy() config.AgentRetryConfig { return l.cfg.Retry }
+
+// LastRunHitCap implements RoundCapTracker so Confucius can propagate a Liang
+// cap into usage.meta.round_capped.
+func (l *Liang) LastRunHitCap() bool { return l.hitCapThisRun }
 
 // Run executes Liang's tool-calling loop. When no tools are configured it
 // degrades to a single streaming completion, sending no tools[] field so the
@@ -77,8 +89,10 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub *stream.Hub) (s
 	round := append([]Message{}, messages...)
 	var total Usage
 	var finalContent string
+	l.hitCapThisRun = false
+	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
-	for i := 0; i < maxLiangRounds; i++ {
+	for i := 0; i < l.maxRounds; i++ {
 		select {
 		case <-ctx.Done():
 			return finalContent, total, nil, ctx.Err()
@@ -164,6 +178,49 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub *stream.Hub) (s
 				Name:       tc.Function.Name,
 			})
 		}
+		// This iteration dispatched tools and did not break; flag a cap exit
+		// when it was the last allowed round so the post-loop wrap-up runs.
+		capped = i+1 == l.maxRounds
+	}
+
+	// Round cap reached without a natural stop: give the model one
+	// tool-disabled wrap-up round to synthesize a final answer instead of
+	// ending empty. WARN log + hitCapThisRun always; agent_error only if the
+	// wrap-up recovers no content (genuine empty-end).
+	if capped {
+		l.hitCapThisRun = true
+		emitCapHitWarn(l.Name(), l.maxRounds, l.maxRounds)
+		wrapReq := LLMRequest{
+			Model:           l.cfg.Model,
+			Messages:        withSystem(l.cfg.SystemPrompt, round),
+			MaxTokens:       l.cfg.MaxTokens,
+			Thinking:        l.cfg.Thinking,
+			ReasoningEffort: l.cfg.ReasoningEffort,
+			// Tools intentionally omitted: force a prose/structured answer.
+		}
+		// The wrap-up IS the terminal round, so a structured-output Liang still
+		// carries response_format (the synthesized answer conforms to
+		// output_schema). terminalResponseFormat returns the format when the
+		// preceding context is a tool result (true here: the last dispatched
+		// round appended role="tool" messages) or when no tools are configured.
+		if rf, ok := l.terminalResponseFormat(round); ok {
+			wrapReq.ResponseFormat = rf
+		}
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, l.client, l.Name(), hub, wrapReq)
+		if wrapErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return finalContent, total, nil, ctxErr
+			}
+			emitCapExhaustedError(ctx, hub, l.Name())
+			return finalContent, total, nil, fmt.Errorf("liang: round cap exhausted: %w", wrapErr)
+		}
+		total.Add(wrapUsage)
+		if strings.TrimSpace(wrapContent) != "" {
+			finalContent = wrapContent
+		} else {
+			emitCapExhaustedError(ctx, hub, l.Name())
+			return finalContent, total, nil, fmt.Errorf("liang: round cap exhausted: wrap-up round produced no content")
+		}
 	}
 
 	if !hub.SendCtx(ctx, stream.AgentEndEvent(l.Name())) {
@@ -207,11 +264,11 @@ func (l *Liang) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub *s
 	}
 	out, err := l.toolRegistry.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 	if err != nil {
-		msg := err.Error()
-		streamAgentError(hub, ctx, l.Name(), msg, "tool_error")
-		return toolResult{content: msg, isError: true}
+		// Frontend channel: agent_error still fires; the model-facing error is
+		// carried in-band by the status envelope (capability: tool-result-envelope).
+		streamAgentError(hub, ctx, l.Name(), err.Error(), "tool_error")
 	}
-	return toolResult{content: marshalToolResult(out)}
+	return toolResult{content: renderToolResult(out, err), isError: err != nil}
 }
 
 // terminalResponseFormat returns the response_format payload to attach to this

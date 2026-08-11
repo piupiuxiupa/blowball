@@ -134,7 +134,7 @@ var (
   "properties": {
     "path": {
       "type": "string",
-      "description": "Directory path relative to the workspace root to search within. Defaults to the workspace root."
+      "description": "Required. Directory path relative to the workspace root to search within. Use \".\" to search the whole workspace root; omitting path or passing an empty/blank string is an error."
     },
     "pattern": {
       "type": "string",
@@ -161,7 +161,7 @@ var (
       "description": "Number of lines to include after each match. Defaults to 0."
     }
   },
-  "required": ["pattern"],
+  "required": ["path", "pattern"],
   "additionalProperties": false
 }`)
 
@@ -339,10 +339,12 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 			Name: NameGrep,
 			Description: "Searches workspace file contents with an RE2 regex and returns `{path, pattern, glob, " +
 				"ignore_case, matches[]}` where each match carries `file`, `line_number`, `line`, and (when requested) " +
-				"`context_before`/`context_after`. **`path` MUST be relative to the workspace root** (absolute paths, `..` " +
-				"and the `.blowball` namespace are rejected). **Prefer this over `bash grep`** — it is cheaper and returns " +
-				"line numbers. Binary files are skipped; the result is capped (~200 matches, lines truncated) and sets " +
-				"`truncated: true` when the cap is hit. Use `glob` to filter by file name (e.g. `*.go`).",
+				"`context_before`/`context_after`. **`path` is REQUIRED and MUST be relative to the workspace root** " +
+				"(absolute paths, `..` and the `.blowball` namespace are rejected); omitting it or passing an empty " +
+				"string is an error. Use `\".\"` to search the whole workspace root explicitly. **Prefer this over " +
+				"`bash grep`** — it is cheaper and returns line numbers. Binary files are skipped; the result is " +
+				"capped (~200 matches, lines truncated) and sets `truncated: true` when the cap is hit. Use `glob` " +
+				"to filter by file name (e.g. `*.go`).",
 			ParametersJSON: schemaGrep,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 				var a grepArgs

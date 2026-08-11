@@ -236,6 +236,10 @@ agents:
     max_tokens: 8192
     thinking: true
     reasoning_effort: xhigh
+    # max_rounds: 100  # tool-calling loop cap (unset → default 100). On a cap
+    #                   # hit the agent runs one tool-disabled wrap-up round,
+    #                   # emits a WARN log + usage.meta.round_capped, and only
+    #                   # emits agent_error if the wrap-up yields no content.
     tools:
       - xizhi_read_file
       - xizhi_write_file
@@ -352,6 +356,23 @@ tools:
     enabled: true
     timeout: 30s
     # max_redirects: 10   # optional; HTTP redirect cap (default 10, 0/negative -> 10)
+
+  # Per-tool execution timeouts (capability: tool-execution-timeout). Maps a
+  # built-in tool name (the same identifier agents list under their tools:) to a
+  # per-invocation budget, enforced centrally at the registry dispatch entry
+  # point. A tool mapped to a positive duration is bounded by it on every call;
+  # an absent entry or zero/negative duration is unbounded (the prior behavior).
+  # For remote tools that already have a native timeout (webfetch / bash /
+  # per-user mcp) this acts as a looser outer backstop — set it LOOSER than the
+  # native one so the tighter (native) bound fires first. Opt-in per tool; no
+  # global default is applied.
+  # timeouts:
+  #   xizhi_grep: 30s
+  #   xizhi_tree: 15s
+  #   xizhi_list_files: 10s
+  #   xizhi_glob_files: 15s
+  #   webfetch: 30s
+  #   bash: 120s
 
   # Per-user (workspace-resident) MCP tools: mcp_list_servers / mcp_add_server /
   # mcp_remove_server / mcp_call. Each user configures their own servers in

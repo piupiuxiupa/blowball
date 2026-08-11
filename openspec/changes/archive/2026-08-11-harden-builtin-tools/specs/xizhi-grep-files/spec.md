@@ -1,24 +1,7 @@
-# xizhi-grep-files Specification
-
-## Purpose
-
-TBD — 定义 `xizhi_grep` Xizhi 工作空间文件内容搜索工具：在调用者工作空间内按 RE2 正则搜索文件内容，支持文件名 glob 过滤、行号、上下文行、忽略大小写，跳过二进制文件，结果总数与单行字符数均有上限。
-
-## Requirements
-
-### Requirement: xizhi_grep tool registration
-系统 SHALL 提供一个名为 `xizhi_grep` 的 Xizhi 工作空间文件工具，受 `tools.xizhi.grep.enabled` 开关控制；启用时注册到工具注册表，可被配置了该工具的 Agent 使用。其注册模式 SHALL 与 `xizhi_list_files`/`xizhi_tree`/`xizhi_glob_files`/`xizhi_delete` 一致（按 `tools.xizhi.<tool>.enabled` 条件注册，per-request 绑定到调用者工作空间根）。
-
-#### Scenario: Enable grep tool
-- **WHEN** 配置中 `tools.xizhi.grep.enabled` 为 true
-- **THEN** 系统将 `xizhi_grep` 注册到工具注册表，可被配置了该工具的 Agent 使用
-
-#### Scenario: Disable grep tool
-- **WHEN** 配置中 `tools.xizhi.grep.enabled` 为 false 或未配置
-- **THEN** 系统不注册 `xizhi_grep`，Agent 无法调用它
+## MODIFIED Requirements
 
 ### Requirement: Xizhi grep content search
-`xizhi_grep` SHALL 在调用者工作空间内按文件内容搜索，参数包含：`path`（搜索起始目录，相对工作空间根，**必填**——空字符串或纯空白字符串 SHALL 被拒绝并返回明确错误；字面量 `.` SHALL 表示工作空间根，区别于"模型漏传 path"的情形）、`pattern`（RE2 正则，必填）、`glob`（可选，doublestar 文件名过滤模式，如 `*.go`，仅搜索文件名匹配的文件）、`ignore_case`（可选布尔，默认 false）、`include_hidden`（可选布尔，默认 false）、`context_before`（可选整数，默认 0，匹配行前输出行数）、`context_after`（可选整数，默认 0，匹配行后输出行数）。`path` SHALL 经 `xizhi.ValidatePath` 校验（绝对路径、`..`、符号链接逃逸、`.blowball` 保留命名空间均拒绝）；不跟随符号链接（对齐 `xizhi_glob_files`）。
+`xizhi_grep` SHALL 在调用者工作空间内按文件内容搜索，参数包含：`path`（搜索起始目录，相对工作空间根，**必填**——空字符串或纯空白字符串 SHALL 被拒绝并返回明确错误；字面量 `.` SHALL 表示工作空间根，区别于“模型漏传 path”的情形）、`pattern`（RE2 正则，必填）、`glob`（可选，doublestar 文件名过滤模式，如 `*.go`，仅搜索文件名匹配的文件）、`ignore_case`（可选布尔，默认 false）、`include_hidden`（可选布尔，默认 false）、`context_before`（可选整数，默认 0，匹配行前输出行数）、`context_after`（可选整数，默认 0，匹配行后输出行数）。`path` SHALL 经 `xizhi.ValidatePath` 校验（绝对路径、`..`、符号链接逃逸、`.blowball` 保留命名空间均拒绝）；不跟随符号链接（对齐 `xizhi_glob_files`）。
 
 匹配输出 SHALL 为 `{path, pattern, glob, ignore_case, matches: [{file, line_number, line, context_before?: [], context_after?: []}], truncated}`，每个 match 携带 `file`（相对 `path` 的路径）、`line_number`（1 基）、`line`（匹配行文本）、以及当对应 context 参数 >0 时的上下文行数组。系统 SHALL 跳过二进制文件（检测到 NUL 字节即视为二进制并跳过，不报错）。系统 SHALL 对结果设上限：匹配总数上限与每行字符截断上限（默认上限值由实现固定，约 200 条匹配 / 每行约 500 字符），超限时 SHALL 停止追加并在 `truncated` 置 `true`。正则编译失败 SHALL 返回错误。
 

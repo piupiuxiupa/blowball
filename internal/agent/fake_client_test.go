@@ -106,8 +106,11 @@ type fakeAgent struct {
 	usage       Usage
 	err         error
 	retryPolicy config.AgentRetryConfig
-	mu          sync.Mutex
-	calls       []fakeAgentCall
+	// hitCap makes LastRunHitCap report that the fake hit its round cap, for
+	// sub-agent cap-propagation tests.
+	hitCap bool
+	mu     sync.Mutex
+	calls  []fakeAgentCall
 }
 
 type fakeAgentCall struct {
@@ -120,6 +123,10 @@ func (a *fakeAgent) SystemPrompt() string { return a.prompt }
 // retryPolicy lets tests configure the fake's retry behavior; defaults to a
 // disabled policy so existing tests are unaffected.
 func (a *fakeAgent) RetryPolicy() config.AgentRetryConfig { return a.retryPolicy }
+
+// LastRunHitCap implements RoundCapTracker so cap-propagation tests can make a
+// fake sub-agent report that it hit its max_rounds cap.
+func (a *fakeAgent) LastRunHitCap() bool { return a.hitCap }
 
 func (a *fakeAgent) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
 	a.mu.Lock()

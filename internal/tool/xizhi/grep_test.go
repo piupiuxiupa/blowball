@@ -45,7 +45,7 @@ func TestGrepFiles_GlobFilter(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("TODO fix\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "b.py"), []byte("TODO fix\n"), 0o644))
 
-	res, err := GrepFiles(root, "", "TODO", "*.go", false, false, 0, 0)
+	res, err := GrepFiles(root, ".", "TODO", "*.go", false, false, 0, 0)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	require.Len(t, got.Matches, 1)
@@ -70,7 +70,7 @@ func TestGrepFiles_ContextLines(t *testing.T) {
 	content := "line1\nline2\ndef main():\nline4\nline5\n"
 	require.NoError(t, os.WriteFile(filepath.Join(root, "a.py"), []byte(content), 0o644))
 
-	res, err := GrepFiles(root, "", "def main", "", false, false, 2, 2)
+	res, err := GrepFiles(root, ".", "def main", "", false, false, 2, 2)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	require.Len(t, got.Matches, 1)
@@ -86,7 +86,7 @@ func TestGrepFiles_BinarySkipped(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "bin.dat"), bin, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("func Foo\n"), 0o644))
 
-	res, err := GrepFiles(root, "", "Foo", "", false, false, 0, 0)
+	res, err := GrepFiles(root, ".", "Foo", "", false, false, 0, 0)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	require.Len(t, got.Matches, 1)
@@ -110,7 +110,7 @@ func TestGrepFiles_ResultCapTruncates(t *testing.T) {
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(root, "big.txt"), content, 0o644))
 
-	res, err := GrepFiles(root, "", "x", "", false, false, 0, 0)
+	res, err := GrepFiles(root, ".", "x", "", false, false, 0, 0)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	assert.Len(t, got.Matches, maxGrepMatches)
@@ -119,24 +119,39 @@ func TestGrepFiles_ResultCapTruncates(t *testing.T) {
 
 func TestGrepFiles_InvalidRegex(t *testing.T) {
 	root := t.TempDir()
-	_, err := GrepFiles(root, "", "[", "", false, false, 0, 0)
+	_, err := GrepFiles(root, ".", "[", "", false, false, 0, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid regex")
 }
 
-func TestGrepFiles_SearchFromRootByDefault(t *testing.T) {
+func TestGrepFiles_DotPathSearchesRoot(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "pkg"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("import \"fmt\"\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "pkg", "util.go"), []byte("import \"os\"\n"), 0o644))
 
-	// Empty path -> search from workspace root; default include_hidden=false.
-	res, err := GrepFiles(root, "", "import", "", false, false, 0, 0)
+	// "." explicitly means the workspace root; default include_hidden=false.
+	res, err := GrepFiles(root, ".", "import", "", false, false, 0, 0)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	files := []string{got.Matches[0].File, got.Matches[1].File}
 	assert.Contains(t, files, "main.go")
 	assert.Contains(t, files, "pkg/util.go")
+}
+
+func TestGrepFiles_EmptyPathRejected(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("import \"fmt\"\n"), 0o644))
+
+	// An empty path is an error, not a fallback to the workspace root.
+	_, err := GrepFiles(root, "", "import", "", false, false, 0, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path is required")
+
+	// A whitespace-only path is equally rejected.
+	_, err = GrepFiles(root, "   ", "import", "", false, false, 0, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path is required")
 }
 
 func TestGrepFiles_HiddenExcludedByDefault(t *testing.T) {
@@ -146,14 +161,14 @@ func TestGrepFiles_HiddenExcludedByDefault(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".env"), []byte("secret\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "visible.txt"), []byte("secret\n"), 0o644))
 
-	res, err := GrepFiles(root, "", "secret", "", false, false, 0, 0)
+	res, err := GrepFiles(root, ".", "secret", "", false, false, 0, 0)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	require.Len(t, got.Matches, 1)
 	assert.Equal(t, "visible.txt", got.Matches[0].File, "hidden files and dirs excluded by default")
 
 	// include_hidden surfaces them.
-	res, err = GrepFiles(root, "", "secret", "", false, true, 0, 0)
+	res, err = GrepFiles(root, ".", "secret", "", false, true, 0, 0)
 	require.NoError(t, err)
 	got = res.(grepResult)
 	files := make([]string, len(got.Matches))
@@ -173,7 +188,7 @@ func TestGrepFiles_SymlinksNotFollowed(t *testing.T) {
 	require.NoError(t, os.Symlink(target, filepath.Join(root, "link")))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "real.go"), []byte("func Foo\n"), 0o644))
 
-	res, err := GrepFiles(root, "", "Foo", "", false, false, 0, 0)
+	res, err := GrepFiles(root, ".", "Foo", "", false, false, 0, 0)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	require.Len(t, got.Matches, 1)
@@ -182,7 +197,7 @@ func TestGrepFiles_SymlinksNotFollowed(t *testing.T) {
 
 func TestGrepFiles_EmptyPatternRejected(t *testing.T) {
 	root := t.TempDir()
-	_, err := GrepFiles(root, "", "", "", false, false, 0, 0)
+	_, err := GrepFiles(root, ".", "", "", false, false, 0, 0)
 	require.Error(t, err)
 }
 
@@ -219,7 +234,7 @@ func TestGrepFiles_LineTruncated(t *testing.T) {
 	long = append(long, '\n')
 	require.NoError(t, os.WriteFile(filepath.Join(root, "long.txt"), long, 0o644))
 
-	res, err := GrepFiles(root, "", "A", "", false, false, 0, 0)
+	res, err := GrepFiles(root, ".", "A", "", false, false, 0, 0)
 	require.NoError(t, err)
 	got := res.(grepResult)
 	require.Len(t, got.Matches, 1)

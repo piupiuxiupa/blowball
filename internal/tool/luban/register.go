@@ -14,9 +14,11 @@ import (
 // Registered tool names. These are the strings agents reference in their
 // config `tools:` lists and what the registry indexes.
 const (
-	ToolListSkills   = "luban_list_skills"
-	ToolReadSkill    = "luban_read_skill"
-	ToolInstallSkill = "luban_install_skill"
+	ToolListSkills     = "luban_list_skills"
+	ToolReadSkill      = "luban_read_skill"
+	ToolInstallSkill   = "luban_install_skill"
+	ToolListSkillFiles = "luban_list_skill_files"
+	ToolTreeSkill      = "luban_tree_skill"
 )
 
 // Tools holds the dependencies and configuration for the luban skill tools.
@@ -50,7 +52,7 @@ func (t *Tools) WithMaxSize(size int64) *Tools {
 	return t
 }
 
-// RegisterAll registers the three luban tools into r.
+// RegisterAll registers the luban tools into r.
 func RegisterAll(r *tool.Registry, tools *Tools) error {
 	if err := registerListSkills(r, tools); err != nil {
 		return err
@@ -61,15 +63,117 @@ func RegisterAll(r *tool.Registry, tools *Tools) error {
 	if err := registerInstallSkill(r, tools); err != nil {
 		return err
 	}
+	if err := registerListSkillFiles(r, tools); err != nil {
+		return err
+	}
+	if err := registerTreeSkill(r, tools); err != nil {
+		return err
+	}
 	return nil
+}
+
+func registerListSkillFiles(r *tool.Registry, tools *Tools) error {
+	spec := &tool.ToolSpec{
+		Name: ToolListSkillFiles,
+		Description: "Lists the immediate children of a skill's directory (one level, not recursive) and returns " +
+			"`{path, entries[]}` inside the standard status envelope (`{\"status\":0,\"result\":{...}}` on success, " +
+			"`{\"status\":1,\"error\":...}` on failure); each entry carries `name`, `type` (`file`/`dir`) and `size`. " +
+			"**`name` MUST be a simple skill identifier resolved via `luban_list_skills` (user skills override global);** " +
+			"optional `path` selects a sub-directory relative to the skill root (confined to the skill directory; " +
+			"absolute paths, `..` and symlink escapes are rejected). Hidden entries (names starting with `.`) are " +
+			"excluded unless `include_hidden` is true, so a git-cloned skill's `.git` is hidden by default. " +
+			"**DO NOT list skills with `xizhi_*` — use luban.**",
+		ParametersJSON: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string",
+					"description": "The canonical skill name. Must be a simple identifier, not a path; resolve it first with luban_list_skills."
+				},
+				"path": {
+					"type": "string",
+					"description": "Optional. A sub-directory relative to the skill's directory root to list (defaults to the skill root). Absolute paths, .., and symlinks escaping the skill directory are rejected."
+				},
+				"include_hidden": {
+					"type": "boolean",
+					"description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+				}
+			},
+			"required": ["name"],
+			"additionalProperties": false
+		}`),
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var a struct {
+				Name          string `json:"name"`
+				Path          string `json:"path"`
+				IncludeHidden bool   `json:"include_hidden"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return nil, fmt.Errorf("luban_list_skill_files: parse args: %w", err)
+			}
+			return ListSkillFiles(tools.loader, a.Name, a.Path, skill.UserIDFromContext(ctx), a.IncludeHidden)
+		},
+	}
+	return r.Register(spec)
+}
+
+func registerTreeSkill(r *tool.Registry, tools *Tools) error {
+	spec := &tool.ToolSpec{
+		Name: ToolTreeSkill,
+		Description: "Returns a nested tree of a skill's directory and returns `{path, depth, tree[]}` inside the " +
+			"standard status envelope (`{\"status\":0,\"result\":{...}}` on success, `{\"status\":1,\"error\":...}` on " +
+			"failure); each node carries `name`, `type` (`file`/`dir`), `size` (files only) and `children` (dirs). " +
+			"**`name` MUST be a simple skill identifier resolved via `luban_list_skills` (user skills override global);** " +
+			"optional `path` selects a sub-directory relative to the skill root. `depth` defaults to 3 and is clamped to " +
+			"10. Hidden entries (names starting with `.`) are excluded unless `include_hidden` is true. **DO NOT tree " +
+			"skills with `xizhi_*` — use luban.**",
+		ParametersJSON: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string",
+					"description": "The canonical skill name. Must be a simple identifier, not a path; resolve it first with luban_list_skills."
+				},
+				"path": {
+					"type": "string",
+					"description": "Optional. A sub-directory relative to the skill's directory root to tree (defaults to the skill root). Absolute paths, .., and symlinks escaping the skill directory are rejected."
+				},
+				"depth": {
+					"type": "integer",
+					"description": "Maximum recursion depth. Defaults to 3, maximum 10 (values above 10 are clamped to 10)."
+				},
+				"include_hidden": {
+					"type": "boolean",
+					"description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+				}
+			},
+			"required": ["name"],
+			"additionalProperties": false
+		}`),
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var a struct {
+				Name          string `json:"name"`
+				Path          string `json:"path"`
+				Depth         int    `json:"depth"`
+				IncludeHidden bool   `json:"include_hidden"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return nil, fmt.Errorf("luban_tree_skill: parse args: %w", err)
+			}
+			return TreeSkill(tools.loader, a.Name, a.Path, skill.UserIDFromContext(ctx), a.Depth, a.IncludeHidden)
+		},
+	}
+	return r.Register(spec)
 }
 
 func registerListSkills(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolListSkills,
-		Description: "List all available skills and return an array `[{name, description, location}, ...]`, where each " +
-			"entry's `location` is `global` or `user`. **User skills OVERRIDE global skills of the same name.** **You " +
-			"MUST discover skill names here first, then load one with `luban_read_skill` (by name, not path).**",
+		Description: "List all available skills. The result is delivered inside the standard status envelope: " +
+			"`{\"status\":0,\"result\":[{name, description, location}, ...]}` on success (each entry's `location` is " +
+			"`global` or `user`), or `{\"status\":1,\"error\":...}` on failure. **User skills OVERRIDE global skills " +
+			"of the same name.** **You MUST discover skill names here first, then load one with `luban_read_skill` " +
+			"(by name, not path).**",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {},
@@ -85,12 +189,13 @@ func registerListSkills(r *tool.Registry, tools *Tools) error {
 func registerReadSkill(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolReadSkill,
-		Description: "Reads a skill by name and returns its text body as a **bare string** (YAML frontmatter " +
-			"stripped, not a JSON object). User skills take precedence over global skills. **`name` MUST be a simple skill " +
-			"identifier, not a path.** With `path` omitted it reads the skill's `SKILL.md`; with `path` provided it reads the " +
-			"text file at that path relative to the skill's directory root (confined to the skill directory; any text file " +
-			"is readable, binary files are rejected). **DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory " +
-			"access rules live in the system prompt.)",
+		Description: "Reads a skill by name and returns its text body. The result is delivered inside the standard " +
+			"status envelope: `{\"status\":0,\"result\":\"<skill text>\"}` on success (a JSON string with YAML " +
+			"frontmatter stripped), or `{\"status\":1,\"error\":...}` on failure. User skills take precedence over " +
+			"global skills. **`name` MUST be a simple skill identifier, not a path.** With `path` omitted it reads the " +
+			"skill's `SKILL.md`; with `path` provided it reads the text file at that path relative to the skill's " +
+			"directory root (confined to the skill directory; any text file is readable, binary files are rejected). " +
+			"**DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory access rules live in the system prompt.)",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {

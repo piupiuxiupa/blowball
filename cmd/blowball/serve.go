@@ -434,6 +434,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 
 	// Tool registry. The main registry backs the MCP tools-listing endpoint. Real tool execution during orchestration uses a per-request registry the orchestrator's factory rebuilds scoped to the user's workspace root.
 	reg := tool.NewRegistry()
+	reg.SetTimeouts(cfg.Tools.Timeouts)
 	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi)
 	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
@@ -576,7 +577,7 @@ func executorConfigured(cfg *config.Config) bool {
 
 // needsLubanTools reports whether any agent explicitly lists one of the luban skill tools in its tools list.
 func needsLubanTools(agents config.AgentsConfig) bool {
-	lubanTools := []string{luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill}
+	lubanTools := []string{luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill, luban.ToolListSkillFiles, luban.ToolTreeSkill}
 	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Chongzhi, agents.Liang} {
 		for _, name := range lubanTools {
 			if slices.Contains(cfg.Tools, name) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,6 +130,73 @@ func TestCall_UnknownTool_Errors(t *testing.T) {
 	_, err := r.Call(context.Background(), "ghost", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown tool")
+}
+
+// blockingSpec is a tool Execute that blocks until ctx is cancelled (or stop is
+// closed), then returns ctx.Err(). Used to assert timeout enforcement.
+func blockingSpec(name string, stop <-chan struct{}) *ToolSpec {
+	return &ToolSpec{
+		Name:           name,
+		Description:    name + " description",
+		ParametersJSON: json.RawMessage(`{"type":"object"}`),
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-stop:
+				return "done", nil
+			}
+		},
+	}
+}
+
+func TestCall_TimeoutCancelsLongRunningTool(t *testing.T) {
+	r := NewRegistry()
+	// A tiny timeout that fires well before the tool would return on its own.
+	r.SetTimeouts(map[string]time.Duration{"slow": 20 * time.Millisecond})
+	require.NoError(t, r.Register(blockingSpec("slow", make(chan struct{}))))
+
+	start := time.Now()
+	_, err := r.Call(context.Background(), "slow", json.RawMessage(`{}`))
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected DeadlineExceeded, got %v", err)
+	// The timeout (not the unbounded block) must be what unblocked the call.
+	assert.Less(t, elapsed, time.Second, "Call must return shortly after the timeout fires, not block unbounded")
+}
+
+func TestCall_UnmappedToolIsUnbounded(t *testing.T) {
+	r := NewRegistry()
+	// No timeouts configured at all; the tool stops itself almost immediately.
+	stop := make(chan struct{})
+	require.NoError(t, r.Register(blockingSpec("free", stop)))
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		close(stop)
+	}()
+
+	res, err := r.Call(context.Background(), "free", json.RawMessage(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "done", res, "unmapped tool must run to completion with no cancellation")
+}
+
+func TestCall_ZeroDurationMeansNoTimeout(t *testing.T) {
+	r := NewRegistry()
+	// An explicit zero duration is treated as unbounded, not as an instant
+	// timeout (preserving prior behavior byte-for-byte).
+	r.SetTimeouts(map[string]time.Duration{"free": 0})
+	stop := make(chan struct{})
+	require.NoError(t, r.Register(blockingSpec("free", stop)))
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		close(stop)
+	}()
+
+	res, err := r.Call(context.Background(), "free", json.RawMessage(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "done", res, "zero duration must NOT cancel the tool")
 }
 
 func TestOpenAITools_ProducesExpectedShape(t *testing.T) {

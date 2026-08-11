@@ -514,7 +514,7 @@ func TestMessageFlow_ToolCallMemory(t *testing.T) {
 				}
 			}
 		}
-		if m.Role == "tool" && m.ToolCallID == "tc-1" && m.Content == "hello" {
+		if m.Role == "tool" && m.ToolCallID == "tc-1" && strings.Contains(m.Content, `"result":"hello"`) {
 			sawToolResult = true
 		}
 	}

@@ -359,6 +359,17 @@ func DefaultRetryMaxAttempts() int              { return defaultRetryMaxAttempts
 func DefaultRetryInitialBackoff() time.Duration { return defaultRetryInitialBackoff }
 func DefaultRetryMaxBackoff() time.Duration     { return defaultRetryMaxBackoff }
 
+// defaultAgentMaxRounds is the per-agent tool-calling loop cap applied when an
+// agent omits max_rounds (or sets it <= 0). 100 reproduces the prior
+// hard-coded constants exactly (zero behavior change); operators tune the cap
+// per agent via agents.<name>.max_rounds.
+const defaultAgentMaxRounds = 100
+
+// DefaultAgentMaxRounds exposes the agent round-cap default for callers
+// outside the config package (the agent constructors apply it when an agent
+// omits max_rounds). Mirrors the private constant above.
+func DefaultAgentMaxRounds() int { return defaultAgentMaxRounds }
+
 // AgentConfig describes a single agent's runtime settings.
 type AgentConfig struct {
 	Name            string         `yaml:"name"`
@@ -370,6 +381,14 @@ type AgentConfig struct {
 	Skills          []string       `yaml:"skills"`
 	Thinking        bool           `yaml:"thinking"`
 	ReasoningEffort string         `yaml:"reasoning_effort"`
+	// MaxRounds bounds the agent's tool-calling loop — the number of LLM
+	// rounds the loop runs before terminating. When the model keeps emitting
+	// tool_calls without converging, the loop stops at MaxRounds and the agent
+	// runs one tool-disabled wrap-up round to synthesize a final answer (see
+	// the agent-orchestration spec, "Agent tool-calling loop round cap and
+	// graceful termination"). 0 / unset falls back to DefaultAgentMaxRounds()
+	// at agent construction; validate() rejects negative values.
+	MaxRounds int `yaml:"max_rounds"`
 	// OutputSchema is an optional raw JSON Schema (string form) that, when set,
 	// makes the sub-agent enable OpenAI structured output
 	// (response_format: json_schema) on its FINAL tool-calling round (the
@@ -455,6 +474,12 @@ func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 			if cfg.Retry.MaxBackoff > 0 && cfg.Retry.InitialBackoff > cfg.Retry.MaxBackoff {
 				return fmt.Errorf("agents.%s.retry: initial_backoff must be <= max_backoff", name)
 			}
+		}
+		// MaxRounds: negative is a typo, not "use default" — reject it. 0 is
+		// valid and means "use the default" (applied at agent construction, not
+		// here, matching how retry defaults are applied per-agent).
+		if cfg.MaxRounds < 0 {
+			return fmt.Errorf("agents.%s.max_rounds: must be >= 0 (0 means use the default)", name)
 		}
 		for i, s := range cfg.MCP.Servers {
 			if strings.TrimSpace(s.Name) == "" {
@@ -743,6 +768,15 @@ type ToolsConfig struct {
 	Webfetch WebfetchConfig `yaml:"webfetch"`
 	Executor ExecutorConfig `yaml:"executor"`
 	UserMCP  UserMCPConfig  `yaml:"user_mcp"`
+	// Timeouts maps a built-in tool name (the same identifier agents reference in
+	// their tools: lists) to a per-invocation execution budget. Enforced centrally
+	// at the registry dispatch entry point (capability: tool-execution-timeout):
+	// a tool mapped to a positive duration is bounded by that duration on every
+	// Call; an absent entry or a zero/negative duration is unbounded (the prior
+	// behavior). For remote tools that already have a native timeout (webfetch /
+	// bash / per-user mcp), this acts as a looser outer backstop — the native
+	// (tighter) bound still fires first in normal operation.
+	Timeouts map[string]time.Duration `yaml:"timeouts"`
 }
 
 // MCPConfig holds external MCP server configuration.

@@ -63,6 +63,21 @@ type ToolCallTracker interface {
 	LastRunExecutedTool() bool
 }
 
+// RoundCapTracker is an optional capability implemented by every agent whose
+// Run may hit its configured max_rounds cap. The dispatcher (Confucius)
+// consults it after a sub-agent Run to propagate "a sub-agent hit its cap"
+// into the turn-level usage.meta.round_capped flag (capability: agent
+// round-cap). Each agent sets its flag when its loop exits via the cap path;
+// callers must invoke Run before reading it. Confucius also implements it for
+// uniformity, though it is never consulted as a sub-agent.
+type RoundCapTracker interface {
+	// LastRunHitCap reports whether the most recent Run exited its
+	// tool-calling loop because max_rounds was reached (rather than a natural
+	// stop). Callers must invoke Run before reading this; the value reflects
+	// the last completed Run.
+	LastRunHitCap() bool
+}
+
 // TurnBreakdown is the per-agent usage attribution and orchestration metadata
 // for one Confucius turn. It is the source of the done event's
 // Meta.usage.by_agent and Meta.usage.meta, and is persisted verbatim into
@@ -95,6 +110,12 @@ type TurnBreakdown struct {
 	// SubAgentInvocations lists the invoke_* tool names dispatched this turn,
 	// in first-seen (dispatch) order and de-duplicated.
 	SubAgentInvocations []string
+
+	// RoundCapped reports whether any agent (Confucius or a dispatched
+	// sub-agent) hit its max_rounds cap this turn. Rendered into the done
+	// event's usage.meta.round_capped (omitted when false so non-capped turns
+	// serialize identically to before).
+	RoundCapped bool
 }
 
 // Usage accumulates token counts for a single Run. Totals across rounds are

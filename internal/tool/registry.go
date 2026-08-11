@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // ToolSpec describes a single tool that an agent can invoke via function
@@ -28,13 +29,25 @@ type ToolSpec struct {
 // Registry holds the set of tools known to the process. Registration happens at
 // startup; lookups happen per agent invocation. It is safe for concurrent use.
 type Registry struct {
-	mu    sync.RWMutex
-	tools map[string]*ToolSpec
+	mu       sync.RWMutex
+	tools    map[string]*ToolSpec
+	timeouts map[string]time.Duration
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]*ToolSpec)}
+}
+
+// SetTimeouts configures the per-tool execution timeout map applied by Call
+// (capability: tool-execution-timeout). A tool name mapped to a positive
+// duration is bounded by that duration on every Call; absent entries and
+// zero/negative durations are unbounded (the prior behavior). It is intended to
+// be called once at wiring time, before any Call. Safe for concurrent use.
+func (r *Registry) SetTimeouts(m map[string]time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.timeouts = m
 }
 
 // Register adds spec to the registry. It returns an error if spec.Name is empty
@@ -113,13 +126,39 @@ func (r *Registry) ToolsFor(names []string) ([]*ToolSpec, error) {
 }
 
 // Call looks up name and invokes its Execute with args. It is a convenience
-// used by the agent loop's tool-call dispatcher.
+// used by the agent loop's tool-call dispatcher. When a positive timeout is
+// configured for name via SetTimeouts, the Execute runs under a child context
+// bounded by that duration; otherwise execution is unbounded (the prior
+// behavior). The timeout composes with any native tool timeout as a looser
+// outer backstop (capability: tool-execution-timeout).
 func (r *Registry) Call(ctx context.Context, name string, args json.RawMessage) (any, error) {
 	spec, ok := r.Get(name)
 	if !ok {
 		return nil, fmt.Errorf("tool registry: unknown tool %q", name)
 	}
+	if d, hasTimeout := r.timeoutFor(name); hasTimeout {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
 	return spec.Execute(ctx, args)
+}
+
+// timeoutFor returns the configured execution timeout for name and whether one
+// applies. Absent entries and zero/negative durations are treated as unbounded
+// (no timeout), preserving the prior behavior for unmapped tools. Safe for
+// concurrent use with SetTimeouts.
+func (r *Registry) timeoutFor(name string) (time.Duration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.timeouts == nil {
+		return 0, false
+	}
+	d := r.timeouts[name]
+	if d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 // openAITool is the per-entry shape rendered by OpenAITools. The "function"

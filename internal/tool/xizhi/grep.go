@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -48,11 +49,13 @@ type grepResult struct {
 }
 
 // GrepFiles searches the content of files beneath workspaceRoot/relPath for
-// lines matching the RE2 pattern. The search path is normalised so an empty
-// string or "." refers to the workspace root, and is validated by validatePath
-// (absolute paths, "..", symlink escapes and the reserved .blowball namespace
-// are rejected). Symlinks are not followed during the walk, mirroring
-// xizhi_glob_files.
+// lines matching the RE2 pattern. relPath is REQUIRED: an empty or
+// whitespace-only path is rejected with "path is required" (it no longer falls
+// back to the workspace root). The literal "." explicitly means the workspace
+// root, distinguishing "the model wants the whole workspace" from "the model
+// forgot the path". relPath is validated by validatePath (absolute paths, "..",
+// symlink escapes and the reserved .blowball namespace are rejected). Symlinks
+// are not followed during the walk, mirroring xizhi_glob_files.
 //
 // pattern is a required Go RE2 regular expression; ignoreCase compiles it
 // case-insensitively (equivalent to wrapping it in (?i)). glob, when non-empty,
@@ -66,7 +69,9 @@ type grepResult struct {
 // line is capped at maxGrepLineRunes runes; when the match cap is hit scanning
 // stops and truncated is set to true.
 func GrepFiles(workspaceRoot, relPath, pattern, glob string, ignoreCase, includeHidden bool, contextBefore, contextAfter int) (any, error) {
-	relPath = normalizePath(relPath)
+	if strings.TrimSpace(relPath) == "" {
+		return nil, fmt.Errorf("xizhi_grep: path is required")
+	}
 	absPath, err := validatePath(workspaceRoot, relPath)
 	if err != nil {
 		return nil, err
