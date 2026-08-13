@@ -2,28 +2,28 @@ package xizhi
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
 
 // Built-in result caps that bound the response size when an agent searches a
-// large workspace (e.g. searching for "the"). maxGrepMatches caps the total
-// number of matches across all files; once reached scanning stops and the
-// result's truncated flag is set. maxGrepLineRunes caps each returned line
-// (matched or context) so a single very long line cannot dominate the output.
+// large workspace (e.g. searching for "the"). maxGrepMatches is the default
+// head_limit (the historical hard cap, preserved so default behavior is
+// unchanged); maxGrepLineRunes caps each returned line (matched or context) so a
+// single very long line cannot dominate the output. See grep_engine.go for the
+// pagination layer (head_limit/offset) and the maxGrepCollect memory ceiling.
 const (
 	maxGrepMatches   = 200
 	maxGrepLineRunes = 500
 )
 
-// grepMatch is one content match returned by xizhi_grep.
+// grepMatch is one content match returned by xizhi_grep in content mode.
 type grepMatch struct {
 	// File is the path of the matched file relative to the search path.
 	File string `json:"file"`
@@ -38,84 +38,52 @@ type grepMatch struct {
 	ContextAfter  []string `json:"context_after,omitempty"`
 }
 
-// grepResult is the JSON-serializable result returned by GrepFiles.
-type grepResult struct {
-	Path       string      `json:"path"`
-	Pattern    string      `json:"pattern"`
-	Glob       string      `json:"glob,omitempty"`
-	IgnoreCase bool        `json:"ignore_case"`
-	Matches    []grepMatch `json:"matches"`
-	Truncated  bool        `json:"truncated"`
+// grepCount is one per-file match tally returned in count mode.
+type grepCount struct {
+	File  string `json:"file"`
+	Count int    `json:"count"`
 }
 
-// GrepFiles searches the content of files beneath workspaceRoot/relPath for
-// lines matching the RE2 pattern. relPath is REQUIRED: an empty or
-// whitespace-only path is rejected with "path is required" (it no longer falls
-// back to the workspace root). The literal "." explicitly means the workspace
-// root, distinguishing "the model wants the whole workspace" from "the model
-// forgot the path". relPath is validated by validatePath (absolute paths, "..",
-// symlink escapes and the reserved .blowball namespace are rejected). Symlinks
-// are not followed during the walk, mirroring xizhi_glob_files.
-//
-// pattern is a required Go RE2 regular expression; ignoreCase compiles it
-// case-insensitively (equivalent to wrapping it in (?i)). glob, when non-empty,
-// filters files by their base name via a doublestar match (e.g. "*.go"). Files
-// whose leading bytes contain a NUL byte are treated as binary and skipped.
-// includeHidden controls whether hidden entries (names beginning with ".") are
-// searched. contextBefore / contextAfter add that many surrounding lines to
-// each match (omitted from the JSON when zero).
-//
-// The result is bounded: at most maxGrepMatches matches are returned and each
-// line is capped at maxGrepLineRunes runes; when the match cap is hit scanning
-// stops and truncated is set to true.
-func GrepFiles(workspaceRoot, relPath, pattern, glob string, ignoreCase, includeHidden bool, contextBefore, contextAfter int) (any, error) {
-	if strings.TrimSpace(relPath) == "" {
-		return nil, fmt.Errorf("xizhi_grep: path is required")
-	}
-	absPath, err := validatePath(workspaceRoot, relPath)
-	if err != nil {
-		return nil, err
-	}
+// grepResult is the JSON-serializable result returned by xizhi_grep. The
+// populated collection depends on Mode: Matches (content), Files
+// (files_with_matches) or Counts (count). Matches is always present (possibly
+// empty) for backward compatibility; Files/Counts are populated only in their
+// mode. Truncated, AppliedLimit, AppliedOffset and TotalFiles describe the
+// pagination window so the model can request the next page.
+type grepResult struct {
+	Path          string      `json:"path"`
+	Pattern       string      `json:"pattern"`
+	Glob          string      `json:"glob,omitempty"`
+	IgnoreCase    bool        `json:"ignore_case"`
+	Mode          string      `json:"mode"`
+	Matches       []grepMatch `json:"matches"`
+	Files         []string    `json:"files,omitempty"`
+	Counts        []grepCount `json:"counts,omitempty"`
+	Truncated     bool        `json:"truncated"`
+	AppliedLimit  int         `json:"applied_limit"`
+	AppliedOffset int         `json:"applied_offset"`
+	TotalFiles    int         `json:"total_files"`
+}
 
-	if pattern == "" {
-		return nil, fmt.Errorf("xizhi_grep: pattern is required")
-	}
+// goGrepEngine is the pure-Go RE2 fallback used when ripgrep is not installed.
+// It walks the search path and matches each text file with the compiled regex.
+// It produces the same rawMatch shape as the ripgrep engine; the shared mapper
+// in grep_engine.go normalizes ordering, pagination and truncation so both
+// engines yield an identical grepResult.
+type goGrepEngine struct{}
 
-	expr := pattern
-	if ignoreCase {
-		expr = "(?i)" + pattern
-	}
-	re, err := regexp.Compile(expr)
-	if err != nil {
-		return nil, fmt.Errorf("xizhi_grep: invalid regex %q: %w", pattern, err)
-	}
-
-	info, err := os.Stat(absPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("directory not found: %w", err)
+func (goGrepEngine) search(ctx context.Context, in grepInput) (engineResult, error) {
+	var er engineResult
+	walkErr := filepath.WalkDir(in.absPath, func(p string, d fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return nil, fmt.Errorf("xizhi grep: stat %q: %w", absPath, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("xizhi grep: %q is not a directory", relPath)
-	}
-
-	result := grepResult{
-		Path:       relPath,
-		Pattern:    pattern,
-		Glob:       glob,
-		IgnoreCase: ignoreCase,
-		Matches:    []grepMatch{},
-	}
-
-	walkErr := filepath.WalkDir(absPath, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// Skip unreadable entries rather than aborting the whole search.
 			return nil
 		}
 		if d.IsDir() {
-			if p != absPath && !includeHidden && isHiddenName(d.Name()) {
+			if p != in.absPath && !in.includeHidden && isHiddenName(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -124,43 +92,59 @@ func GrepFiles(workspaceRoot, relPath, pattern, glob string, ignoreCase, include
 		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		if !includeHidden && isHiddenName(d.Name()) {
+		if !in.includeHidden && isHiddenName(d.Name()) {
 			return nil
 		}
-		if glob != "" {
-			if ok, _ := doublestar.Match(glob, d.Name()); !ok {
+		if in.glob != "" {
+			if ok, _ := doublestar.Match(in.glob, d.Name()); !ok {
 				return nil
 			}
 		}
 
-		remaining := maxGrepMatches - len(result.Matches)
-		if remaining <= 0 {
-			result.Truncated = true
-			return filepath.SkipAll
-		}
-
-		fileRel, _ := filepath.Rel(absPath, p)
-		matches, hitCap := scanGrepFile(p, filepath.ToSlash(fileRel), re, contextBefore, contextAfter, remaining)
-		result.Matches = append(result.Matches, matches...)
-		if hitCap {
-			result.Truncated = true
+		fileRel, _ := filepath.Rel(in.absPath, p)
+		er.matches = append(er.matches, scanGrepFileRaw(p, filepath.ToSlash(fileRel), in.re, in.contextBefore, in.contextAfter)...)
+		if len(er.matches) >= maxGrepCollect {
+			er.collectCapped = true
 			return filepath.SkipAll
 		}
 		return nil
 	})
 	if walkErr != nil {
-		return nil, fmt.Errorf("xizhi grep: walk %q: %w", absPath, walkErr)
+		if ctx.Err() != nil {
+			return engineResult{}, ctx.Err()
+		}
+		return engineResult{}, fmt.Errorf("xizhi grep: walk %q: %w", in.absPath, walkErr)
 	}
-
-	return result, nil
+	return er, nil
 }
 
-// scanGrepFile reads a single file and returns the matches found within budget.
-// A file that cannot be opened or is binary (leading bytes contain a NUL byte,
-// aligning with grep -I and workspace WriteContent's binary judgment) yields no
-// matches and no error. hitCap reports whether the per-call budget was reached
-// so the caller can stop the walk and flag truncation.
-func scanGrepFile(absFile, fileRel string, re *regexp.Regexp, contextBefore, contextAfter, budget int) ([]grepMatch, bool) {
+// scanGrepFileRaw reads a single file and returns every match as a rawMatch
+// (untruncated line + raw context lines). A file that cannot be opened or is
+// binary (leading bytes contain a NUL byte, aligning with grep -I) yields no
+// matches and no error. Truncation of long lines is applied later by the shared
+// mapper so this stays engine-agnostic.
+func scanGrepFileRaw(absFile, fileRel string, re *regexp.Regexp, contextBefore, contextAfter int) []rawMatch {
+	lines, ok := readTextLines(absFile)
+	if !ok {
+		return nil
+	}
+	var out []rawMatch
+	for i, line := range lines {
+		if !re.MatchString(line) {
+			continue
+		}
+		m := rawMatch{file: fileRel, lineNumber: i + 1, line: line}
+		m.contextBefore, m.contextAfter = contextAround(lines, i+1, contextBefore, contextAfter)
+		out = append(out, m)
+	}
+	return out
+}
+
+// readTextLines reads absFile and returns its lines. It reports ok=false (no
+// error) if the file cannot be opened, is binary, or has a line that exceeds the
+// scanner buffer — matching the grep engines' silent-skip behavior. CRLF line
+// endings are normalized (the trailing CR is stripped, like bufio.Scanner).
+func readTextLines(absFile string) ([]string, bool) {
 	f, err := os.Open(absFile)
 	if err != nil {
 		return nil, false
@@ -169,7 +153,7 @@ func scanGrepFile(absFile, fileRel string, re *regexp.Regexp, contextBefore, con
 
 	reader := bufio.NewReader(f)
 	// Binary detection: a NUL byte in the leading bytes marks the file binary.
-	if preview, _ := reader.Peek(8192); bytes.IndexByte(preview, 0) >= 0 {
+	if preview, _ := reader.Peek(binarySniffPeek); looksBinary(preview) {
 		return nil, false
 	}
 
@@ -185,37 +169,25 @@ func scanGrepFile(absFile, fileRel string, re *regexp.Regexp, contextBefore, con
 	if err := scanner.Err(); err != nil {
 		return nil, false
 	}
+	return lines, true
+}
 
-	var matches []grepMatch
-	for i, line := range lines {
-		if !re.MatchString(line) {
-			continue
-		}
-		m := grepMatch{
-			File:       fileRel,
-			LineNumber: i + 1,
-			Line:       truncateGrepLine(line),
-		}
-		if contextBefore > 0 {
-			start := i - contextBefore
-			if start < 0 {
-				start = 0
-			}
-			m.ContextBefore = truncateGrepLines(lines[start:i])
-		}
-		if contextAfter > 0 {
-			end := i + contextAfter + 1
-			if end > len(lines) {
-				end = len(lines)
-			}
-			m.ContextAfter = truncateGrepLines(lines[i+1 : end])
-		}
-		matches = append(matches, m)
-		if len(matches) >= budget {
-			return matches, true
-		}
+// contextAround returns the before/after context lines for the 1-based
+// lineNumber, given the file's full line slice. It is the single source of
+// truth for context slicing so the ripgrep and Go engines produce identical
+// context. Nil slices are returned when the corresponding amount is zero (so
+// they omit from the JSON via omitempty).
+func contextAround(lines []string, lineNumber, before, after int) (contextBefore, contextAfter []string) {
+	i := lineNumber - 1
+	if before > 0 {
+		start := max(0, i-before)
+		contextBefore = append([]string(nil), lines[start:i]...)
 	}
-	return matches, false
+	if after > 0 {
+		end := min(i+after+1, len(lines))
+		contextAfter = append([]string(nil), lines[i+1:end]...)
+	}
+	return contextBefore, contextAfter
 }
 
 // truncateGrepLine caps s at maxGrepLineRunes runes.
@@ -226,7 +198,8 @@ func truncateGrepLine(s string) string {
 	return string([]rune(s)[:maxGrepLineRunes])
 }
 
-// truncateGrepLines caps each entry at maxGrepLineRunes runes.
+// truncateGrepLines caps each entry at maxGrepLineRunes runes. A nil/empty input
+// returns nil so the field omits from the JSON.
 func truncateGrepLines(in []string) []string {
 	if len(in) == 0 {
 		return nil

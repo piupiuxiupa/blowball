@@ -240,3 +240,94 @@ func TestGrepFiles_LineTruncated(t *testing.T) {
 	require.Len(t, got.Matches, 1)
 	assert.LessOrEqual(t, len([]rune(got.Matches[0].Line)), maxGrepLineRunes)
 }
+
+func TestGrepSearch_FilesWithMatches(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("func Foo\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "b.go"), []byte("func Foo\nfunc Bar\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "c.go"), []byte("nope\n"), 0o644))
+
+	res, err := GrepSearch(root, ".", "Foo", "", false, false, 0, 0, outputModeFiles, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	assert.Equal(t, outputModeFiles, got.Mode)
+	assert.Equal(t, []string{"a.go", "b.go"}, got.Files)
+	assert.Equal(t, 2, got.TotalFiles)
+	assert.False(t, got.Truncated)
+	assert.Equal(t, defaultGrepHeadLimit, got.AppliedLimit)
+	assert.Equal(t, 0, got.AppliedOffset)
+}
+
+func TestGrepSearch_Count(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("Foo\nFoo\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "b.go"), []byte("Foo\n"), 0o644))
+
+	res, err := GrepSearch(root, ".", "Foo", "", false, false, 0, 0, outputModeCount, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	assert.Equal(t, outputModeCount, got.Mode)
+	assert.ElementsMatch(t, []grepCount{{File: "a.go", Count: 2}, {File: "b.go", Count: 1}}, got.Counts)
+	assert.Equal(t, 2, got.TotalFiles)
+}
+
+func TestGrepSearch_ContentIsDefault(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("func Foo\n"), 0o644))
+
+	// An empty/unknown output_mode falls back to content (backward compatible).
+	res, err := GrepSearch(root, ".", "Foo", "", false, false, 0, 0, "", 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	assert.Equal(t, outputModeContent, got.Mode)
+	require.Len(t, got.Matches, 1)
+	assert.Equal(t, "a.go", got.Matches[0].File)
+}
+
+func TestGrepSearch_HeadLimitOffsetPaginates(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.txt"), []byte("m\nm\nm\nm\nm\n"), 0o644)) // 5 matches
+
+	// Page 1: first 2 matches.
+	res, err := GrepSearch(root, ".", "m", "", false, false, 0, 0, outputModeContent, 2, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	require.Len(t, got.Matches, 2)
+	assert.Equal(t, []int{1, 2}, []int{got.Matches[0].LineNumber, got.Matches[1].LineNumber})
+	assert.Equal(t, 2, got.AppliedLimit)
+	assert.Equal(t, 0, got.AppliedOffset)
+	assert.Equal(t, 1, got.TotalFiles)
+	assert.True(t, got.Truncated, "3 more matches remain")
+
+	// Page 2: matches 3 and 4.
+	res, err = GrepSearch(root, ".", "m", "", false, false, 0, 0, outputModeContent, 2, 2)
+	require.NoError(t, err)
+	got = res.(grepResult)
+	require.Len(t, got.Matches, 2)
+	assert.Equal(t, []int{3, 4}, []int{got.Matches[0].LineNumber, got.Matches[1].LineNumber})
+	assert.Equal(t, 2, got.AppliedOffset)
+	assert.True(t, got.Truncated, "1 more match remains")
+
+	// Page 3: the final match — no truncation.
+	res, err = GrepSearch(root, ".", "m", "", false, false, 0, 0, outputModeContent, 2, 4)
+	require.NoError(t, err)
+	got = res.(grepResult)
+	require.Len(t, got.Matches, 1)
+	assert.Equal(t, 5, got.Matches[0].LineNumber)
+	assert.False(t, got.Truncated)
+}
+
+func TestGrepSearch_FilesModeHeadLimitPaginates(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a", "b", "c", "d"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name+".go"), []byte("hit\n"), 0o644))
+	}
+
+	// head_limit applies to file paths in files_with_matches mode.
+	res, err := GrepSearch(root, ".", "hit", "", false, false, 0, 0, outputModeFiles, 2, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	assert.Len(t, got.Files, 2)
+	assert.Equal(t, 4, got.TotalFiles)
+	assert.True(t, got.Truncated)
+}

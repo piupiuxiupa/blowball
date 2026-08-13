@@ -31,6 +31,14 @@ var (
     "path": {
       "type": "string",
       "description": "Path of the file to read, relative to the workspace root."
+    },
+    "offset": {
+      "type": "integer",
+      "description": "1-based line number to start reading from. Only provide if the file is too large to read at once. Defaults to 1."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of lines to return. Only provide if the file is too large to read at once. Defaults to 2000; when the file has more lines, truncated is set and total_lines lets you request the next page."
     }
   },
   "required": ["path"],
@@ -144,6 +152,11 @@ var (
       "type": "string",
       "description": "Optional doublestar file-name filter such as '*.go' or '*.py'; only files whose base name matches are searched."
     },
+    "output_mode": {
+      "type": "string",
+      "enum": ["content", "files_with_matches", "count"],
+      "description": "What to return. 'content' (default): each match with file/line_number/line and optional context. 'files_with_matches': just the file paths that contain a match (cheapest — use to locate files, then read them). 'count': per-file match tallies."
+    },
     "ignore_case": {
       "type": "boolean",
       "description": "Whether to match case-insensitively. Defaults to false."
@@ -154,11 +167,19 @@ var (
     },
     "context_before": {
       "type": "integer",
-      "description": "Number of lines to include before each match. Defaults to 0."
+      "description": "Number of lines to include before each match (content mode only). Defaults to 0."
     },
     "context_after": {
       "type": "integer",
-      "description": "Number of lines to include after each match. Defaults to 0."
+      "description": "Number of lines to include after each match (content mode only). Defaults to 0."
+    },
+    "head_limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (content: matches; files_with_matches: file paths; count: count entries). Defaults to 200; pass a larger value to retrieve more in one call."
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Number of entries to skip before applying head_limit, for paginating large result sets. Defaults to 0. When truncated is true, request the next page with offset = offset + head_limit."
     }
   },
   "required": ["path", "pattern"],
@@ -180,7 +201,9 @@ var (
 
 // readArgs / writeArgs / modifyArgs decode the model-supplied tool arguments.
 type readArgs struct {
-	Path string `json:"path"`
+	Path   string `json:"path"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
 }
 type writeArgs struct {
 	Path    string `json:"path"`
@@ -217,6 +240,9 @@ type grepArgs struct {
 	IncludeHidden bool   `json:"include_hidden"`
 	ContextBefore int    `json:"context_before"`
 	ContextAfter  int    `json:"context_after"`
+	OutputMode    string `json:"output_mode"`
+	HeadLimit     int    `json:"head_limit"`
+	Offset        int    `json:"offset"`
 }
 
 type deleteArgs struct {
@@ -236,17 +262,20 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 	// config by leaving them out of agent tool lists.
 	tools = append(tools, &tool.ToolSpec{
 		Name: NameReadFile,
-		Description: "Reads a workspace file and returns `{path, content, size}` with the full contents as a UTF-8 string — " +
-			"no line-number prefix, no truncation. **`path` MUST be relative to the workspace root** (absolute paths, " +
-			"`..` and symlink escapes are rejected); a missing file returns an error. **DO NOT read files with `bash`/" +
-			"`python` (`cat`) — use this tool.**",
+		Description: "Reads a workspace file and returns `{path, content, start_line, total_lines, size, truncated}`. " +
+			"`content` is cat -n line-numbered text (`<lineNo>\\t<line>`, one row per line) so you can cite results as " +
+			"`file:line`. By default up to 2000 lines are read from the start; pass `offset`/`limit` to page larger " +
+			"files (when more lines remain, `truncated` is true and `total_lines` gives the full count). Binary files " +
+			"are rejected with an error. **`path` MUST be relative to the workspace root** (absolute paths, `..` and " +
+			"symlink escapes are rejected); a missing file returns an error. **DO NOT read files with `bash`/`python` " +
+			"(`cat`) — use this tool.**",
 		ParametersJSON: schemaRead,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a readArgs
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("xizhi_read_file: parse args: %w", err)
 			}
-			return ReadFile(workspaceRoot, a.Path)
+			return ReadFile(workspaceRoot, a.Path, a.Offset, a.Limit)
 		},
 	})
 
@@ -337,21 +366,24 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 	if cfg.Grep.Enabled {
 		tools = append(tools, &tool.ToolSpec{
 			Name: NameGrep,
-			Description: "Searches workspace file contents with an RE2 regex and returns `{path, pattern, glob, " +
-				"ignore_case, matches[]}` where each match carries `file`, `line_number`, `line`, and (when requested) " +
-				"`context_before`/`context_after`. **`path` is REQUIRED and MUST be relative to the workspace root** " +
-				"(absolute paths, `..` and the `.blowball` namespace are rejected); omitting it or passing an empty " +
-				"string is an error. Use `\".\"` to search the whole workspace root explicitly. **Prefer this over " +
-				"`bash grep`** — it is cheaper and returns line numbers. Binary files are skipped; the result is " +
-				"capped (~200 matches, lines truncated) and sets `truncated: true` when the cap is hit. Use `glob` " +
-				"to filter by file name (e.g. `*.go`).",
+			Description: "Searches workspace file contents with an RE2 regex. `output_mode` selects the result: " +
+				"`content` (default) returns `matches[]` where each match carries `file`, `line_number`, `line` and " +
+				"(when requested) `context_before`/`context_after`; `files_with_matches` returns `files[]` of just the " +
+				"matching paths (cheapest — use it to locate files, then read them); `count` returns per-file " +
+				"`counts[]`. Every result carries `mode`, `applied_limit`, `applied_offset`, `total_files` and " +
+				"`truncated`, so paginate large results with `head_limit`/`offset` (defaults: 200 / 0; request the " +
+				"next page with `offset = offset + head_limit` when `truncated` is true). **`path` is REQUIRED and " +
+				"MUST be relative to the workspace root** (absolute paths, `..` and the `.blowball` namespace are " +
+				"rejected); use `\".\"` to search the whole workspace root explicitly. **Prefer this over `bash grep`** " +
+				"— it is cheaper and returns line numbers. Binary files are skipped; long lines are truncated. Use " +
+				"`glob` to filter by file name (e.g. `*.go`).",
 			ParametersJSON: schemaGrep,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 				var a grepArgs
 				if err := json.Unmarshal(args, &a); err != nil {
 					return nil, fmt.Errorf("xizhi_grep: parse args: %w", err)
 				}
-				return GrepFiles(workspaceRoot, a.Path, a.Pattern, a.Glob, a.IgnoreCase, a.IncludeHidden, a.ContextBefore, a.ContextAfter)
+				return GrepSearch(workspaceRoot, a.Path, a.Pattern, a.Glob, a.IgnoreCase, a.IncludeHidden, a.ContextBefore, a.ContextAfter, a.OutputMode, a.HeadLimit, a.Offset)
 			},
 		})
 	}
