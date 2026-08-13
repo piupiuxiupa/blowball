@@ -42,6 +42,23 @@ func authHeaders(auth Auth) map[string]string {
 	return nil
 }
 
+// mergeHeaders builds the outbound header map for a server: the custom
+// (non-secret) Headers are applied first, then the auth-derived headers overlay
+// them, so auth wins any same-name collision (keeping the secret channel
+// authoritative and single). The returned map is what the transport sets on
+// every request. Custom headers are non-secret (see Auth); they are never
+// redacted.
+func mergeHeaders(custom map[string]string, auth Auth) map[string]string {
+	out := make(map[string]string, len(custom)+2)
+	for k, v := range custom {
+		out[k] = v
+	}
+	for k, v := range authHeaders(auth) {
+		out[k] = v
+	}
+	return out
+}
+
 // redacted replaces a non-empty secret with the standard mask and leaves an
 // empty value absent. Used by redactedAuth.
 const redacted = "***"
@@ -77,20 +94,22 @@ func redactAuth(auth Auth) redactedAuth {
 	return out
 }
 
-// serverView is the model-safe projection of a Server for mcp_list_servers:
-// name/url/transport/description plus a redacted auth, and the count (not the
-// bodies) of cached tools so the agent knows the server is callable without the
-// schema noise.
+// serverView is the model-facing projection of a Server for mcp_list_servers:
+// name/url/transport/description plus a redacted auth, the count (not the
+// bodies) of cached tools, and the custom Headers in plaintext. Auth is
+// redacted (secrets); Headers are the non-secret channel and shown verbatim.
 type serverView struct {
-	Name        string       `json:"name"`
-	URL         string       `json:"url"`
-	Transport   string       `json:"transport"`
-	Description string       `json:"description,omitempty"`
-	Auth        redactedAuth `json:"auth"`
-	Tools       int          `json:"tools"`
+	Name        string            `json:"name"`
+	URL         string            `json:"url"`
+	Transport   string            `json:"transport"`
+	Description string            `json:"description,omitempty"`
+	Auth        redactedAuth      `json:"auth"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Tools       int               `json:"tools"`
 }
 
-// serverViewFrom builds the redacted projection of s.
+// serverViewFrom builds the projection of s: auth redacted, custom headers in
+// plaintext.
 func serverViewFrom(s Server) serverView {
 	return serverView{
 		Name:        s.Name,
@@ -98,6 +117,7 @@ func serverViewFrom(s Server) serverView {
 		Transport:   s.Transport,
 		Description: s.Description,
 		Auth:        redactAuth(s.Auth),
+		Headers:     s.Headers,
 		Tools:       len(s.Tools),
 	}
 }

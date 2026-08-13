@@ -157,16 +157,16 @@ func TestValidateName(t *testing.T) {
 	// Each of these is rejected: path separators, leading dot, dots, spaces,
 	// other punctuation, and oversize.
 	for _, n := range []string{
-		"",        // empty
-		".h",      // leading dot
-		"a b",     // whitespace
-		"a.b",     // dot
-		"a/b",     // path separator
-		"../x",    // traversal
-		`a\b`,     // backslash separator
-		"a:b",     // other punctuation
-		"-lead",   // leading hyphen (not alphanumeric)
-		"_lead",   // leading underscore (not alphanumeric)
+		"",                      // empty
+		".h",                    // leading dot
+		"a b",                   // whitespace
+		"a.b",                   // dot
+		"a/b",                   // path separator
+		"../x",                  // traversal
+		`a\b`,                   // backslash separator
+		"a:b",                   // other punctuation
+		"-lead",                 // leading hyphen (not alphanumeric)
+		"_lead",                 // leading underscore (not alphanumeric)
 		strings.Repeat("a", 65), // oversize
 	} {
 		assert.Error(t, ValidateName(n), "expected %q to be rejected", n)
@@ -551,7 +551,7 @@ func TestAddServer_ConnectsAndCachesTools(t *testing.T) {
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
 
-	res, err := addServer(context.Background(), m, "calc", "http://x/mcp", "calculator", "http", Auth{Type: AuthBearer, Value: "tok"})
+	res, err := addServer(context.Background(), m, "calc", "http://x/mcp", "calculator", "http", Auth{Type: AuthBearer, Value: "tok"}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "added", res.Status)
 	assert.Equal(t, 1, res.Tools)
@@ -579,7 +579,7 @@ func TestAddServer_InvalidNameRejected(t *testing.T) {
 	m, _ := newManagerWithFake(t, ft, ManagerOptions{})
 	defer m.Close()
 
-	_, err := addServer(context.Background(), m, "a.b", "http://x", "", "http", Auth{})
+	_, err := addServer(context.Background(), m, "a.b", "http://x", "", "http", Auth{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid")
 	assert.Contains(t, err.Error(), "github") // rule/example guidance present
@@ -593,7 +593,7 @@ func TestAddServer_DuplicateNameRejected(t *testing.T) {
 	defer m.Close()
 	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
 
-	_, err := addServer(context.Background(), m, "calc", "http://y", "", "http", Auth{})
+	_, err := addServer(context.Background(), m, "calc", "http://y", "", "http", Auth{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 	ini, _, _ := ft.snapshot()
@@ -604,7 +604,7 @@ func TestAddServer_RejectsNonHTTP(t *testing.T) {
 	ft := &fakeTransport{}
 	m, _ := newManagerWithFake(t, ft, ManagerOptions{})
 	defer m.Close()
-	_, err := addServer(context.Background(), m, "calc", "http://x", "", "stdio", Auth{})
+	_, err := addServer(context.Background(), m, "calc", "http://x", "", "stdio", Auth{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "http")
 	ini, _, _ := ft.snapshot()
@@ -615,7 +615,7 @@ func TestRemoveServer_RemovesAndDropsConnection(t *testing.T) {
 	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
 	m, ws := newManagerWithFake(t, ft, ManagerOptions{})
 	defer m.Close()
-	_, err := addServer(context.Background(), m, "calc", "http://x", "", "http", Auth{Type: AuthBearer, Value: "tok"})
+	_, err := addServer(context.Background(), m, "calc", "http://x", "", "http", Auth{Type: AuthBearer, Value: "tok"}, nil)
 	require.NoError(t, err)
 	_, _ = m.Conn(context.Background(), "calc") // warm the connection
 
@@ -744,7 +744,7 @@ func TestLog_NoPlaintextAuth(t *testing.T) {
 	m, _ := newManagerWithFake(t, ft, ManagerOptions{ConnectTimeout: time.Second, CallTimeout: time.Second})
 	defer m.Close()
 
-	_, err := addServer(context.Background(), m, "calc", "http://x", "", "http", Auth{Type: AuthBearer, Value: secret})
+	_, err := addServer(context.Background(), m, "calc", "http://x", "", "http", Auth{Type: AuthBearer, Value: secret}, nil)
 	require.NoError(t, err)
 	_, _ = callTool(context.Background(), m, "calc", "missing", json.RawMessage(`{}`))
 
@@ -977,4 +977,158 @@ func TestWriteBackToolsAsync_FailureOnlyLogs(t *testing.T) {
 	cfg, err := LoadConfig(ws)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.Servers)
+}
+
+// ---------------------------------------------------------------------------
+// Custom (non-secret) request headers (add-user-mcp-custom-headers)
+// ---------------------------------------------------------------------------
+
+// TestMergeHeaders asserts the injection merge: custom headers are applied
+// first and auth-derived headers overlay them, so auth wins same-name
+// collisions. Custom-only, auth-only, and coexistence paths are covered.
+func TestMergeHeaders(t *testing.T) {
+	// Custom-only headers pass through verbatim.
+	got := mergeHeaders(map[string]string{"X-Tenant": "acme", "X-Region": "eu"}, Auth{})
+	assert.Equal(t, "acme", got["X-Tenant"])
+	assert.Equal(t, "eu", got["X-Region"])
+	assert.Len(t, got, 2)
+
+	// Auth-only headers are still produced.
+	got = mergeHeaders(nil, Auth{Type: AuthBearer, Value: "tok"})
+	assert.Equal(t, "Bearer tok", got["Authorization"])
+	assert.Len(t, got, 1)
+
+	// Collision: a custom Authorization header is overridden by bearer auth.
+	got = mergeHeaders(map[string]string{"Authorization": "custom"}, Auth{Type: AuthBearer, Value: "tok"})
+	assert.Equal(t, "Bearer tok", got["Authorization"], "auth must win on a name collision")
+
+	// A custom header coexists with an auth header when names differ.
+	got = mergeHeaders(map[string]string{"X-Tenant": "acme"}, Auth{Type: AuthAPIKey, Value: "k"})
+	assert.Equal(t, "acme", got["X-Tenant"])
+	assert.Equal(t, "k", got[defaultAPIKeyHeader])
+	assert.Len(t, got, 2)
+}
+
+// TestValidateHeaders covers the custom-header validators: valid headers pass,
+// reserved transport-managed names (case-insensitive) are rejected, invalid
+// token names are rejected, and CR/LF in values is rejected.
+func TestValidateHeaders(t *testing.T) {
+	// Valid headers pass at the server level.
+	assert.NoError(t, validateServer(Server{
+		URL: "http://x", Transport: "http",
+		Headers: map[string]string{"X-Tenant": "acme", "X-Trace-Id": "abc-123"},
+	}))
+
+	// Each reserved header name is rejected, including case variants.
+	for _, name := range []string{
+		"Content-Type", "content-type", "CONTENT-TYPE",
+		"Content-Length", "Accept", "ACCEPT",
+		"Mcp-Session-Id", "mcp-session-id", "Host",
+	} {
+		err := validateServer(Server{
+			URL: "http://x", Transport: "http",
+			Headers: map[string]string{name: "v"},
+		})
+		require.Error(t, err, "header %q must be rejected", name)
+		assert.Contains(t, err.Error(), "reserved")
+		assert.Contains(t, err.Error(), name)
+	}
+
+	// Invalid header name (not a valid HTTP token).
+	err := validateServer(Server{
+		URL: "http://x", Transport: "http",
+		Headers: map[string]string{"Bad Name": "v"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "valid HTTP token")
+
+	// CRLF in a value is rejected (header/CRLF injection).
+	for _, val := range []string{"a\nb", "a\rb", "a\r\nb"} {
+		err := validateServer(Server{
+			URL: "http://x", Transport: "http",
+			Headers: map[string]string{"X-Ok": val},
+		})
+		require.Error(t, err, "value %q must be rejected", val)
+		assert.Contains(t, err.Error(), "CR or LF")
+	}
+}
+
+// TestWriteServer_HeadersRoundTrip ensures custom headers persist to
+// {name}/config.json and round-trip through LoadConfig unchanged.
+func TestWriteServer_HeadersRoundTrip(t *testing.T) {
+	ws := t.TempDir()
+	require.NoError(t, WriteServer(ws, Server{
+		Name: "svc", URL: "http://x/mcp", Transport: "http",
+		Auth:    Auth{Type: AuthBearer, Value: "tok"},
+		Headers: map[string]string{"X-Tenant": "acme", "X-Region": "eu"},
+	}))
+
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	require.Len(t, cfg.Servers[0].Headers, 2)
+	assert.Equal(t, "acme", cfg.Servers[0].Headers["X-Tenant"])
+	assert.Equal(t, "eu", cfg.Servers[0].Headers["X-Region"])
+
+	// The plaintext headers are present in the on-disk file body.
+	body, err := os.ReadFile(serverConfigPath(ws, "svc"))
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "X-Tenant")
+	assert.Contains(t, string(body), "acme")
+}
+
+// TestListServers_CustomHeadersPlaintext verifies the non-secret channel:
+// custom headers are surfaced verbatim by mcp_list_servers while the auth
+// credential stays redacted.
+func TestListServers_CustomHeadersPlaintext(t *testing.T) {
+	ws := t.TempDir()
+	writeServers(t, ws, Server{
+		Name: "a", URL: "http://a", Transport: "http",
+		Auth:    Auth{Type: AuthBearer, Value: "super-secret-token"},
+		Headers: map[string]string{"X-Tenant": "acme"},
+	})
+	m := NewManager(ManagerOptions{WorkspaceRoot: ws})
+
+	out, err := listServers(m)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	// Custom header shown in plaintext.
+	require.NotNil(t, out[0].Headers)
+	assert.Equal(t, "acme", out[0].Headers["X-Tenant"])
+	// Auth still redacted.
+	assert.Equal(t, redacted, out[0].Auth.Value)
+
+	// Rendered JSON carries the plaintext header but never the auth secret.
+	rendered, err := json.Marshal(out)
+	require.NoError(t, err)
+	assert.Contains(t, string(rendered), "acme")
+	assert.NotContains(t, string(rendered), "super-secret-token")
+}
+
+// TestAddServer_CustomHeadersPersisted ensures mcp_add_server persists custom
+// headers and rejects reserved names before any network activity.
+func TestAddServer_CustomHeadersPersisted(t *testing.T) {
+	ft := &fakeTransport{tools: []mcpclient.Tool{{Name: "add"}}}
+	m, ws := newManagerWithFake(t, ft, ManagerOptions{})
+	defer m.Close()
+
+	_, err := addServer(context.Background(), m, "svc", "http://x", "", "http", Auth{},
+		map[string]string{"X-Tenant": "acme"})
+	require.NoError(t, err)
+
+	cfg, err := LoadConfig(ws)
+	require.NoError(t, err)
+	require.Len(t, cfg.Servers, 1)
+	assert.Equal(t, "acme", cfg.Servers[0].Headers["X-Tenant"])
+
+	// A reserved header name is rejected before the server is contacted.
+	ft2 := &fakeTransport{}
+	m2, _ := newManagerWithFake(t, ft2, ManagerOptions{})
+	defer m2.Close()
+	_, err = addServer(context.Background(), m2, "svc2", "http://x", "", "http", Auth{},
+		map[string]string{"Content-Type": "text/plain"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reserved")
+	ini, _, calls := ft2.snapshot()
+	assert.Equal(t, 0, ini+calls, "a reserved header must be rejected before connecting")
 }

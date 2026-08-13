@@ -23,18 +23,20 @@ type TimeoutConfig struct {
 	Connect time.Duration
 	Call    time.Duration
 }
-// DefaultTransportFactory builds an HTTPTransport carrying the server's static
-// auth headers (leak invariant #3: auth is injected here, server-side, and
-// never appears in a tool result or log). The HTTP client timeout is set to
-// the total call timeout as a per-request safety net; precise control is
-// provided by the caller-bound contexts the Manager passes to each transport
-// method.
+
+// DefaultTransportFactory builds an HTTPTransport carrying the server's request
+// headers: the non-secret custom Headers overlaid by the static auth headers
+// (auth wins collisions). Leak invariant #3 holds — auth is injected here,
+// server-side, and never appears in a tool result or log; custom headers are
+// non-secret by design. The HTTP client timeout is set to the total call
+// timeout as a per-request safety net; precise control is provided by the
+// caller-bound contexts the Manager passes to each transport method.
 var DefaultTransportFactory TransportFactory = func(server Server, tc TimeoutConfig) (mcpclient.Transport, error) {
 	callTimeout := tc.Call
 	if callTimeout <= 0 {
 		callTimeout = defaultTotalCallTimeout
 	}
-	headers := authHeaders(server.Auth)
+	headers := mergeHeaders(server.Headers, server.Auth)
 	return mcpclient.NewHTTPTransport(server.URL, headers, callTimeout), nil
 }
 

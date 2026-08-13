@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -130,12 +131,19 @@ type ToolCache struct {
 // `{name}/config.json`. A stray `name` key inside a file body is therefore
 // ignored on load.
 type Server struct {
-	Name        string      `json:"-"`
-	URL         string      `json:"url"`
-	Transport   string      `json:"transport"`
-	Auth        Auth        `json:"auth,omitempty"`
-	Description string      `json:"description,omitempty"`
-	Tools       []ToolCache `json:"tools,omitempty"`
+	Name      string `json:"-"`
+	URL       string `json:"url"`
+	Transport string `json:"transport"`
+	Auth      Auth   `json:"auth,omitempty"`
+	// Headers are optional NON-SECRET custom request headers injected into every
+	// outbound request to this server (tenant id, routing/gateway params, a
+	// proprietary token used together with auth.type "none", …). They are the
+	// non-secret channel: NOT redacted (surfaced verbatim by mcp_list_servers
+	// and persisted in plaintext) — put secrets in Auth, never here. On a
+	// header-name collision with the auth-derived headers, Auth wins.
+	Headers     map[string]string `json:"headers,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Tools       []ToolCache       `json:"tools,omitempty"`
 }
 
 // Config is the in-memory aggregation of a user's configured servers. It is
@@ -234,6 +242,49 @@ func validateServer(s Server) error {
 		// ok
 	default:
 		return fmt.Errorf("unsupported auth type %q (use bearer, api-key, or basic)", s.Auth.Type)
+	}
+	if err := validateHeaders(s.Headers); err != nil {
+		return err
+	}
+	return nil
+}
+
+// headerNameRegexp constrains a custom header name to a valid RFC 7230 token
+// (one or more tchars). This mirrors the rule net/http enforces at request
+// time, but is checked up front so a bad name yields a clear error before any
+// network activity.
+var headerNameRegexp = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+// reservedHeaderNames are the HTTP headers the Streamable HTTP transport
+// manages itself: Content-Type/Accept carry the JSON-RPC framing,
+// Content-Length and Host are owned by the http client, and Mcp-Session-Id
+// tracks the session. Letting a server's custom headers override any of them
+// would corrupt the request, so they are rejected here. Comparison is
+// case-insensitive (canonical form).
+var reservedHeaderNames = map[string]struct{}{
+	"Content-Type":   {},
+	"Content-Length": {},
+	"Accept":         {},
+	"Mcp-Session-Id": {},
+	"Host":           {},
+}
+
+// validateHeaders validates a server's custom request headers. Names must be
+// valid HTTP tokens and must not collide with the reserved transport-managed
+// set; values must not contain CR or LF (CRLF / header injection). Custom
+// headers are the NON-SECRET channel (secrets go in Auth), so they are checked
+// for shape only — they are never redacted.
+func validateHeaders(headers map[string]string) error {
+	for name, value := range headers {
+		if !headerNameRegexp.MatchString(name) {
+			return fmt.Errorf("custom header name %q is not a valid HTTP token", name)
+		}
+		if _, reserved := reservedHeaderNames[textproto.CanonicalMIMEHeaderKey(name)]; reserved {
+			return fmt.Errorf("custom header %q is reserved (transport-managed); remove it (reserved: Content-Type, Content-Length, Accept, Mcp-Session-Id, Host)", name)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("custom header %q value must not contain CR or LF", name)
+		}
 	}
 	return nil
 }

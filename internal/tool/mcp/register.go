@@ -130,7 +130,12 @@ func registerAddServer(r *tool.Registry, tools *Tools) error {
 			"stdio and OAuth are not. The tool connects to the server, validates it is " +
 			"reachable, and caches its `tools/list` so `mcp_call` can validate args " +
 			"later. A duplicate name is rejected. Credentials are stored in your config " +
-			"file and are NEVER returned by this tool.",
+			"file and are NEVER returned by this tool. `headers` (optional) are NON-SECRET " +
+			"custom request headers (tenant id, routing/gateway params, or a proprietary " +
+			"token used with auth.type \"none\"). Never put secrets in `headers` — use " +
+			"`auth` (headers are shown in plaintext by mcp_list_servers). Reserved header " +
+			"names (Content-Type, Content-Length, Accept, Mcp-Session-Id, Host) are " +
+			"rejected; on a name collision with `auth`, `auth` wins.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -151,6 +156,11 @@ func registerAddServer(r *tool.Registry, tools *Tools) error {
 					"description": "Transport type. Only \"http\" is accepted (default if omitted).",
 					"default": "http"
 				},
+				"headers": {
+					"type": "object",
+					"description": "Optional NON-SECRET custom request headers injected on every call to this server (e.g. tenant id, routing/gateway params, or a proprietary token used with auth.type \"none\"). NOT redacted — shown in plaintext by mcp_list_servers and stored in plaintext. Never put secrets here: secrets go in the auth field. Header names must be valid HTTP tokens; the transport-managed names Content-Type, Content-Length, Accept, Mcp-Session-Id, Host are rejected. On a name collision with auth, auth wins.",
+					"additionalProperties": {"type": "string"}
+				},
 				"auth": {
 					"type": "object",
 					"description": "Static credentials, injected server-side on each call. One of: {\"type\":\"bearer\",\"value\":\"<token>\"}, {\"type\":\"api-key\",\"value\":\"<key>\",\"header\":\"X-API-Key\"}, or {\"type\":\"basic\",\"username\":\"...\",\"password\":\"...\"}. OAuth is not supported.",
@@ -169,16 +179,17 @@ func registerAddServer(r *tool.Registry, tools *Tools) error {
 		}`),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
-				Name        string `json:"name"`
-				URL         string `json:"url"`
-				Description string `json:"description"`
-				Transport   string `json:"transport"`
-				Auth        Auth    `json:"auth"`
+				Name        string            `json:"name"`
+				URL         string            `json:"url"`
+				Description string            `json:"description"`
+				Transport   string            `json:"transport"`
+				Auth        Auth              `json:"auth"`
+				Headers     map[string]string `json:"headers"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("mcp_add_server: parse args: %w", err)
 			}
-			return addServer(ctx, tools.manager, a.Name, a.URL, a.Description, a.Transport, a.Auth)
+			return addServer(ctx, tools.manager, a.Name, a.URL, a.Description, a.Transport, a.Auth, a.Headers)
 		},
 	}
 	return r.Register(spec)
@@ -312,10 +323,10 @@ func registerListTools(r *tool.Registry, tools *Tools) error {
 // addResult is the redacted confirmation returned by mcp_add_server. It never
 // carries the auth value.
 type addResult struct {
-	Name   string `json:"name"`
-	URL    string `json:"url"`
-	Status string `json:"status"`
-	Tools  int    `json:"tools"`
+	Name   string       `json:"name"`
+	URL    string       `json:"url"`
+	Status string       `json:"status"`
+	Tools  int          `json:"tools"`
 	Auth   redactedAuth `json:"auth"`
 }
 
@@ -347,7 +358,7 @@ func listServers(m *Manager) ([]serverView, error) {
 // addServer validates the entry, connects to capture tools/list, and persists
 // the per-server config. The connection is cached on the manager so the
 // following mcp_call reuses it.
-func addServer(ctx context.Context, m *Manager, name, url, description, transport string, auth Auth) (addResult, error) {
+func addServer(ctx context.Context, m *Manager, name, url, description, transport string, auth Auth, headers map[string]string) (addResult, error) {
 	// Name validation runs first with a full rule/example message so an invalid
 	// name is rejected before any network activity.
 	if err := ValidateName(name); err != nil {
@@ -376,6 +387,7 @@ func addServer(ctx context.Context, m *Manager, name, url, description, transpor
 		URL:         url,
 		Transport:   transport,
 		Auth:        auth,
+		Headers:     headers,
 		Description: description,
 	}
 
