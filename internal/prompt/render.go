@@ -129,7 +129,7 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 			fmt.Fprintf(&b, "  </skill>\n")
 		}
 		b.WriteString("</skills>\n\n")
-		b.WriteString("Use luban_list_skills / luban_read_skill / luban_install_skill for skill operations. Never use xizhi_* tools to access the skills directory.\n")
+		b.WriteString("MUST USE `luban_*` for skill operations. NEVER USE `xizhi_*` tools to access the skills directory.\n")
 		b.WriteString("luban_install_skill supports several install shapes: a whole git repository is cloned as one entry; a git collection combined with the optional `skill` parameter installs only the selected sub-skill (matched by frontmatter name, else by repo-relative subpath) and discards the rest; and a single SKILL.md URL ending in .md is downloaded and installed directly.\n")
 		b.WriteString("If a .md URL is not itself a valid skill, luban_install_skill returns the fetched content as an install document (result kind \"install-doc\") instead of installing. When a user asks to install a skill from an instruction or landing page, read the returned install-document content, follow it to the real skill source URL it points at, and call luban_install_skill again with that source - do not treat the instruction page itself as the skill.\n")
 		b.WriteString("You may use the bash tool to read and execute files under the exposed skill directories (run Python scripts via `bash` calling `python3`). Global skill directories are read-only and must not be modified. Per-user skills live under the workspace at .blowball/skills and are managed exclusively via the luban_* tools; never use xizhi_* tools to access .blowball or any skill directory.\n")
@@ -155,7 +155,7 @@ func renderWorkspaceConvention() string {
 		"- The `bash` sandbox runs with `/workspace` as the working directory.\n" +
 		"- The sandbox's `/tmp` is mapped to the workspace's `./tmp/` directory. Files written to `/tmp` persist at `tmp/` and can be read with `xizhi_read_file` using a relative path such as `tmp/hello.txt`.\n" +
 		"- **Where generated files go:** write temporary or intermediate artifacts (exploratory calculations, debug dumps, test scaffolding — anything that is NOT a final deliverable) to `tmp/`. Write final deliverables directly in the workspace (not under `tmp/`), organized into meaningful directories by topic or task, and keep related files together in the same directory rather than scattering them.\n" +
-		"- **Keep `tmp/` clean:** `tmp/` is a scratch area whose contents are temporary. Once a scratch file has served its purpose, remove it promptly with `xizhi_delete` (or `bash rm` when `xizhi_delete` is unavailable). **Never hand a `tmp/` path to the user as a deliverable** — move the result into the workspace first, or delete the scratch."
+		"- **KEEP `tmp/` clean:** `tmp/` is a scratch area whose contents are temporary. Once a scratch file has served its purpose, remove it promptly with `xizhi_delete` (or `bash rm` when `xizhi_delete` is unavailable). **NEVER hand a `tmp/` path to the user as a deliverable** — move the result into the workspace first, or delete the scratch."
 }
 
 func classifyTools(tools []ToolInfo) ([]ToolInfo, map[string][]ToolInfo) {
@@ -178,5 +178,7 @@ func renderImportantNotice() string {
 	- Before executing a task, also proactively evaluate whether a configured per-user MCP service (see the "User MCP Servers" section, if present) is the best way to accomplish it, and select it when appropriate.
 	- You must not repeat the content of the skill itself to the user; instead, you should strictly follow the specifications of the skill to complete the task.
 	- When replying to users, try to use few or no emojis.
+	- Respond PRECISELY and CONCISELY. No filler. Give the SHORTEST complete answer.
+	- For SIMPLE TASKS (e.g., factual Q&A, basic math, common requests), respond with the most STRAIGHTFORWARD solution. Do not OVERTHINK, do not add extra steps or alternative interpretations, and do not provide background unless explicitly requested. Give the simplest correct answer immediately.
 	`
 }
