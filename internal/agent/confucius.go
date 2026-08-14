@@ -474,13 +474,12 @@ func (c *Confucius) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub *
 		return toolResult{content: msg, isError: true}
 	}
 	out, err := c.toolRegistry.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
-	if err != nil {
-		// Frontend channel: keep emitting agent_error for tool failures so the
-		// UI can signal them. The model-facing error is carried in-band by
-		// renderToolResult's envelope ({"status":1,"error":...}); both channels
-		// fire independently (capability: tool-result-envelope).
-		streamAgentError(hub, ctx, c.Name(), err.Error(), "tool_error")
-	}
+	// On a tool failure the status envelope (renderToolResult's
+	// {"status":1,"error":...}) is the sole channel: the model sees the error
+	// in-band in the role="tool" message and the frontend renders it from the
+	// tool_result status field. No agent_error is emitted for tool failures —
+	// that would misrepresent a recoverable tool hiccup as an agent failure and
+	// double-display on reload (capability: tool-result-envelope).
 	return toolResult{content: renderToolResult(out, err), isError: err != nil}
 }
 

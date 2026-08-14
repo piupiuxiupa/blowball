@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -208,6 +208,57 @@ func TestChongzhi_RunsXizhiTool(t *testing.T) {
 	assert.True(t, sawTool, "expected tool_call event for xizhi_write_file")
 }
 
+// TestChongzhi_ToolFailure_NoAgentError verifies that a registry-tool failure
+// is carried solely by the status envelope in the role="tool" message and does
+// NOT emit an agent_error SSE event. The frontend renders tool errors from the
+// status field; surfacing them again as agent_error misrepresents a recoverable
+// tool hiccup as an agent failure (capability: tool-result-envelope). This guards
+// the shared leaf-agent dispatchOneRegistryTool path used by Chongzhi/Liang and
+// the parallel structure of Confucius's dispatchRegistryTool.
+func TestChongzhi_ToolFailure_NoAgentError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	fake := &fakeExecutor{name: "xizhi_write_file", err: errors.New("disk full")}
+	reg := newChongzhiRegistryWithFake(t, fake)
+
+	client := newFake(
+		fakeResponse{
+			finishReason: "tool_calls",
+			toolCalls: []ToolCall{{
+				ID:       "t1",
+				Function: ToolCallFunction{Name: "xizhi_write_file", Arguments: `{"path":"a.txt","content":"hi"}`},
+			}},
+		},
+		fakeResponse{
+			content:      "could not write the file",
+			finishReason: "stop",
+			tokens:       []string{"could not write the file"},
+		},
+	)
+	c := newTestChongzhi(t, client, reg)
+
+	events, _, _, err := runChongzhiAndCollect(t, c, []Message{
+		{Role: "user", Content: "write a.txt"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, fake.callCount(), "xizhi_write_file must be invoked once (failure path)")
+
+	// The model must receive the failure in-band via the status envelope.
+	last := client.lastRequest()
+	var toolContent string
+	for _, m := range last.Messages {
+		if m.Role == "tool" && m.ToolCallID == "t1" {
+			toolContent = m.Content
+		}
+	}
+	assert.Contains(t, toolContent, `"status":1`, "tool result envelope must mark failure")
+	assert.Contains(t, toolContent, `"error":"disk full"`, "tool result envelope must carry the error message")
+
+	// No agent_error event must be emitted for a registry-tool failure.
+	for _, e := range events {
+		assert.NotEqual(t, stream.EventAgentError, e.Type, "a registry-tool failure must not emit an agent_error event")
+	}
+}
+
 // TestChongzhi_DispatchesToolCallsOnStopFinishReason verifies that Chongzhi
 // dispatches tool_calls even when the finish_reason is "stop" rather than the
 // native "tool_calls" value.
@@ -287,17 +338,21 @@ func TestChongzhi_FlatTopology_NoInvokeTools(t *testing.T) {
 	assert.Equal(t, "fallback", content)
 
 	// Flat-topology contract: invoke_* tools are NEVER recognized by Chongzhi.
-	// The tool_call must error as "unknown tool" (registry miss) rather than
-	// dispatching the sub-agent.
-	var sawUnknownErr bool
-	for _, e := range events {
-		if e.Type == stream.EventAgentError && e.Agent == "Chongzhi" {
-			if strings.Contains(e.Content, "unknown tool") || strings.Contains(e.Content, ToolInvokeLiang) {
-				sawUnknownErr = true
-			}
+	// The tool_call errors as a registry miss — surfaced to the model in-band via
+	// the status envelope ({"status":1,"error":...}), NOT as an agent_error event:
+	// a registry-tool failure (including an unrecognized name) is carried solely by
+	// the envelope so it does not misrepresent a recoverable error as an agent crash.
+	var toolContent string
+	for _, m := range client.lastRequest().Messages {
+		if m.Role == "tool" && m.ToolCallID == "t-inv" {
+			toolContent = m.Content
 		}
 	}
-	assert.True(t, sawUnknownErr, "Chongzhi must surface an unknown-tool error for invoke_liang; flat topology forbids sub-agent recursion")
+	assert.Contains(t, toolContent, `"status":1`, "invoke_liang must fail as a registry miss in the status envelope")
+	assert.Contains(t, toolContent, ToolInvokeLiang, "the tool-result error must name the unrecognized invoke_* tool")
+	for _, e := range events {
+		assert.NotEqual(t, stream.EventAgentError, e.Type, "a registry-tool failure must not emit an agent_error event")
+	}
 
 	// The fake xizhi tool should not have been touched.
 	assert.Equal(t, 0, fake.callCount(), "xizhi tool must not be invoked by an invoke_liang tool_call")

@@ -269,11 +269,8 @@ func (c *Chongzhi) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub
 		streamAgentError(hub, ctx, c.Name(), msg, "unknown_tool")
 		return toolResult{content: msg, isError: true}
 	}
+	// On a tool failure the status envelope is the sole channel — no agent_error
+	// is emitted for tool failures (capability: tool-result-envelope).
 	out, err := c.toolRegistry.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
-	if err != nil {
-		// Frontend channel: agent_error still fires; the model-facing error is
-		// carried in-band by the status envelope (capability: tool-result-envelope).
-		streamAgentError(hub, ctx, c.Name(), err.Error(), "tool_error")
-	}
 	return toolResult{content: renderToolResult(out, err), isError: err != nil}
 }
