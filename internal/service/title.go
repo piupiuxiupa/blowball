@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -21,7 +22,15 @@ const maxTitleRunes = 20
 // titleSystemPrompt is the tiny instruction we prepend to the Q&A exchange.
 // Asking for "title only" without quotes keeps the LLM from wrapping the
 // answer in punctuation that would leak into the stored value.
-const titleSystemPrompt = "Generate a short title (max 20 chars, no quotes) summarizing this conversation. Reply with the title only."
+
+// const titleSystemPrompt = "Generate a short title (max 20 chars, no quotes) summarizing this conversation. Reply with the title only."
+const text = `Create a concise title for an AI coding-assistant session from the supplied human messages.
+Return only the title on one line, in plain text of natural language, with no quotes,
+prefix, explanation, Markdown, XML, or terminal control codes. No code is allowed.
+Use the language of the messages.
+Aim for about %d words in non-CJK languages or %d CJK characters.`
+
+var titleSystemPrompt = fmt.Sprintf(text, maxTitleRunes, maxTitleRunes)
 
 // TitleService generates a short session title asynchronously from the first
 // user/assistant exchange. Generation is fire-and-forget: callers run it in a
@@ -114,7 +123,7 @@ func (s *TitleService) callLLM(ctx context.Context, log *zap.Logger, userMsg, as
 		Model: modelName,
 		Messages: []agent.Message{
 			{Role: "system", Content: titleSystemPrompt},
-			{Role: "user", Content: "User: " + userMsg + "\n\nAssistant: " + assistantMsg},
+			{Role: "user", Content: "Generate the session title from the following messages: \n\n User: " + userMsg + "\n\nAssistant: " + assistantMsg},
 		},
 	}
 
