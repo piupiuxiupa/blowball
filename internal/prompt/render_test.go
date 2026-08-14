@@ -70,10 +70,10 @@ func TestRenderSystemPrompt_FileOutputConvention(t *testing.T) {
 	// (b) grouping related files.
 	assert.Contains(t, out, "keep related files together")
 	// (c) timely tmp cleanup via xizhi_delete.
-	assert.Contains(t, out, "Keep `tmp/` clean")
+	assert.Contains(t, out, "**KEEP `tmp/` clean:**")
 	assert.Contains(t, out, "xizhi_delete")
 	// (d) forbid handing tmp paths as deliverables.
-	assert.Contains(t, out, "Never hand a `tmp/` path to the user as a deliverable")
+	assert.Contains(t, out, "**NEVER hand a `tmp/` path to the user as a deliverable**")
 	// Coexists with the pre-existing relative-path / tmp-mapping guidance.
 	assert.Contains(t, out, "All `xizhi_*` paths must be relative to the workspace root")
 	assert.Contains(t, out, "sandbox's `/tmp` is mapped")
@@ -122,8 +122,8 @@ func TestRenderSystemPrompt_Skills(t *testing.T) {
 	assert.Contains(t, out, "    <description>Global coding conventions</description>")
 	assert.Contains(t, out, "    <location>skills/coding-style</location>")
 	assert.Contains(t, out, "</skills>")
-	assert.Contains(t, out, "Use luban_list_skills / luban_read_skill / luban_install_skill for skill operations. Never use xizhi_* tools to access the skills directory.")
-	assert.Contains(t, out, "luban_read_skill")
+	assert.Contains(t, out, "MUST USE `luban_*` for skill operations. NEVER USE `xizhi_*` tools to access the skills directory.")
+	assert.Contains(t, out, "When the user explicitly names a specific skill or MCP service")
 	assert.Contains(t, out, "luban_install_skill")
 	// Multi-form install guidance: supported shapes and install-doc flow.
 	assert.Contains(t, out, "whole git repository is cloned as one entry")
