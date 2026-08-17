@@ -97,6 +97,10 @@ func (c *Confucius) LastRunHitCap() bool { return c.hitCapThisRun }
 // usage.by_agent / usage.meta on the done event and it is persisted verbatim
 // into turn_usage.usage_json.
 func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
+	// Attribute every LLM call this loop makes (including round-cap wrap-up
+	// rounds, which inherit this ctx) to this agent in the raw-capture log.
+	ctx = WithAgentName(ctx, c.Name())
+
 	select {
 	case <-ctx.Done():
 		return "", Usage{}, nil, ctx.Err()

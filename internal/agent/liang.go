@@ -76,6 +76,10 @@ func (l *Liang) LastRunHitCap() bool { return l.hitCapThisRun }
 // degrades to a single streaming completion, sending no tools[] field so the
 // existing TestLiang_NoTools_PassesEmptyToolsJSON contract still holds.
 func (l *Liang) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
+	// Attribute every LLM call this loop makes (including round-cap wrap-up
+	// rounds, which inherit this ctx) to this agent in the raw-capture log.
+	ctx = WithAgentName(ctx, l.Name())
+
 	select {
 	case <-ctx.Done():
 		return "", Usage{}, nil, ctx.Err()

@@ -25,6 +25,7 @@ import (
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/handler"
+	"github.com/lush/blowball/internal/llmraw"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/service"
@@ -131,17 +132,20 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 	// handlers their partition needs, so the api role never instantiates the
 	// orchestrator, OpenAI client, tool registry, or MCP manager.
 	var mcpMgr *mcpclient.Manager
+	var rawFlusher *llmraw.Flusher
 	switch role {
 	case "all":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
-		agentDeps, mgr := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
+		rawFlusher = fl
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	case "api":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
 	case "agent":
-		agentDeps, mgr := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
+		rawFlusher = fl
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	}
 	if mcpMgr != nil {
@@ -186,6 +190,14 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		log.Error("server shutdown error", zap.Error(err))
 	}
 	log.Info("server stopped", zap.String("role", role))
+
+	// Drain the raw-capture write-behind buffer before the deferred store
+	// closes release Redis/MySQL, so a graceful restart does not leave the
+	// tail of the buffer unflushed (nil on the api role, which never captures).
+	if rawFlusher != nil {
+		rawFlusher.Close()
+		log.Info("llm raw flusher stopped", zap.String("role", role))
+	}
 	return nil
 }
 
@@ -422,11 +434,12 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 
 // wireAgent builds the agent layer for the agent role (and contributes it in
 // the all role): the tool registry, the external MCP manager, the OpenAI
-// client, the orchestrator, the title service, and the streaming + MCP-tool
-// handlers. It returns a RouteDeps populated with only the agent-route
-// handlers (SendMessage, MCPTools) plus the auth middleware, and the MCP
-// manager so serveRun can defer its Close.
-func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager) {
+// client (with raw-capture sink attached), the orchestrator, the title
+// service, and the streaming + MCP-tool handlers. It returns a RouteDeps
+// populated with only the agent-route handlers (SendMessage, MCPTools) plus
+// the auth middleware, the MCP manager so serveRun can defer its Close, and
+// the raw-capture flusher so serveRun can drain it on shutdown.
+func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher) {
 	cfg := rt.cfg
 	dataDir := rt.dataDir
 	fsStore := rt.fsStore
@@ -499,7 +512,17 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	// Message service delegates saves back to SessionService.SaveMessage so writes stay in one place.
 	msgSvc := service.NewMessageService(service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: fsStore}, sessSvc.SaveMessage)
 
-	openAIClient := agent.NewOpenAIClient(cfg.OpenAI)
+	// Raw LLM capture (llm-raw-capture capability): the sink stages captured
+	// request/response/error payloads in the Redis write-behind buffer and the
+	// flusher batch-inserts them into llm_raw_log. Zero-config, always on for
+	// agent/all roles; serveRun closes the flusher after the HTTP shutdown so
+	// the buffer drains before the stores are released.
+	rawNotify := make(chan struct{}, 1)
+	rawSink := llmraw.NewSink(rt.redisStore, rawNotify)
+	rawFlusher := llmraw.NewFlusher(rt.redisStore, rt.mysqlStore, rawNotify)
+	rawFlusher.Start()
+
+	openAIClient := agent.NewOpenAIClientWithSink(cfg.OpenAI, rawSink)
 	titleSvc := service.NewTitleService(openAIClient, rt.mysqlStore, cfg.OpenAI)
 
 	// The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
@@ -519,7 +542,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		AuthMW:      middleware.AuthMiddleware(cfg.JWT.Secret),
 		SendMessage: streamHandler.SendMessage,
 		MCPTools:    mcpHandler.Tools,
-	}, mcpManager
+	}, mcpManager, rawFlusher
 }
 
 // newEngine builds a gin.Engine with the standard middleware chain shared by

@@ -4,8 +4,13 @@
 //   - session:{session_id} — per-session blob cache (the warm layer)
 //   - msgs:{session_id}    — per-session ordered message-list cache (RPUSH/LRANGE)
 //
-// A single *redis.Client and a uniform TTL is shared across both families so
-// callers can use one Store value for everything.
+// plus one queue key (no TTL, not a cache):
+//
+//   - llm_raw:buffer — write-behind buffer of raw LLM capture records,
+//     drained in batches into the MySQL llm_raw_log table (see llm_raw.go)
+//
+// A single *redis.Client and a uniform TTL is shared across the cache
+// families so callers can use one Store value for everything.
 package redis
 
 import (

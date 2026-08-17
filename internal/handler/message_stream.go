@@ -107,7 +107,9 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	sessionID := c.Param("session_id")
 	tid := middleware.TraceIDFromCtx(c)
-	ctx := trace.WithContext(c.Request.Context(), tid)
+	// trace_id + session_id both ride the context so the raw-capture sink can
+	// attribute every LLM call the orchestrator makes to this session.
+	ctx := agent.WithSessionID(trace.WithContext(c.Request.Context(), tid), sessionID)
 
 	sess, err := h.sessSvc.GetSessionByID(ctx, sessionID)
 	if err != nil {

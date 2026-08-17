@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -136,16 +138,28 @@ func logLLMResponse(ctx context.Context, resp LLMResponse) {
 // pointing at a non-OpenAI compatible endpoint) only touches this file.
 type OpenAIClient struct {
 	client openai.Client
+	// sink optionally receives raw request/response/error captures for the
+	// llm-raw-capture capability. Nil disables capture entirely; see
+	// rawcapture.go.
+	sink RawCaptureSink
 }
 
 // NewOpenAIClient builds an OpenAIClient from the OpenAI section of config.
-// baseURL is optional; when empty the SDK default is used.
+// baseURL is optional; when empty the SDK default is used. Raw capture is
+// disabled; use NewOpenAIClientWithSink to enable it.
 func NewOpenAIClient(cfg config.OpenAIConfig) *OpenAIClient {
+	return NewOpenAIClientWithSink(cfg, nil)
+}
+
+// NewOpenAIClientWithSink is NewOpenAIClient with a raw-capture sink attached.
+// The sink receives the as-sent request params when a call starts and the
+// stitched response (or gateway error body) when it ends; see rawcapture.go.
+func NewOpenAIClientWithSink(cfg config.OpenAIConfig, sink RawCaptureSink) *OpenAIClient {
 	opts := []option.RequestOption{option.WithAPIKey(cfg.APIKey)}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
-	return &OpenAIClient{client: openai.NewClient(opts...)}
+	return &OpenAIClient{client: openai.NewClient(opts...), sink: sink}
 }
 
 // NewOpenAIClientFromClient wires an externally-constructed openai.Client —
@@ -199,6 +213,30 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 
 	logLLMRequest(ctx, req)
 
+	// Raw capture (llm-raw-capture capability): mint the call identity and
+	// emit the request row — the exact params as sent — before the stream
+	// starts, so a call that dies mid-stream still leaves its request side.
+	// frameIdx tracks the last emitted record ordinal within the call
+	// (request=0, per-frame chunks 1..N, response/error last); frameBytes and
+	// framesCapped implement the per-call frame-capture budget.
+	var callID string
+	var seq int
+	var start time.Time
+	var respID string
+	var respCreated int64
+	var frameIdx int
+	var frameBytes int
+	var framesCapped bool
+	if c.sink != nil {
+		callID, seq = newRawCall()
+		start = time.Now()
+		if raw, err := json.Marshal(params); err != nil {
+			logger.L().Warn("raw capture: marshal request params failed; skipping request row", zap.Error(err))
+		} else {
+			c.capture(ctx, callID, seq, 0, rawKindRequest, req.Model, "", 0, 0, string(raw))
+		}
+	}
+
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 	defer stream.Close()
 
@@ -208,11 +246,92 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		toolStitch       = newToolCallStitcher()
 		reasoningContent strings.Builder
 	)
+
+	// capturePartial emits a response row for a stream that ended without the
+	// gateway failing it (context cancellation, hub close): what was streamed
+	// so far, with the raw finish_reason (no forced "stop"), and without
+	// mutating the resp the caller sees. Per design D6 a local cancellation is
+	// not an error row.
+	capturePartial := func() {
+		if c.sink == nil || callID == "" {
+			return
+		}
+		p := resp
+		p.FinishReason = finish
+		p.ToolCalls = toolStitch.finalize()
+		p.ReasoningContent = reasoningContent.String()
+		if raw, err := json.Marshal(stitchedCompletion(respID, respCreated, req.Model, p)); err == nil {
+			c.capture(ctx, callID, seq, frameIdx+1, rawKindResponse, req.Model, p.FinishReason, 0, time.Since(start), string(raw))
+		}
+	}
+	// captureError emits the error row: gateway HTTP status plus the raw
+	// error body when openai-go exposes one (apierror), else the error string.
+	captureError := func(err error) {
+		if c.sink == nil || callID == "" {
+			return
+		}
+		httpStatus := 0
+		rawBody := err.Error()
+		var apiErr *openai.Error
+		if errors.As(err, &apiErr) {
+			httpStatus = apiErr.StatusCode
+			if body := apiErr.RawJSON(); body != "" {
+				rawBody = body
+			}
+		}
+		c.capture(ctx, callID, seq, frameIdx+1, rawKindError, req.Model, finish, httpStatus, time.Since(start), rawBody)
+	}
+	// captureFrame emits one kind=chunk row for the chunk just received, with
+	// its verbatim wire bytes, and enforces the per-call frame budget: past
+	// frameCaptureCap it emits an explicit truncation marker row and stops
+	// capturing frames for the rest of the call.
+	captureFrame := func(chunk openai.ChatCompletionChunk) {
+		if c.sink == nil || callID == "" || framesCapped {
+			return
+		}
+		frameJSON := chunk.RawJSON()
+		if frameJSON == "" {
+			// No wire bytes on the chunk (synthetic/decoded-only path);
+			// re-marshal so the frame is still captured, just not byte-exact.
+			if b, err := json.Marshal(chunk); err == nil {
+				frameJSON = string(b)
+			}
+		}
+		if frameJSON == "" {
+			return
+		}
+		frameIdx++
+		frameBytes += len(frameJSON)
+		c.capture(ctx, callID, seq, frameIdx, rawKindChunk, req.Model, "", 0, 0, frameJSON)
+		if frameBytes < frameCaptureCap {
+			return
+		}
+		framesCapped = true
+		if raw, err := json.Marshal(map[string]any{
+			"_truncated": true,
+			"reason":     "frame_capture_cap",
+			"frames":     frameIdx,
+			"bytes":      frameBytes,
+		}); err == nil {
+			frameIdx++
+			c.capture(ctx, callID, seq, frameIdx, rawKindChunk, req.Model, "", 0, 0, string(raw))
+		}
+		logger.L().Warn("raw capture: frame budget reached; further chunks not captured for this call",
+			zap.String("call_id", callID),
+			zap.Int("frames", frameIdx),
+			zap.Int("bytes", frameBytes))
+	}
+
 	for stream.Next() {
 		if err := ctx.Err(); err != nil {
+			capturePartial()
 			return resp, err
 		}
 		chunk := stream.Current()
+		if respID == "" && chunk.ID != "" {
+			respID, respCreated = chunk.ID, chunk.Created
+		}
+		captureFrame(chunk)
 		if chunk.Usage.TotalTokens > 0 {
 			resp.Usage = Usage{
 				PromptTokens:     int(chunk.Usage.PromptTokens),
@@ -232,6 +351,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 				resp.Content += delta.Content
 				if onToken != nil {
 					if err := onToken(delta.Content); err != nil {
+						capturePartial()
 						return resp, err
 					}
 				}
@@ -244,6 +364,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 						reasoningContent.WriteString(rc)
 						if onReasoning != nil {
 							if err := onReasoning(rc); err != nil {
+								capturePartial()
 								return resp, err
 							}
 						}
@@ -257,8 +378,10 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		// ssestream surfaces context cancellation as an error; surface ctx.Err
 		// directly when applicable so callers can branch on cancellation.
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			capturePartial()
 			return resp, ctxErr
 		}
+		captureError(err)
 		return resp, fmt.Errorf("openai client: stream: %w", err)
 	}
 
@@ -268,6 +391,12 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	}
 	resp.ToolCalls = toolStitch.finalize()
 	resp.ReasoningContent = reasoningContent.String()
+
+	if c.sink != nil && callID != "" {
+		if raw, err := json.Marshal(stitchedCompletion(respID, respCreated, req.Model, resp)); err == nil {
+			c.capture(ctx, callID, seq, frameIdx+1, rawKindResponse, req.Model, resp.FinishReason, 0, time.Since(start), string(raw))
+		}
+	}
 
 	logLLMResponse(ctx, resp)
 	return resp, nil
