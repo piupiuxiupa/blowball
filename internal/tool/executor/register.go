@@ -21,12 +21,12 @@ func registerBash(r *tool.Registry, tools *Tools) error {
 			"- **IMPORTANT: `output` is capped at 64KB** — when truncated it ends with `...output truncated...` and sets " +
 			"`truncated: true`; if you need the rest, narrow the command or redirect output to a workspace file and read " +
 			"it with `xizhi_read_file`.\n" +
-			"- **MUST: commands time out at 30s by default.**\n" +
-			"- The sandbox runs as an unprivileged user; only `/workspace` is writable and network is enabled by default " +
+			"- Commands **MUST finish within the default 30s timeout.**\n" +
+			"- The sandbox runs as an unprivileged user; only current WORKSPACE path (`.`) is writable and network is enabled by default " +
 			"(operator may disable via config). Global skills are read-only at `/skills/global`; per-user skills live at " +
-			"`/workspace/.blowball/skills` (managed via luban).\n" +
+			"`.blowball/skills` (managed via luban).\n" +
 			"- Run Python here with `python3 ...` and install packages with `python3 -m pip install --target " +
-			"/workspace/.pip <pkg>`; installed packages are importable in later runs via the injected `PYTHONPATH` bridge.\n" +
+			".pip <pkg>`; installed packages are importable in later runs via the injected `PYTHONPATH` bridge.\n" +
 			"- **DO NOT use `cat`, `rm`, `ls`, `find`, `sed`, `awk` or `grep` for workspace file work — use the dedicated " +
 			"`xizhi_*` tools instead** (`cat`→`xizhi_read_file`; `ls`→`xizhi_list_files`/`xizhi_tree`; " +
 			"`find`→`xizhi_glob_files`; `grep`→`xizhi_grep`; `sed`/`awk`→`xizhi_modify_file`; `rm`→`xizhi_delete`), " +

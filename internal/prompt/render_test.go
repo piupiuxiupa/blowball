@@ -122,7 +122,7 @@ func TestRenderSystemPrompt_Skills(t *testing.T) {
 	assert.Contains(t, out, "    <description>Global coding conventions</description>")
 	assert.Contains(t, out, "    <location>skills/coding-style</location>")
 	assert.Contains(t, out, "</skills>")
-	assert.Contains(t, out, "MUST USE `luban_*` for skill operations. NEVER USE `xizhi_*` tools to access the skills directory.")
+	assert.Contains(t, out, "**MUST USE** `luban_*` for skill operations. **NEVER USE** `xizhi_*` tools to access the skills directory.")
 	assert.Contains(t, out, "When the user explicitly names a specific skill or MCP service")
 	assert.Contains(t, out, "luban_install_skill")
 	// Multi-form install guidance: supported shapes and install-doc flow.
@@ -135,10 +135,10 @@ func TestRenderSystemPrompt_Skills(t *testing.T) {
 	assert.Contains(t, out, "do not treat the instruction page itself as the skill")
 	assert.Contains(t, out, "You may use the bash tool to read and execute files under the exposed skill directories")
 	assert.Contains(t, out, "run Python scripts via `bash` calling `python3`")
-	assert.Contains(t, out, "Global skill directories are read-only")
-	assert.Contains(t, out, "Per-user skills live under the workspace at .blowball/skills")
-	assert.Contains(t, out, "managed exclusively via the luban_* tools")
-	assert.Contains(t, out, "never use xizhi_* tools to access .blowball or any skill directory")
+	assert.Contains(t, out, "Global skill directories are read-only and MUST NOT be modified")
+	assert.Contains(t, out, "Per-user skills live under the workspace at `.blowball/skills`")
+	assert.Contains(t, out, "managed exclusively via the `luban_*` tools")
+	assert.Contains(t, out, "NEVER use `xizhi_*` tools to access `.blowball` or any skill directory")
 	assert.NotContains(t, out, "call read_skill")
 }
 
@@ -216,7 +216,7 @@ func TestRenderSystemPrompt_UserMCPListBeforeCallConvention(t *testing.T) {
 	assert.Contains(t, out, "## User MCP Servers")
 	assert.Contains(t, out, "mcp_list_tools", "convention must name the discovery tool")
 	assert.Contains(t, out, "mcp_call")
-	assert.Contains(t, out, "never guess", "convention must forbid guessing tool names/args")
+	assert.Contains(t, out, "NEVER guess", "convention must forbid guessing tool names/args")
 	assert.Contains(t, out, "rejected before the remote call", "convention must explain the rejection")
 }
 
@@ -248,7 +248,7 @@ func TestRenderSystemPrompt_BlowballMCPConstraint(t *testing.T) {
 		UserMCP: []MCPServerInfo{{Name: "github", URL: "https://mcp/mcp"}},
 	})
 	assert.Contains(t, with, "`.blowball/mcp/` namespace is managed exclusively via the `mcp_*` tools")
-	assert.Contains(t, with, "never use `xizhi_*` tools")
+	assert.Contains(t, with, "**NEVER** use `xizhi_*` tools")
 }
 
 func mustRender(t *testing.T, in RenderInput) string {

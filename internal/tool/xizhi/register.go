@@ -374,8 +374,8 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 				"`truncated`, so paginate large results with `head_limit`/`offset` (defaults: 200 / 0; request the " +
 				"next page with `offset = offset + head_limit` when `truncated` is true). **`path` is REQUIRED and " +
 				"MUST be relative to the workspace root** (absolute paths, `..` and the `.blowball` namespace are " +
-				"rejected); use `\".\"` to search the whole workspace root explicitly. **Prefer this over `bash grep`** " +
-				"— it is cheaper and returns line numbers. Binary files are skipped; long lines are truncated. Use " +
+				"rejected); use `\".\"` to search the whole workspace root explicitly. **DO NOT grep via `bash` — use " +
+				"this tool** (it is cheaper and returns line numbers). Binary files are skipped; long lines are truncated. Use " +
 				"`glob` to filter by file name (e.g. `*.go`).",
 			ParametersJSON: schemaGrep,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {

@@ -103,8 +103,8 @@ func registerListServers(r *tool.Registry, tools *Tools) error {
 		Description: "List the per-user MCP servers configured in YOUR workspace " +
 			"(`.blowball/mcp/{name}/config.json`, one directory per server). Returns name, " +
 			"url, transport, description, the auth KIND (credentials are redacted), and how " +
-			"many tools each server advertises. Use this to discover which servers you can " +
-			"call with `mcp_call`. Credentials are never shown.",
+			"many tools each server advertises. **You MUST call this before `mcp_call` to " +
+			"discover which servers you can use.** Credentials are **NEVER shown**.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {},
@@ -125,17 +125,18 @@ func registerAddServer(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolAddServer,
 		Description: "Add a per-user MCP server to YOUR workspace config " +
-			"(`.blowball/mcp/config.json`). Only the remote HTTP (Streamable HTTP) " +
-			"transport and static credentials (bearer / api-key / basic) are supported; " +
-			"stdio and OAuth are not. The tool connects to the server, validates it is " +
-			"reachable, and caches its `tools/list` so `mcp_call` can validate args " +
-			"later. A duplicate name is rejected. Credentials are stored in your config " +
-			"file and are NEVER returned by this tool. `headers` (optional) are NON-SECRET " +
-			"custom request headers (tenant id, routing/gateway params, or a proprietary " +
-			"token used with auth.type \"none\"). Never put secrets in `headers` — use " +
-			"`auth` (headers are shown in plaintext by mcp_list_servers). Reserved header " +
-			"names (Content-Type, Content-Length, Accept, Mcp-Session-Id, Host) are " +
-			"rejected; on a name collision with `auth`, `auth` wins.",
+			"(`.blowball/mcp/{name}/config.json`, one directory per server). **ONLY the " +
+			"remote HTTP (Streamable HTTP) transport and static credentials (bearer / " +
+			"api-key / basic) are supported — stdio and OAuth are rejected.** The tool " +
+			"connects to the server, validates it is reachable, and caches its " +
+			"`tools/list` so `mcp_call` can validate args later. A duplicate name is " +
+			"rejected. Credentials are stored in your config file and are **NEVER " +
+			"returned** by this tool. `headers` (optional) are non-secret custom request " +
+			"headers (tenant id, routing/gateway params, or a proprietary token used with " +
+			"auth.type \"none\"). **DO NOT put secrets in `headers` — use `auth`** " +
+			"(headers are shown in plaintext by mcp_list_servers). Reserved header names " +
+			"(Content-Type, Content-Length, Accept, Mcp-Session-Id, Host) are rejected; " +
+			"on a name collision with `auth`, `auth` wins.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -200,8 +201,8 @@ func registerRemoveServer(r *tool.Registry, tools *Tools) error {
 	spec := &tool.ToolSpec{
 		Name: ToolRemoveServer,
 		Description: "Remove a per-user MCP server from YOUR workspace config by name. " +
-			"The other configured servers are preserved. Returns a confirmation that " +
-			"never echoes any credential.",
+			"**Removes ONLY the named server** — every other configured server is " +
+			"preserved. The confirmation **NEVER echoes any credential**.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -233,14 +234,14 @@ func registerCall(r *tool.Registry, tools *Tools) error {
 		Name: ToolCall,
 		Description: "Call a tool on one of YOUR configured per-user MCP servers. " +
 			"You pass the server name, the tool name, and the tool's arguments object. " +
-			"The tool name and arguments are validated against the server's cached " +
-			"`tools/list` BEFORE the call; an unknown tool or schema-violating args are " +
-			"rejected without contacting the server. Authentication is injected " +
-			"server-side and is never part of the input or output. If you are unsure " +
-			"which tools a server offers, call `mcp_list_servers` first (tool counts are " +
-			"shown); to discover exact tool names/args you may need to consult the " +
-			"server's own documentation. A single call is bounded by the total-call " +
-			"timeout (default 10s).",
+			"**DO NOT guess the tool name or argument shape — both are validated against " +
+			"the server's cached `tools/list` BEFORE the call**, and an unknown tool or " +
+			"schema-violating args are rejected without contacting the server. " +
+			"Authentication is injected server-side and is **NEVER part of the input or " +
+			"output**. If you are unsure which tools a server offers, call " +
+			"`mcp_list_servers` first (tool counts are shown), then `mcp_list_tools` to " +
+			"discover exact tool names and argument schemas. A single call is bounded by " +
+			"the total-call timeout (default 10s).",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -290,12 +291,13 @@ func registerListTools(r *tool.Registry, tools *Tools) error {
 		Name: ToolListTools,
 		Description: "Discover the tools offered by ONE of YOUR configured per-user MCP servers. " +
 			"Connects to the server live, runs `tools/list`, and returns every tool's " +
-			"name, description, and input_schema. This is the AUTHORITATIVE way to learn " +
-			"a server's exact tool names and argument shapes; always call it before " +
-			"`mcp_call` for a server whose tools you do not yet know. Never guess a tool " +
-			"name or argument shape — a wrong guess is rejected before the remote call " +
-			"is made. The discovered tools are written back to your config cache in the " +
-			"background so later `mcp_call` validations pass without a refresh.",
+			"name, description, and input_schema. **This is the AUTHORITATIVE way to " +
+			"learn a server's exact tool names and argument shapes — you MUST call it " +
+			"before `mcp_call` for a server whose tools you do not yet know.** " +
+			"**DO NOT guess a tool name or argument shape** — a wrong guess is rejected " +
+			"before the remote call is made. The discovered tools are written back to " +
+			"your config cache in the background so later `mcp_call` validations pass " +
+			"without a refresh.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
