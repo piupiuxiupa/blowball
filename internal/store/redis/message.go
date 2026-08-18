@@ -5,37 +5,16 @@ import "context"
 // messagesKey formats the cache key for the message list of sessionID.
 func messagesKey(sessionID string) string { return "msgs:" + sessionID }
 
-// AppendMessage appends a single serialised message (raw) to the end of the
-// cached message list for sessionID using RPUSH. The key's TTL is refreshed so
-// a long-lived session whose messages arrive one at a time does not silently
-// expire mid-conversation.
+// AppendMessage appends a single serialised message (raw) to the cached
+// message list for sessionID using RPUSH, refreshing the key's TTL. NOTE:
+// this is a cache-only write that BYPASSES the ingest queue — production
+// persistence goes through AppendMessagesDual (msgqueue.go), never here.
 func (s *Store) AppendMessage(ctx context.Context, sessionID string, raw []byte) error {
 	key := messagesKey(sessionID)
 	logCmd(ctx, "msgs.append", key)
 
 	pipe := s.client.TxPipeline()
 	pipe.RPush(ctx, key, raw)
-	pipe.Expire(ctx, key, s.ttl)
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
-// AppendMessages appends multiple serialised messages (raws) to the cached
-// message list for sessionID in a single transactional pipeline. The key's TTL
-// is refreshed. An empty raws slice is a no-op.
-func (s *Store) AppendMessages(ctx context.Context, sessionID string, raws [][]byte) error {
-	if len(raws) == 0 {
-		return nil
-	}
-	key := messagesKey(sessionID)
-	logCmd(ctx, "msgs.append_batch", key)
-
-	pipe := s.client.TxPipeline()
-	members := make([]any, len(raws))
-	for i := range raws {
-		members[i] = raws[i]
-	}
-	pipe.RPush(ctx, key, members...)
 	pipe.Expire(ctx, key, s.ttl)
 	_, err := pipe.Exec(ctx)
 	return err

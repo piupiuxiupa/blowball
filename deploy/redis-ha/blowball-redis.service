@@ -1,0 +1,28 @@
+# blowball Redis 数据节点(哨兵集群,主/副本通用 —— 角色由配置文件和哨兵决定)
+# 安装到 /etc/systemd/system/blowball-redis.service,然后:
+#   systemctl daemon-reload && systemctl enable --now blowball-redis
+[Unit]
+Description=blowball Redis server (sentinel HA)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=redis
+Group=redis
+# 源码安装的 redis 调整此路径
+ExecStart=/usr/bin/redis-server /etc/redis/redis.conf --daemonize no
+Restart=always
+RestartSec=3
+RuntimeDirectory=redis
+RuntimeDirectoryMode=0755
+UMask=007
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# /etc/redis 必须可写:哨兵切换后对本节点 REPLICAOF + CONFIG REWRITE
+ReadWritePaths=/etc/redis /var/lib/redis
+
+[Install]
+WantedBy=multi-user.target

@@ -20,8 +20,8 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
-	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/service"
+	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -97,9 +97,6 @@ type handlerFakeMySQL struct {
 	listSessionsErr     error
 	upsertTitleCalls    int
 	upsertTitleArg      model.Title
-	appendMessageCalls  int
-	appendMessageArg    model.Message
-	appendMessageErr    error
 	appendMessagesCalls int
 	appendMessagesArg   []model.Message
 	appendMessagesErr   error
@@ -164,16 +161,6 @@ func (m *handlerFakeMySQL) UpsertTitleManual(_ context.Context, t model.Title) e
 func (m *handlerFakeMySQL) GetTitle(_ context.Context, _ string) (*model.Title, error) {
 	return nil, nil
 }
-func (m *handlerFakeMySQL) AppendMessage(_ context.Context, msg model.Message) (int64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.appendMessageCalls++
-	m.appendMessageArg = msg
-	if m.appendMessageErr != nil {
-		return 0, m.appendMessageErr
-	}
-	return int64(m.appendMessageCalls), nil
-}
 func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -183,9 +170,8 @@ func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Messag
 		return nil, m.appendMessagesErr
 	}
 	ids := make([]int64, len(msgs))
-	for i := range msgs {
-		m.appendMessageCalls++
-		ids[i] = int64(m.appendMessageCalls)
+	for i := range ids {
+		ids[i] = int64(i + 1)
 	}
 	return ids, nil
 }
@@ -271,35 +257,51 @@ func (m *handlerFakeMySQL) SaveTurnUsage(_ context.Context, tu model.TurnUsage) 
 	return m.saveTurnUsageErr
 }
 
+// handlerFakeRedis records the write-behind dual writes. The decoded rows
+// (dualRows) are what handler tests assert on — with the Redis-first change
+// the dual-write pipeline IS the persistence call, so the batch previously
+// observed on the MySQL fake now lands here.
 type handlerFakeRedis struct {
-	mu                  sync.Mutex
-	appendCalls         int
-	appendErr           error
-	appendMessagesCalls int
-	appendMessagesArgs  [][]byte
-	appendMessagesErr   error
-	getCalls            int
-	getResult           [][]byte
-	getErr              error
-	setCalls            int
-	setErr              error
+	mu         sync.Mutex
+	dualCalls  int
+	dualSID    string
+	dualRows   []model.Message
+	dualErr    error
+	clearCalls int
+	delSessErr error
+	getCalls   int
+	getResult  [][]byte
+	getErr     error
+	setCalls   int
+	setErr     error
+	setArgRows int
 }
 
-func (r *handlerFakeRedis) AppendMessage(_ context.Context, _ string, _ []byte) error {
+func (r *handlerFakeRedis) AppendMessagesDual(_ context.Context, sessionID string, raws [][]byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.appendCalls++
-	return r.appendErr
-}
-func (r *handlerFakeRedis) AppendMessages(_ context.Context, _ string, raws [][]byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.appendMessagesCalls++
-	r.appendMessagesArgs = make([][]byte, len(raws))
-	for i, b := range raws {
-		r.appendMessagesArgs[i] = append([]byte(nil), b...)
+	r.dualCalls++
+	r.dualSID = sessionID
+	for _, b := range raws {
+		var m model.Message
+		if err := json.Unmarshal(b, &m); err != nil {
+			return err
+		}
+		r.dualRows = append(r.dualRows, m)
 	}
-	return r.appendMessagesErr
+	return r.dualErr
+}
+func (r *handlerFakeRedis) dualCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.dualCalls
+}
+func (r *handlerFakeRedis) dualSnapshot() []model.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]model.Message, len(r.dualRows))
+	copy(out, r.dualRows)
+	return out
 }
 func (r *handlerFakeRedis) GetMessages(_ context.Context, _ string) ([][]byte, error) {
 	r.mu.Lock()
@@ -310,37 +312,37 @@ func (r *handlerFakeRedis) GetMessages(_ context.Context, _ string) ([][]byte, e
 	}
 	return r.getResult, nil
 }
-func (r *handlerFakeRedis) SetMessages(_ context.Context, _ string, _ [][]byte) error {
+func (r *handlerFakeRedis) SetMessages(_ context.Context, _ string, raws [][]byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.setCalls++
+	r.setArgRows = len(raws)
 	return r.setErr
 }
+func (r *handlerFakeRedis) ClearMessages(_ context.Context, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clearCalls++
+	return nil
+}
+func (r *handlerFakeRedis) DelSessionCache(_ context.Context, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.delSessErr
+}
 
+// handlerFakeFS records EnsureUserDirs — the FS store's only remaining duty
+// after the warm-tier removal.
 type handlerFakeFS struct {
 	mu          sync.Mutex
-	writeCalls  int
-	writeData   map[string][]byte
-	writeErr    error
 	ensureCalls int
 	ensureErr   error
 }
 
 func newHandlerFakeFS() *handlerFakeFS {
-	return &handlerFakeFS{writeData: map[string][]byte{}}
+	return &handlerFakeFS{}
 }
 
-func (f *handlerFakeFS) WriteSession(_ context.Context, userID, sessionID string, data []byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.writeCalls++
-	f.writeData[userID+"/"+sessionID] = append([]byte(nil), data...)
-	return f.writeErr
-}
-func (f *handlerFakeFS) ReadSession(_ context.Context, _, _ string) ([]byte, error) {
-	return nil, nil
-}
-func (f *handlerFakeFS) DeleteSession(_ context.Context, _, _ string) error { return nil }
 func (f *handlerFakeFS) EnsureUserDirs(_ context.Context, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -471,31 +473,23 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	require.Contains(t, env.stub.gotWorkspace, "user-1/workspace")
 	env.stub.mu.Unlock()
 
-	// One FS write happened: the single batch containing the user message and
-	// the merged assistant event stream.
+	// One dual write happened: the single batch containing the user message
+	// and the merged assistant event stream (the write-behind queue and the
+	// read cache receive the same blobs in one pipeline).
 	require.Eventually(t, func() bool {
-		env.fs.mu.Lock()
-		defer env.fs.mu.Unlock()
-		return env.fs.writeCalls == 1
-	}, time.Second, 10*time.Millisecond, "expected one FS write for the combined batch")
+		return env.redis.dualCount() == 1
+	}, time.Second, 10*time.Millisecond, "expected one dual write for the combined batch")
 
-	// MySQL: one batch append containing the user message + merged assistant events.
-	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
-	}, time.Second, 10*time.Millisecond, "expected single batch for user + assistant events")
-
-	env.mysql.mu.Lock()
-	defer env.mysql.mu.Unlock()
+	rows := env.redis.dualSnapshot()
 	// Batch: user message followed by merged assistant events (agent_start, token, agent_end).
-	require.Len(t, env.mysql.appendMessagesArg, 4, "batch must contain user + 3 merged assistant events")
-	userMsg := env.mysql.appendMessagesArg[0]
+	require.Len(t, rows, 4, "batch must contain user + 3 merged assistant events")
+	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
 	assert.Equal(t, 0, userMsg.MsgIndex)
 	assert.Equal(t, "hi there", userMsg.Content)
+	require.NotEmpty(t, userMsg.ClientMsgID, "persisted rows carry the idempotency key")
 
 	// Assistant event stream is merged: agent_start, merged token, agent_end (done excluded).
 	wantTypes := []string{
@@ -504,7 +498,7 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 		model.EventTypeAgentEnd,
 	}
 	for i, want := range wantTypes {
-		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
 	}
 }
 
@@ -850,19 +844,16 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
+		return env.redis.dualCount() == 1
 	}, time.Second, 10*time.Millisecond, "expected single combined batch")
 
-	env.mysql.mu.Lock()
-	defer env.mysql.mu.Unlock()
+	rows := env.redis.dualSnapshot()
 
 	// Combined batch: 1 user message + 7 assistant events, done excluded.
-	require.Len(t, env.mysql.appendMessagesArg, 8)
+	require.Len(t, rows, 8)
 
 	// User message comes first.
-	userMsg := env.mysql.appendMessagesArg[0]
+	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
@@ -880,11 +871,11 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 		model.EventTypeAgentEnd,
 	}
 	for i, want := range wantTypes {
-		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "event %d", i)
+		assert.Equal(t, want, rows[i+1].EventType, "event %d", i)
 	}
 
 	// Token/tool_call rows carry the assistant role; markers have empty role.
-	for _, m := range env.mysql.appendMessagesArg[1:] {
+	for _, m := range rows[1:] {
 		switch m.EventType {
 		case model.EventTypeToken, model.EventTypeToolCall:
 			assert.Equal(t, model.RoleAssistant, m.Role, "event_type=%s", m.EventType)
@@ -894,11 +885,11 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	}
 
 	// Agent column is preserved from the event.
-	assert.Equal(t, stream.AgentConfucius, env.mysql.appendMessagesArg[1].Agent)
-	assert.Equal(t, stream.AgentChongzhi, env.mysql.appendMessagesArg[5].Agent)
+	assert.Equal(t, stream.AgentConfucius, rows[1].Agent)
+	assert.Equal(t, stream.AgentChongzhi, rows[5].Agent)
 
 	// Tool_call content is JSON with name and args.
-	toolMsg := env.mysql.appendMessagesArg[3]
+	toolMsg := rows[3]
 	require.Equal(t, model.EventTypeToolCall, toolMsg.EventType)
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal([]byte(toolMsg.Content), &payload))
@@ -931,17 +922,14 @@ func TestSendMessage_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 
 	// One combined batch must land despite the failure.
 	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
+		return env.redis.dualCount() == 1
 	}, time.Second, 10*time.Millisecond, "expected single batch for failed turn")
 
-	env.mysql.mu.Lock()
-	defer env.mysql.mu.Unlock()
+	rows := env.redis.dualSnapshot()
 
 	// 1 user message + 2 merged assistant events (agent_start, token).
-	require.Len(t, env.mysql.appendMessagesArg, 3, "batch must contain user + partial assistant events")
-	userMsg := env.mysql.appendMessagesArg[0]
+	require.Len(t, rows, 3, "batch must contain user + partial assistant events")
+	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
@@ -952,9 +940,9 @@ func TestSendMessage_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 		model.EventTypeToken,
 	}
 	for i, want := range wantTypes {
-		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
 	}
-	assert.Equal(t, "oops", env.mysql.appendMessagesArg[2].Content, "partial token should be persisted")
+	assert.Equal(t, "oops", rows[2].Content, "partial token should be persisted")
 }
 
 // TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents verifies that a
@@ -984,17 +972,14 @@ func TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents(t *testing.T) 
 
 	// One combined batch must land despite the cancellation.
 	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
+		return env.redis.dualCount() == 1
 	}, time.Second, 10*time.Millisecond, "expected single batch for interrupted turn")
 
-	env.mysql.mu.Lock()
-	defer env.mysql.mu.Unlock()
+	rows := env.redis.dualSnapshot()
 
 	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
-	require.Len(t, env.mysql.appendMessagesArg, 4, "batch must contain user + partial assistant events")
-	userMsg := env.mysql.appendMessagesArg[0]
+	require.Len(t, rows, 4, "batch must contain user + partial assistant events")
+	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
@@ -1006,9 +991,9 @@ func TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents(t *testing.T) 
 		model.EventTypeAgentEnd,
 	}
 	for i, want := range wantTypes {
-		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
 	}
-	assert.Equal(t, "partial reply", env.mysql.appendMessagesArg[2].Content, "partial tokens should be merged")
+	assert.Equal(t, "partial reply", rows[2].Content, "partial tokens should be merged")
 }
 
 // TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser verifies
@@ -1031,16 +1016,13 @@ func TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser(t *testi
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
+		return env.redis.dualCount() == 1
 	}, time.Second, 10*time.Millisecond, "expected single batch for user-only interrupted turn")
 
-	env.mysql.mu.Lock()
-	defer env.mysql.mu.Unlock()
-	require.Len(t, env.mysql.appendMessagesArg, 1, "only the user message should be persisted")
-	assert.Equal(t, model.RoleUser, env.mysql.appendMessagesArg[0].Role)
-	assert.Equal(t, "hello?", env.mysql.appendMessagesArg[0].Content)
+	rows := env.redis.dualSnapshot()
+	require.Len(t, rows, 1, "only the user message should be persisted")
+	assert.Equal(t, model.RoleUser, rows[0].Role)
+	assert.Equal(t, "hello?", rows[0].Content)
 }
 
 // TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle verifies that title
@@ -1118,18 +1100,15 @@ func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialE
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
+		return env.redis.dualCount() == 1
 	}, time.Second, 10*time.Millisecond, "expected single batch for failed turn")
 
-	env.mysql.mu.Lock()
-	defer env.mysql.mu.Unlock()
+	rows := env.redis.dualSnapshot()
 
 	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
-	require.Len(t, env.mysql.appendMessagesArg, 4, "batch must contain user + partial assistant events")
-	assert.Equal(t, model.RoleUser, env.mysql.appendMessagesArg[0].Role)
-	assert.Equal(t, "hi", env.mysql.appendMessagesArg[0].Content)
+	require.Len(t, rows, 4, "batch must contain user + partial assistant events")
+	assert.Equal(t, model.RoleUser, rows[0].Role)
+	assert.Equal(t, "hi", rows[0].Content)
 
 	wantTypes := []string{
 		model.EventTypeAgentStart,
@@ -1137,9 +1116,9 @@ func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialE
 		model.EventTypeAgentEnd,
 	}
 	for i, want := range wantTypes {
-		assert.Equal(t, want, env.mysql.appendMessagesArg[i+1].EventType, "assistant event %d", i)
+		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
 	}
-	assert.Equal(t, "partial reply", env.mysql.appendMessagesArg[2].Content, "partial tokens should be merged")
+	assert.Equal(t, "partial reply", rows[2].Content, "partial tokens should be merged")
 }
 
 // TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser
@@ -1162,16 +1141,13 @@ func TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser(t *t
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	require.Eventually(t, func() bool {
-		env.mysql.mu.Lock()
-		defer env.mysql.mu.Unlock()
-		return env.mysql.appendMessagesCalls == 1
+		return env.redis.dualCount() == 1
 	}, time.Second, 10*time.Millisecond, "expected single batch for user-only failed turn")
 
-	env.mysql.mu.Lock()
-	defer env.mysql.mu.Unlock()
-	require.Len(t, env.mysql.appendMessagesArg, 1, "only the user message should be persisted")
-	assert.Equal(t, model.RoleUser, env.mysql.appendMessagesArg[0].Role)
-	assert.Equal(t, "hello?", env.mysql.appendMessagesArg[0].Content)
+	rows := env.redis.dualSnapshot()
+	require.Len(t, rows, 1, "only the user message should be persisted")
+	assert.Equal(t, model.RoleUser, rows[0].Role)
+	assert.Equal(t, "hello?", rows[0].Content)
 }
 
 // TestSendMessage_OrchestratorFailure_FirstTurnGeneratesTitle verifies that a
@@ -1385,7 +1361,9 @@ func TestUpdateTitle_EmptyTitle_400(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
@@ -1406,7 +1384,9 @@ func TestUpdateTitle_SessionNotFound_404(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "NOT_FOUND", body.Error.Code)

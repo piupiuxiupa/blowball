@@ -1,13 +1,17 @@
-// Package redis provides the cache layer of the blowball three-layer message
-// store. It owns two key families:
+// Package redis provides the cache layer of the blowball message store. It
+// owns two key families:
 //
 //   - session:{session_id} — per-session blob cache (the warm layer)
 //   - msgs:{session_id}    — per-session ordered message-list cache (RPUSH/LRANGE)
 //
-// plus one queue key (no TTL, not a cache):
+// plus two queue keys (no TTL, not caches):
 //
 //   - llm_raw:buffer — write-behind buffer of raw LLM capture records,
 //     drained in batches into the MySQL llm_raw_log table (see llm_raw.go)
+//   - msgs:buffer / msgs:processing — the message write-behind reliable
+//     queue (LMOVE claim + LREM ack), drained in batches into the MySQL
+//     messages table by the background flusher (see msgqueue.go and
+//     internal/msgflush)
 //
 // A single *redis.Client and a uniform TTL is shared across the cache
 // families so callers can use one Store value for everything.

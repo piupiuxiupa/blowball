@@ -76,10 +76,8 @@ func TestMessageCache_AppendGet(t *testing.T) {
 		[]byte(`{"i":1,"role":"assistant"}`),
 		[]byte(`{"i":2,"role":"tool"}`),
 	}
-	for i, m := range msgs {
-		if err := store.AppendMessage(ctx, "s-1", m); err != nil {
-			t.Fatalf("AppendMessage[%d]: %v", i, err)
-		}
+	if err := store.AppendMessagesDual(ctx, "s-1", msgs); err != nil {
+		t.Fatalf("AppendMessagesDual: %v", err)
 	}
 
 	got, err := store.GetMessages(ctx, "s-1")

@@ -15,12 +15,16 @@ import (
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 )
 
-func TestSaveMessage_AllLayersSucceed(t *testing.T) {
+// TestSaveMessage_DualWrite_NoSyncMySQL verifies the Redis-first happy path:
+// one dual-write pipeline call carries the canonical JSON (with a freshly
+// minted client_msg_id) to both the read cache and the ingest queue, and NO
+// synchronous MySQL write or FS write happens.
+func TestSaveMessage_DualWrite_NoSyncMySQL(t *testing.T) {
 	const (
 		userID    = "u-1"
 		sessionID = "s-1"
 	)
-	m := &fakeMySQLStore{appendMessageID: 42, appendMessagesIDs: []int64{42}}
+	m := &fakeMySQLStore{}
 	r := &fakeRedisStore{}
 	f := &fakeFSStore{}
 	svc := NewSessionService(newDeps(m, r, f))
@@ -29,97 +33,99 @@ func TestSaveMessage_AllLayersSucceed(t *testing.T) {
 	err := svc.SaveMessage(context.Background(), userID, msg)
 	require.NoError(t, err)
 
-	// Redis saw one batch append with the canonical JSON of the message.
-	require.Equal(t, 1, r.appendMessagesCalls)
-	require.Len(t, r.appendMessagesArgs, 1)
+	// One dual write carrying exactly one element.
+	require.Equal(t, 1, r.dualCalls)
+	assert.Equal(t, sessionID, r.dualSID)
+	require.Len(t, r.dualArgs, 1)
+
+	// The queued blob carries a minted idempotency key and otherwise
+	// round-trips the message (SaveMessage copies the struct into its batch
+	// slice, so the mint lands on the persisted row, not the caller's value).
 	var got model.Message
-	require.NoError(t, json.Unmarshal(r.appendMessagesArgs[0], &got))
-	assert.Equal(t, msg, got)
+	require.NoError(t, json.Unmarshal(r.dualArgs[0], &got))
+	require.NotEmpty(t, got.ClientMsgID, "client_msg_id must be minted at persistence time")
+	assert.Equal(t, msg.Content, got.Content)
+	assert.Equal(t, msg.SessionID, got.SessionID)
 
-	// FS saw exactly one write. The written payload must be a sessionFile whose
-	// messages[] contains exactly one element equal to the original message.
-	require.Equal(t, 1, f.writeCalls)
-	var doc sessionFile
-	require.NoError(t, json.Unmarshal(f.writeData, &doc))
-	assert.Equal(t, sessionID, doc.SessionID)
-	require.Len(t, doc.Messages, 1)
-	var fsMsg model.Message
-	require.NoError(t, json.Unmarshal(doc.Messages[0], &fsMsg))
-	assert.Equal(t, msg, fsMsg)
-
-	// MySQL saw exactly one batch append with the original message struct.
-	require.Equal(t, 1, m.appendMessagesCalls)
-	require.Len(t, m.appendMessagesArg, 1)
-	assert.Equal(t, msg, m.appendMessagesArg[0])
+	// The flusher owns the MySQL write now: no synchronous insert, no
+	// synchronous update_time, no FS touch.
+	assert.Equal(t, 0, m.appendMessagesCalls, "no synchronous MySQL write on the happy path")
+	assert.Equal(t, 0, m.updateSessionTimeCalls, "update_time refresh belongs to the flusher")
+	assert.Equal(t, 0, f.ensureCalls, "FS store is not part of the message write path")
 }
 
-func TestSaveMessage_RedisFailure_DoesNotBlock(t *testing.T) {
+// TestSaveMessage_PreStampedClientMsgIDPreserved verifies an
+// already-stamped message keeps its key (redelivery stays idempotent).
+func TestSaveMessage_PreStampedClientMsgIDPreserved(t *testing.T) {
+	const sessionID = "s-pre"
+	r := &fakeRedisStore{}
+	svc := NewSessionService(newDeps(&fakeMySQLStore{}, r, &fakeFSStore{}))
+
+	msg := sampleMessage(sessionID, "x")
+	msg.ClientMsgID = "cmid-fixed"
+	require.NoError(t, svc.SaveMessage(context.Background(), "u", msg))
+	assert.Equal(t, "cmid-fixed", msg.ClientMsgID)
+
+	var got model.Message
+	require.NoError(t, json.Unmarshal(r.dualArgs[0], &got))
+	assert.Equal(t, "cmid-fixed", got.ClientMsgID)
+}
+
+// TestSaveMessage_RedisFailure_FallsBackToDirectMySQL verifies the fallback:
+// when the dual-write pipeline fails, the batch is synchronously
+// inserted into MySQL (idempotent) plus one update_time refresh, and the
+// caller still sees success.
+func TestSaveMessage_RedisFailure_FallsBackToDirectMySQL(t *testing.T) {
 	const (
 		userID    = "u-2"
 		sessionID = "s-2"
 	)
-	m := &fakeMySQLStore{appendMessagesIDs: []int64{1}}
-	r := &fakeRedisStore{appendMessagesErr: errFake}
-	f := &fakeFSStore{}
-	svc := NewSessionService(newDeps(m, r, f))
-
-	err := svc.SaveMessage(context.Background(), userID, sampleMessage(sessionID, "x"))
-	require.NoError(t, err, "redis failure must NOT surface to caller")
-
-	require.Equal(t, 1, r.appendMessagesCalls)
-	require.Equal(t, 1, f.writeCalls, "FS write must still happen")
-	require.Equal(t, 1, m.appendMessagesCalls, "MySQL write must still happen")
-}
-
-func TestSaveMessage_MysqlFailure_LoggedNotReturned(t *testing.T) {
-	const (
-		userID    = "u-3"
-		sessionID = "s-3"
-	)
-	m := &fakeMySQLStore{appendMessagesErr: errFake}
-	r := &fakeRedisStore{}
-	f := &fakeFSStore{}
-	svc := NewSessionService(newDeps(m, r, f))
-
-	err := svc.SaveMessage(context.Background(), userID, sampleMessage(sessionID, "x"))
-	require.NoError(t, err, "mysql failure must NOT surface to caller per design choice")
-
-	require.Equal(t, 1, r.appendMessagesCalls, "redis still attempted")
-	require.Equal(t, 1, f.writeCalls, "FS still attempted")
-	require.Equal(t, 1, m.appendMessagesCalls, "MySQL attempt counted even on failure")
-}
-
-func TestSaveMessage_FSFailure_Returned(t *testing.T) {
-	const (
-		userID    = "u-4"
-		sessionID = "s-4"
-	)
 	m := &fakeMySQLStore{}
-	r := &fakeRedisStore{}
-	f := &fakeFSStore{readErr: errFake}
-	svc := NewSessionService(newDeps(m, r, f))
+	r := &fakeRedisStore{dualErr: errFake}
+	svc := NewSessionService(newDeps(m, r, &fakeFSStore{}))
 
 	err := svc.SaveMessage(context.Background(), userID, sampleMessage(sessionID, "x"))
-	require.Error(t, err)
+	require.NoError(t, err, "redis failure must degrade, not surface")
+
+	require.Equal(t, 1, r.dualCalls)
+	require.Equal(t, 1, m.appendMessagesCalls, "fallback must write MySQL synchronously")
+	require.Len(t, m.appendMessagesArg, 1)
+	require.NotEmpty(t, m.appendMessagesArg[0].ClientMsgID, "fallback row carries the idempotency key")
+	require.Equal(t, 1, m.updateSessionTimeCalls, "fallback refreshes update_time (the flusher never sees this batch)")
+	assert.Equal(t, sessionID, m.updateSessionTimeArg)
 }
 
-func TestSaveMessagesBatch_AllLayersSucceed(t *testing.T) {
+// TestSaveMessage_BothTiersFail_LoggedNotReturned verifies that when Redis
+// AND MySQL are both down the failure is swallowed (SSE response path stays
+// unblocked) — the loud ERROR log is the operator's signal.
+func TestSaveMessage_BothTiersFail_LoggedNotReturned(t *testing.T) {
+	const sessionID = "s-3"
+	m := &fakeMySQLStore{appendMessagesErr: errFake}
+	r := &fakeRedisStore{dualErr: errFake}
+	svc := NewSessionService(newDeps(m, r, &fakeFSStore{}))
+
+	err := svc.SaveMessage(context.Background(), "u-3", sampleMessage(sessionID, "x"))
+	require.NoError(t, err)
+	require.Equal(t, 1, m.appendMessagesCalls, "fallback attempt still made")
+}
+
+// TestSaveMessagesBatch_MixedEvents_DualWrite verifies a multi-message batch
+// (user message + assistant events) lands as ONE dual write with all rows in
+// order and each carrying a distinct client_msg_id.
+func TestSaveMessagesBatch_MixedEvents_DualWrite(t *testing.T) {
 	const (
 		userID    = "u-batch-1"
 		sessionID = "s-batch-1"
 	)
-	m := &fakeMySQLStore{appendMessagesIDs: []int64{10, 11, 12}}
+	m := &fakeMySQLStore{}
 	r := &fakeRedisStore{}
-	f := &fakeFSStore{}
-	svc := NewSessionService(newDeps(m, r, f))
+	svc := NewSessionService(newDeps(m, r, &fakeFSStore{}))
 
 	msgs := []model.Message{
 		sampleMessage(sessionID, "first"),
 		sampleMessage(sessionID, "second"),
 		sampleMessage(sessionID, "third"),
 	}
-	// Make the second and third rows assistant events so the batch exercises
-	// mixed event types.
 	msgs[1].Agent = model.AgentConfucius
 	msgs[1].Role = model.RoleAssistant
 	msgs[1].EventType = model.EventTypeToken
@@ -132,101 +138,30 @@ func TestSaveMessagesBatch_AllLayersSucceed(t *testing.T) {
 	err := svc.SaveMessagesBatch(context.Background(), userID, msgs)
 	require.NoError(t, err)
 
-	require.Equal(t, 1, r.appendMessagesCalls)
-	require.Len(t, r.appendMessagesArgs, 3)
+	require.Equal(t, 1, r.dualCalls)
+	require.Len(t, r.dualArgs, 3)
 
-	require.Equal(t, 1, f.writeCalls)
-	var doc sessionFile
-	require.NoError(t, json.Unmarshal(f.writeData, &doc))
-	require.Len(t, doc.Messages, 3)
-
-	require.Equal(t, 1, m.appendMessagesCalls)
-	require.Len(t, m.appendMessagesArg, 3)
-	for i, msg := range msgs {
-		assert.Equal(t, msg, m.appendMessagesArg[i])
+	ids := map[string]struct{}{}
+	for i, raw := range r.dualArgs {
+		var got model.Message
+		require.NoError(t, json.Unmarshal(raw, &got))
+		assert.Equal(t, msgs[i], got, "queued row %d must round-trip", i)
+		require.NotEmpty(t, got.ClientMsgID)
+		ids[got.ClientMsgID] = struct{}{}
 	}
+	assert.Len(t, ids, 3, "every row gets a distinct client_msg_id")
 
-	// Session update_time is refreshed for the parent session.
-	require.Equal(t, 1, m.updateSessionTimeCalls)
-	assert.Equal(t, sessionID, m.updateSessionTimeArg)
+	assert.Equal(t, 0, m.appendMessagesCalls)
+	assert.Equal(t, 0, m.updateSessionTimeCalls)
 }
 
-func TestSaveMessagesBatch_UpdateSessionTimeFailure_LoggedNotReturned(t *testing.T) {
-	const (
-		userID    = "u-batch-time"
-		sessionID = "s-batch-time"
-	)
-	m := &fakeMySQLStore{
-		appendMessagesIDs:    []int64{1},
-		updateSessionTimeErr: errFake,
-	}
-	r := &fakeRedisStore{}
-	f := &fakeFSStore{}
-	svc := NewSessionService(newDeps(m, r, f))
-
-	err := svc.SaveMessagesBatch(context.Background(), userID, []model.Message{sampleMessage(sessionID, "x")})
-	require.NoError(t, err, "update_session_time failure must NOT surface to caller")
-
-	require.Equal(t, 1, m.appendMessagesCalls, "message insert still attempted")
-	require.Equal(t, 1, m.updateSessionTimeCalls, "update_session_time still attempted")
-	assert.Equal(t, sessionID, m.updateSessionTimeArg)
-}
-
-func TestSaveMessagesBatch_RedisFailure_DoesNotBlock(t *testing.T) {
-	const (
-		userID    = "u-batch-2"
-		sessionID = "s-batch-2"
-	)
-	m := &fakeMySQLStore{appendMessagesIDs: []int64{1}}
-	r := &fakeRedisStore{appendMessagesErr: errFake}
-	f := &fakeFSStore{}
-	svc := NewSessionService(newDeps(m, r, f))
-
-	err := svc.SaveMessagesBatch(context.Background(), userID, []model.Message{sampleMessage(sessionID, "x")})
-	require.NoError(t, err, "redis batch failure must NOT surface to caller")
-
-	require.Equal(t, 1, r.appendMessagesCalls)
-	require.Equal(t, 1, f.writeCalls)
-	require.Equal(t, 1, m.appendMessagesCalls)
-}
-
-func TestSaveMessagesBatch_MysqlFailure_LoggedNotReturned(t *testing.T) {
-	const (
-		userID    = "u-batch-3"
-		sessionID = "s-batch-3"
-	)
-	m := &fakeMySQLStore{appendMessagesErr: errFake}
-	r := &fakeRedisStore{}
-	f := &fakeFSStore{}
-	svc := NewSessionService(newDeps(m, r, f))
-
-	err := svc.SaveMessagesBatch(context.Background(), userID, []model.Message{sampleMessage(sessionID, "x")})
-	require.NoError(t, err, "mysql batch failure must NOT surface to caller")
-
-	require.Equal(t, 1, r.appendMessagesCalls)
-	require.Equal(t, 1, f.writeCalls)
-	require.Equal(t, 1, m.appendMessagesCalls)
-}
-
-func TestSaveMessagesBatch_FSFailure_Returned(t *testing.T) {
-	const (
-		userID    = "u-batch-4"
-		sessionID = "s-batch-4"
-	)
-	m := &fakeMySQLStore{}
-	r := &fakeRedisStore{}
-	f := &fakeFSStore{readErr: errFake}
-	svc := NewSessionService(newDeps(m, r, f))
-
-	err := svc.SaveMessagesBatch(context.Background(), userID, []model.Message{sampleMessage(sessionID, "x")})
-	require.Error(t, err)
-}
-
+// TestSaveMessagesBatch_Empty verifies an empty batch is a full no-op.
 func TestSaveMessagesBatch_Empty(t *testing.T) {
-	svc := NewSessionService(newDeps(&fakeMySQLStore{}, &fakeRedisStore{}, &fakeFSStore{}))
+	r := &fakeRedisStore{}
+	svc := NewSessionService(newDeps(&fakeMySQLStore{}, r, &fakeFSStore{}))
 
-	err := svc.SaveMessagesBatch(context.Background(), "u", []model.Message{})
-	require.NoError(t, err)
+	require.NoError(t, svc.SaveMessagesBatch(context.Background(), "u", []model.Message{}))
+	assert.Equal(t, 0, r.dualCalls)
 }
 
 func TestListSessions_WithTitle(t *testing.T) {
@@ -237,9 +172,7 @@ func TestListSessions_WithTitle(t *testing.T) {
 			{SessionID: "s-b", UserID: userID, Title: "", UpdateTime: time.Unix(1, 0).UTC()},
 		},
 	}
-	r := &fakeRedisStore{}
-	f := &fakeFSStore{}
-	svc := NewSessionService(newDeps(m, r, f))
+	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, &fakeFSStore{}))
 
 	got, err := svc.ListSessions(context.Background(), userID)
 	require.NoError(t, err)
@@ -319,9 +252,8 @@ func TestCreateSession_Success(t *testing.T) {
 
 func TestCreateSession_EnsureUserDirsError_Returned(t *testing.T) {
 	m := &fakeMySQLStore{}
-	r := &fakeRedisStore{}
 	f := &fakeFSStore{ensureErr: errors.New("no space")}
-	svc := NewSessionService(newDeps(m, r, f))
+	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, f))
 
 	sessionID, err := svc.CreateSession(context.Background(), "u")
 	require.Error(t, err)

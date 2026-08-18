@@ -98,10 +98,9 @@ func TestTurnUsage_UsageWriteFailureDoesNotRollbackMessages(t *testing.T) {
 	w := env.postMessage(`{"content":"hello"}`, token)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Messages must still be persisted even though turn_usage failed.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 2
-	}, 2*time.Second, 10*time.Millisecond, "message batch must persist despite usage-write failure")
+	// Messages must still be persisted even though turn_usage failed (dual
+	// write, then drain the write-behind queue into the fake MySQL tier).
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 	assert.Empty(t, env.mysqlFake.turnUsagesFor(defaultSessionID), "no turn_usage row on failure")
 }
 

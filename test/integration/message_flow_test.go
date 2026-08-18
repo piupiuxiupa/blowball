@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -106,42 +104,22 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.True(t, ok, "session must be persisted to MySQL tier")
 
 	// Wait for the single combined batch (user message + assistant events) to
-	// land in every tier. The batch is saved AFTER the SSE response completes via
-	// a detached context, so we poll.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) == 4 // 1 user + 3 merged assistant events
-	}, 2*time.Second, 10*time.Millisecond, "expected user + 3 merged assistant events in MySQL tier")
+	// land in the Redis dual write (read cache + ingest queue), then drain the
+	// queue into MySQL. The batch is saved AFTER the SSE response completes via
+	// a detached context, so we poll for the cache entries first.
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
+	msgs := env.mysqlFake.messagesFor(defaultSessionID)
+	require.Len(t, msgs, 4, "user + 3 merged assistant events in MySQL tier after drain")
 
-	// Redis tier: 4 messages cached under msgs:{session_id}.
-	require.Eventually(t, func() bool {
-		raws, err := env.redisSvc.GetMessages(context.Background(), defaultSessionID)
-		return err == nil && len(raws) == 4
-	}, 2*time.Second, 10*time.Millisecond, "expected 4 messages cached in Redis")
-
-	// FS tier: the session file must contain all messages in order.
-	sessionFile := filepath.Join(env.dataDir, defaultUserID, "sessions", defaultSessionID+".json")
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(sessionFile)
-		return err == nil
-	}, 2*time.Second, 10*time.Millisecond, "session file must exist on disk")
-
-	data, err := os.ReadFile(sessionFile)
-	require.NoError(t, err)
-
-	var doc struct {
-		SessionID string            `json:"session_id"`
-		Messages  []json.RawMessage `json:"messages"`
+	// Every persisted row carries the idempotency key.
+	for _, m := range msgs {
+		assert.NotEmpty(t, m.ClientMsgID, "persisted rows must carry client_msg_id")
 	}
-	require.NoError(t, json.Unmarshal(data, &doc))
-	require.Len(t, doc.Messages, 4, "FS session file must contain user + 3 merged assistant events")
-
-	var first model.Message
-	require.NoError(t, json.Unmarshal(doc.Messages[0], &first))
-	assert.Equal(t, model.RoleUser, first.Role)
-	assert.Equal(t, model.AgentUser, first.Agent)
-	assert.Equal(t, model.EventTypeMessage, first.EventType)
-	assert.Equal(t, 0, first.MsgIndex)
-	assert.Equal(t, "hello", first.Content)
+	assert.Equal(t, model.RoleUser, msgs[0].Role)
+	assert.Equal(t, model.AgentUser, msgs[0].Agent)
+	assert.Equal(t, model.EventTypeMessage, msgs[0].EventType)
+	assert.Equal(t, 0, msgs[0].MsgIndex)
+	assert.Equal(t, "hello", msgs[0].Content)
 
 	// Assistant events follow in order: agent_start, merged token, agent_end.
 	wantEvents := []struct {
@@ -154,13 +132,16 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 		{model.EventTypeAgentEnd, stream.AgentConfucius, ""},
 	}
 	for i, want := range wantEvents {
-		var m model.Message
-		require.NoError(t, json.Unmarshal(doc.Messages[i+1], &m))
-		assert.Equal(t, want.EventType, m.EventType, "assistant event %d", i)
-		assert.Equal(t, want.Agent, m.Agent, "assistant event %d", i)
-		assert.Equal(t, want.Role, m.Role, "assistant event %d", i)
-		assert.Equal(t, i+1, m.MsgIndex, "assistant event %d", i)
+		assert.Equal(t, want.EventType, msgs[i+1].EventType, "assistant event %d", i)
+		assert.Equal(t, want.Agent, msgs[i+1].Agent, "assistant event %d", i)
+		assert.Equal(t, want.Role, msgs[i+1].Role, "assistant event %d", i)
+		assert.Equal(t, i+1, msgs[i+1].MsgIndex, "assistant event %d", i)
 	}
+
+	// The ingest queue drained with the read cache.
+	require.NoError(t, env.drainMessages(context.Background()))
+	assert.Equal(t, 4, len(env.mysqlFake.messagesFor(defaultSessionID)),
+		"re-draining the queue must not duplicate rows (INSERT IGNORE)")
 
 	// RecoverMessages through the public service API must return the same
 	// ordered stream (Redis hit fast-path).
@@ -197,10 +178,9 @@ func TestMessageFlow_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 	// is observed; the stream simply terminates early.
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the detached-context persistence goroutine to land.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) > 0
-	}, 2*time.Second, 10*time.Millisecond, "expected failed turn to be persisted")
+	// Wait for the detached-context persistence goroutine to dual-write, then
+	// drain the write-behind queue into MySQL.
+	env.waitForPersistedTurn(t, defaultSessionID, 1)
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
 	require.GreaterOrEqual(t, len(msgs), 2, "expected user message plus at least one assistant event")
@@ -387,11 +367,10 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 	w := env.postMessage(`{"content":"first message"}`, token)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the async batch save to land before the second turn and before
-	// the temp directory is cleaned up.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 4
-	}, 2*time.Second, 10*time.Millisecond, "expected first turn messages to be persisted")
+	// Wait for the async batch save to land (redis dual write + drain into
+	// MySQL) before the second turn so the recovered history is complete.
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
+	require.GreaterOrEqual(t, len(env.mysqlFake.messagesFor(defaultSessionID)), 4, "expected first turn messages to be persisted")
 
 	// Wait for the title-generation goroutine to consume its LLM round.
 	require.Eventually(t, func() bool {
@@ -405,9 +384,8 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	// Wait for the second turn's async batch save as well.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 8
-	}, 2*time.Second, 10*time.Millisecond, "expected second turn messages to be persisted")
+	env.waitForPersistedTurn(t, defaultSessionID, 8)
+	require.GreaterOrEqual(t, len(env.mysqlFake.messagesFor(defaultSessionID)), 8, "expected second turn messages to be persisted")
 
 	client := llm
 	var secondTurn *agent.LLMRequest
@@ -476,11 +454,11 @@ func TestMessageFlow_ToolCallMemory(t *testing.T) {
 	w := env.postMessage(`{"content":"say hello"}`, token)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the async batch save to land so the second turn recovers the
-	// complete conversation history including the tool call and result.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 4
-	}, 2*time.Second, 10*time.Millisecond, "expected first turn messages to be persisted")
+	// Wait for the async batch save to land (redis dual write + drain) so the
+	// second turn recovers the complete conversation history including the
+	// tool call and result.
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
+	require.GreaterOrEqual(t, len(env.mysqlFake.messagesFor(defaultSessionID)), 4, "expected first turn messages to be persisted")
 
 	// Wait for title generation to consume its round.
 	require.Eventually(t, func() bool {
@@ -563,10 +541,9 @@ func TestMessageFlow_InterruptedTurn_PersistsPartialStream(t *testing.T) {
 	// The handler always writes a 200 because the SSE headers are sent first.
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the detached-context persistence goroutine to land.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) > 0
-	}, 2*time.Second, 10*time.Millisecond, "expected interrupted turn to be persisted")
+	// Wait for the detached-context persistence goroutine to dual-write, then
+	// drain the write-behind queue into MySQL.
+	env.waitForPersistedTurn(t, defaultSessionID, 1)
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
 	require.GreaterOrEqual(t, len(msgs), 2, "expected user message plus at least one assistant event")

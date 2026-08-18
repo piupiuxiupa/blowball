@@ -21,6 +21,7 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	redisstore "github.com/lush/blowball/internal/store/redis"
@@ -67,7 +68,7 @@ func startFakeMCPServer(t *testing.T) *fakeMCPRecorder {
 					"name":        "echo",
 					"description": "echo the msg",
 					"inputSchema": map[string]any{
-						"type": "object",
+						"type":     "object",
 						"required": []string{"msg"},
 						"properties": map[string]any{
 							"msg": map[string]any{"type": "string"},
@@ -94,8 +95,8 @@ func startFakeMCPServer(t *testing.T) *fakeMCPRecorder {
 }
 
 type fakeMCPRecorder struct {
-	server     *httptest.Server
-	mu         sync.Mutex
+	server      *httptest.Server
+	mu          sync.Mutex
 	authHeaders []string
 }
 
@@ -180,7 +181,14 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 	mysqlFake := newMemoryMySQL()
 	require.NoError(t, mysqlFake.CreateSession(context.Background(), model.Session{SessionID: "sess-umcp", UserID: defaultUserID, TraceID: "trace-umcp"}))
 
-	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	deps := service.SessionDeps{
+		MySQL: mysqlFake,
+		Redis: redisSvc,
+		FS:    fsSvc,
+		DrainMessageQueue: func(ctx context.Context) error {
+			return msgflush.Drain(ctx, redisSvc, mysqlFake)
+		},
+	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
@@ -194,8 +202,8 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())
 	handler.RegisterRoutes(r, handler.RouteDeps{
-		AuthMW:       middleware.AuthMiddleware(integrationTestSecret),
-		SendMessage:  streamH.SendMessage,
+		AuthMW:      middleware.AuthMiddleware(integrationTestSecret),
+		SendMessage: streamH.SendMessage,
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-umcp/messages", jsonBody(t, map[string]string{"content": "echo hi for me"}))
@@ -231,10 +239,9 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 	assert.True(t, callResultSeen, "expected the mcp_call tool_result to carry echo:hi")
 
 	// The final assistant content is assembled server-side and persisted; verify
-	// it there rather than across tokenized SSE events.
-	require.Eventually(t, func() bool {
-		return len(mysqlFake.messagesFor("sess-umcp")) > 0
-	}, 2*time.Second, 10*time.Millisecond, "expected sess-umcp messages to be persisted")
+	// it there rather than across tokenized SSE events (dual write, then drain
+	// the write-behind queue into the fake MySQL tier).
+	waitForQueuedTurn(t, redisSvc, mysqlFake, "sess-umcp", 1)
 	var sawAssistantEcho bool
 	for _, m := range mysqlFake.messagesFor("sess-umcp") {
 		if m.Role == "assistant" && strings.Contains(m.Content, "echo:hi") {

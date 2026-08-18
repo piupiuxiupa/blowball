@@ -28,6 +28,7 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/msgflush"
 	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
 	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -172,6 +173,10 @@ type memoryMySQL struct {
 	messages map[string][]model.Message
 	nextID   int64
 
+	// insertAttempts counts every row handed to AppendMessages including the
+	// ones INSERT IGNORE would drop (duplicate client_msg_id).
+	insertAttempts int
+
 	// turnUsages records every TurnUsage row handed to SaveTurnUsage, keyed by
 	// session_id, so integration tests can assert per-turn cost persistence and
 	// the session-deletion cascade (DeleteSession clears the slice).
@@ -315,11 +320,30 @@ func (m *memoryMySQL) AppendMessage(_ context.Context, msg model.Message) (int64
 	return msg.ID, nil
 }
 
+// AppendMessages mirrors the real store's INSERT IGNORE on the UNIQUE
+// client_msg_id: a redelivered record (drain running after a partial flush,
+// crash-recovery replay) counts as an attempt but lands no second row. The
+// attempts counter lets tests assert idempotency explicitly.
 func (m *memoryMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.insertAttempts += len(msgs)
+	known := make(map[string]struct{}, len(m.messages))
+	for sid := range m.messages {
+		for _, r := range m.messages[sid] {
+			if r.ClientMsgID != "" {
+				known[r.ClientMsgID] = struct{}{}
+			}
+		}
+	}
 	ids := make([]int64, 0, len(msgs))
 	for i := range msgs {
+		if msgs[i].ClientMsgID != "" {
+			if _, dup := known[msgs[i].ClientMsgID]; dup {
+				continue
+			}
+			known[msgs[i].ClientMsgID] = struct{}{}
+		}
 		m.nextID++
 		msgs[i].ID = m.nextID
 		msgs[i].UpdateTime = time.Now().UTC()
@@ -327,6 +351,14 @@ func (m *memoryMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([
 		ids = append(ids, msgs[i].ID)
 	}
 	return ids, nil
+}
+
+// insertAttemptCount returns the total number of rows handed to AppendMessages
+// (including ignored duplicates). Test helper.
+func (m *memoryMySQL) insertAttemptCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.insertAttempts
 }
 
 func (m *memoryMySQL) ListMessages(_ context.Context, sessionID string) ([]model.Message, error) {
@@ -453,6 +485,37 @@ type testEnv struct {
 	msgSvc    *service.MessageService
 }
 
+// drainMessages synchronously drains the write-behind ingest queue into the
+// fake MySQL tier using the production msgflush.Drain primitive — the same
+// hook the harness wires into SessionDeps.DrainMessageQueue (used by the
+// pre-delete and read-miss paths).
+func (e *testEnv) drainMessages(ctx context.Context) error {
+	return msgflush.Drain(ctx, e.redisSvc, e.mysqlFake)
+}
+
+// waitForPersistedTurn waits until the detached persistence goroutine has
+// dual-written at least min messages for sessionID into Redis, then drains
+// the write-behind queue into the fake MySQL tier. This mirrors production:
+// after a turn, messages sit in the queue until the background flusher (here:
+// the explicit drain) moves them, and only then are they visible to the
+// MySQL-backed history reads.
+func (e *testEnv) waitForPersistedTurn(t *testing.T, sessionID string, min int) {
+	t.Helper()
+	waitForQueuedTurn(t, e.redisSvc, e.mysqlFake, sessionID, min)
+}
+
+// waitForQueuedTurn is waitForPersistedTurn for local harnesses that are not
+// built around a testEnv but share the same store pair (real miniredis-backed
+// redis.Store + memoryMySQL).
+func waitForQueuedTurn(t *testing.T, redisSvc *redisstore.Store, mysqlFake *memoryMySQL, sessionID string, min int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		raws, err := redisSvc.GetMessages(context.Background(), sessionID)
+		return err == nil && len(raws) >= min
+	}, 2*time.Second, 10*time.Millisecond, "expected the turn to be dual-written into the redis read cache")
+	require.NoError(t, msgflush.Drain(context.Background(), redisSvc, mysqlFake))
+}
+
 // agentConfig builds the per-agent config used by the orchestrator. Chongzhi
 // is granted the Xizhi file tools so file_ops_test can drive a real
 // xizhi_write_file invocation; Confucius carries no plain tools (it dispatches
@@ -522,7 +585,14 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		TraceID:   "seed-trace",
 	}))
 
-	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	deps := service.SessionDeps{
+		MySQL: mysqlFake,
+		Redis: redisSvc,
+		FS:    fsSvc,
+		DrainMessageQueue: func(ctx context.Context) error {
+			return msgflush.Drain(ctx, redisSvc, mysqlFake)
+		},
+	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	// TitleService is given the same scripted LLM; for these tests we never
@@ -609,7 +679,14 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		TraceID:   "seed-trace",
 	}))
 
-	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	deps := service.SessionDeps{
+		MySQL: mysqlFake,
+		Redis: redisSvc,
+		FS:    fsSvc,
+		DrainMessageQueue: func(ctx context.Context) error {
+			return msgflush.Drain(ctx, redisSvc, mysqlFake)
+		},
+	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
@@ -710,7 +787,14 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		TraceID:   "seed-trace",
 	}))
 
-	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	deps := service.SessionDeps{
+		MySQL: mysqlFake,
+		Redis: redisSvc,
+		FS:    fsSvc,
+		DrainMessageQueue: func(ctx context.Context) error {
+			return msgflush.Drain(ctx, redisSvc, mysqlFake)
+		},
+	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
@@ -767,6 +851,23 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		sessSvc:   sessSvc,
 		msgSvc:    msgSvc,
 	}
+}
+
+// mustMarshal JSON-encodes v, failing the test on error.
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	return raw
+}
+
+// mustLenMessageBuffer returns the current ingest-queue length, failing the
+// test on a Redis error.
+func mustLenMessageBuffer(t *testing.T, e *testEnv) int64 {
+	t.Helper()
+	n, err := e.redisSvc.LenMessageBuffer(context.Background())
+	require.NoError(t, err)
+	return n
 }
 
 // authToken returns a Bearer JWT for the default test user that the real auth

@@ -27,6 +27,7 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/llmraw"
 	"github.com/lush/blowball/internal/middleware"
+	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/storage"
@@ -119,8 +120,43 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 
 	// 2. Shared session service. Store-only, so it carries no agent-layer
 	// dependency; both the api CRUD handlers and the agent streaming handler use it.
-	sessDeps := service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: rt.fsStore}
+	// The drain hook exposes the synchronous write-behind drain to the service
+	// layer (pre-delete archive completeness and Redis-miss backfill safety);
+	// the notify channel wakes the message flusher when the queue crosses its
+	// batch threshold. Both roles get the drain — the api role deletes
+	// sessions too — while the flusher goroutine below is agent/all only.
+	drainMessages := func(ctx context.Context) error {
+		return msgflush.Drain(ctx, rt.redisStore, rt.mysqlStore)
+	}
+	msgNotify := make(chan struct{}, 1)
+	sessDeps := service.SessionDeps{
+		MySQL:             rt.mysqlStore,
+		Redis:             rt.redisStore,
+		FS:                rt.fsStore,
+		DrainMessageQueue: drainMessages,
+		NudgeMessageFlush: func() {
+			select {
+			case msgNotify <- struct{}{}:
+			default:
+			}
+		},
+	}
 	sessSvc := service.NewSessionService(sessDeps)
+
+	// Message write-behind flusher (message-write-behind capability): moves
+	// the msgs:buffer ingest queue into MySQL in batches. Constructed and
+	// started only by the agent/all roles — the api role never runs the
+	// consumption path (its SessionHandler is CRUD-only); a nil msgFlusher
+	// on the api role skips the shutdown drain below. Start() performs the
+	// processing-residue crash recovery before the loop begins.
+	var msgFlusher *msgflush.Flusher
+	if role != "api" {
+		msgFlusher = msgflush.NewFlusher(rt.redisStore, rt.mysqlStore, msgflush.Config{
+			Interval:  rt.cfg.Messages.FlushInterval,
+			BatchSize: rt.cfg.Messages.FlushBatchSize,
+		}, msgNotify)
+		msgFlusher.Start()
+	}
 
 	// 3. Engine + health check. Each role gets its own engine with the standard
 	// middleware chain (Recovery → Trace → CORS); auth is applied per-route-group
@@ -197,6 +233,13 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 	if rawFlusher != nil {
 		rawFlusher.Close()
 		log.Info("llm raw flusher stopped", zap.String("role", role))
+	}
+	// Same for the message write-behind queue: Close stops the loop and runs
+	// one bounded final drain so a normal release does not leave the turn
+	// tail queued (nil on the api role, which never runs the flusher).
+	if msgFlusher != nil {
+		msgFlusher.Close()
+		log.Info("message flusher stopped", zap.String("role", role))
 	}
 	return nil
 }
@@ -296,6 +339,21 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		log.Fatal("redis init failed", zap.Error(err))
 	}
 	rt.redisStore = redisStore
+
+	// Best-effort Redis AOF probe (message-write-behind deployment
+	// prerequisite): the msgs:buffer ingest queue is the only synchronous
+	// layer for messages, so a Redis restart without AOF loses whatever sits
+	// in the flush window. A probe failure (no CONFIG permission, managed
+	// Redis) is skipped silently — only a definitive "off" WARNs; startup is
+	// never blocked.
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	aofOn, aofErr := redisStore.AppendOnlyEnabled(probeCtx)
+	probeCancel()
+	if aofErr != nil {
+		log.Debug("redis appendonly probe failed; skipping", zap.Error(aofErr))
+	} else if !aofOn {
+		log.Warn("redis appendonly is disabled; messages sitting in the write-behind flush window are lost on a redis restart — enable AOF (appendonly yes)")
+	}
 
 	// FS store for per-user session files, workspace and skills directories. fs.New creates dataDir.
 	fsStore, err := fs.New(dataDir)

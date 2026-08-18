@@ -14,6 +14,10 @@ services:
       - ./migrations:/docker-entrypoint-initdb.d
   redis:
     image: redis:7-alpine
+    # AOF 对齐生产红线:msgs:buffer 是消息的唯一同步层,关掉会在重启时
+    # 丢 flush 窗口的消息,且 blowball 启动探测会打 WARN。
+    # HA 拓扑(哨兵集群)见 deploy/redis-ha/ 与 docs/redis-ha-deployment.md。
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
     volumes:

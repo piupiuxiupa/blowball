@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,10 +13,12 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
-// TestDeleteSession_EndToEnd seeds all three persistence tiers for a session,
-// deletes it through the HTTP API, and verifies: the live rows are purged, the
-// archive mirrors are populated, the warm-tier FS file is removed, the Redis
-// cache is left untouched (TTL-only), and a subsequent read returns 404.
+// TestDeleteSession_EndToEnd seeds the MySQL tier and the Redis cache for a
+// session, deletes it through the HTTP API, and verifies the three-step
+// ordering: the live rows are purged, the archive mirrors are populated, the
+// Redis cache keys are proactively cleared (database before cache — a
+// behavior change from the TTL-only policy), and a subsequent read returns
+// 404.
 func TestDeleteSession_EndToEnd(t *testing.T) {
 	env := newTestEnv(t, newScriptedLLMClient())
 	ctx := context.Background()
@@ -31,17 +31,12 @@ func TestDeleteSession_EndToEnd(t *testing.T) {
 		SessionID: sessionID, Title: "Chat", TraceID: "seed-trace",
 	}))
 	_, err := env.mysqlFake.AppendMessages(ctx, []model.Message{
-		{SessionID: sessionID, Agent: model.AgentUser, MsgIndex: 0, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hi", TraceID: "seed-trace"},
-		{SessionID: sessionID, Agent: stream.AgentConfucius, MsgIndex: 1, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "hello", TraceID: "seed-trace"},
+		{SessionID: sessionID, Agent: model.AgentUser, MsgIndex: 0, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hi", TraceID: "seed-trace", ClientMsgID: "seed-cmid-1"},
+		{SessionID: sessionID, Agent: stream.AgentConfucius, MsgIndex: 1, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "hello", TraceID: "seed-trace", ClientMsgID: "seed-cmid-2"},
 	})
 	require.NoError(t, err)
 
-	// Seed the warm FS tier with a session JSON file.
-	fsPath := filepath.Join(env.dataDir, userID, "sessions", sessionID+".json")
-	require.NoError(t, os.MkdirAll(filepath.Dir(fsPath), 0o755))
-	require.NoError(t, os.WriteFile(fsPath, []byte(`{"session_id":"`+sessionID+`"}`), 0o644))
-
-	// Seed the hot Redis tier so we can later assert it is left in place.
+	// Seed the hot Redis tier so we can later assert it is cleared.
 	require.NoError(t, env.redisSvc.SetMessages(ctx, sessionID, [][]byte{[]byte("raw")}))
 	require.True(t, env.miniRedis.Exists("msgs:"+sessionID), "precondition: redis key seeded")
 
@@ -67,21 +62,57 @@ func TestDeleteSession_EndToEnd(t *testing.T) {
 	require.Len(t, env.mysqlFake.deletedMessages[sessionID], 2, "both messages must be archived")
 	env.mysqlFake.mu.Unlock()
 
-	// Warm-tier FS file is removed.
-	_, statErr := os.Stat(fsPath)
-	assert.ErrorIs(t, statErr, os.ErrNotExist, "FS session JSON must be removed")
-
-	// Redis is intentionally not cleared; the key survives until TTL.
-	assert.True(t, env.miniRedis.Exists("msgs:"+sessionID),
-		"redis cache must NOT be cleared on delete (TTL-only)")
+	// Redis cache keys are proactively cleared after the database delete.
+	assert.False(t, env.miniRedis.Exists("msgs:"+sessionID),
+		"msgs cache key must be cleared on delete (db-first, then cache)")
+	assert.False(t, env.miniRedis.Exists("session:"+sessionID),
+		"session cache key must be cleared on delete")
 
 	// A subsequent read returns 404: the ownership lookup misses the purged
-	// session before Redis/FS are ever consulted.
+	// session before the cache is ever consulted.
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID+"/messages", nil)
 	getReq.Header.Set("Authorization", "Bearer "+authToken(t, userID))
 	getW := httptest.NewRecorder()
 	env.engine.ServeHTTP(getW, getReq)
 	require.Equal(t, http.StatusNotFound, getW.Code, "body: %s", getW.Body.String())
+}
+
+// TestDeleteSession_ArchiveIncludesQueuedMessages verifies the pre-delete
+// drain: messages that were dual-written into Redis but not yet flushed to
+// MySQL are drained into the archive, so the *_deleted mirror captures every
+// message the session ever produced despite the async write-behind window.
+func TestDeleteSession_ArchiveIncludesQueuedMessages(t *testing.T) {
+	env := newTestEnv(t, newScriptedLLMClient())
+	ctx := context.Background()
+	sessionID := defaultSessionID
+	userID := defaultUserID
+
+	// Simulate a turn whose batch reached Redis (dual write) but has NOT been
+	// flushed: push straight onto the ingest queue through the service API.
+	msgs := []model.Message{
+		{SessionID: sessionID, Agent: model.AgentUser, MsgIndex: 0, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "unflushed", TraceID: "t-1", ClientMsgID: "unflushed-cmid-1"},
+		{SessionID: sessionID, Agent: stream.AgentConfucius, MsgIndex: 1, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "still-queued", TraceID: "t-1", ClientMsgID: "unflushed-cmid-2"},
+	}
+	raws := make([][]byte, 0, len(msgs))
+	for _, m := range msgs {
+		raws = append(raws, mustMarshal(t, m))
+	}
+	require.NoError(t, env.redisSvc.PushMessageBuffer(ctx, raws))
+	require.Equal(t, int64(2), mustLenMessageBuffer(t, env), "precondition: queue holds the unflushed batch")
+
+	// Delete through the real HTTP stack; the service drains first.
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sessionID, nil)
+	req.Header.Set("Authorization", "Bearer "+authToken(t, userID))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+
+	env.mysqlFake.mu.Lock()
+	require.Len(t, env.mysqlFake.deletedMessages[sessionID], 2,
+		"the archive must include the queued-but-unflushed messages (drain ran first)")
+	content := env.mysqlFake.deletedMessages[sessionID][0].Content
+	env.mysqlFake.mu.Unlock()
+	assert.Equal(t, "unflushed", content)
 }
 
 // TestDeleteSession_NonOwner_404 verifies a user cannot delete another user's
@@ -95,7 +126,8 @@ func TestDeleteSession_NonOwner_404(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+authToken(t, "intruder"))
 	w := httptest.NewRecorder()
 	env.engine.ServeHTTP(w, req)
-	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+
+	require.Equal(t, http.StatusNotFound, w.Code)
 
 	// The session survives untouched.
 	env.mysqlFake.mu.Lock()
@@ -115,7 +147,8 @@ func TestDeleteSession_MissingSession_404(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+authToken(t, ""))
 	w := httptest.NewRecorder()
 	env.engine.ServeHTTP(w, req)
-	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+
+	require.Equal(t, http.StatusNotFound, w.Code)
 
 	env.mysqlFake.mu.Lock()
 	assert.Empty(t, env.mysqlFake.deletedSessions, "missing-session delete must not archive anything")

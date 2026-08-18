@@ -19,6 +19,7 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	redisstore "github.com/lush/blowball/internal/store/redis"
@@ -36,6 +37,7 @@ type roleTestEnv struct {
 	apiEngine   *gin.Engine
 	agentEngine *gin.Engine
 	mysqlFake   *memoryMySQL
+	redisSvc    *redisstore.Store
 }
 
 func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
@@ -58,7 +60,14 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 		TraceID:   "seed-trace",
 	}))
 
-	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	deps := service.SessionDeps{
+		MySQL: mysqlFake,
+		Redis: redisSvc,
+		FS:    fsSvc,
+		DrainMessageQueue: func(ctx context.Context) error {
+			return msgflush.Drain(ctx, redisSvc, mysqlFake)
+		},
+	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
@@ -117,7 +126,7 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 	handler.RegisterHealthz(agentEngine)
 	handler.RegisterAgentRoutes(agentEngine, agentDeps)
 
-	return &roleTestEnv{apiEngine: apiEngine, agentEngine: agentEngine, mysqlFake: mysqlFake}
+	return &roleTestEnv{apiEngine: apiEngine, agentEngine: agentEngine, mysqlFake: mysqlFake, redisSvc: redisSvc}
 }
 
 // TestAPIRoleEngine_OwnsCRUDRejectsAgentRoutes asserts the api-role engine
@@ -195,10 +204,9 @@ func TestAgentRoleEngine_OwnsStreamingRejectsCRUD(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "agent engine should serve the streaming endpoint; body: %s", w.Body.String())
 	require.Equal(t, "text/event-stream", w.Result().Header.Get("Content-Type"))
 
-	// The agent-owned pipeline persisted the turn into the shared store.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) > 0
-	}, 2*time.Second, 10*time.Millisecond, "agent engine streaming turn should persist to the shared store")
+	// The agent-owned pipeline persisted the turn into the shared store (dual
+	// write, then drain the write-behind queue into the fake MySQL tier).
+	waitForQueuedTurn(t, env.redisSvc, env.mysqlFake, defaultSessionID, 1)
 
 	// GET /mcp/tools is served by the agent engine.
 	mcpReq := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/tools", nil)

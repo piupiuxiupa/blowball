@@ -2,14 +2,10 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -224,19 +220,20 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 
 	// With event-stream storage, every assistant event is persisted. The
 	// assistant summary is reconstructed from Confucius round-2 token events.
-	require.Eventually(t, func() bool {
-		msgs := env.mysqlFake.messagesFor(defaultSessionID)
-		var summaryBuf string
-		for _, m := range msgs {
-			if m.Agent == stream.AgentConfucius && m.EventType == model.EventTypeToken {
-				summaryBuf += m.Content
-			}
+	// Wait for the dual write, then drain the write-behind queue into the
+	// fake MySQL tier before reading the rows back.
+	env.waitForPersistedTurn(t, defaultSessionID, 3)
+
+	msgs := env.mysqlFake.messagesFor(defaultSessionID)
+	var summaryBuf string
+	for _, m := range msgs {
+		if m.Agent == stream.AgentConfucius && m.EventType == model.EventTypeToken {
+			summaryBuf += m.Content
 		}
-		return summaryBuf == summary
-	}, 2*time.Second, 10*time.Millisecond, "Confucius round-2 token events must reconstruct the summary")
+	}
+	assert.Equal(t, summary, summaryBuf, "Confucius round-2 token events must reconstruct the summary")
 
 	// Sanity: many rows persisted (user + all assistant events).
-	msgs := env.mysqlFake.messagesFor(defaultSessionID)
 	require.Greater(t, len(msgs), 2, "expected user message plus multiple assistant events")
 
 	// The user row must be first and correctly tagged.
@@ -250,20 +247,6 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 	require.GreaterOrEqual(t, len(recovered), 3)
 	assert.Equal(t, model.AgentUser, recovered[0].Agent)
 	assert.Equal(t, model.EventTypeMessage, recovered[0].EventType)
-
-	// FS tier carries the same ordered stream.
-	sessionFile := filepath.Join(env.dataDir, defaultUserID, "sessions", defaultSessionID+".json")
-	data, err := os.ReadFile(sessionFile)
-	require.NoError(t, err)
-	var doc struct {
-		Messages []json.RawMessage `json:"messages"`
-	}
-	require.NoError(t, json.Unmarshal(data, &doc))
-	require.Greater(t, len(doc.Messages), 2)
-	var firstFS model.Message
-	require.NoError(t, json.Unmarshal(doc.Messages[0], &firstFS))
-	assert.Equal(t, model.AgentUser, firstFS.Agent)
-	assert.Equal(t, model.EventTypeMessage, firstFS.EventType)
 }
 
 // trackingLLMClient wraps an agent.LLMClient, invoking the supplied hooks

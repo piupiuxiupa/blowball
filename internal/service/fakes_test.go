@@ -41,11 +41,6 @@ type fakeMySQLStore struct {
 	getTitleFound *model.Title
 	getTitleErr   error
 
-	appendMessageCalls int
-	appendMessageArg   model.Message
-	appendMessageID    int64
-	appendMessageErr   error
-
 	appendMessagesCalls int
 	appendMessagesArg   []model.Message
 	appendMessagesIDs   []int64
@@ -58,6 +53,11 @@ type fakeMySQLStore struct {
 	updateSessionTimeCalls int
 	updateSessionTimeArg   string
 	updateSessionTimeErr   error
+
+	// order (when non-nil) records the call sequence of delete-path
+	// operations so tests can assert the drain → purge → cache-clear
+	// ordering across fakes sharing one log.
+	order *[]string
 
 	listMessagesRows []model.Message
 	listMessagesErr  error
@@ -90,6 +90,9 @@ func (f *fakeMySQLStore) DeleteSession(_ context.Context, sessionID string) erro
 	defer f.mu.Unlock()
 	f.deleteSessionCalls++
 	f.deleteSessionArg = sessionID
+	if f.order != nil {
+		*f.order = append(*f.order, "mysql.delete")
+	}
 	return f.deleteSessionErr
 }
 
@@ -142,22 +145,14 @@ func (f *fakeMySQLStore) GetTitle(_ context.Context, sessionID string) (*model.T
 	return &cp, nil
 }
 
-func (f *fakeMySQLStore) AppendMessage(_ context.Context, m model.Message) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.appendMessageCalls++
-	f.appendMessageArg = m
-	if f.appendMessageErr != nil {
-		return 0, f.appendMessageErr
-	}
-	return f.appendMessageID, nil
-}
-
 func (f *fakeMySQLStore) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.appendMessagesCalls++
 	f.appendMessagesArg = msgs
+	if f.order != nil {
+		*f.order = append(*f.order, "mysql.append")
+	}
 	if f.appendMessagesErr != nil {
 		return nil, f.appendMessagesErr
 	}
@@ -252,17 +247,16 @@ func (f *fakeMySQLStore) SaveTurnUsage(_ context.Context, tu model.TurnUsage) er
 	return f.saveTurnUsageErr
 }
 
-// fakeRedisStore records AppendMessage/GetMessages/SetMessages calls.
+// fakeRedisStore records AppendMessagesDual/GetMessages/SetMessages/
+// ClearMessages/DelSessionCache calls. Order entries feed the delete-path
+// ordering assertions.
 type fakeRedisStore struct {
 	mu sync.Mutex
 
-	appendCalls int
-	appendArg   []byte
-	appendErr   error
-
-	appendMessagesCalls int
-	appendMessagesArgs  [][]byte
-	appendMessagesErr   error
+	dualCalls int
+	dualSID   string
+	dualArgs  [][]byte
+	dualErr   error
 
 	getCalls  int
 	getResult [][]byte
@@ -271,25 +265,27 @@ type fakeRedisStore struct {
 	setCalls int
 	setArgs  [][]byte
 	setErr   error
+
+	clearCalls   int
+	clearErr     error
+	delSessCalls int
+	delSessErr   error
+
+	// order (when non-nil) records the delete-path call sequence; it may be
+	// shared with the other fakes and the drain hook.
+	order *[]string
 }
 
-func (f *fakeRedisStore) AppendMessage(_ context.Context, sessionID string, raw []byte) error {
+func (f *fakeRedisStore) AppendMessagesDual(_ context.Context, sessionID string, raws [][]byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.appendCalls++
-	f.appendArg = append([]byte(nil), raw...)
-	return f.appendErr
-}
-
-func (f *fakeRedisStore) AppendMessages(_ context.Context, sessionID string, raws [][]byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.appendMessagesCalls++
-	f.appendMessagesArgs = make([][]byte, len(raws))
+	f.dualCalls++
+	f.dualSID = sessionID
+	f.dualArgs = make([][]byte, len(raws))
 	for i, b := range raws {
-		f.appendMessagesArgs[i] = append([]byte(nil), b...)
+		f.dualArgs[i] = append([]byte(nil), b...)
 	}
-	return f.appendMessagesErr
+	return f.dualErr
 }
 
 func (f *fakeRedisStore) GetMessages(_ context.Context, sessionID string) ([][]byte, error) {
@@ -317,49 +313,33 @@ func (f *fakeRedisStore) SetMessages(_ context.Context, sessionID string, raws [
 	return f.setErr
 }
 
-// fakeFSStore records WriteSession/ReadSession/DeleteSession/EnsureUserDirs.
+func (f *fakeRedisStore) ClearMessages(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clearCalls++
+	if f.order != nil {
+		*f.order = append(*f.order, "redis.clear_msgs")
+	}
+	return f.clearErr
+}
+
+func (f *fakeRedisStore) DelSessionCache(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delSessCalls++
+	if f.order != nil {
+		*f.order = append(*f.order, "redis.del_session")
+	}
+	return f.delSessErr
+}
+
+// fakeFSStore records EnsureUserDirs (the FS store's only remaining duty
+// after the warm-tier removal).
 type fakeFSStore struct {
 	mu sync.Mutex
 
-	writeCalls int
-	writeData  []byte
-	writeErr   error
-
-	readResult []byte
-	readErr    error
-
-	deleteCalls int
-	deleteErr   error
-
 	ensureCalls int
 	ensureErr   error
-}
-
-func (f *fakeFSStore) WriteSession(_ context.Context, userID, sessionID string, data []byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.writeCalls++
-	f.writeData = append([]byte(nil), data...)
-	return f.writeErr
-}
-
-func (f *fakeFSStore) ReadSession(_ context.Context, userID, sessionID string) ([]byte, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.readErr != nil {
-		return nil, f.readErr
-	}
-	if f.readResult == nil {
-		return nil, nil
-	}
-	return append([]byte(nil), f.readResult...), nil
-}
-
-func (f *fakeFSStore) DeleteSession(_ context.Context, userID, sessionID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.deleteCalls++
-	return f.deleteErr
 }
 
 func (f *fakeFSStore) EnsureUserDirs(_ context.Context, userID string) error {
@@ -396,9 +376,27 @@ func (c *fakeLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, on
 	return c.resp, nil
 }
 
-// newDeps builds a SessionDeps with the supplied fakes.
+// newDeps builds a SessionDeps with the supplied fakes and no drain hook.
 func newDeps(m *fakeMySQLStore, r *fakeRedisStore, f *fakeFSStore) SessionDeps {
 	return SessionDeps{MySQL: m, Redis: r, FS: f}
+}
+
+// fakeDrain records write-behind drain invocations (the msgflush.Drain stand-in).
+type fakeDrain struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+	order *[]string // optional shared order log (mirrors the store fakes)
+}
+
+func (d *fakeDrain) drain(ctx context.Context) error {
+	d.mu.Lock()
+	d.calls++
+	d.mu.Unlock()
+	if d.order != nil {
+		*d.order = append(*d.order, "drain")
+	}
+	return d.err
 }
 
 // sampleMessage is a stable message used across tests.

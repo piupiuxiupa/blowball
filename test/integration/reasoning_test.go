@@ -73,11 +73,9 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	require.True(t, ok, "expected usage.total in done event")
 	assert.Equal(t, float64(2), totalObj["reasoning_tokens"], "expected reasoning_tokens in usage.total")
 
-	// Wait for the async batch save and title generation to finish so the test
-	// can clean up the temp data directory without racing the FS writer.
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 4
-	}, 2*time.Second, 10*time.Millisecond, "expected first turn messages to be persisted")
+	// Wait for the dual write, then drain the write-behind queue into the
+	// fake MySQL tier.
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
 
 	// Wait for the async title generation round to complete so the request
 	// snapshot is stable.
@@ -114,9 +112,7 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	w2 := env.postMessage(`{"content":"again"}`, token)
 	require.Equal(t, http.StatusOK, w2.Code, "body: %s", w2.Body.String())
 
-	require.Eventually(t, func() bool {
-		return len(env.mysqlFake.messagesFor(defaultSessionID)) >= 8
-	}, 2*time.Second, 10*time.Millisecond, "expected second turn messages to be persisted")
+	env.waitForPersistedTurn(t, defaultSessionID, 8)
 
 	var echoed bool
 	for _, req := range llm.requests() {

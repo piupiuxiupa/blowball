@@ -1409,3 +1409,84 @@ func containsStr(s []string, v string) bool {
 	}
 	return false
 }
+
+func TestLoad_MessagesDefaults(t *testing.T) {
+	// Omitting the messages block must default flush_interval to 1s and
+	// flush_batch_size to 100.
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Messages.FlushInterval != time.Second {
+		t.Errorf("Messages.FlushInterval = %s, want 1s", cfg.Messages.FlushInterval)
+	}
+	if cfg.Messages.FlushBatchSize != 100 {
+		t.Errorf("Messages.FlushBatchSize = %d, want 100", cfg.Messages.FlushBatchSize)
+	}
+}
+
+func TestLoad_MessagesExplicitValues(t *testing.T) {
+	path := writeTempYAML(t, `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  flush_interval: 500ms
+  flush_batch_size: 25
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Messages.FlushInterval != 500*time.Millisecond {
+		t.Errorf("Messages.FlushInterval = %s, want 500ms", cfg.Messages.FlushInterval)
+	}
+	if cfg.Messages.FlushBatchSize != 25 {
+		t.Errorf("Messages.FlushBatchSize = %d, want 25", cfg.Messages.FlushBatchSize)
+	}
+}
+
+func TestLoad_MessagesNegativeRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "negative flush_interval",
+			yaml: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  flush_interval: -1s
+`,
+		},
+		{
+			name: "negative flush_batch_size",
+			yaml: `
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  flush_batch_size: -5
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.yaml)
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load accepted a non-positive messages value, want load-time rejection")
+			}
+		})
+	}
+}

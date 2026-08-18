@@ -1,0 +1,105 @@
+# blowball Redis 哨兵集群 —— 单机演练环境(仅测试/演练,不用于生产)
+# 用途:验证主从切换行为与 blowball 在切换窗口的降级(docs/redis-ha-deployment.md §8)
+#
+#   docker compose -f deploy/redis-ha/docker-compose.ha.yml up -d
+#   docker compose -f deploy/redis-ha/docker-compose.ha.yml stop redis-1   # kill 主,观察切换
+#   docker compose -f deploy/redis-ha/docker-compose.ha.yml logs -f sentinel-1
+#
+# 宿主机端口映射仅用于观察(redis-cli 连 16379-16381 / 26379-26381);
+# 让宿主机上的 blowball 直连本集群需要把 sentinel monitor 指向宿主机可达地址
+# 并配置 announce-ip(哨兵会把它看到的容器名广播出去,宿主机解析不了)——
+# 更简单的做法是把 blowball 跑进同一个 docker 网络。
+
+name: blowball-redis-ha
+
+services:
+  # 初始主节点
+  redis-1:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"            # 红线:msgs:buffer 是唯一同步层(§4.1)
+      - --appendfsync
+      # 生产配置为 always(JuiceFS 元数据红线,§4.1);演练环境为降低宿主机
+      # fsync 压力用 everysec —— 不影响 failover 行为,演练的是切换不是持久化。
+      - everysec
+      - --requirepass
+      - ha-test-pass
+      - --masterauth     # 主也要配:切换后被降级为副本时对新主认证(§4.3)
+      - ha-test-pass
+      - --maxmemory-policy
+      - noeviction       # 红线:队列是业务数据,禁止淘汰(§4.2)
+      - --min-replicas-to-write
+      - "1"
+      - --min-replicas-max-lag
+      - "10"
+    ports:
+      - "16379:6379"
+    networks: [ha]
+
+  redis-2:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ha-test-pass
+      - --masterauth
+      - ha-test-pass
+      - --maxmemory-policy
+      - noeviction
+      - --replicaof
+      - redis-1
+      - "6379"
+    ports:
+      - "16380:6379"
+    networks: [ha]
+
+  redis-3:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ha-test-pass
+      - --masterauth
+      - ha-test-pass
+      - --maxmemory-policy
+      - noeviction
+      - --replicaof
+      - redis-1
+      - "6379"
+    ports:
+      - "16381:6379"
+    networks: [ha]
+
+  # 每个哨兵在启动时生成自己的 /tmp/sentinel.conf —— 哨兵会运行时重写
+  # 配置文件,三台共享同一个挂载文件会互相覆盖。
+  sentinel-1: &sentinel
+    image: redis:7-alpine
+    entrypoint: >
+      sh -c 'printf "port 26379\nprotected-mode no\nsentinel monitor blowball-master redis-1 6379 2\nsentinel auth-pass blowball-master ha-test-pass\nsentinel down-after-milliseconds blowball-master 5000\nsentinel failover-timeout blowball-master 30000\nsentinel parallel-syncs blowball-master 1\n" > /tmp/sentinel.conf &&
+      redis-sentinel /tmp/sentinel.conf'
+    ports:
+      - "26379:26379"
+    networks: [ha]
+
+  sentinel-2:
+    <<: *sentinel
+    ports:
+      - "26380:26379"
+
+  sentinel-3:
+    <<: *sentinel
+    ports:
+      - "26381:26379"
+
+networks:
+  ha:

@@ -7,20 +7,21 @@ import (
 )
 
 // userSubDirs lists the fixed subdirectories created directly under each user's
-// directory. The order is the on-disk creation order; sessions/ first because
-// the session service depends on it immediately, then workspace/. Per-user
-// skills are NOT a top-level sibling: they live under the workspace in the
+// directory. The sessions/ entry is gone: the Redis-first write-behind
+// persistence change removed the session-file warm tier, so the per-user tree
+// now only needs the workspace/ (per-user skills live under it in the
 // reserved .blowball/skills/ namespace, created by EnsureUserDirs once the
-// workspace dir exists.
-var userSubDirs = []string{"sessions", "workspace"}
+// workspace dir exists). Legacy sessions/ directories on existing deployments
+// are simply no longer created or touched.
+var userSubDirs = []string{"workspace"}
 
 // userDir returns the directory owned by userID under the configured root.
 func (s *Store) userDir(userID string) string {
 	return filepath.Join(s.root, userID)
 }
 
-// EnsureUserDirs creates the user directory for userID, the canonical sessions/
-// and workspace/ subdirectories beneath it, and the reserved
+// EnsureUserDirs creates the user directory for userID, the canonical
+// workspace/ subdirectory beneath it, and the reserved
 // workspace/.blowball/skills/ directory that holds per-user skills. The call is
 // idempotent: already-existing directories are kept untouched.
 //
@@ -73,12 +74,6 @@ func (s *Store) UserWorkspace(userID string) string {
 // can still read and write it, letting the user manage their own skills.
 func (s *Store) UserSkills(userID string) string {
 	return filepath.Join(s.userDir(userID), "workspace", ".blowball", "skills")
-}
-
-// UserSessions returns the absolute path of userID's sessions directory. The
-// FS session store writes session JSON files here.
-func (s *Store) UserSessions(userID string) string {
-	return filepath.Join(s.userDir(userID), "sessions")
 }
 
 // UserDirExists reports whether the base user directory (and the expected

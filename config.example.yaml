@@ -50,6 +50,30 @@ storage:
   workspace:
     backend: local  # local (default) | shared
 
+# Redis-first write-behind message persistence (message-write-behind
+# capability). Every turn's message batch is dual-written into Redis (the
+# msgs:{session_id} read cache + the global msgs:buffer ingest queue) in one
+# pipeline; a background flusher (agent/all roles only) then batch-inserts the
+# queue into MySQL idempotently. These knobs tune that flusher. Omit the whole
+# block for the defaults; explicit negative values are rejected at load.
+#
+# DEPLOYMENT PREREQUISITE: with the queue as the only synchronous layer, Redis
+# must run with AOF persistence (appendonly yes) — a bare-restart Redis loses
+# the messages still sitting in the flush window. The server probes
+# appendonly at startup and WARNs when it is off.
+#
+# Fields:
+#   flush_interval  - optional; ticker bounding how long a persisted message
+#                     can sit in the queue before landing in MySQL (default
+#                     1s). Also the read-your-writes window of the message
+#                     history endpoint; the SSE stream itself is unaffected.
+#   flush_batch_size - optional; records claimed per flush round, and the
+#                     queue-length threshold that triggers an early flush
+#                     between ticks (default 100).
+messages:
+  flush_interval: 1s
+  flush_batch_size: 100
+
 # Process-level Landlock sandbox (Linux only; no-op on macOS/Windows). Applied
 # once at startup over the server process. The process RW application dirs
 # ({data-dir}/data, {data-dir}/logs, {data-dir}/skills) and RO dir

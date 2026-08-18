@@ -24,13 +24,16 @@ type SessionSummary struct {
 	UpdateTime time.Time `json:"update_time"`
 }
 
-// SessionService owns session lifecycle and three-layer message writes. It is
-// safe for concurrent use: every public method takes a context, has no shared
-// mutable state, and pushes straight through to the underlying stores.
+// SessionService owns session lifecycle and the Redis-first write-behind
+// message persistence. It is safe for concurrent use: every public method
+// takes a context, has no shared mutable state, and pushes straight through
+// to the underlying stores.
 type SessionService struct {
 	mysql MySQLStore
 	redis RedisStore
 	fs    FSStore
+	drain func(ctx context.Context) error
+	nudge func()
 }
 
 // NewSessionService wires a SessionService from the bundled deps. The same
@@ -40,6 +43,8 @@ func NewSessionService(deps SessionDeps) *SessionService {
 		mysql: deps.MySQL,
 		redis: deps.Redis,
 		fs:    deps.FS,
+		drain: deps.DrainMessageQueue,
+		nudge: deps.NudgeMessageFlush,
 	}
 }
 
@@ -96,18 +101,32 @@ func (s *SessionService) GetSessionByID(ctx context.Context, sessionID string) (
 // string-matching.
 var ErrSessionNotFound = errors.New("session not found")
 
-// DeleteSession archives a session (and its titles/messages) into the *_deleted
-// mirror tables, purges the live rows, then removes the warm-tier FS session
-// JSON. Ownership is validated first via GetSessionByID; a missing or
-// non-owned session returns ErrSessionNotFound without touching any tier.
+// messageDrainTimeout bounds the synchronous write-behind drain invoked
+// before archiving a deleted session and on a Redis read miss. Neither call
+// site is an interactive hot path (DELETE is rare; a cache miss means 24h of
+// idleness or a Redis restart), but both must eventually give up rather than
+// hang on a wedged drain.
+const messageDrainTimeout = 5 * time.Second
+
+// DeleteSession removes a session the caller owns, in three steps:
 //
-// The MySQL archive+purge is atomic (single transaction). The FS cleanup is
-// best-effort: a failure there is logged but does NOT undo the successful MySQL
-// delete — the session is already gone from the source of truth, and a stale
-// warm-tier file simply falls through to MySQL (which 404s) on the next read.
-// Redis is intentionally not touched: every read path re-validates ownership
-// against MySQL first, so stale session:{id} / msgs:{id} keys are unreachable
-// until they expire on TTL.
+//  1. Synchronously drain the write-behind ingest queue (bounded) so this
+//     session's messages still awaiting their MySQL flush land BEFORE the
+//     archive transaction snapshots the rows — otherwise the *_deleted
+//     mirrors would silently miss everything sitting in the queue. A drain
+//     failure aborts the delete: archiving an incomplete session is exactly
+//     the data loss the caller avoids by retrying.
+//  2. Atomically archive sessions/titles/messages into the *_deleted mirror
+//     tables and delete the live sessions row (cascade clears live
+//     titles/messages) in one MySQL transaction.
+//  3. Proactively clear the Redis cache keys (msgs:{id}, session:{id}) —
+//     database first, cache second. A stale cache key was already
+//     unreachable (every read re-validates ownership against MySQL), so a
+//     clear failure is logged and the key simply ages out on TTL.
+//
+// Ownership is validated first via GetSessionByID; a missing or non-owned
+// session returns ErrSessionNotFound without touching any tier — and without
+// draining anything.
 func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID string) error {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
@@ -128,15 +147,29 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID st
 		return ErrSessionNotFound
 	}
 
+	// 1) Bounded synchronous drain: unflushed messages must be in MySQL
+	// before the archive transaction reads them out.
+	if s.drain != nil {
+		drainCtx, cancel := context.WithTimeout(ctx, messageDrainTimeout)
+		defer cancel()
+		if err := s.drain(drainCtx); err != nil {
+			log.Error("pre-delete message queue drain failed; aborting delete", zap.Error(err))
+			return fmt.Errorf("session.delete: drain: %w", err)
+		}
+	}
+
+	// 2) Atomic archive + purge.
 	if err := s.mysql.DeleteSession(ctx, sessionID); err != nil {
 		log.Error("archive and purge failed", zap.Error(err))
 		return fmt.Errorf("session.delete: purge: %w", err)
 	}
 
-	// Best-effort FS cleanup: never block or fail the request on a warm-tier
-	// miss. fs.DeleteSession is itself idempotent (missing file = success).
-	if err := s.fs.DeleteSession(ctx, userID, sessionID); err != nil {
-		log.Warn("fs session cleanup failed; proceeding", zap.Error(err))
+	// 3) Cache clear, best-effort (db already deleted; TTL covers failures).
+	if err := s.redis.ClearMessages(ctx, sessionID); err != nil {
+		log.Warn("redis msgs cache clear failed; key expires on TTL", zap.Error(err))
+	}
+	if err := s.redis.DelSessionCache(ctx, sessionID); err != nil {
+		log.Warn("redis session cache clear failed; key expires on TTL", zap.Error(err))
 	}
 	log.Info("session deleted")
 	return nil
@@ -176,33 +209,27 @@ func (s *SessionService) ListSessions(ctx context.Context, userID string) ([]Ses
 	return out, nil
 }
 
-// SaveMessage persists msg across all three storage tiers. Per the
-// session-management spec, Redis is best-effort: a Redis error is logged but
-// does NOT abort the write. MySQL is treated as a synchronous durability
-// requirement per the design's "asynchronous write" intent; however the spec
-// only explicitly blesses Redis failure as non-blocking, so we log MySQL
-// failures and return nil so the streaming response path is never blocked by a
-// database hiccup. The file system layer is the warm tier; an FS error is
-// returned because a corrupted file would silently corrupt the recovery chain.
-//
-// The same canonical JSON blob flows into Redis (RPUSH element), the session
-// file's messages[] array, and MySQL (via AppendMessage, which re-serializes
-// through named params).
+// SaveMessage persists a single message through the Redis-first write-behind
+// path; see SaveMessagesBatch for the tier semantics.
 func (s *SessionService) SaveMessage(ctx context.Context, userID string, msg model.Message) error {
 	return s.SaveMessagesBatch(ctx, userID, []model.Message{msg})
 }
 
-// SaveMessagesBatch persists msgs across all three storage tiers in batch form.
-// It follows the same best-effort/error policies as SaveMessage:
-//   - Redis: best-effort, logged and ignored on failure.
-//   - FS: synchronous; an error is returned because a corrupted session file
-//     would break recovery.
-//   - MySQL: synchronous attempt; failures are logged and NOT returned so the
-//     streaming response path is never blocked by a database hiccup.
+// SaveMessagesBatch persists msgs through the Redis-first write-behind path:
+// every message is stamped with a freshly minted client_msg_id (the
+// idempotency key), and the whole batch is dual-written in ONE Redis
+// transactional pipeline — onto the per-session read cache (msgs:{session_id},
+// TTL refreshed) AND the global ingest queue (msgs:buffer, no TTL). A
+// background flusher (internal/msgflush, agent/all roles) later moves the
+// queue into MySQL in batches and refreshes sessions.update_time; no
+// synchronous MySQL write and no filesystem write happens on this path.
 //
-// All messages are first canonicalised into raw JSON, then pushed to Redis in
-// one RPUSH, appended to the session file in one read-modify-write, and finally
-// inserted into MySQL with a single multi-value INSERT.
+// Failure policy: when the dual-write pipeline fails (Redis unavailable), the
+// batch falls back to a synchronous direct MySQL write (idempotent INSERT
+// IGNORE plus one update_time refresh) so the "messages always win"
+// convention survives a Redis outage. A fallback failure means both tiers are
+// down; it is logged loudly but not surfaced, keeping the SSE response path
+// unblocked per the session-management spec.
 func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, msgs []model.Message) error {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
@@ -216,6 +243,22 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 		return nil
 	}
 
+	// Mint the idempotency key for every message. An already-stamped message
+	// (test fixture, caller reuse) keeps its key so redelivery still
+	// collapses to one row.
+	for i := range msgs {
+		if msgs[i].ClientMsgID != "" {
+			continue
+		}
+		id, err := uuid.NewV7()
+		if err != nil {
+			log.Error("mint client_msg_id failed", zap.Int("index", i), zap.Error(err))
+			return fmt.Errorf("session.save_messages_batch: mint client_msg_id: %w", err)
+		}
+		msgs[i].ClientMsgID = id.String()
+	}
+
+	// One canonical JSON blob flows to both keys of the dual write.
 	raws := make([][]byte, 0, len(msgs))
 	for i := range msgs {
 		raw, err := json.Marshal(msgs[i])
@@ -226,33 +269,40 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 		raws = append(raws, raw)
 	}
 
-	// 1) Redis hot tier. Best-effort per spec: log + continue on failure.
-	if err := s.redis.AppendMessages(ctx, msgs[0].SessionID, raws); err != nil {
-		log.Warn("redis append batch failed; continuing with FS and MySQL", zap.Error(err))
+	if err := s.redis.AppendMessagesDual(ctx, msgs[0].SessionID, raws); err != nil {
+		log.Error("redis dual-write failed; falling back to synchronous MySQL write",
+			zap.String("session_id", msgs[0].SessionID),
+			zap.Error(err))
+		s.fallbackDirectWrite(ctx, log, msgs)
+		return nil
 	}
 
-	// 2) FS warm tier. Read-modify-write so the session file accumulates every
-	// message in order. A miss (new session) starts a fresh document.
-	if err := s.appendToFS(ctx, userID, msgs[0].SessionID, raws); err != nil {
-		log.Error("fs append failed", zap.Error(err))
-		return fmt.Errorf("session.save_messages_batch: fs: %w", err)
+	// Wake the flusher (non-blocking): a signal lets it flush early once the
+	// queue has crossed its batch threshold instead of waiting for the next
+	// interval tick.
+	if s.nudge != nil {
+		s.nudge()
 	}
+	return nil
+}
 
-	// 3) MySQL durable tier. Synchronous per current decision; logged but NOT
-	// returned so the SSE response path is never blocked by a DB hiccup. The
-	// file layer above still holds the messages for the next RecoverMessages.
+// fallbackDirectWrite persists msgs straight into MySQL when the Redis
+// dual-write pipeline failed: one idempotent batch INSERT plus one
+// update_time refresh for the batch's session (the flusher normally owns
+// both, but it never sees a batch that never reached the queue). Failures
+// are logged, not returned — the SSE streaming path is never blocked by a
+// store hiccup.
+func (s *SessionService) fallbackDirectWrite(ctx context.Context, log *zap.Logger, msgs []model.Message) {
 	if _, err := s.mysql.AppendMessages(ctx, msgs); err != nil {
-		log.Error("mysql append batch failed; messages held in FS only", zap.Error(err))
+		log.Error("mysql fallback write failed; batch lost",
+			zap.String("session_id", msgs[0].SessionID),
+			zap.Int("rows", len(msgs)),
+			zap.Error(err))
+		return
 	}
-
-	// 4) Refresh session update_time so recently-active sessions bubble to the
-	// top of the list. Errors are logged but not returned; a stale sort order is
-	// preferable to interrupting the streaming response.
 	if err := s.mysql.UpdateSessionTime(ctx, msgs[0].SessionID); err != nil {
 		log.Error("update session time failed", zap.String("session_id", msgs[0].SessionID), zap.Error(err))
 	}
-
-	return nil
 }
 
 // SaveTurnUsage persists one turn's per-agent token cost into the turn_usage
@@ -281,45 +331,6 @@ func (s *SessionService) SaveTurnUsage(ctx context.Context, tu model.TurnUsage) 
 	if err := s.mysql.SaveTurnUsage(ctx, tu); err != nil {
 		log.Error("save turn_usage failed", zap.Error(err))
 		return fmt.Errorf("session.save_turn_usage: %w", err)
-	}
-	return nil
-}
-
-// sessionFile is the on-disk JSON shape for the warm tier. messages holds the
-// raw JSON blob of each Message (one per append) in insertion order.
-type sessionFile struct {
-	SessionID string            `json:"session_id"`
-	Messages  []json.RawMessage `json:"messages"`
-}
-
-// appendToFS reads the existing session file (or starts fresh), appends the new
-// raw message JSON blobs, and writes it back. A nil file (new session) yields a
-// document whose messages array contains all supplied raws in order.
-func (s *SessionService) appendToFS(ctx context.Context, userID, sessionID string, raws [][]byte) error {
-	existing, err := s.fs.ReadSession(ctx, userID, sessionID)
-	if err != nil {
-		return fmt.Errorf("read session file: %w", err)
-	}
-
-	var doc sessionFile
-	if len(existing) > 0 {
-		if err := json.Unmarshal(existing, &doc); err != nil {
-			return fmt.Errorf("unmarshal session file: %w", err)
-		}
-	}
-	if doc.SessionID == "" {
-		doc.SessionID = sessionID
-	}
-	for _, raw := range raws {
-		doc.Messages = append(doc.Messages, json.RawMessage(raw))
-	}
-
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return fmt.Errorf("marshal session file: %w", err)
-	}
-	if err := s.fs.WriteSession(ctx, userID, sessionID, out); err != nil {
-		return fmt.Errorf("write session file: %w", err)
 	}
 	return nil
 }

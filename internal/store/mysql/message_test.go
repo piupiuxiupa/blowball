@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/lush/blowball/internal/model"
 )
 
 // testDSN returns the MySQL DSN from the environment, or an empty string when
@@ -34,20 +36,27 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 	}
 
 	// Create an isolated messages table without the FK constraint so tests do
-	// not require a sessions row. The column layout matches production.
+	// not require a sessions row. The column layout mirrors the production
+	// schema (migrations 004 + 005 + 012: nullable role, event_type,
+	// millisecond msg_time, nullable client_msg_id with its UNIQUE index) so
+	// the SELECT scan paths run against the real shape — this is exactly how
+	// the legacy-NULL scan bug escaped: an out-of-date test table.
 	_, err = store.db.ExecContext(context.Background(), `
 		CREATE TABLE IF NOT EXISTS messages (
 			id          BIGINT       NOT NULL AUTO_INCREMENT,
 			session_id  CHAR(36)     NOT NULL,
-			msg_time    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			msg_time    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			agent       VARCHAR(32)  NOT NULL,
 			msg_index   INT          NOT NULL,
-			role        VARCHAR(16)  NOT NULL,
+			role        VARCHAR(16)  NULL,
+			event_type  VARCHAR(16)  NOT NULL DEFAULT 'token',
 			content     MEDIUMTEXT   NOT NULL,
 			trace_id    CHAR(36)     NOT NULL,
+			client_msg_id CHAR(36)   NULL,
 			update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
-			KEY idx_messages_session_time (session_id, msg_time)
+			KEY idx_messages_session_time (session_id, msg_time),
+			UNIQUE KEY uk_messages_client_msg_id (client_msg_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 	`)
 	require.NoError(t, err)
@@ -70,7 +79,11 @@ func insertTestMessage(t *testing.T, s *Store, sessionID string, msgTime time.Ti
 
 // TestListMessagesPaged_AscendingFirstPage verifies the default ascending
 // order, that next_page_token is present when more rows exist, and that the
-// cursor advances to the next page.
+// cursor advances to the next page. The real store emits a token whenever it
+// returns rows (the caller detects the end by the NEXT page coming back
+// empty) — this env-gated test previously asserted a "no token on the last
+// non-empty page" contract the store has never implemented, so it had never
+// actually passed against MySQL.
 func TestListMessagesPaged_AscendingFirstPage(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -91,7 +104,14 @@ func TestListMessagesPaged_AscendingFirstPage(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgs2, 1)
 	assert.Equal(t, "second", msgs2[0].Content)
-	assert.Empty(t, next2, "last page must have empty next_page_token")
+	require.NotEmpty(t, next2, "the store always emits a token with non-empty pages")
+
+	// The end of the session is signalled by the page AFTER the last row:
+	// empty page, no token.
+	msgs3, next3, err := store.ListMessagesPaged(context.Background(), sessionID, next2, 10, "asc")
+	require.NoError(t, err)
+	assert.Empty(t, msgs3, "page past the last row must be empty")
+	assert.Empty(t, next3, "empty page must carry no next_page_token")
 }
 
 // TestListMessagesPaged_DescendingOrder verifies descending pagination.
@@ -177,4 +197,69 @@ func TestListMessagesPaged_InvalidCursor_ReturnsError(t *testing.T) {
 
 	_, _, err := store.ListMessagesPaged(context.Background(), "aaaaaaaa-0000-7000-8000-000000000006", "not-a-token", 10, "asc")
 	require.Error(t, err)
+}
+
+// TestListMessages_NullClientMsgIDScansAsEmptyString is the regression test
+// for the legacy-row read path: rows written before migration 012 carry NULL
+// in client_msg_id, and the SELECTs COALESCE it to the empty string so sqlx
+// can scan it into the model's plain string field. Without the COALESCE every
+// read of a legacy session failed with "converting NULL to string is
+// unsupported".
+func TestListMessages_NullClientMsgIDScansAsEmptyString(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	sessionID := "aaaaaaaa-0000-7000-8000-0000000000aa"
+	base := time.Unix(1_700_000_000, 0).UTC()
+	// One legacy row (client_msg_id NULL, the pre-012 shape) and one stamped
+	// row written through the store API.
+	legacyID := insertTestMessage(t, store, sessionID, base, 0, "legacy")
+	stamped := model.Message{
+		SessionID:   sessionID,
+		MsgTime:     base.Add(time.Second),
+		Agent:       model.AgentUser,
+		MsgIndex:    1,
+		Role:        model.RoleUser,
+		EventType:   model.EventTypeMessage,
+		Content:     "stamped",
+		TraceID:     "trace-1",
+		ClientMsgID: "019a0000-0000-7000-8000-000000000001",
+	}
+	_, err := store.AppendMessages(context.Background(), []model.Message{stamped})
+	require.NoError(t, err)
+
+	msgs, err := store.ListMessages(context.Background(), sessionID)
+	require.NoError(t, err, "legacy NULL client_msg_id rows must scan cleanly")
+	require.Len(t, msgs, 2)
+	assert.Equal(t, legacyID, msgs[0].ID)
+	assert.Empty(t, msgs[0].ClientMsgID, "NULL must surface as the empty string")
+	assert.Equal(t, stamped.ClientMsgID, msgs[1].ClientMsgID)
+
+	paged, _, err := store.ListMessagesPaged(context.Background(), sessionID, "", 10, "asc")
+	require.NoError(t, err, "paged read must scan legacy NULL rows cleanly too")
+	require.Len(t, paged, 2)
+	assert.Empty(t, paged[0].ClientMsgID)
+	assert.Equal(t, stamped.ClientMsgID, paged[1].ClientMsgID)
+}
+
+// TestAppendMessages_EmptyClientMsgIDWritesNull verifies the inverse mapping:
+// an unstamped message writes SQL NULL (not the empty string), so two such
+// rows never collide on uk_messages_client_msg_id.
+func TestAppendMessages_EmptyClientMsgIDWritesNull(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	sessionID := "aaaaaaaa-0000-7000-8000-0000000000bb"
+	base := time.Unix(1_700_000_000, 0).UTC()
+	two := []model.Message{
+		{SessionID: sessionID, MsgTime: base, Agent: model.AgentUser, MsgIndex: 0, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "a", TraceID: "t"},
+		{SessionID: sessionID, MsgTime: base.Add(time.Second), Agent: model.AgentUser, MsgIndex: 1, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "b", TraceID: "t"},
+	}
+	_, err := store.AppendMessages(context.Background(), two)
+	require.NoError(t, err, "two unstamped rows must coexist (NULL repeats freely)")
+
+	var nulls int
+	require.NoError(t, store.db.GetContext(context.Background(), &nulls,
+		`SELECT COUNT(*) FROM messages WHERE session_id = ? AND client_msg_id IS NULL`, sessionID))
+	assert.Equal(t, 2, nulls, "unstamped messages must persist as NULL, not ''")
 }

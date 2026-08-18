@@ -13,35 +13,69 @@ import (
 
 // appendMessageSQL inserts a new message row. id is AUTO_INCREMENT and is
 // returned to the caller via AppendMessage. msg_index is supplied by the
-// service layer which tracks the per-turn counter.
+// service layer which tracks the per-turn counter. The INSERT is IGNOREd on a
+// duplicate client_msg_id (UNIQUE index uk_messages_client_msg_id) so a
+// redelivered write-behind record collapses to the existing row — the
+// write-behind queue guarantees at-least-once delivery, the UNIQUE key plus
+// IGNORE makes it effectively exactly-once.
 const appendMessageSQL = `
-INSERT INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id)
-VALUES (:session_id, :msg_time, :agent, :msg_index, :role, :event_type, :content, :trace_id)
+INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, client_msg_id)
+VALUES (:session_id, :msg_time, :agent, :msg_index, :role, :event_type, :content, :trace_id, :client_msg_id)
 `
 
 // appendMessagesSQL inserts multiple message rows in a single statement. The
-// VALUES clause is expanded at runtime by AppendMessages.
+// VALUES clause is expanded at runtime by AppendMessages. INSERT IGNORE for
+// the same idempotency reason as appendMessageSQL.
 const appendMessagesSQL = `
-INSERT INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id)
+INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, client_msg_id)
 VALUES %s
 `
 
 // listMessagesSQL returns every message for sessionID in (msg_time, msg_index)
 // order. The covering index idx_messages_session_time makes the leading
 // msg_time sort efficient; msg_index resolves ties within a single batch.
+// client_msg_id is COALESCEd to the empty string: legacy rows written before
+// migration 012 carry NULL, and sqlx cannot scan NULL into the model's plain
+// string field (nilIfEmpty performs the inverse empty→NULL mapping on write,
+// so the round trip is stable).
 const listMessagesSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, update_time
 FROM messages
 WHERE session_id = ?
 ORDER BY msg_time ASC, msg_index ASC
 `
 
+// nilIfEmpty maps an absent client_msg_id (legacy rows / callers that predate
+// the idempotency key) onto SQL NULL. Binding the empty string instead would
+// violate uk_messages_client_msg_id the moment two such rows coexist, because
+// the empty string is a single colliding value while NULL repeats freely.
+func nilIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // AppendMessage inserts m into the messages table and returns the
-// auto-incremented id assigned by MySQL.
+// auto-incremented id assigned by MySQL. A row with the same client_msg_id is
+// silently ignored (see appendMessageSQL), in which case the returned id is
+// that of the pre-existing row's statement outcome and must not be relied on.
 func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, error) {
 	logQuery(ctx, "message.append", appendMessageSQL)
 
-	res, err := sqlx.NamedExecContext(ctx, s.db, appendMessageSQL, m)
+	params := map[string]any{
+		"session_id":    m.SessionID,
+		"msg_time":      m.MsgTime,
+		"agent":         m.Agent,
+		"msg_index":     m.MsgIndex,
+		"role":          m.Role,
+		"event_type":    m.EventType,
+		"content":       m.Content,
+		"trace_id":      m.TraceID,
+		"client_msg_id": nilIfEmpty(m.ClientMsgID),
+	}
+
+	res, err := sqlx.NamedExecContext(ctx, s.db, appendMessageSQL, params)
 	if err != nil {
 		return 0, err
 	}
@@ -53,16 +87,18 @@ func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, erro
 }
 
 // AppendMessages inserts msgs in a single multi-value INSERT and returns the
-// auto-incremented ids assigned by MySQL, in the same order as msgs.
+// auto-incremented ids assigned by MySQL, in the same order as msgs. Rows
+// whose client_msg_id already exists are ignored (see appendMessagesSQL), so
+// under redelivery the id sequence is not meaningful — no caller consumes it.
 func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error) {
 	if len(msgs) == 0 {
 		return []int64{}, nil
 	}
 
 	placeholders := make([]string, 0, len(msgs))
-	args := make([]any, 0, len(msgs)*8)
+	args := make([]any, 0, len(msgs)*9)
 	for _, m := range msgs {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?)")
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			m.SessionID,
 			m.MsgTime,
@@ -72,6 +108,7 @@ func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int
 			m.EventType,
 			m.Content,
 			m.TraceID,
+			nilIfEmpty(m.ClientMsgID),
 		)
 	}
 
@@ -103,7 +140,7 @@ func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int
 // (msg_time, msg_index, id) ascending. The id tie-breaker makes the cursor
 // stable when two rows share the same msg_time and msg_index.
 const listMessagesPagedAscSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, update_time
 FROM messages
 WHERE session_id = ?
   AND (msg_time, msg_index, id) > (?, ?, ?)
@@ -114,7 +151,7 @@ LIMIT ?
 // listMessagesPagedDescSQL returns messages before the cursor ordered by
 // (msg_time, msg_index, id) descending.
 const listMessagesPagedDescSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, update_time
 FROM messages
 WHERE session_id = ?
   AND (msg_time, msg_index, id) > (?, ?, ?)

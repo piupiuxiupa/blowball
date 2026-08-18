@@ -30,6 +30,7 @@ type Config struct {
 	Logging    LoggingConfig    `yaml:"logging"`
 	OnlyOffice OnlyOfficeConfig `yaml:"onlyoffice"`
 	Storage    StorageConfig    `yaml:"storage"`
+	Messages   MessagesConfig   `yaml:"messages"`
 }
 
 // WorkspaceBackendLocal is the default workspace storage backend: per-user
@@ -89,6 +90,53 @@ func (w WorkspaceStorageConfig) validate() error {
 	default:
 		return fmt.Errorf("storage.workspace.backend: unsupported value %q (want local|shared)", w.Backend)
 	}
+}
+
+// Default message-flush parameters (message-write-behind capability): the
+// ticker is deliberately shorter than llmraw's 5s because the history API is
+// sensitive to when a just-sent turn becomes readable from MySQL.
+const (
+	defaultMessageFlushInterval  = time.Second
+	defaultMessageFlushBatchSize = 100
+)
+
+// MessagesConfig holds the Redis-first write-behind message persistence knobs
+// (the top-level `messages:` block; see the message-write-behind capability).
+// FlushInterval is the background flusher's ticker — the upper bound on how
+// long a persisted message can sit in the Redis ingest queue before it lands
+// in MySQL (and therefore the read-your-writes window of the history
+// endpoint). FlushBatchSize caps the records claimed per flush round and
+// doubles as the queue-length threshold that triggers an early flush.
+// Omitted/zero fields fall back to the defaults; explicit negative values are
+// rejected at load time.
+type MessagesConfig struct {
+	FlushInterval  time.Duration `yaml:"flush_interval"`
+	FlushBatchSize int           `yaml:"flush_batch_size"`
+}
+
+// applyDefaults fills zero-valued fields with the documented defaults. It is
+// idempotent and leaves explicit values (including negatives, which validate
+// rejects) untouched.
+func (m *MessagesConfig) applyDefaults() {
+	if m.FlushInterval == 0 {
+		m.FlushInterval = defaultMessageFlushInterval
+	}
+	if m.FlushBatchSize == 0 {
+		m.FlushBatchSize = defaultMessageFlushBatchSize
+	}
+}
+
+// validate rejects explicit non-positive values. After applyDefaults a zero
+// never survives, so this only fires on negatives — a typo, not "use the
+// default" (mirrors the agents.<name>.max_rounds convention).
+func (m MessagesConfig) validate() error {
+	if m.FlushInterval < 0 {
+		return fmt.Errorf("messages.flush_interval: must be positive (got %s)", m.FlushInterval)
+	}
+	if m.FlushBatchSize < 0 {
+		return fmt.Errorf("messages.flush_batch_size: must be positive (got %d)", m.FlushBatchSize)
+	}
+	return nil
 }
 
 // LandlockConfig holds the process-level Landlock sandbox directory policy (see
@@ -880,6 +928,7 @@ func Load(path string) (*Config, error) {
 	cfg.Server.applyDefaults()
 	cfg.Storage.Workspace.applyDefaults()
 	cfg.Landlock.applyDefaults()
+	cfg.Messages.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Sandbox.applyDefaults()
 	// Per-agent retry defaults (capability C): Liang (read-only) defaults to
@@ -907,6 +956,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Storage.Workspace.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Messages.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.MCP.validate(); err != nil {

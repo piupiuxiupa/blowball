@@ -12,11 +12,12 @@ import (
 	"github.com/lush/blowball/internal/pkg/trace"
 )
 
-// MessageService owns the read side of the three-layer store. RecoverMessages
-// walks the Redis -> FS -> MySQL chain per the session-management spec,
-// backfilling the upper tiers whenever a lower tier supplies the data. Writes
-// are funnelled through SessionService.SaveMessage so the write path stays in
-// exactly one place.
+// MessageService owns the read side of the two-layer store. RecoverMessages
+// walks the Redis → MySQL chain per the session-management spec, inserting a
+// bounded synchronous drain of the write-behind queue before the MySQL
+// fallback so the cache backfill cannot erase rows that were persisted but
+// not yet flushed. Writes are funnelled through SessionService.SaveMessage so
+// the write path stays in exactly one place.
 type MessageService struct {
 	deps        SessionDeps
 	saveMessage func(ctx context.Context, userID string, msg model.Message) error
@@ -39,10 +40,20 @@ func (s *MessageService) AppendMessage(ctx context.Context, userID string, msg m
 	return s.saveMessage(ctx, userID, msg)
 }
 
-// RecoverMessages returns the full ordered message list for sessionID using the
-// priority chain Redis -> FS -> MySQL, backfilling the upper tiers on each
-// fallback so subsequent reads are cheaper. An empty (non-nil) slice with no
-// error is returned for a brand-new session with no messages anywhere.
+// RecoverMessages returns the full ordered message list for sessionID using
+// the priority chain Redis → MySQL, backfilling the cache on the MySQL
+// fallback so subsequent reads are cheaper. The filesystem no longer
+// participates.
+//
+// On a Redis miss (or a Redis error) a bounded synchronous drain of the
+// write-behind queue runs first: messages dual-written but not yet flushed
+// must land in MySQL BEFORE the ListMessages read, and especially before the
+// SetMessages backfill — the DEL+RPUSH inside SetMessages would otherwise
+// drop the unflushed rows from the cache layer, stretching the inconsistency
+// window from one flush interval to the whole cache TTL. Misses only happen
+// after 24h of idleness or a Redis restart, so the drain cost is negligible;
+// a drain failure is logged and the read proceeds (the backfill race then
+// self-heals on the next miss once the flusher catches up).
 func (s *MessageService) RecoverMessages(ctx context.Context, userID, sessionID string) ([]model.Message, error) {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
@@ -54,25 +65,26 @@ func (s *MessageService) RecoverMessages(ctx context.Context, userID, sessionID 
 		log = log.With(zap.String("trace_id", tid))
 	}
 
-	// 1) Hot tier: Redis. Hit short-circuits FS and MySQL.
-	if msgs, raws, err := s.tryRedis(ctx, log, sessionID); err != nil {
-		log.Warn("redis recover failed; falling back to FS", zap.Error(err))
+	// 1) Hot tier: Redis. A hit short-circuits the drain and the MySQL read.
+	if msgs, _, err := s.tryRedis(ctx, log, sessionID); err != nil {
+		log.Warn("redis recover failed; falling back to MySQL", zap.Error(err))
 	} else if msgs != nil {
 		return msgs, nil
-	} else if len(raws) == 0 {
+	} else {
 		log.Debug("redis miss")
 	}
 
-	// 2) Warm tier: FS file. On hit, parse messages and backfill Redis.
-	if msgs, raws, err := s.tryFS(ctx, log, userID, sessionID); err != nil {
-		log.Warn("fs recover failed; falling back to MySQL", zap.Error(err))
-	} else if msgs != nil {
-		return msgs, nil
-	} else if len(raws) == 0 {
-		log.Debug("fs miss")
+	// 2) Miss: drain the write-behind queue first (bounded, best-effort) so
+	// the MySQL read below observes every persisted message.
+	if s.deps.DrainMessageQueue != nil {
+		drainCtx, cancel := context.WithTimeout(ctx, messageDrainTimeout)
+		if err := s.deps.DrainMessageQueue(drainCtx); err != nil {
+			log.Warn("write-behind drain before mysql fallback failed", zap.Error(err))
+		}
+		cancel()
 	}
 
-	// 3) Cold tier: MySQL. On hit, backfill Redis and FS.
+	// 3) Cold tier: MySQL. On hit, backfill the Redis cache.
 	msgs, err := s.deps.MySQL.ListMessages(ctx, sessionID)
 	if err != nil {
 		log.Error("mysql recover failed", zap.Error(err))
@@ -95,9 +107,6 @@ func (s *MessageService) RecoverMessages(ctx context.Context, userID, sessionID 
 
 	if err := s.deps.Redis.SetMessages(ctx, sessionID, raws); err != nil {
 		log.Warn("backfill redis from mysql failed", zap.Error(err))
-	}
-	if err := s.writeFSFromRaws(ctx, userID, sessionID, raws); err != nil {
-		log.Warn("backfill fs from mysql failed", zap.Error(err))
 	}
 
 	return msgs, nil
@@ -125,57 +134,4 @@ func (s *MessageService) tryRedis(ctx context.Context, log *zap.Logger, sessionI
 	}
 	log.Debug("recovered from redis", zap.Int("count", len(msgs)))
 	return msgs, raws, nil
-}
-
-// tryFS returns parsed messages from the session file. On hit it backfills
-// Redis (SetMessages) so the next reader hits the hot tier.
-func (s *MessageService) tryFS(ctx context.Context, log *zap.Logger, userID, sessionID string) ([]model.Message, [][]byte, error) {
-	data, err := s.deps.FS.ReadSession(ctx, userID, sessionID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(data) == 0 {
-		return nil, nil, nil
-	}
-	var doc sessionFile
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal fs session file: %w", err)
-	}
-	if len(doc.Messages) == 0 {
-		return nil, nil, nil
-	}
-
-	raws := make([][]byte, 0, len(doc.Messages))
-	msgs := make([]model.Message, 0, len(doc.Messages))
-	for _, r := range doc.Messages {
-		raws = append(raws, []byte(r))
-		var m model.Message
-		if err := json.Unmarshal(r, &m); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal fs message: %w", err)
-		}
-		msgs = append(msgs, m)
-	}
-	log.Debug("recovered from fs", zap.Int("count", len(msgs)))
-
-	if err := s.deps.Redis.SetMessages(ctx, sessionID, raws); err != nil {
-		log.Warn("backfill redis from fs failed", zap.Error(err))
-	}
-	return msgs, raws, nil
-}
-
-// writeFSFromRaws writes a fresh session-file document from the supplied raw
-// message blobs. Used when MySQL backfills the warm tier.
-func (s *MessageService) writeFSFromRaws(ctx context.Context, userID, sessionID string, raws [][]byte) error {
-	doc := sessionFile{SessionID: sessionID, Messages: make([]json.RawMessage, 0, len(raws))}
-	for _, r := range raws {
-		doc.Messages = append(doc.Messages, json.RawMessage(r))
-	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return fmt.Errorf("marshal session file: %w", err)
-	}
-	if err := s.deps.FS.WriteSession(ctx, userID, sessionID, out); err != nil {
-		return fmt.Errorf("write session file: %w", err)
-	}
-	return nil
 }

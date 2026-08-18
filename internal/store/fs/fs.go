@@ -1,17 +1,22 @@
-// Package fs provides the warm-tier file-system store for blowball sessions.
+// Package fs provides the filesystem tier of the blowball per-user data tree.
 //
 // Each user owns a directory under root named after their user_id; inside it
-// the sessions/ subdirectory holds one JSON file per session. This package is
-// the middle layer of the three-layer message store: it is more durable than
-// Redis and faster to read than MySQL.
+// the workspace/ subdirectory holds the user's files (the xizhi_* tools and
+// the workspace REST API are scoped here) plus the reserved
+// .blowball/skills/ namespace for per-user skills.
+//
+// Historically this package also held the session-file warm tier
+// ({root}/{userID}/sessions/{sessionID}.json) of the three-layer message
+// store; the Redis-first write-behind persistence change removed that tier
+// entirely (messages now flow Redis ingest queue → MySQL flusher, see the
+// message-write-behind capability). Legacy sessions/ directories left on
+// disk are never read or written again; operators may clean them up at will.
 package fs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"go.uber.org/zap"
 
@@ -37,7 +42,6 @@ func dirExists(dir string) bool {
 
 // Store wraps a root directory. The directory layout under root is:
 //
-//	{root}/{userID}/sessions/{sessionID}.json
 //	{root}/{userID}/workspace/...                        (user files; xizhi_* scoped here)
 //	{root}/{userID}/workspace/.blowball/skills/...       (reserved; per-user skills)
 type Store struct {
@@ -59,61 +63,6 @@ func New(root string) (*Store, error) {
 
 // Root returns the configured root directory.
 func (s *Store) Root() string { return s.root }
-
-// sessionPath returns the absolute path of the session JSON file for
-// (userID, sessionID). It is constructed purely from filepath.Join so it is
-// immune to path-traversal in the caller's arguments (e.g. a sessionID
-// containing ".." cannot escape the sessions/ subdirectory).
-func (s *Store) sessionPath(userID, sessionID string) string {
-	return filepath.Join(s.root, userID, "sessions", sessionID+".json")
-}
-
-// WriteSession writes data as the session JSON for (userID, sessionID),
-// creating any missing parent directories along the way. The write is atomic
-// from the reader's perspective only when the caller's filesystem honours
-// O_TRUNC and atomic replaces — we use os.WriteFile which truncates in place;
-// the warm-tier fallback to MySQL covers any partial-write risk.
-func (s *Store) WriteSession(ctx context.Context, userID, sessionID string, data []byte) error {
-	path := s.sessionPath(userID, sessionID)
-	logFS(ctx, "session.write", path)
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir parents for %q: %w", path, err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write session %q: %w", path, err)
-	}
-	return nil
-}
-
-// ReadSession returns the session JSON for (userID, sessionID), or (nil, nil)
-// when the file does not exist. Any other read error is returned verbatim.
-func (s *Store) ReadSession(ctx context.Context, userID, sessionID string) ([]byte, error) {
-	path := s.sessionPath(userID, sessionID)
-	logFS(ctx, "session.read", path)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read session %q: %w", path, err)
-	}
-	return data, nil
-}
-
-// DeleteSession removes the session JSON for (userID, sessionID). A missing
-// file is treated as success (idempotent delete).
-func (s *Store) DeleteSession(ctx context.Context, userID, sessionID string) error {
-	path := s.sessionPath(userID, sessionID)
-	logFS(ctx, "session.delete", path)
-
-	err := os.Remove(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("delete session %q: %w", path, err)
-	}
-	return nil
-}
 
 // logFS emits a debug log describing the about-to-be-run fs operation. It
 // mirrors logQuery / logCmd in the other store packages.

@@ -39,98 +39,13 @@ func TestNew_CreatesRootIfMissing(t *testing.T) {
 	}
 }
 
-func TestWriteSession_ReadBack(t *testing.T) {
-	store, root := newTestStore(t)
-	ctx := context.Background()
-
-	want := []byte(`{"session_id":"s-1","messages":[]}`)
-	if err := store.WriteSession(ctx, "u-1", "s-1", want); err != nil {
-		t.Fatalf("WriteSession: %v", err)
-	}
-
-	// The expected path is {root}/{userID}/sessions/{sessionID}.json.
-	dst := filepath.Join(root, "u-1", "sessions", "s-1.json")
-	got, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("read file %q: %v", dst, err)
-	}
-	if string(got) != string(want) {
-		t.Fatalf("file content = %q, want %q", got, want)
-	}
-
-	// ReadSession must return the same bytes via the API.
-	gotAPI, err := store.ReadSession(ctx, "u-1", "s-1")
-	if err != nil {
-		t.Fatalf("ReadSession: %v", err)
-	}
-	if string(gotAPI) != string(want) {
-		t.Fatalf("ReadSession = %q, want %q", gotAPI, want)
+func TestNew_EmptyRootRejected(t *testing.T) {
+	if _, err := New(""); err == nil {
+		t.Fatal("New(\"\") must be rejected")
 	}
 }
 
-func TestReadSession_MissingReturnsNil(t *testing.T) {
-	store, _ := newTestStore(t)
-	ctx := context.Background()
-
-	got, err := store.ReadSession(ctx, "u-1", "never-written")
-	if err != nil {
-		t.Fatalf("ReadSession on missing file returned error: %v", err)
-	}
-	if got != nil {
-		t.Fatalf("ReadSession on missing file = %q, want nil", got)
-	}
-}
-
-func TestDeleteSession_Idempotent(t *testing.T) {
-	store, _ := newTestStore(t)
-	ctx := context.Background()
-
-	// Delete a file that was never written — must be a no-op.
-	if err := store.DeleteSession(ctx, "u-1", "ghost"); err != nil {
-		t.Fatalf("DeleteSession on missing file: %v", err)
-	}
-
-	// Write then delete then delete again.
-	if err := store.WriteSession(ctx, "u-1", "s-1", []byte("x")); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.DeleteSession(ctx, "u-1", "s-1"); err != nil {
-		t.Fatalf("DeleteSession: %v", err)
-	}
-	// Second delete on the now-removed file must still succeed.
-	if err := store.DeleteSession(ctx, "u-1", "s-1"); err != nil {
-		t.Fatalf("DeleteSession (idempotent): %v", err)
-	}
-
-	got, err := store.ReadSession(ctx, "u-1", "s-1")
-	if err != nil {
-		t.Fatalf("ReadSession after delete: %v", err)
-	}
-	if got != nil {
-		t.Fatalf("ReadSession after delete = %q, want nil", got)
-	}
-}
-
-func TestWriteSession_OverwritesExisting(t *testing.T) {
-	store, _ := newTestStore(t)
-	ctx := context.Background()
-
-	if err := store.WriteSession(ctx, "u-1", "s-1", []byte("first")); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WriteSession(ctx, "u-1", "s-1", []byte("second")); err != nil {
-		t.Fatal(err)
-	}
-	got, err := store.ReadSession(ctx, "u-1", "s-1")
-	if err != nil {
-		t.Fatalf("ReadSession: %v", err)
-	}
-	if string(got) != "second" {
-		t.Fatalf("ReadSession = %q, want %q", got, "second")
-	}
-}
-
-func TestEnsureUserDirs_CreatesAllSubdirs(t *testing.T) {
+func TestEnsureUserDirs_CreatesWorkspaceLayout(t *testing.T) {
 	store, root := newTestStore(t)
 	ctx := context.Background()
 
@@ -138,17 +53,21 @@ func TestEnsureUserDirs_CreatesAllSubdirs(t *testing.T) {
 		t.Fatalf("EnsureUserDirs: %v", err)
 	}
 
-	// sessions/ and workspace/ are the top-level siblings; per-user skills are
+	// workspace/ is the only top-level sibling (the sessions/ warm tier is
+	// gone with the Redis-first persistence change); per-user skills are
 	// nested under the workspace in the reserved .blowball/skills namespace.
-	for _, sub := range []string{"sessions", "workspace"} {
-		dir := filepath.Join(root, "u-1", sub)
-		info, err := os.Stat(dir)
-		if err != nil {
-			t.Fatalf("subdir %q not created: %v", sub, err)
-		}
-		if !info.IsDir() {
-			t.Fatalf("%q exists but is not a directory", dir)
-		}
+	dir := filepath.Join(root, "u-1", "workspace")
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("subdir %q not created: %v", dir, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%q exists but is not a directory", dir)
+	}
+
+	// No sessions/ directory must be created anymore.
+	if _, err := os.Stat(filepath.Join(root, "u-1", "sessions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sessions/ must not be created, got err=%v", err)
 	}
 
 	// Per-user skills live under the workspace at .blowball/skills, not as a
@@ -166,6 +85,13 @@ func TestEnsureUserDirs_CreatesAllSubdirs(t *testing.T) {
 	// UserDirExists must now report true.
 	if !store.UserDirExists("u-1") {
 		t.Fatal("UserDirExists reported false right after EnsureUserDirs")
+	}
+}
+
+func TestEnsureUserDirs_EmptyUserRejected(t *testing.T) {
+	store, _ := newTestStore(t)
+	if err := store.EnsureUserDirs(context.Background(), ""); err == nil {
+		t.Fatal("EnsureUserDirs(\"\") must be rejected")
 	}
 }
 

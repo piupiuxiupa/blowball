@@ -22,6 +22,7 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	redisstore "github.com/lush/blowball/internal/store/redis"
@@ -131,7 +132,7 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 		},
 	}
 
-	srv, mysqlFake := setupMCPIntegrationServer(t, llm, cfg, baseReg, map[string][]string{"remote": {"remote_search", "remote_fetch"}}, nil)
+	srv, mysqlFake, redisSvc := setupMCPIntegrationServer(t, llm, cfg, baseReg, map[string][]string{"remote": {"remote_search", "remote_fetch"}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-mcp/messages", jsonBody(t, map[string]string{"content": "hi"}))
 	req.Header.Set("Authorization", "Bearer "+authToken(t, defaultUserID))
@@ -139,15 +140,15 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the async batch save to finish so the temp data directory can be
-	// cleaned up without racing the FS writer.
-	require.Eventually(t, func() bool {
-		return len(mysqlFake.messagesFor("sess-mcp")) >= 4
-	}, 2*time.Second, 10*time.Millisecond, "expected sess-mcp messages to be persisted")
+	// Wait for the dual write, then drain the write-behind queue into the
+	// fake MySQL tier.
+	waitForQueuedTurn(t, redisSvc, mysqlFake, "sess-mcp", 4)
 
 	require.NotNil(t, llm.confuciusRequest().Tools)
 	var tools []struct {
-		Function struct{ Name string `json:"name"` } `json:"function"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
 	}
 	require.NoError(t, json.Unmarshal(llm.confuciusRequest().Tools, &tools))
 	names := make(map[string]bool, len(tools))
@@ -220,7 +221,7 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 		},
 	}
 
-	srv, mysqlFake := setupMCPIntegrationServer(t, llm, cfg, baseReg, nil, loader)
+	srv, mysqlFake, redisSvc := setupMCPIntegrationServer(t, llm, cfg, baseReg, nil, loader)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-skills/messages", jsonBody(t, map[string]string{"content": "hi"}))
 	req.Header.Set("Authorization", "Bearer "+authToken(t, defaultUserID))
@@ -228,11 +229,9 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the async batch save to finish so the temp data directory can be
-	// cleaned up without racing the FS writer.
-	require.Eventually(t, func() bool {
-		return len(mysqlFake.messagesFor("sess-skills")) >= 4
-	}, 2*time.Second, 10*time.Millisecond, "expected sess-skills messages to be persisted")
+	// Wait for the dual write, then drain the write-behind queue into the
+	// fake MySQL tier.
+	waitForQueuedTurn(t, redisSvc, mysqlFake, "sess-skills", 4)
 
 	prompt := llm.confuciusRequest().Messages[0].Content
 	assert.Contains(t, prompt, "coding-style")
@@ -248,7 +247,7 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 	assert.Contains(t, last.Content, "# Style")
 }
 
-func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Config, baseReg *tool.Registry, serverTools map[string][]string, loader *skill.Loader) (*gin.Engine, *memoryMySQL) {
+func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Config, baseReg *tool.Registry, serverTools map[string][]string, loader *skill.Loader) (*gin.Engine, *memoryMySQL, *redisstore.Store) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -265,7 +264,14 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	require.NoError(t, mysqlFake.CreateSession(context.Background(), model.Session{SessionID: "sess-mcp", UserID: defaultUserID, TraceID: "trace-mcp"}))
 	require.NoError(t, mysqlFake.CreateSession(context.Background(), model.Session{SessionID: "sess-skills", UserID: defaultUserID, TraceID: "trace-skills"}))
 
-	deps := service.SessionDeps{MySQL: mysqlFake, Redis: redisSvc, FS: fsSvc}
+	deps := service.SessionDeps{
+		MySQL: mysqlFake,
+		Redis: redisSvc,
+		FS:    fsSvc,
+		DrainMessageQueue: func(ctx context.Context) error {
+			return msgflush.Drain(ctx, redisSvc, mysqlFake)
+		},
+	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
@@ -301,7 +307,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
 	})
-	return r, mysqlFake
+	return r, mysqlFake, redisSvc
 }
 
 func jsonBody(t *testing.T, v any) *strings.Reader {

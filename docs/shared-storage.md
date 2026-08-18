@@ -50,11 +50,20 @@ access key / secret key pair dedicated to JuiceFS (not reused by other tenants).
 ### 2.2 Dedicated metadata engine
 
 JuiceFS metadata is its availability lifeline: if the engine is down, the
-filesystem is unreadable. **Do not** reuse blowball's session-cache Redis for
-this. Provision a **dedicated** metadata store:
+filesystem is unreadable. **Do not** reuse blowball's Redis (message
+write-behind queue + caches) for this in production. Provision a **dedicated**
+metadata store:
 
-- **Production**: a HA Redis (Sentinel or Cluster), or TiKV.
-- **Dev**: a separate Redis DB index on an existing instance is acceptable.
+- **Production**: a HA Redis via Sentinel — see `docs/redis-ha-deployment.md`
+  for the full deployment runbook. It covers the recommended same-host
+  dual-instance layout (a second redis-server per node just for JuiceFS
+  metadata, monitored by the same sentinel trio) **and** the rules for sharing
+  one instance with blowball if you choose to (separate DB index, shared
+  `maxmemory` budget, `appendfsync always`). TiKV is an alternative engine.
+  (Redis Cluster is technically supported by JuiceFS but pins one file
+  system's metadata to a single instance, so it adds no sharding benefit.)
+- **Dev**: a separate Redis DB index on an existing instance is acceptable —
+  follow the shared-instance rules in `docs/redis-ha-deployment.md` §2.1.
 
 Example meta URL (dedicated Redis DB index `5`, distinct from blowball's
 `redis.db`):
