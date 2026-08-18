@@ -84,7 +84,7 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 	// use. Login is stubbed (the harness does the same) since these tests assert
 	// route ownership, not the login flow.
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)

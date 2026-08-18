@@ -33,6 +33,14 @@ type MySQLStore interface {
 	ListMessages(ctx context.Context, sessionID string) ([]model.Message, error)
 	ListMessagesPaged(ctx context.Context, sessionID, cursor string, pageSize int, order string) ([]model.Message, string, error)
 	SaveTurnUsage(ctx context.Context, tu model.TurnUsage) error
+	// Compaction storage (context-compaction capability): append-only
+	// compaction records, the sessions.context_compacted stitching gate, and
+	// the latest turn's end-of-turn context size for the turn-start
+	// preventive check.
+	InsertCompaction(ctx context.Context, rec model.ContextCompaction) error
+	LatestCompaction(ctx context.Context, sessionID string) (*model.ContextCompaction, error)
+	UpdateSessionCompacted(ctx context.Context, sessionID string) error
+	LatestContextTokens(ctx context.Context, sessionID string) (int, error)
 }
 
 // RedisStore is the subset of the cache layer that SessionService /
@@ -47,6 +55,13 @@ type RedisStore interface {
 	SetMessages(ctx context.Context, sessionID string, raws [][]byte) error
 	ClearMessages(ctx context.Context, sessionID string) error
 	DelSessionCache(ctx context.Context, sessionID string) error
+	// Compaction cache (context-compaction capability): the
+	// compaction:{session_id} hot copy of the latest compaction record. Set
+	// overwrites whole-key on each new compaction; session deletion clears
+	// the key via DelSessionCache.
+	SetCompactionCache(ctx context.Context, sessionID string, data []byte) error
+	GetCompactionCache(ctx context.Context, sessionID string) ([]byte, error)
+	DelCompactionCache(ctx context.Context, sessionID string) error
 }
 
 // FSStore is the subset of the file-system store the services call. The

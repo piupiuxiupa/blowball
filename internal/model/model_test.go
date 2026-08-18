@@ -17,7 +17,7 @@ var expectedDBTags = map[string][]string{
 	},
 	"Session": {
 		"session_id", "user_id", "trace_id",
-		"update_time", "create_time",
+		"update_time", "create_time", "context_compacted",
 	},
 	"Title": {
 		"session_id", "title", "trace_id", "is_manual",
@@ -27,15 +27,27 @@ var expectedDBTags = map[string][]string{
 		"id", "session_id", "msg_time", "agent", "msg_index",
 		"role", "event_type", "content", "trace_id", "client_msg_id", "update_time",
 	},
+	"TurnUsage": {
+		"id", "session_id", "trace_id", "user_id", "usage_json",
+		"total_tokens", "context_tokens", "created_at",
+	},
+	"ContextCompaction": {
+		"id", "session_id", "user_id", "trace_id", "trigger_kind",
+		"trigger_tokens", "content", "boundary_msg_time", "boundary_msg_index",
+		"boundary_msg_id", "shadowed_tokens", "summary_model",
+		"summary_prompt_tokens", "summary_completion_tokens", "create_time",
+	},
 }
 
 // structTypes returns the model structs covered by the test.
 func structTypes() map[string]any {
 	return map[string]any{
-		"User":    User{},
-		"Session": Session{},
-		"Title":   Title{},
-		"Message": Message{},
+		"User":              User{},
+		"Session":           Session{},
+		"Title":             Title{},
+		"Message":           Message{},
+		"TurnUsage":         TurnUsage{},
+		"ContextCompaction": ContextCompaction{},
 	}
 }
 
@@ -90,7 +102,7 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 				UpdateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 				CreateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 			},
-			want: []string{"session_id", "user_id", "trace_id", "update_time", "create_time"},
+			want: []string{"session_id", "user_id", "trace_id", "update_time", "create_time", "context_compacted"},
 		},
 		{
 			name: "Title",

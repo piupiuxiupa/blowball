@@ -48,9 +48,9 @@ type TurnCloser func()
 type orchestratorFactory struct {
 	cfg          *config.Config
 	client       LLMClient
-	baseRegistry *tool.Registry      // holds process-wide tools (webfetch, MCP proxies, luban skill tools)
-	serverTools  map[string][]string // server name -> prefixed tool names
-	skillLoader  *skill.Loader       // discovers global and per-user skills
+	baseRegistry *tool.Registry       // holds process-wide tools (webfetch, MCP proxies, luban skill tools)
+	serverTools  map[string][]string  // server name -> prefixed tool names
+	skillLoader  *skill.Loader        // discovers global and per-user skills
 	userMCP      config.UserMCPConfig // per-user MCP tool timeouts/enabled flag
 }
 
@@ -419,10 +419,14 @@ type WorkspaceRootForUser = func(userID string) string
 //   - Stream events to hub,
 //   - Emit a final done event with the aggregated usage breakdown.
 //
+// roundHook (optional, context-compaction capability) is installed on the
+// freshly-built Confucius as the between-rounds mid-turn compaction seam; nil
+// runs the loop hook-free.
+//
 // workspaceRoot is the absolute path to the requesting user's workspace
 // directory (data/{user_uuid}/workspace). userID identifies the caller so the
 // factory can load user-specific skills and validate skill permissions.
-func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub) error {
+func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook) error {
 	ctx = skill.WithUserID(ctx, userID)
 	confucius, closer, err := o.factory.Build(workspaceRoot, skillsDir, userID)
 	if err != nil {
@@ -433,6 +437,11 @@ func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, use
 	// when no per-turn resources were created.
 	if closer != nil {
 		defer closer()
+	}
+	if roundHook != nil {
+		if hs, ok := confucius.(RoundHookSetter); ok {
+			hs.SetRoundHook(roundHook)
+		}
 	}
 
 	content, usage, breakdown, err := confucius.Run(ctx, messages, hub)
@@ -535,6 +544,12 @@ func buildMetaObject(b *TurnBreakdown) map[string]any {
 	// non-capped turns serialize identically to before (additive key).
 	if b.RoundCapped {
 		m["round_capped"] = true
+	}
+	// context_tokens carries the turn's last-round prompt+completion for
+	// turn_usage.context_tokens (context-compaction capability). Additive key,
+	// omitted on zero (turns that made no LLM call serialize as before).
+	if b.LastRoundContextTokens > 0 {
+		m["context_tokens"] = b.LastRoundContextTokens
 	}
 	return m
 }

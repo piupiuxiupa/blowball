@@ -8,10 +8,13 @@ import (
 
 // saveTurnUsageSQL inserts one turn_usage row recording a completed chat turn's
 // per-agent cost. id is AUTO_INCREMENT. The redundant total_tokens column lets
-// per-session cost be summed without parsing usage_json.
+// per-session cost be summed without parsing usage_json; context_tokens
+// records the LAST round's prompt+completion — the authoritative end-of-turn
+// context size the turn-start preventive compaction check reads (see
+// migration 013 / internal/service/compaction.go).
 const saveTurnUsageSQL = `
-INSERT INTO turn_usage (session_id, trace_id, user_id, usage_json, total_tokens)
-VALUES (:session_id, :trace_id, :user_id, :usage_json, :total_tokens)
+INSERT INTO turn_usage (session_id, trace_id, user_id, usage_json, total_tokens, context_tokens)
+VALUES (:session_id, :trace_id, :user_id, :usage_json, :total_tokens, :context_tokens)
 `
 
 // SaveTurnUsage inserts one turn_usage row. It is a write-only path (the

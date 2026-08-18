@@ -39,7 +39,7 @@ type stubOrchestrator struct {
 	preCloseSleep time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub) ([]stream.StreamEvent, map[string]any, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, _ TurnHooks) ([]stream.StreamEvent, map[string]any, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
 	s.gotSkillsDir = skillsDir
@@ -105,6 +105,14 @@ type handlerFakeMySQL struct {
 	saveTurnUsageCalls  int
 	saveTurnUsageArg    model.TurnUsage
 	saveTurnUsageErr    error
+
+	// Compaction-storage recording (context-compaction capability).
+	compactions                 []model.ContextCompaction
+	insertCompactionErr         error
+	latestCompactionErr         error
+	updateSessionCompactedCalls int
+	updateSessionCompactedErr   error
+	latestContextTokens         int
 }
 
 func (m *handlerFakeMySQL) CreateSession(_ context.Context, sess model.Session) error {
@@ -257,6 +265,38 @@ func (m *handlerFakeMySQL) SaveTurnUsage(_ context.Context, tu model.TurnUsage) 
 	return m.saveTurnUsageErr
 }
 
+// Compaction-storage members (context-compaction capability). compactions is
+// the append-only record list; latestCompactionErr simulates read failures.
+func (m *handlerFakeMySQL) InsertCompaction(_ context.Context, rec model.ContextCompaction) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.compactions = append(m.compactions, rec)
+	return m.insertCompactionErr
+}
+func (m *handlerFakeMySQL) LatestCompaction(_ context.Context, _ string) (*model.ContextCompaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.latestCompactionErr != nil {
+		return nil, m.latestCompactionErr
+	}
+	if len(m.compactions) == 0 {
+		return nil, nil
+	}
+	cp := m.compactions[len(m.compactions)-1]
+	return &cp, nil
+}
+func (m *handlerFakeMySQL) UpdateSessionCompacted(_ context.Context, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateSessionCompactedCalls++
+	return m.updateSessionCompactedErr
+}
+func (m *handlerFakeMySQL) LatestContextTokens(_ context.Context, _ string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.latestContextTokens, nil
+}
+
 // handlerFakeRedis records the write-behind dual writes. The decoded rows
 // (dualRows) are what handler tests assert on — with the Redis-first change
 // the dual-write pipeline IS the persistence call, so the batch previously
@@ -275,6 +315,12 @@ type handlerFakeRedis struct {
 	setCalls   int
 	setErr     error
 	setArgRows int
+
+	// Compaction-cache recording (context-compaction capability).
+	compactionCache    []byte
+	setCompactionCalls int
+	setCompactionErr   error
+	getCompactionCalls int
 }
 
 func (r *handlerFakeRedis) AppendMessagesDual(_ context.Context, sessionID string, raws [][]byte) error {
@@ -329,6 +375,31 @@ func (r *handlerFakeRedis) DelSessionCache(_ context.Context, _ string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.delSessErr
+}
+
+// Compaction-cache members (context-compaction capability): a single-slot
+// cache mirroring the whole-key overwrite semantics of the real store.
+func (r *handlerFakeRedis) SetCompactionCache(_ context.Context, _ string, data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setCompactionCalls++
+	r.compactionCache = append([]byte(nil), data...)
+	return r.setCompactionErr
+}
+func (r *handlerFakeRedis) GetCompactionCache(_ context.Context, _ string) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.getCompactionCalls++
+	if r.compactionCache == nil {
+		return nil, nil
+	}
+	return append([]byte(nil), r.compactionCache...), nil
+}
+func (r *handlerFakeRedis) DelCompactionCache(_ context.Context, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.compactionCache = nil
+	return nil
 }
 
 // handlerFakeFS records EnsureUserDirs — the FS store's only remaining duty
@@ -387,7 +458,7 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	// SessionHandler owns CRUD only; MessageStreamHandler owns the streaming
 	// endpoint and the orchestrator dependency. Both share the same services.
 	h := NewSessionHandler(sessSvc, titleSvc)
-	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, stub, "/tmp/blowball-test-data")
+	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, stub, "/tmp/blowball-test-data")
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {

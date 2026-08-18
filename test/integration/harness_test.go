@@ -189,6 +189,12 @@ type memoryMySQL struct {
 	deletedTitles   map[string]model.Title
 	deletedMessages map[string][]model.Message
 	deletionIDs     map[string]string // sessionID -> deletion_id of its delete
+
+	// Compaction storage (context-compaction capability): the append-only
+	// record list per session (latest-wins stitching reads the last entry)
+	// and the set of sessions whose context_compacted flag was set.
+	compactions map[string][]model.ContextCompaction
+	compacted   map[string]bool
 }
 
 func newMemoryMySQL() *memoryMySQL {
@@ -201,6 +207,8 @@ func newMemoryMySQL() *memoryMySQL {
 		deletedTitles:   map[string]model.Title{},
 		deletedMessages: map[string][]model.Message{},
 		deletionIDs:     map[string]string{},
+		compactions:     map[string][]model.ContextCompaction{},
+		compacted:       map[string]bool{},
 	}
 }
 
@@ -252,6 +260,9 @@ func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
 	// turn_usage cascades with the session delete via its FK ON DELETE CASCADE
 	// (migration 010); mirror that here so integration tests can assert it.
 	delete(m.turnUsages, sessionID)
+	// context_compactions cascades the same way (migration 013).
+	delete(m.compactions, sessionID)
+	delete(m.compacted, sessionID)
 	return nil
 }
 
@@ -469,6 +480,64 @@ func (m *memoryMySQL) turnUsagesFor(sessionID string) []model.TurnUsage {
 	return out
 }
 
+// Compaction-storage members (context-compaction capability). Append-only per
+// session; LatestCompaction returns the newest entry (latest-wins).
+func (m *memoryMySQL) InsertCompaction(_ context.Context, rec model.ContextCompaction) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextID++
+	rec.ID = m.nextID
+	m.compactions[rec.SessionID] = append(m.compactions[rec.SessionID], rec)
+	return nil
+}
+
+func (m *memoryMySQL) LatestCompaction(_ context.Context, sessionID string) (*model.ContextCompaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows := m.compactions[sessionID]
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	cp := rows[len(rows)-1]
+	return &cp, nil
+}
+
+func (m *memoryMySQL) UpdateSessionCompacted(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[sessionID]; ok {
+		s.ContextCompacted = true
+	}
+	m.compacted[sessionID] = true
+	return nil
+}
+
+func (m *memoryMySQL) LatestContextTokens(_ context.Context, sessionID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows := m.turnUsages[sessionID]
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[len(rows)-1].ContextTokens, nil
+}
+
+// compactionsFor returns the recorded compaction records for sessionID. Test helper.
+func (m *memoryMySQL) compactionsFor(sessionID string) []model.ContextCompaction {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.ContextCompaction, len(m.compactions[sessionID]))
+	copy(out, m.compactions[sessionID])
+	return out
+}
+
+// isCompacted reports whether UpdateSessionCompacted fired for sessionID. Test helper.
+func (m *memoryMySQL) isCompacted(sessionID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.compacted[sessionID]
+}
+
 // testEnv is the wired-up integration harness: real handlers + real services
 // + real agent orchestrator backed by a scripted LLM, real FS, real Redis
 // (miniredis), and an in-memory MySQL fake.
@@ -609,7 +678,7 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -700,7 +769,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -809,7 +878,7 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)

@@ -116,6 +116,14 @@ type TurnBreakdown struct {
 	// event's usage.meta.round_capped (omitted when false so non-capped turns
 	// serialize identically to before).
 	RoundCapped bool
+
+	// LastRoundContextTokens is the FINAL LLM round's prompt+completion — the
+	// authoritative end-of-turn context size (context-compaction capability).
+	// Rendered into usage.meta.context_tokens (omitted when 0) so the
+	// streaming handler can persist it into turn_usage.context_tokens for the
+	// next turn's preventive compaction check. Deliberately the LAST round,
+	// never the cumulative sum of all rounds.
+	LastRoundContextTokens int
 }
 
 // Usage accumulates token counts for a single Run. Totals across rounds are

@@ -307,6 +307,24 @@ type OpenAIConfig struct {
 	APIKey  string `yaml:"api_key"`
 	BaseURL string `yaml:"base_url"`
 	Model   string `yaml:"model"`
+	// MaxContextTokens is the model's maximum context window in tokens — the
+	// single value driving the context-compaction capability (see
+	// internal/service/compaction.go). Compaction triggers at a fixed 80% of
+	// it. Zero (unset) disables compaction entirely (the pre-capability
+	// behavior); a configured value must be positive — validate() rejects
+	// negatives at load time so a typo fails fast rather than silently
+	// disabling the guard.
+	MaxContextTokens int `yaml:"max_context_tokens"`
+}
+
+// validate rejects a non-positive MaxContextTokens. Zero is valid (compaction
+// disabled); only a negative value — necessarily an operator typo — is an
+// error (mirrors the reasoning_effort / max_rounds fail-fast precedent).
+func (o OpenAIConfig) validate() error {
+	if o.MaxContextTokens < 0 {
+		return fmt.Errorf("openai.max_context_tokens: must be a positive integer or 0 (0 disables context compaction; got %d)", o.MaxContextTokens)
+	}
+	return nil
 }
 
 // MySQLConfig holds MySQL connection settings.
@@ -923,6 +941,29 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
 
+	// openai.max_context_tokens MUST be an integer. yaml.v3 silently truncates
+	// a fractional value into the int field (12.5 → 12), so the integer-ness
+	// is checked on a shadow decode of the raw value — a float that is not
+	// whole, or any non-numeric value, fails fast here (context-compaction
+	// spec: "a configured value MUST be a positive integer").
+	var shadow struct {
+		OpenAI struct {
+			MaxContextTokens any `yaml:"max_context_tokens"`
+		} `yaml:"openai"`
+	}
+	if err := yaml.Unmarshal([]byte(expanded), &shadow); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	switch v := shadow.OpenAI.MaxContextTokens.(type) {
+	case nil, int, uint, int64:
+	case float64:
+		if v != float64(int64(v)) {
+			return nil, fmt.Errorf("config validation error: openai.max_context_tokens: must be a positive integer (got %v)", v)
+		}
+	default:
+		return nil, fmt.Errorf("config validation error: openai.max_context_tokens: must be a positive integer (got %T)", v)
+	}
+
 	cfg.Logging.applyDefaults()
 	cfg.OnlyOffice.applyDefaults()
 	cfg.Server.applyDefaults()
@@ -974,6 +1015,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Tools.Executor.Bash.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.OpenAI.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	return nil

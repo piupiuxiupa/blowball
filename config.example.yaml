@@ -13,6 +13,16 @@ openai:
   api_key: ${OPENAI_API_KEY}
   base_url: https://api.openai.com/v1
   model: gpt-4o-mini
+  # Context-compaction guard (context-compaction capability): the model's max
+  # context window in tokens. When measured context pressure reaches a fixed
+  # 80% of this value (mid-turn: the last LLM round's prompt+completion usage;
+  # turn-start: the previous turn's recorded turn_usage.context_tokens), the
+  # middle history is condensed into a structured checkpoint summary so long
+  # sessions never hit the hard window limit. Zero/unset (the default)
+  # disables compaction entirely — turns behave exactly as before. A
+  # configured value must be a positive integer (a negative value fails
+  # config load).
+  # max_context_tokens: 128000
 
 mysql:
   dsn: ${MYSQL_DSN:user:password@tcp(127.0.0.1:3306)/blowball?charset=utf8mb4&parseTime=true&loc=Local}

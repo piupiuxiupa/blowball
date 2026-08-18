@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +36,7 @@ type MessageStreamHandler struct {
 	sessSvc  *service.SessionService
 	msgSvc   *service.MessageService
 	titleSvc *service.TitleService
+	compSvc  *service.CompactionService
 	orch     OrchestratorRunner
 	dataDir  string
 	newHub   func() *stream.Hub
@@ -43,12 +45,15 @@ type MessageStreamHandler struct {
 
 // NewMessageStreamHandler wires the streaming handler with its services, the
 // orchestrator adapter, and the dataDir used to resolve per-user workspace and
-// skills roots. The agent role (and the all role) constructs this; the api role
-// does not.
+// skills roots. compSvc is the context-compaction service; it may be nil (or
+// constructed with max_context_tokens 0), in which case every compaction
+// check is skipped and turns behave exactly as before the capability. The
+// agent role (and the all role) constructs this; the api role does not.
 func NewMessageStreamHandler(
 	sessSvc *service.SessionService,
 	msgSvc *service.MessageService,
 	titleSvc *service.TitleService,
+	compSvc *service.CompactionService,
 	orch OrchestratorRunner,
 	dataDir string,
 ) *MessageStreamHandler {
@@ -56,6 +61,7 @@ func NewMessageStreamHandler(
 		sessSvc:  sessSvc,
 		msgSvc:   msgSvc,
 		titleSvc: titleSvc,
+		compSvc:  compSvc,
 		orch:     orch,
 		dataDir:  dataDir,
 	}
@@ -136,20 +142,114 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	}
 	isFirstTurn := len(prior) == 0
 
-	messages, err := MessagesToAgentMessages(prior)
+	agentMsgs, _, err := MessagesToAgentMessagesIndexed(prior)
 	if err != nil {
 		logger.L().Warn("reconstruct messages failed; falling back to current message only",
 			zap.String("op", "handler.send_message"),
 			zap.String("session_id", sessionID),
 			zap.Error(err))
-		messages = nil
+		agentMsgs = nil
 	}
-	messages = append(messages, agent.Message{Role: "user", Content: req.Content})
+
+	// Context-compaction stitching (context-compaction capability). Two ways
+	// the model context becomes the stitched form:
+	//
+	//  a) turn-start preventive compaction — the previous turn ended over the
+	//     80% threshold (turn_usage.context_tokens), so compact NOW, before
+	//     the first LLM call of this turn, saving a doomed full-window
+	//     request. Only for non-first turns (a new session has no usage row).
+	//  b) the session was compacted on an earlier turn
+	//     (sessions.context_compacted) — stitch from the latest record.
+	//
+	// Both paths operate on the DURABLE history (drain + MySQL read): the
+	// Redis-first view above may serve rows whose id is still 0 (ids are
+	// minted by the MySQL flusher), and a boundary cursor must reference a
+	// durable row identity. Both degrade to the full recovered history on any
+	// miss (compaction skipped, record unavailable, boundary not locatable):
+	// never block the turn.
+	var activeRecord *model.ContextCompaction
+	if h.compSvc.Enabled() {
+		overThreshold := false
+		lastContextTokens := 0
+		if !isFirstTurn {
+			tokens, terr := h.compSvc.LatestContextTokens(ctx, sessionID)
+			if terr != nil {
+				logger.L().Warn("turn-start context tokens read failed; skipping preventive compaction",
+					zap.String("op", "handler.send_message"),
+					zap.String("session_id", sessionID),
+					zap.Error(terr))
+			} else {
+				lastContextTokens = tokens
+				overThreshold = h.compSvc.ShouldCompact(tokens)
+			}
+		}
+		if overThreshold || sess.ContextCompacted {
+			if durable, derr := h.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
+				durableMsgs, durableRow, rerr := MessagesToAgentMessagesIndexed(durable)
+				if rerr != nil {
+					logger.L().Warn("durable reconstruct failed; using full recovered history",
+						zap.String("op", "handler.send_message"),
+						zap.String("session_id", sessionID),
+						zap.Error(rerr))
+				} else {
+					if overThreshold {
+						activeRecord, _ = h.compSvc.Compact(ctx, service.CompactionInput{
+							SessionID:     sessionID,
+							UserID:        userID,
+							TriggerKind:   model.CompactionTriggerTurnStart,
+							TriggerTokens: lastContextTokens,
+							Rows:          durable,
+							AgentMsgs:     durableMsgs,
+							LastRow:       durableRow,
+						})
+					}
+					if activeRecord == nil && sess.ContextCompacted {
+						activeRecord = h.compSvc.LatestCompactionRecord(ctx, sessionID)
+					}
+					if activeRecord != nil {
+						if stitched := stitchCompacted(durable, durableMsgs, activeRecord); stitched != nil {
+							agentMsgs = stitched
+						}
+					}
+				}
+			} else {
+				logger.L().Warn("durable recovery failed; using full recovered history",
+					zap.String("op", "handler.send_message"),
+					zap.String("session_id", sessionID),
+					zap.Error(derr))
+			}
+		}
+	}
+
+	messages := append(agentMsgs, agent.Message{Role: "user", Content: req.Content})
 
 	// Capture the user message timestamp early so the persisted user row keeps
 	// the request-arrival time even though persistence is deferred until after
 	// the orchestrator succeeds.
 	userMsgTime := time.Now().UTC()
+
+	// Turn-scoped persistence bookkeeping shared by the mid-turn flush and the
+	// turn-end save (context-compaction capability): how many merged events
+	// have already been persisted determines the suffix the turn-end save
+	// pushes, keeping both the MySQL rows (deterministic client_msg_ids) and
+	// the Redis msgs:{sid} list free of duplicates.
+	persist := turnPersistInfo{
+		sessionID:   sessionID,
+		userID:      userID,
+		traceID:     tid,
+		userContent: req.Content,
+		userMsgTime: userMsgTime,
+	}
+	flushed := &turnFlushState{}
+
+	// Mid-turn compaction seam: when compaction is configured, install a
+	// between-rounds hook plus the synchronized event tap it flushes through.
+	// Both are per-turn values handed to the orchestrator alongside the hub.
+	var hooks TurnHooks
+	if h.compSvc.Enabled() {
+		tap := NewTurnEventTap()
+		hooks = TurnHooks{Round: h.newRoundHook(tap, persist, flushed), Tap: tap}
+	}
 
 	workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")
 	skillsDir := filepath.Join(h.dataDir, userID, "skills")
@@ -166,7 +266,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// cancels the agent loop. We close the hub when Handle returns so the
 		// SSE writer drains remaining events and exits cleanly.
 		defer hub.Close()
-		events, usage, err := h.orch.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub)
+		events, usage, err := h.orch.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub, hooks)
 		resultCh <- runResult{events: events, usage: usage, err: err}
 	}()
 
@@ -196,6 +296,12 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// message batch (usage is observability data, messages are business data —
 	// see the turn-cost-tracking spec's "Usage write failure does not roll back
 	// messages" scenario).
+	//
+	// Mid-turn flush interaction (context-compaction capability): when a
+	// mid-turn compaction flushed part of this turn already, only the
+	// post-flush suffix is persisted — the deterministic client_msg_ids would
+	// collapse the rows in MySQL, but the Redis msgs:{sid} read cache has no
+	// such dedup, so the suffix split keeps the cache list exact.
 	persistEvents := func(events []stream.StreamEvent, usage map[string]any) {
 		// Title generation still needs a single assistant content string. We
 		// derive it from the token events emitted by Confucius so the title
@@ -219,25 +325,22 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 			now := time.Now().UTC()
 			merged := MergeEvents(events)
-			msgs := make([]model.Message, 0, len(merged)+1)
-			msgs = append(msgs, UserMessage(sessionID, tid, req.Content, userMsgTime))
-			for i, e := range merged {
-				msg, mErr := MessageFromEvent(e, sessionID, tid, i+1, now)
-				if mErr != nil {
-					logger.L().Error("map event to message failed",
-						zap.String("op", "handler.send_message"),
-						zap.String("session_id", sessionID),
-						zap.Error(mErr))
-					return
-				}
-				msgs = append(msgs, msg)
-			}
-
-			if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
-				logger.L().Error("save event stream failed",
+			msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), now)
+			if mErr != nil {
+				logger.L().Error("map event to message failed",
 					zap.String("op", "handler.send_message"),
 					zap.String("session_id", sessionID),
-					zap.Error(err))
+					zap.Error(mErr))
+				return
+			}
+
+			if len(msgs) > 0 {
+				if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
+					logger.L().Error("save event stream failed",
+						zap.String("op", "handler.send_message"),
+						zap.String("session_id", sessionID),
+						zap.Error(err))
+				}
 			}
 
 			// Persist per-agent token cost into turn_usage AFTER the message
@@ -299,8 +402,10 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 // object plus the request identifiers. The usage map is the authoritative
 // {total, by_agent, meta} object; it is serialized verbatim into UsageJSON and
 // its total.total_tokens is copied into the redundant TotalTokens column for
-// fast per-session SUM() aggregation. Returns ok=false when usage is nil or
-// missing total.total_tokens, so the caller can skip persistence cleanly
+// fast per-session SUM() aggregation. The meta.context_tokens key (emitted by
+// the agent layer from the turn's LAST LLM round) feeds ContextTokens for the
+// turn-start preventive compaction check. Returns ok=false when usage is nil
+// or missing total.total_tokens, so the caller can skip persistence cleanly
 // (e.g. a turn that errored before any LLM call produced usage).
 func buildTurnUsage(sessionID, traceID, userID string, usage map[string]any) (model.TurnUsage, bool) {
 	if len(usage) == 0 {
@@ -312,11 +417,12 @@ func buildTurnUsage(sessionID, traceID, userID string, usage map[string]any) (mo
 		return model.TurnUsage{}, false
 	}
 	return model.TurnUsage{
-		SessionID:   sessionID,
-		TraceID:     traceID,
-		UserID:      userID,
-		UsageJSON:   string(raw),
-		TotalTokens: totalTokens,
+		SessionID:     sessionID,
+		TraceID:       traceID,
+		UserID:        userID,
+		UsageJSON:     string(raw),
+		TotalTokens:   totalTokens,
+		ContextTokens: extractContextTokens(usage),
 	}, true
 }
 
@@ -341,4 +447,170 @@ func extractTotalTokens(usage map[string]any) int {
 		return int(v)
 	}
 	return 0
+}
+
+// extractContextTokens pulls the turn's last-round context size out of the
+// usage object's `meta` segment (usage.meta.context_tokens, emitted by the
+// agent layer — see TurnBreakdown.LastRoundContextTokens). Tolerates the
+// JSON-decoded map shape; 0 when absent (turns with no LLM call).
+func extractContextTokens(usage map[string]any) int {
+	metaRaw, ok := usage["meta"]
+	if !ok {
+		return 0
+	}
+	meta, ok := metaRaw.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch v := meta["context_tokens"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
+// turnPersistInfo bundles the per-turn identifiers the persistence path needs
+// to render message batches (shared by the mid-turn flush and the turn-end
+// save so both derive byte-identical rows — same client_msg_ids, same user
+// message timestamp).
+type turnPersistInfo struct {
+	sessionID   string
+	userID      string
+	traceID     string
+	userContent string
+	userMsgTime time.Time
+}
+
+// buildTurnMessages renders the persistence batch for merged events
+// [from:len(merged)] plus the user message when from == 0. Message ordinals
+// are the merged-stream positions (user = 0, events 1..N), so an overlapping
+// re-render produces the SAME deterministic client_msg_ids and the MySQL
+// UNIQUE index collapses any redelivery.
+func (p turnPersistInfo) buildTurnMessages(merged []stream.StreamEvent, from int, now time.Time) ([]model.Message, error) {
+	if from > len(merged) {
+		from = len(merged)
+	}
+	var msgs []model.Message
+	if from == 0 {
+		msgs = append(msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime))
+	}
+	for i := from; i < len(merged); i++ {
+		msg, err := MessageFromEvent(merged[i], p.sessionID, p.traceID, i+1, now)
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs, nil
+}
+
+// turnFlushState tracks how much of the turn's merged event stream a mid-turn
+// flush has already persisted. It is written by the flush (running on the
+// orchestrator goroutine inside the round hook) and read by the turn-end save
+// (running on the detached persistence goroutine), hence the mutex.
+type turnFlushState struct {
+	mu      sync.Mutex
+	flushed int // number of merged events already persisted (0 = nothing flushed)
+}
+
+// mark records that the first n merged events are persisted. Monotonic: a
+// stale lower value never wins.
+func (f *turnFlushState) mark(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n > f.flushed {
+		f.flushed = n
+	}
+}
+
+// count returns the number of merged events already persisted.
+func (f *turnFlushState) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.flushed
+}
+
+// newRoundHook builds the mid-turn compaction hook (context-compaction
+// capability, trigger=mid_turn): threshold check → flush-first persistence →
+// recover+reconstruct → Compact → rewrite the in-memory round to the stitched
+// context. Every failure inside is best-effort — WARN and return nil so the
+// agent loop continues on the original conversation.
+func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState) agent.RoundHook {
+	return func(ctx context.Context, lastUsage agent.Usage) []agent.Message {
+		contextTokens := lastUsage.PromptTokens + lastUsage.CompletionTokens
+		if !h.compSvc.ShouldCompact(contextTokens) {
+			return nil
+		}
+		log := logger.L().With(
+			zap.String("op", "handler.round_hook"),
+			zap.String("session_id", persist.sessionID),
+			zap.Int("context_tokens", contextTokens),
+		)
+
+		// ① Flush-first: persist the turn so far through the ordinary batch
+		// path. Compaction has a hard dependency on the flush — the boundary
+		// cursor must point at real persisted rows — so a flush failure aborts
+		// the compaction attempt.
+		events := tap.Snapshot(ctx)
+		if events == nil {
+			log.Warn("mid-turn event snapshot unavailable; compaction skipped")
+			return nil
+		}
+		merged := MergeEvents(events)
+		msgs, err := persist.buildTurnMessages(merged, flushed.count(), time.Now().UTC())
+		if err != nil {
+			log.Warn("mid-turn flush batch build failed; compaction skipped", zap.Error(err))
+			return nil
+		}
+		if len(msgs) > 0 {
+			if err := h.sessSvc.SaveMessagesBatch(ctx, persist.userID, msgs); err != nil {
+				log.Warn("mid-turn flush failed; compaction skipped", zap.Error(err))
+				return nil
+			}
+		}
+		flushed.mark(len(merged))
+
+		// ② Recover the now-complete history from the DURABLE tier (bounded
+		// drain + MySQL read): the flush just queued the turn's rows, and the
+		// boundary cursor must reference real MySQL identities — the Redis
+		// read cache would serve them with id 0. A drain failure aborts the
+		// compaction attempt like a flush failure.
+		rows, err := h.compSvc.RecoverDurable(ctx, persist.sessionID)
+		if err != nil {
+			log.Warn("mid-turn durable recover failed; compaction skipped", zap.Error(err))
+			return nil
+		}
+		agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows)
+		if err != nil {
+			log.Warn("mid-turn reconstruct failed; compaction skipped", zap.Error(err))
+			return nil
+		}
+
+		// ③ Compact the middle into a checkpoint.
+		rec, ok := h.compSvc.Compact(ctx, service.CompactionInput{
+			SessionID:     persist.sessionID,
+			UserID:        persist.userID,
+			TriggerKind:   model.CompactionTriggerMidTurn,
+			TriggerTokens: contextTokens,
+			Rows:          rows,
+			AgentMsgs:     agentMsgs,
+			LastRow:       lastRow,
+		})
+		if !ok {
+			return nil
+		}
+
+		// ④ Rewrite the in-memory round to first + framed summary + retained
+		// tail — the same shape later turns stitch from the record.
+		stitched := stitchCompacted(rows, agentMsgs, rec)
+		if stitched == nil {
+			log.Warn("mid-turn stitch failed after compaction; keeping original context")
+			return nil
+		}
+		return stitched
+	}
 }

@@ -109,7 +109,7 @@ func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
 	hub := stream.NewHub(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
 	require.NoError(t, err)
 	hub.Close()
 }
@@ -133,7 +133,7 @@ func TestOrchestrator_Handle_FullFlow(t *testing.T) {
 	type res struct{ err error }
 	resCh := make(chan res, 1)
 	go func() {
-		resCh <- res{err: o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)}
+		resCh <- res{err: o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)}
 	}()
 
 	var events []stream.StreamEvent
@@ -268,7 +268,7 @@ func TestOrchestrator_ExternalMCPTool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
 	require.NoError(t, err)
 	hub.Close()
 
@@ -335,7 +335,7 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
 	require.NoError(t, err)
 	hub.Close()
 
@@ -413,7 +413,7 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
 	require.NoError(t, err)
 	hub.Close()
 
@@ -483,7 +483,7 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
 	require.NoError(t, err)
 	hub.Close()
 
@@ -526,7 +526,7 @@ func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
 	hub := stream.NewHub(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub))
+	require.NoError(t, o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil))
 	hub.Close()
 
 	prompt := client.lastRequest().Messages[0].Content

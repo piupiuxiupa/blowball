@@ -50,6 +50,15 @@ type fakeMySQLStore struct {
 	saveTurnUsageArg   model.TurnUsage
 	saveTurnUsageErr   error
 
+	// Compaction-storage recording (context-compaction capability).
+	compactions                 []model.ContextCompaction
+	insertCompactionCalls       int
+	insertCompactionErr         error
+	latestCompactionErr         error
+	updateSessionCompactedCalls int
+	updateSessionCompactedErr   error
+	latestContextTokens         int
+
 	updateSessionTimeCalls int
 	updateSessionTimeArg   string
 	updateSessionTimeErr   error
@@ -247,6 +256,45 @@ func (f *fakeMySQLStore) SaveTurnUsage(_ context.Context, tu model.TurnUsage) er
 	return f.saveTurnUsageErr
 }
 
+// Compaction-storage members (context-compaction capability). compactions is
+// the append-only record list; the error knobs simulate per-step failures so
+// tests can assert the write-order degradation policy.
+func (f *fakeMySQLStore) InsertCompaction(_ context.Context, rec model.ContextCompaction) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.insertCompactionCalls++
+	if f.insertCompactionErr == nil {
+		f.compactions = append(f.compactions, rec)
+	}
+	return f.insertCompactionErr
+}
+
+func (f *fakeMySQLStore) LatestCompaction(_ context.Context, _ string) (*model.ContextCompaction, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.latestCompactionErr != nil {
+		return nil, f.latestCompactionErr
+	}
+	if len(f.compactions) == 0 {
+		return nil, nil
+	}
+	cp := f.compactions[len(f.compactions)-1]
+	return &cp, nil
+}
+
+func (f *fakeMySQLStore) UpdateSessionCompacted(_ context.Context, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updateSessionCompactedCalls++
+	return f.updateSessionCompactedErr
+}
+
+func (f *fakeMySQLStore) LatestContextTokens(_ context.Context, _ string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.latestContextTokens, nil
+}
+
 // fakeRedisStore records AppendMessagesDual/GetMessages/SetMessages/
 // ClearMessages/DelSessionCache calls. Order entries feed the delete-path
 // ordering assertions.
@@ -270,6 +318,13 @@ type fakeRedisStore struct {
 	clearErr     error
 	delSessCalls int
 	delSessErr   error
+
+	// Compaction-cache recording (context-compaction capability).
+	compactionCache    []byte
+	setCompactionCalls int
+	setCompactionErr   error
+	getCompactionCalls int
+	getCompactionErr   error
 
 	// order (when non-nil) records the delete-path call sequence; it may be
 	// shared with the other fakes and the drain hook.
@@ -331,6 +386,39 @@ func (f *fakeRedisStore) DelSessionCache(_ context.Context, sessionID string) er
 		*f.order = append(*f.order, "redis.del_session")
 	}
 	return f.delSessErr
+}
+
+// Compaction-cache members (context-compaction capability): a single-slot
+// cache mirroring the whole-key overwrite semantics of the real store. A nil
+// compactionCache is a miss.
+func (f *fakeRedisStore) SetCompactionCache(_ context.Context, _ string, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setCompactionCalls++
+	if f.setCompactionErr == nil {
+		f.compactionCache = append([]byte(nil), data...)
+	}
+	return f.setCompactionErr
+}
+
+func (f *fakeRedisStore) GetCompactionCache(_ context.Context, _ string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getCompactionCalls++
+	if f.getCompactionErr != nil {
+		return nil, f.getCompactionErr
+	}
+	if f.compactionCache == nil {
+		return nil, nil
+	}
+	return append([]byte(nil), f.compactionCache...), nil
+}
+
+func (f *fakeRedisStore) DelCompactionCache(_ context.Context, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.compactionCache = nil
+	return nil
 }
 
 // fakeFSStore records EnsureUserDirs (the FS store's only remaining duty

@@ -583,6 +583,17 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	openAIClient := agent.NewOpenAIClientWithSink(cfg.OpenAI, rawSink)
 	titleSvc := service.NewTitleService(openAIClient, rt.mysqlStore, cfg.OpenAI)
 
+	// Context-compaction service (context-compaction capability): reuses the
+	// shared OpenAI client (summary calls land in llm_raw_log) and the
+	// Confucius agent config's model. Inert while openai.max_context_tokens
+	// is unset — the handler skips every check and turns behave as before.
+	compSvc := service.NewCompactionService(
+		service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: fsStore},
+		openAIClient,
+		cfg.Agents.Confucius,
+		cfg.OpenAI.MaxContextTokens,
+	)
+
 	// The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
 	wsFn := func(userID string) string {
 		return fsStore.UserWorkspace(userID)
@@ -593,7 +604,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	}
 
 	orchAdapter := handler.NewOrchestratorAdapter(orch)
-	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, orchAdapter, dataDir)
+	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, orchAdapter, dataDir)
 	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn)
 
 	return handler.RouteDeps{

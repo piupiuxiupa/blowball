@@ -131,13 +131,14 @@ components:
           format: uuid
         client_msg_id:
           type: string
-          format: uuid
           nullable: true
           description: >
-            Idempotency key minted at persistence time (UUID v7). Backs the
-            Redis-first write-behind delivery: duplicate insert attempts of
-            the same logical message collapse to one row. Null on rows written
-            before migration 012.
+            Idempotency key minted at persistence time. Backs the Redis-first
+            write-behind delivery: duplicate insert attempts of the same
+            logical message collapse to one row. Rows carry either a
+            deterministic "{trace_id}:{msg_index}" key (the mid-turn-compaction
+            flush path, migration 013) or a UUID v7 (legacy write-behind
+            minting). Null on rows written before migration 012.
         update_time:
           type: string
           format: date-time

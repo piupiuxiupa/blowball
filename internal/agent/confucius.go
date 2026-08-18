@@ -34,7 +34,16 @@ type Confucius struct {
 	// sub-agent, but it implements RoundCapTracker for uniformity with the
 	// leaf agents. Reset at the top of each Run.
 	hitCapThisRun bool
+	// roundHook is the optional between-rounds seam (context-compaction
+	// mid-turn trigger). Nil on leaf-agent-free runs unless the orchestrator
+	// installed one right after the factory built this agent; see roundhook.go.
+	roundHook RoundHook
 }
+
+// SetRoundHook implements RoundHookSetter. The orchestrator calls it on the
+// freshly-built per-request Confucius so the hook (and everything it captures)
+// never outlives the turn.
+func (c *Confucius) SetRoundHook(hook RoundHook) { c.roundHook = hook }
 
 // NewConfucius builds a Confucius agent. subAgents maps invoke_chongzhi /
 // invoke_liang to their respective Agent implementations; it must contain at
@@ -174,6 +183,11 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 
 		total.Add(resp.Usage)
 		byAgent[c.Name()] = addUsage(byAgent[c.Name()], resp.Usage)
+		// Record the end-of-round context size (this round's authoritative
+		// prompt+completion) so the done event's usage.meta.context_tokens —
+		// and through it turn_usage.context_tokens — carries the turn's LAST
+		// round for the next turn's preventive compaction check.
+		tmeta.observeRoundContext(resp.Usage.PromptTokens + resp.Usage.CompletionTokens)
 
 		// Append the assistant turn (with any tool_calls) to the conversation
 		// so the next round sees the model's reasoning + planned calls.
@@ -240,6 +254,20 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 				Name:       tc.Function.Name,
 			})
 		}
+
+		// Between-rounds context-pressure seam (context-compaction, mid-turn
+		// trigger): after this round's tool results are appended and before
+		// the next LLM request, hand the round's authoritative usage to the
+		// installed hook. It may rewrite `round` to the compacted context
+		// (first message + framed summary + retained tail); nil keeps the
+		// conversation unchanged. The hook is silent on the SSE stream by
+		// contract and never aborts the loop.
+		if c.roundHook != nil {
+			if replaced := c.roundHook(ctx, resp.Usage); replaced != nil {
+				round = replaced
+			}
+		}
+
 		// This iteration dispatched tools and did not break; flag a cap exit
 		// when it was the last allowed round so the post-loop wrap-up runs.
 		capped = i+1 == c.maxRounds
@@ -271,6 +299,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub
 		}
 		total.Add(wrapUsage)
 		byAgent[c.Name()] = addUsage(byAgent[c.Name()], wrapUsage)
+		// The wrap-up round is the turn's last LLM interaction; its
+		// prompt+completion is the closest measurement of the context the
+		// session ends on.
+		tmeta.observeRoundContext(wrapUsage.PromptTokens + wrapUsage.CompletionTokens)
 		if strings.TrimSpace(wrapContent) != "" {
 			finalContent = wrapContent
 		} else {
@@ -584,16 +616,17 @@ func addUsage(base, delta Usage) Usage {
 // tmeta.snapshot. Safe to call on every return path (including error paths)
 // so partial attribution is never lost.
 func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
-	invokes, parallel, roundCapped := tmeta.snapshot()
+	invokes, parallel, roundCapped, lastRoundContext := tmeta.snapshot()
 	out := make(map[string]Usage, len(byAgent))
 	for k, v := range byAgent {
 		out[k] = v
 	}
 	return &TurnBreakdown{
-		ByAgent:             out,
-		Parallel:            parallel,
-		SubAgentInvocations: invokes,
-		RoundCapped:         roundCapped,
+		ByAgent:                out,
+		Parallel:               parallel,
+		SubAgentInvocations:    invokes,
+		RoundCapped:            roundCapped,
+		LastRoundContextTokens: lastRoundContext,
 	}
 }
 
@@ -609,10 +642,23 @@ type turnMeta struct {
 	roundCapped bool
 	invokes     []string // ordered, deduplicated invoke_* tool names
 	invokesSeen map[string]struct{}
+	// lastRoundContext is the most recent LLM round's prompt+completion —
+	// the authoritative end-of-turn context size (context-compaction
+	// capability), rendered into usage.meta.context_tokens.
+	lastRoundContext int
 }
 
 func newTurnMeta() *turnMeta {
 	return &turnMeta{invokesSeen: map[string]struct{}{}}
+}
+
+// observeRoundContext records the context size of the LLM round that just
+// completed, overwriting any earlier round (the LAST round's value is what
+// turn_usage.context_tokens needs — never the cumulative sum).
+func (t *turnMeta) observeRoundContext(tokens int) {
+	t.mu.Lock()
+	t.lastRoundContext = tokens
+	t.mu.Unlock()
 }
 
 // observeRound records whether one assistant round's tool_calls constitute a
@@ -646,13 +692,13 @@ func (t *turnMeta) observeInvoke(toolName string) {
 	t.invokes = append(t.invokes, toolName)
 }
 
-// snapshot returns the invoke list, parallel flag, and round-capped flag safe
-// for emission. The returned slice is a copy so callers may use it after
-// further mutations.
-func (t *turnMeta) snapshot() ([]string, bool, bool) {
+// snapshot returns the invoke list, parallel flag, round-capped flag, and
+// last-round context size safe for emission. The returned slice is a copy so
+// callers may use it after further mutations.
+func (t *turnMeta) snapshot() ([]string, bool, bool, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make([]string, len(t.invokes))
 	copy(out, t.invokes)
-	return out, t.parallel, t.roundCapped
+	return out, t.parallel, t.roundCapped, t.lastRoundContext
 }

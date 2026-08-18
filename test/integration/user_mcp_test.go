@@ -197,7 +197,7 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, nil, nil)
 	require.NoError(t, err)
 
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
 
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())

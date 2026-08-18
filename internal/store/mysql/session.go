@@ -21,7 +21,7 @@ VALUES (:session_id, :user_id, :trace_id)
 // listSessionsByUserSQL returns every session owned by userID, most-recently
 // updated first. The index idx_sessions_user_update backs this query.
 const listSessionsByUserSQL = `
-SELECT session_id, user_id, trace_id, update_time, create_time
+SELECT session_id, user_id, trace_id, update_time, create_time, context_compacted
 FROM sessions
 WHERE user_id = ?
 ORDER BY update_time DESC
@@ -53,7 +53,7 @@ func (s *Store) ListSessionsByUser(ctx context.Context, userID string) ([]model.
 // getSessionByIDSQL returns the row for a single session_id PK lookup. Used by
 // the service layer to decide whether EnsureSession needs to create the row.
 const getSessionByIDSQL = `
-SELECT session_id, user_id, trace_id, update_time, create_time
+SELECT session_id, user_id, trace_id, update_time, create_time, context_compacted
 FROM sessions
 WHERE session_id = ?
 LIMIT 1
@@ -82,6 +82,7 @@ func (s *Store) GetSessionByID(ctx context.Context, sessionID string) (*model.Se
 const listSessionsWithTitleSQL = `
 SELECT s.session_id AS session_id, s.user_id AS user_id, s.trace_id AS trace_id,
        s.update_time AS update_time, s.create_time AS create_time,
+       s.context_compacted AS context_compacted,
        COALESCE(t.title, '') AS title
 FROM sessions s
 LEFT JOIN titles t ON t.session_id = s.session_id
@@ -93,12 +94,13 @@ ORDER BY s.update_time DESC
 // ListSessionsWithTitle. Title is empty when no titles row exists for the
 // session. It is intended for read-only consumption by the session service.
 type SessionWithTitle struct {
-	SessionID  string    `db:"session_id"  json:"session_id"`
-	UserID     string    `db:"user_id"     json:"user_id"`
-	TraceID    string    `db:"trace_id"    json:"trace_id"`
-	UpdateTime time.Time `db:"update_time" json:"update_time"`
-	CreateTime time.Time `db:"create_time" json:"create_time"`
-	Title      string    `db:"title"       json:"title"`
+	SessionID        string    `db:"session_id"        json:"session_id"`
+	UserID           string    `db:"user_id"           json:"user_id"`
+	TraceID          string    `db:"trace_id"          json:"trace_id"`
+	UpdateTime       time.Time `db:"update_time"       json:"update_time"`
+	CreateTime       time.Time `db:"create_time"       json:"create_time"`
+	ContextCompacted bool      `db:"context_compacted" json:"context_compacted"`
+	Title            string    `db:"title"             json:"title"`
 }
 
 // ListSessionsWithTitle returns every session owned by userID left-joined onto

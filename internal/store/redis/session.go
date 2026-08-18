@@ -34,10 +34,12 @@ func (s *Store) GetSessionCache(ctx context.Context, sessionID string) ([]byte, 
 	return res, nil
 }
 
-// DelSessionCache removes the cached blob for sessionID. A missing key is a
+// DelSessionCache removes the cached blob for sessionID together with the
+// session's latest-compaction cache key (compaction:{session_id}) — both are
+// session-scoped caches that must not outlive the session. A missing key is a
 // no-op (Del does not error on non-existent keys).
 func (s *Store) DelSessionCache(ctx context.Context, sessionID string) error {
-	key := sessionKey(sessionID)
-	logCmd(ctx, "session.del", key)
-	return s.client.Del(ctx, key).Err()
+	keys := []string{sessionKey(sessionID), compactionKey(sessionID)}
+	logCmd(ctx, "session.del", keys[0])
+	return s.client.Del(ctx, keys...).Err()
 }

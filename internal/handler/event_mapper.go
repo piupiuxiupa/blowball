@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/lush/blowball/internal/model"
@@ -40,19 +41,34 @@ func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
 	return merged
 }
 
+// deterministicClientMsgID mints the idempotency key for one turn message:
+// {trace_id}:{msg_index}. A turn's messages may be persisted TWICE (mid-turn
+// flush + turn-end save); both passes derive the same id from the same
+// (trace, merged-event ordinal), so the messages table's UNIQUE index plus
+// INSERT IGNORE collapse the redelivery to one row. msg_index 0 is the user
+// message, 1+ the merged assistant events. Note the messages.client_msg_id
+// column is CHAR(64) (migration 013 widened it) because a UUID trace_id alone
+// is already 36 chars.
+func deterministicClientMsgID(traceID string, msgIndex int) string {
+	return traceID + ":" + strconv.Itoa(msgIndex)
+}
+
 // UserMessage builds a model.Message for a user input without using StreamEvent.
 // The user message occupies msg_index=0 within its turn and carries the request
 // arrival timestamp so it sorts before the assistant events emitted later.
+// The client_msg_id is the deterministic {trace_id}:0 so a mid-turn flush and
+// the turn-end save of the same user row collapse to one.
 func UserMessage(sessionID, traceID, content string, msgTime time.Time) model.Message {
 	return model.Message{
-		SessionID: sessionID,
-		MsgTime:   msgTime,
-		Agent:     model.AgentUser,
-		MsgIndex:  0,
-		Role:      model.RoleUser,
-		EventType: model.EventTypeMessage,
-		Content:   content,
-		TraceID:   traceID,
+		SessionID:   sessionID,
+		MsgTime:     msgTime,
+		Agent:       model.AgentUser,
+		MsgIndex:    0,
+		Role:        model.RoleUser,
+		EventType:   model.EventTypeMessage,
+		Content:     content,
+		TraceID:     traceID,
+		ClientMsgID: deterministicClientMsgID(traceID, 0),
 	}
 }
 
@@ -61,13 +77,17 @@ func UserMessage(sessionID, traceID, content string, msgTime time.Time) model.Me
 // leave Role empty; token/tool_call events carry the OpenAI assistant role;
 // tool_call content is JSON-encoded as {"tool_call_id":"...","name":..., "args":...};
 // tool_result content is JSON-encoded as {"tool_call_id":"...","output":...}.
+// The client_msg_id is the deterministic {trace_id}:{msg_index} keyed to the
+// event's ordinal within the MERGED stream — callers must pass the merged
+// index so the mid-turn flush and the turn-end save agree on every row.
 func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex int, msgTime time.Time) (model.Message, error) {
 	msg := model.Message{
-		SessionID: sessionID,
-		MsgTime:   msgTime,
-		Agent:     e.Agent,
-		MsgIndex:  msgIndex,
-		TraceID:   traceID,
+		SessionID:   sessionID,
+		MsgTime:     msgTime,
+		Agent:       e.Agent,
+		MsgIndex:    msgIndex,
+		TraceID:     traceID,
+		ClientMsgID: deterministicClientMsgID(traceID, msgIndex),
 	}
 
 	switch e.Type {
