@@ -59,16 +59,28 @@ type fakeRawLogStore struct {
 	mu   sync.Mutex
 	rows []model.LLMRawLog
 	fail bool
+	// attempts counts every AppendRawLogs call, failed or not, so tests can
+	// wait for a failed insert ATTEMPT to have completed before healing the
+	// store (buffer-empty alone cannot distinguish "dropped" from "popped,
+	// insert in flight").
+	attempts int
 }
 
 func (f *fakeRawLogStore) AppendRawLogs(_ context.Context, logs []model.LLMRawLog) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.attempts++
 	if f.fail {
 		return assert.AnError
 	}
 	f.rows = append(f.rows, logs...)
 	return nil
+}
+
+func (f *fakeRawLogStore) attemptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts
 }
 
 func (f *fakeRawLogStore) snapshot() []model.LLMRawLog {
@@ -185,9 +197,14 @@ func TestFlusher_InsertFailureBackoffAndDropsBatch(t *testing.T) {
 
 	// The batch fails on the first tick and is dropped (at-most-once); the
 	// flusher backs off rather than tearing down, so the buffer drains to 0.
+	// Wait for the FAILED INSERT ATTEMPT to have completed — not just for the
+	// buffer to empty. The pop (LPOP) empties the buffer before the insert
+	// runs, so a buffer-only wait can pass while the failing AppendRawLogs is
+	// still in flight; healing at that moment lets the "dropped" batch insert
+	// late and the final row count comes out one high (a -race flake).
 	require.Eventually(t, func() bool {
 		n, err := buf.LenRawLogs(context.Background())
-		return err == nil && n == 0
+		return err == nil && n == 0 && store.attemptCount() >= 1
 	}, flushInterval+2*time.Second, 20*time.Millisecond, "failed batch must be dropped, not re-queued forever")
 
 	// Recovery: once the store heals, later records flow through. Verified
