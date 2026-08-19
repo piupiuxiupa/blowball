@@ -48,6 +48,15 @@ type Message struct {
 	// fallback direct-write), and the messages table's UNIQUE index on
 	// client_msg_id plus INSERT IGNORE collapses redelivery to one row.
 	// Legacy rows written before migration 012 carry NULL / an empty string.
-	ClientMsgID string    `db:"client_msg_id" json:"client_msg_id"`
+	ClientMsgID string `db:"client_msg_id" json:"client_msg_id"`
+	// RunID is the sub-agent invocation run identity
+	// (subagent-run-identity capability): the parent invoke_* tool_call id
+	// that produced this event, copied from the event's
+	// Meta.parent_tool_call_id at persistence time. It is set only on rows
+	// emitted by a sub-agent Run — Confucius's own events and user rows carry
+	// NULL/empty, and legacy rows (before migration 014) are NULL. Rows keep
+	// arrival order (msg_time, msg_index); consumers regroup interleaved rows
+	// by (agent, run_id).
+	RunID       string    `db:"run_id"       json:"run_id,omitempty"`
 	UpdateTime  time.Time `db:"update_time"   json:"update_time"`
 }

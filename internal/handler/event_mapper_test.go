@@ -238,3 +238,50 @@ func TestMergeEvents(t *testing.T) {
 		})
 	}
 }
+
+// taggedToken builds a Chongzhi token event stamped with a run id, the shape
+// the dispatch layer's run tagger emits during parallel same-name invocations.
+func taggedToken(runID, content string) stream.StreamEvent {
+	e := stream.TokenEvent(stream.AgentChongzhi, content)
+	e.Meta = map[string]any{stream.MetaParentToolCallID: runID}
+	return e
+}
+
+// TestMergeEvents_RunIDChangeIsBoundary: interleaved tokens of concurrent
+// same-name invocations never merge across runs — each run's fragments stay
+// attributable — while fragments of the SAME run still merge and untagged
+// (top-level) events keep the pre-change adjacent-merge behavior.
+func TestMergeEvents_RunIDChangeIsBoundary(t *testing.T) {
+	events := []stream.StreamEvent{
+		taggedToken("x1", "run1-a "),
+		taggedToken("x2", "run2-a "), // same agent+type, DIFFERENT run → boundary
+		taggedToken("x1", "run1-b"),  // back to x1 → new fragment
+		taggedToken("x1", "run1-c"),  // same run → merges with previous
+	}
+
+	merged := MergeEvents(events)
+	require.Len(t, merged, 3, "run-id changes must break adjacency; same-run fragments merge")
+	assert.Equal(t, "run1-a ", merged[0].Content)
+	assert.Equal(t, "x1", merged[0].Meta[stream.MetaParentToolCallID])
+	assert.Equal(t, "run2-a ", merged[1].Content)
+	assert.Equal(t, "x2", merged[1].Meta[stream.MetaParentToolCallID])
+	assert.Equal(t, "run1-brun1-c", merged[2].Content)
+	assert.Equal(t, "x1", merged[2].Meta[stream.MetaParentToolCallID])
+}
+
+// TestMessageFromEvent_RunIDCopiedFromMeta: the persisted row carries the
+// event's run identity; events without one persist an empty RunID (NULL at
+// the store layer).
+func TestMessageFromEvent_RunIDCopiedFromMeta(t *testing.T) {
+	msgTime := time.Unix(1_700_000_000, 0).UTC()
+
+	tagged := taggedToken("call_x1", "hello")
+	m, err := MessageFromEvent(tagged, "sess-1", "trace-1", 1, msgTime)
+	require.NoError(t, err)
+	assert.Equal(t, "call_x1", m.RunID)
+
+	plain := stream.TokenEvent(stream.AgentConfucius, "hello")
+	m, err = MessageFromEvent(plain, "sess-1", "trace-1", 2, msgTime)
+	require.NoError(t, err)
+	assert.Empty(t, m.RunID, "top-level events persist no run identity")
+}

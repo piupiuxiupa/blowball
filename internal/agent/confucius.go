@@ -20,11 +20,15 @@ import (
 // the tool registry is consulted; the synthetic invoke_chongzhi /
 // invoke_liang tools therefore never reach the registry.
 type Confucius struct {
-	cfg           config.AgentConfig
-	client        LLMClient
-	toolRegistry  *tool.Registry
-	subAgents     map[string]Agent // keyed by ToolInvokeChongzhi / ToolInvokeLiang
-	toolsJSON     []byte           // pre-rendered OpenAI tools[] including invoke_*
+	cfg          config.AgentConfig
+	client       LLMClient
+	toolRegistry *tool.Registry
+	// subAgents maps ToolInvokeChongzhi / ToolInvokeLiang to per-invocation
+	// factories (not shared instances): every dispatch builds a fresh sub-agent
+	// so concurrent same-name invocations never share mutable run state
+	// (executedToolThisRun / hitCapThisRun; subagent-run-identity capability).
+	subAgents     map[string]SubAgentFactory
+	toolsJSON     []byte // pre-rendered OpenAI tools[] including invoke_*
 	toolsIsNotNil bool
 	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
 	// (default config.DefaultAgentMaxRounds) at construction.
@@ -46,10 +50,11 @@ type Confucius struct {
 func (c *Confucius) SetRoundHook(hook RoundHook) { c.roundHook = hook }
 
 // NewConfucius builds a Confucius agent. subAgents maps invoke_chongzhi /
-// invoke_liang to their respective Agent implementations; it must contain at
-// least those keys. The tools[] JSON is rendered once at construction time
+// invoke_liang to SubAgentFactories; it must contain at least those keys. Each
+// factory is invoked once per dispatch to build a per-invocation instance (see
+// SubAgentFactory). The tools[] JSON is rendered once at construction time
 // from cfg.Tools plus the two synthetic invoke_* tools.
-func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]Agent) (*Confucius, error) {
+func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory) (*Confucius, error) {
 	if _, ok := subAgents[ToolInvokeChongzhi]; !ok {
 		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeChongzhi)
 	}
@@ -105,7 +110,7 @@ func (c *Confucius) LastRunHitCap() bool { return c.hitCapThisRun }
 // (parallel flag + ordered invoke_* list). emitDone renders it as
 // usage.by_agent / usage.meta on the done event and it is persisted verbatim
 // into turn_usage.usage_json.
-func (c *Confucius) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
+func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.EventHub) (string, Usage, *TurnBreakdown, error) {
 	// Attribute every LLM call this loop makes (including round-cap wrap-up
 	// rounds, which inherit this ctx) to this agent in the raw-capture log.
 	ctx = WithAgentName(ctx, c.Name())
@@ -341,7 +346,7 @@ type toolResult struct {
 // as agent_error events and turned into error-string tool results so the LLM
 // can react. Returns a map keyed by tool_call.ID. budget carries the per-turn
 // retry token budget shared across all parallel dispatches (concurrency-safe).
-func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub, budget *retryBudget) map[string]toolResult {
+func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub, budget *retryBudget) map[string]toolResult {
 	results := make(map[string]toolResult, len(calls))
 	var mu sync.Mutex
 
@@ -367,7 +372,7 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 // events is the sub-agent's own name when dispatching to a sub-agent, and
 // Confucius's own name for plain tool errors (since the tool itself has no
 // identity in the stream model).
-func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hub, budget *retryBudget) toolResult {
+func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub stream.EventHub, budget *retryBudget) toolResult {
 	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
@@ -394,11 +399,28 @@ func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub *stream.Hu
 // retry emits an agent_error event with Meta.retry=true so the frontend can
 // signal the retry. Retries are skipped entirely when the policy is disabled
 // (Chongzhi by default) or the budget is exhausted.
-func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stream.Hub, budget *retryBudget) toolResult {
-	sub, ok := c.subAgents[tc.Function.Name]
+func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub stream.EventHub, budget *retryBudget) toolResult {
+	factory, ok := c.subAgents[tc.Function.Name]
 	if !ok {
 		// Should not happen — NewConfucius validates presence — but defensive.
 		msg := fmt.Sprintf("unknown sub-agent tool %q", tc.Function.Name)
+		streamAgentError(hub, ctx, subAgentNameFor(tc.Function.Name), msg, "unknown_tool")
+		return toolResult{content: msg, isError: true}
+	}
+
+	// Build a FRESH instance for this invocation and discard it afterwards.
+	// The per-run flags the dispatcher reads afterwards (ToolCallTracker's
+	// side-effect flag, RoundCapTracker's cap flag) live on the instance, so
+	// per-invocation construction makes them per-invocation by construction:
+	// a concurrent same-name invocation can neither reset nor set them for
+	// this call. Retries below reuse the SAME instance (one logical call).
+	sub, err := factory()
+	if err != nil {
+		// A construction failure means the sub-agent is effectively
+		// unavailable for this dispatch (config/wiring error); it is
+		// deterministic, so surface it without retry, mirroring the
+		// unknown-tool path.
+		msg := fmt.Sprintf("build sub-agent for %q: %v", tc.Function.Name, err)
 		streamAgentError(hub, ctx, subAgentNameFor(tc.Function.Name), msg, "unknown_tool")
 		return toolResult{content: msg, isError: true}
 	}
@@ -418,8 +440,14 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stre
 	userMsg := buildSubAgentUserMessage(args)
 	messages := []Message{{Role: "user", Content: userMsg}}
 
+	// Stamp every event this Run emits with the invocation's identity: the
+	// invoke tool_call id. The tagging view is producer-only — Confucius's own
+	// dispatcher-emitted events (the invoke tool_call/tool_result pair, retry
+	// agent_error) keep flowing through the raw hub untagged.
+	runHub := stream.TaggedWithRunID(hub, tc.ID)
+
 	// First attempt.
-	content, usage, _, err := sub.Run(ctx, messages, hub)
+	content, usage, _, err := sub.Run(ctx, messages, runHub)
 	if err == nil {
 		u := usage
 		return toolResult{content: content, subUsage: &u, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
@@ -458,7 +486,7 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub *stre
 		case <-ctx.Done():
 			return toolResult{content: ctx.Err().Error(), isError: true, subUsage: &usage, subAgentName: sub.Name()}
 		}
-		content, usage, _, err = sub.Run(ctx, messages, hub)
+		content, usage, _, err = sub.Run(ctx, messages, runHub)
 		if err == nil {
 			u := usage
 			return toolResult{content: content, subUsage: &u, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
@@ -503,7 +531,7 @@ func subHitCap(sub Agent) bool {
 	return false
 }
 
-func (c *Confucius) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+func (c *Confucius) dispatchRegistryTool(ctx context.Context, tc ToolCall, hub stream.EventHub) toolResult {
 	if c.toolRegistry == nil {
 		msg := fmt.Sprintf("tool %q not available: no tool registry", tc.Function.Name)
 		streamAgentError(hub, ctx, c.Name(), msg, "unknown_tool")
@@ -585,7 +613,7 @@ func renderToolResult(out any, err error) string {
 // streamAgentError is a best-effort agent_error emission. It does not block
 // on a closed hub or cancelled context — losing an error event during
 // teardown is acceptable.
-func streamAgentError(hub *stream.Hub, ctx context.Context, agent, msg, code string) {
+func streamAgentError(hub stream.EventHub, ctx context.Context, agent, msg, code string) {
 	hub.SendCtx(ctx, stream.AgentErrorEvent(agent, msg, code))
 }
 

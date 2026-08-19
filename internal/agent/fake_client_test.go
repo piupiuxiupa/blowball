@@ -128,7 +128,7 @@ func (a *fakeAgent) RetryPolicy() config.AgentRetryConfig { return a.retryPolicy
 // fake sub-agent report that it hit its max_rounds cap.
 func (a *fakeAgent) LastRunHitCap() bool { return a.hitCap }
 
-func (a *fakeAgent) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
+func (a *fakeAgent) Run(ctx context.Context, messages []Message, hub stream.EventHub) (string, Usage, *TurnBreakdown, error) {
 	a.mu.Lock()
 	a.calls = append(a.calls, fakeAgentCall{messages: append([]Message{}, messages...)})
 	a.mu.Unlock()

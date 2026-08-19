@@ -228,10 +228,10 @@ func TestChongzhi_RoundCap_WrapUpReturnsToolCalls_SurfacesError(t *testing.T) {
 func TestConfucius_RoundCap_SuccessfulWrapUp(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	reg := pingTool(t)
-	subAgents := map[string]Agent{
+	subAgents := staticFactories(map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
-	}
+	})
 	client := newFake(
 		toolCallResp("tc_1"),
 		toolCallResp("tc_2"),
@@ -297,10 +297,10 @@ func TestConfucius_SubAgentCapPropagatesToMeta(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	chongzhi := &fakeAgent{name: "Chongzhi", content: "did stuff", hitCap: true}
 	liang := &fakeAgent{name: "Liang", content: "analyzed"}
-	subAgents := map[string]Agent{
+	subAgents := staticFactories(map[string]Agent{
 		ToolInvokeChongzhi: chongzhi,
 		ToolInvokeLiang:    liang,
-	}
+	})
 	client := newFake(
 		// Round 1: dispatch Chongzhi (which reports it hit its cap).
 		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{{ID: "tc_1",
@@ -331,10 +331,10 @@ func TestConfucius_SubAgentCapPropagatesToMeta(t *testing.T) {
 // serialization) (task 7.4, negative case).
 func TestConfucius_NoCap_OmitsRoundCappedMeta(t *testing.T) {
 	defer goleak.VerifyNone(t)
-	subAgents := map[string]Agent{
+	subAgents := staticFactories(map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi", content: "did stuff"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang", content: "analyzed"},
-	}
+	})
 	client := newFake(
 		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{{ID: "tc_1",
 			Function: ToolCallFunction{Name: "invoke_chongzhi", Arguments: `{"task":"code"}`}}}},

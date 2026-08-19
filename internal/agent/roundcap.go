@@ -29,7 +29,7 @@ const wrapUpInstruction = "The tool-call round limit for this task has been reac
 // stripped), they cannot be honored and the prose is a preamble, not an answer
 // — so the empty string is returned to route the caller onto its empty-end
 // (round_cap_exhausted) path instead of silently returning a useless non-answer.
-func runWrapUpRound(ctx context.Context, client LLMClient, agentName string, hub *stream.Hub, req LLMRequest) (string, Usage, error) {
+func runWrapUpRound(ctx context.Context, client LLMClient, agentName string, hub stream.EventHub, req LLMRequest) (string, Usage, error) {
 	// Append the steering instruction on a fresh slice so the caller's backing
 	// array is never mutated.
 	req.Messages = append(append([]Message{}, req.Messages...), Message{Role: "user", Content: wrapUpInstruction})
@@ -86,7 +86,7 @@ func emitCapHitWarn(agentName string, cap, executed int) {
 // content (LLM error or empty response), the case that previously ended the
 // turn silently with an empty answer. The caller returns a non-nil error so
 // the orchestrator's done event additionally carries an `error` field.
-func emitCapExhaustedError(ctx context.Context, hub *stream.Hub, agentName string) {
+func emitCapExhaustedError(ctx context.Context, hub stream.EventHub, agentName string) {
 	hub.SendCtx(ctx, stream.AgentErrorEvent(agentName, "round cap exhausted: wrap-up round produced no content", "round_cap_exhausted"))
 	hub.SendCtx(ctx, stream.AgentEndEvent(agentName))
 }

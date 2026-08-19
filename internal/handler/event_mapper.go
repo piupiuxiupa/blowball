@@ -16,6 +16,14 @@ import (
 // a change in Agent) start a new output event so that total ordering and semantic
 // boundaries are preserved. Reasoning events are merged independently from token
 // events so the reasoning/answer boundary is preserved.
+//
+// A change in run identity (Meta.parent_tool_call_id) is also a boundary:
+// interleaved tokens of concurrent same-name sub-agent invocations
+// (subagent-run-identity capability) must never merge across runs — a merged
+// row can carry only one run id, and gluing two runs' sentences under the
+// first run's id is exactly the garbling the capability fixes. Events without
+// a run id (top-level turns) all compare equal, preserving the pre-change
+// merge behavior byte-for-byte.
 func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
 	if len(events) == 0 {
 		return nil
@@ -26,6 +34,7 @@ func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
 	for i := range events {
 		e := events[i]
 		if current != nil && e.Type == current.Type && current.Agent == e.Agent &&
+			runIDFromEvent(*current) == runIDFromEvent(e) &&
 			(e.Type == stream.EventToken || e.Type == stream.EventReasoning) {
 			current.Content += e.Content
 			continue
@@ -88,6 +97,11 @@ func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex 
 		MsgIndex:    msgIndex,
 		TraceID:     traceID,
 		ClientMsgID: deterministicClientMsgID(traceID, msgIndex),
+		// Sub-agent invocation identity (subagent-run-identity capability):
+		// stamped onto every event of a sub-agent Run by the dispatch layer.
+		// Absent on Confucius's own events and on user rows (built by
+		// UserMessage, which never sets it).
+		RunID: runIDFromEvent(e),
 	}
 
 	switch e.Type {
@@ -160,4 +174,13 @@ func marshalToolResultOutput(content string) (any, error) {
 		return v, nil
 	}
 	return content, nil
+}
+
+// runIDFromEvent extracts the sub-agent invocation identity from an event's
+// Meta (stream.MetaParentToolCallID, injected by the dispatch layer's run
+// tagger). It returns "" for top-level events — the empty value maps onto a
+// NULL messages.run_id at the store layer.
+func runIDFromEvent(e stream.StreamEvent) string {
+	id, _ := e.Meta[stream.MetaParentToolCallID].(string)
+	return id
 }

@@ -31,10 +31,12 @@ import (
 // context plumbing it does not currently understand.
 type AgentFactory interface {
 	// Build returns a freshly-constructed Confucius agent for the request whose
-	// user owns workspaceRoot. The returned Confucius owns its own Chongzhi /
-	// Liang sub-agents, all wired to the same LLMClient. The returned TurnCloser
-	// releases per-turn resources (the per-user MCP connection manager) once the
-	// turn's Run completes; it is nil when no per-turn resources were created.
+	// user owns workspaceRoot. The returned Confucius holds per-invocation
+	// factories for its Chongzhi / Liang sub-agents (each dispatch builds a
+	// fresh instance; see SubAgentFactory), all wired to the same LLMClient.
+	// The returned TurnCloser releases per-turn resources (the per-user MCP
+	// connection manager) once the turn's Run completes; it is nil when no
+	// per-turn resources were created.
 	Build(workspaceRoot, skillsDir, userID string) (Agent, TurnCloser, error)
 }
 
@@ -83,25 +85,22 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 		closer = func() { _ = mcpMgr.Close() }
 	}
 
-	chongzhi, err := f.buildChongzhi(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
-	if err != nil {
-		if closer != nil {
-			closer()
-		}
-		return nil, nil, fmt.Errorf("agent factory: build chongzhi: %w", err)
+	// Sub-agents are delivered as per-invocation FACTORIES, not pre-built
+	// instances (subagent-run-identity capability): every invoke_* dispatch
+	// constructs a fresh Chongzhi/Liang so concurrent same-name invocations
+	// never share mutable run state (side-effect / round-cap flags). The
+	// factories capture the turn-scoped inputs below — including the
+	// turn-shared per-user MCP manager — so connection reuse within the turn
+	// is unchanged; only the per-run mutable shell is rebuilt per call.
+	subFactories := map[string]SubAgentFactory{
+		ToolInvokeChongzhi: func() (Agent, error) {
+			return f.buildChongzhi(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+		},
+		ToolInvokeLiang: func() (Agent, error) {
+			return f.buildLiang(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+		},
 	}
-	liang, err := f.buildLiang(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
-	if err != nil {
-		if closer != nil {
-			closer()
-		}
-		return nil, nil, fmt.Errorf("agent factory: build liang: %w", err)
-	}
-	subAgents := map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    liang,
-	}
-	confucius, err := f.buildConfucius(workspaceRoot, globalSkillsDir, skillsDir, userID, subAgents, mcpMgr)
+	confucius, err := f.buildConfucius(workspaceRoot, globalSkillsDir, skillsDir, userID, subFactories, mcpMgr)
 	if err != nil {
 		if closer != nil {
 			closer()
@@ -111,7 +110,7 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 	return confucius, closer, nil
 }
 
-func (f *orchestratorFactory) buildConfucius(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]Agent, mcpMgr *mcp.Manager) (*Confucius, error) {
+func (f *orchestratorFactory) buildConfucius(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]SubAgentFactory, mcpMgr *mcp.Manager) (*Confucius, error) {
 	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confucius, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err

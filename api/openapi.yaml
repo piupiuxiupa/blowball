@@ -139,6 +139,18 @@ components:
             deterministic "{trace_id}:{msg_index}" key (the mid-turn-compaction
             flush path, migration 013) or a UUID v7 (legacy write-behind
             minting). Null on rows written before migration 012.
+        run_id:
+          type: string
+          nullable: true
+          description: >
+            Sub-agent invocation run identity (subagent-run-identity
+            capability): the id of the parent invoke_* tool_call that spawned
+            the producing Run. Present only on rows emitted by a sub-agent
+            (Chongzhi/Liang); Confucius top-level rows and user rows omit it,
+            and rows written before migration 014 are null. Rows stay in
+            arrival order (msg_time, msg_index) — consumers regroup
+            interleaved same-agent rows by (agent, run_id) to recover each
+            invocation's coherent output.
         update_time:
           type: string
           format: date-time
@@ -162,12 +174,22 @@ components:
           minLength: 1
           description: User message text (must be non-empty).
     # ---- SSE event payloads -------------------------------------------------
+    # Every sub-agent-produced event additionally carries the optional
+    # meta.parent_tool_call_id (subagent-run-identity capability): the id of
+    # the parent invoke_* tool_call that spawned the emitting Run. It lets
+    # consumers attribute interleaved parallel same-name invocations; events
+    # from the top-level agent (Confucius) and user rows never carry it, and
+    # older frontends simply ignore the unknown key.
     SSEAgentStart:
       type: object
       required: [type, agent]
       properties:
         type: {type: string, enum: [agent_start]}
         agent: {type: string}
+        meta:
+          type: object
+          properties:
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
     SSEToken:
       type: object
       required: [type, agent, content]
@@ -175,6 +197,10 @@ components:
         type: {type: string, enum: [token]}
         agent: {type: string}
         content: {type: string, description: Incremental text token.}
+        meta:
+          type: object
+          properties:
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
     SSEReasoning:
       type: object
       required: [type, agent, content]
@@ -182,6 +208,10 @@ components:
         type: {type: string, enum: [reasoning]}
         agent: {type: string}
         content: {type: string, description: Incremental reasoning/thinking token.}
+        meta:
+          type: object
+          properties:
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
     SSEToolCall:
       type: object
       required: [type, agent, content]
@@ -195,6 +225,7 @@ components:
           properties:
             tool_call_id: {type: string, description: Correlates this call with its tool_result event.}
             args: {type: object, additionalProperties: true}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
     SSEToolResult:
       type: object
       required: [type, agent, content]
@@ -216,12 +247,17 @@ components:
           required: [tool_call_id]
           properties:
             tool_call_id: {type: string, description: Matches the meta.tool_call_id of the originating tool_call event.}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
     SSEAgentEnd:
       type: object
       required: [type, agent]
       properties:
         type: {type: string, enum: [agent_end]}
         agent: {type: string}
+        meta:
+          type: object
+          properties:
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
     SSEAgentError:
       type: object
       required: [type, agent, content]
@@ -241,6 +277,7 @@ components:
           type: object
           properties:
             error_code: {type: string}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
     SSEDone:
       type: object
       required: [type, meta]

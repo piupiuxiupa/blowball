@@ -37,6 +37,12 @@ func MessagesToAgentMessages(prior []model.Message) ([]agent.Message, error) {
 // agent-message range boundary back to the persistence composite cursor
 // (msg_time, msg_index, id) and to locate a prior boundary inside the
 // reconstructed sequence.
+//
+// Rows are grouped by the composite key (agent, run_id): interleaved rows of
+// concurrent sub-agent invocations (subagent-run-identity capability) replay
+// into per-run fragments instead of merging across runs. A NULL/empty run_id
+// degenerates to the agent name alone — the pre-change behavior for top-level
+// turns.
 func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []int, error) {
 	if len(prior) == 0 {
 		return nil, nil, nil
@@ -76,12 +82,7 @@ func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []i
 			if state.toolCallsPending() {
 				state.flushToolCalls(&out, &lastRow)
 			}
-			if msg.Agent != state.currentAgent {
-				state.flushTokensAndReasoning(&out, &lastRow)
-				state.currentAgent = msg.Agent
-			}
-			state.tokenContent += msg.Content
-			state.tokenLastRow = i
+			state.appendToken(runGroupKeyOf(msg), msg.Content, i)
 
 		case model.EventTypeReasoning:
 			if msg.Role != model.RoleAssistant {
@@ -90,12 +91,7 @@ func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []i
 			if state.toolCallsPending() {
 				state.flushToolCalls(&out, &lastRow)
 			}
-			if msg.Agent != state.currentAgent {
-				state.flushTokensAndReasoning(&out, &lastRow)
-				state.currentAgent = msg.Agent
-			}
-			state.reasoningContent += msg.Content
-			state.tokenLastRow = i
+			state.appendReasoning(runGroupKeyOf(msg), msg.Content, i)
 
 		case model.EventTypeToolCall:
 			if msg.Role != model.RoleAssistant {
@@ -104,6 +100,12 @@ func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []i
 			if state.tokensPending() {
 				state.flushTokensAndReasoning(&out, &lastRow)
 			}
+			// Tool-call batching keys on the agent name alone, NOT the
+			// (agent, run_id) composite: results may interleave arbitrarily
+			// after their calls (parallel dispatch), and flushing a batch on
+			// a run-key change would strand calls whose results have not
+			// arrived yet. Pairing is by tool_call_id inside the batch —
+			// unaffected by run grouping by construction.
 			if msg.Agent != state.toolCallAgent {
 				state.flushToolCalls(&out, &lastRow)
 				state.toolCallAgent = msg.Agent
@@ -148,16 +150,76 @@ func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []i
 // reconstructState accumulates partially-built assistant messages while scanning
 // the persisted event stream.
 type reconstructState struct {
-	tokenContent     string
-	reasoningContent string
-	currentAgent     string
-	toolCalls        []toolCallEntry
-	toolCallAgent    string
-	toolResults      []toolResultEntry
-	// tokenLastRow tracks the source row of the tokens/reasoning being
-	// accumulated, so flushTokensAndReasoning can attribute the merged
-	// assistant message to its last contributing row.
-	tokenLastRow int
+	// tokenRuns accumulates token/reasoning content per (agent, run_id) run,
+	// in first-seen order: interleaved rows of concurrent sub-agent
+	// invocations (subagent-run-identity capability) regroup into one
+	// coherent fragment per run instead of merging across runs. Rows without
+	// run identity all share the agent-only key, which degenerates to the
+	// pre-change single-accumulator behavior.
+	tokenRuns     []runFragment
+	tokenRunIndex map[runGroupKey]int
+	toolCalls     []toolCallEntry
+	toolCallAgent string
+	toolResults   []toolResultEntry
+}
+
+// runFragment is one run's accumulated token/reasoning text. lastRow is the
+// source row of the fragment's last contributing row, for boundary
+// attribution.
+type runFragment struct {
+	key       runGroupKey
+	content   string
+	reasoning string
+	lastRow   int
+}
+
+// runGroupKey is the (agent, run_id) composite that one reconstructed
+// fragment belongs to. An empty run_id is the pre-change shape: the key
+// degenerates to the agent name, so top-level turns group exactly as before.
+type runGroupKey struct {
+	agent string
+	runID string
+}
+
+// runGroupKeyOf returns msg's (agent, run_id) grouping key.
+func runGroupKeyOf(msg model.Message) runGroupKey {
+	return runGroupKey{agent: msg.Agent, runID: msg.RunID}
+}
+
+// appendToken adds a token fragment to its run's accumulator (no-op on empty
+// content, matching the prior single-accumulator behavior of not counting
+// empty rows as pending).
+func (s *reconstructState) appendToken(key runGroupKey, content string, row int) {
+	if content == "" {
+		return
+	}
+	f := s.runFragment(key, row)
+	f.content += content
+	f.lastRow = row
+}
+
+// appendReasoning adds a reasoning fragment to its run's accumulator.
+func (s *reconstructState) appendReasoning(key runGroupKey, content string, row int) {
+	if content == "" {
+		return
+	}
+	f := s.runFragment(key, row)
+	f.reasoning += content
+	f.lastRow = row
+}
+
+// runFragment returns the mutable accumulator for key, creating it (in
+// first-seen order) when this is the key's first fragment.
+func (s *reconstructState) runFragment(key runGroupKey, row int) *runFragment {
+	if idx, ok := s.tokenRunIndex[key]; ok {
+		return &s.tokenRuns[idx]
+	}
+	if s.tokenRunIndex == nil {
+		s.tokenRunIndex = make(map[runGroupKey]int)
+	}
+	s.tokenRunIndex[key] = len(s.tokenRuns)
+	s.tokenRuns = append(s.tokenRuns, runFragment{key: key, lastRow: row})
+	return &s.tokenRuns[len(s.tokenRuns)-1]
 }
 
 type toolCallEntry struct {
@@ -172,7 +234,7 @@ type toolResultEntry struct {
 }
 
 func (s *reconstructState) tokensPending() bool {
-	return s.tokenContent != "" || s.reasoningContent != ""
+	return len(s.tokenRuns) > 0
 }
 func (s *reconstructState) toolCallsPending() bool { return len(s.toolCalls) > 0 }
 
@@ -181,19 +243,21 @@ func (s *reconstructState) flush(out *[]agent.Message, lastRow *[]int) {
 	s.flushTokensAndReasoning(out, lastRow)
 }
 
+// flushTokensAndReasoning emits every accumulated run fragment as its own
+// assistant message, in first-seen run order. For rows without run identity
+// there is exactly one fragment, so the output is byte-for-byte the
+// pre-change single-message flush.
 func (s *reconstructState) flushTokensAndReasoning(out *[]agent.Message, lastRow *[]int) {
-	if s.tokenContent == "" && s.reasoningContent == "" {
-		return
+	for _, f := range s.tokenRuns {
+		*out = append(*out, agent.Message{
+			Role:             "assistant",
+			Content:          f.content,
+			ReasoningContent: f.reasoning,
+		})
+		*lastRow = append(*lastRow, f.lastRow)
 	}
-	*out = append(*out, agent.Message{
-		Role:             "assistant",
-		Content:          s.tokenContent,
-		ReasoningContent: s.reasoningContent,
-	})
-	*lastRow = append(*lastRow, s.tokenLastRow)
-	s.tokenContent = ""
-	s.reasoningContent = ""
-	s.currentAgent = ""
+	s.tokenRuns = nil
+	s.tokenRunIndex = nil
 }
 
 func (s *reconstructState) flushToolCalls(out *[]agent.Message, lastRow *[]int) {

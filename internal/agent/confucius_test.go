@@ -27,14 +27,27 @@ func testConfuciusConfig() config.AgentConfig {
 }
 
 // newTestConfucius builds a Confucius with a registry holding no real tools and
-// the provided sub-agent implementations. Tests supply fakes for the
-// sub-agents they want to exercise.
+// per-invocation factories returning the provided sub-agent implementations
+// (every dispatch of the same name yields the same shared fake — tests that
+// need true per-invocation isolation pass distinct fakes via a custom factory
+// map). Tests supply fakes for the sub-agents they want to exercise.
 func newTestConfucius(t *testing.T, client LLMClient, subAgents map[string]Agent) *Confucius {
 	t.Helper()
 	reg := tool.NewRegistry()
-	c, err := NewConfucius(testConfuciusConfig(), client, reg, subAgents)
+	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents))
 	require.NoError(t, err)
 	return c
+}
+
+// staticFactories converts a name→agent map into name→factory closures that
+// hand out the same agent on every call, preserving the pre-factory test
+// ergonomics for fakes whose state is meant to be observed across calls.
+func staticFactories(subAgents map[string]Agent) map[string]SubAgentFactory {
+	factories := make(map[string]SubAgentFactory, len(subAgents))
+	for name, a := range subAgents {
+		factories[name] = func() (Agent, error) { return a, nil }
+	}
+	return factories
 }
 
 // runConfuciusAndCollect runs c.Run against a fresh hub, drains the hub after
@@ -602,10 +615,10 @@ func TestConfucius_ReasoningRequest(t *testing.T) {
 	cfg.Thinking = true
 	cfg.ReasoningEffort = "medium"
 	reg := tool.NewRegistry()
-	c, err := NewConfucius(cfg, client, reg, map[string]Agent{
+	c, err := NewConfucius(cfg, client, reg, staticFactories(map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
-	})
+	}))
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -669,7 +682,7 @@ func (a *scriptedRetryAgent) SystemPrompt() string             { return a.prompt
 func (a *scriptedRetryAgent) RetryPolicy() config.AgentRetryConfig { return a.policy }
 func (a *scriptedRetryAgent) LastRunExecutedTool() bool        { return a.executedTool }
 
-func (a *scriptedRetryAgent) Run(ctx context.Context, _ []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
+func (a *scriptedRetryAgent) Run(ctx context.Context, _ []Message, hub stream.EventHub) (string, Usage, *TurnBreakdown, error) {
 	a.mu.Lock()
 	a.runCalls++
 	idx := a.runCalls - 1

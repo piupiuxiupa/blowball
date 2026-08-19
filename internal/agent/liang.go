@@ -75,7 +75,7 @@ func (l *Liang) LastRunHitCap() bool { return l.hitCapThisRun }
 // Run executes Liang's tool-calling loop. When no tools are configured it
 // degrades to a single streaming completion, sending no tools[] field so the
 // existing TestLiang_NoTools_PassesEmptyToolsJSON contract still holds.
-func (l *Liang) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
+func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub) (string, Usage, *TurnBreakdown, error) {
 	// Attribute every LLM call this loop makes (including round-cap wrap-up
 	// rounds, which inherit this ctx) to this agent in the raw-capture log.
 	ctx = WithAgentName(ctx, l.Name())
@@ -236,7 +236,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub *stream.Hub) (s
 // dispatchToolCalls runs every tool_call in parallel through the tool registry.
 // Liang never dispatches sub-agents, so invoke_* tool names fall through and
 // error as unknown tools.
-func (l *Liang) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub) map[string]toolResult {
+func (l *Liang) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub) map[string]toolResult {
 	results := make(map[string]toolResult, len(calls))
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
@@ -257,7 +257,7 @@ func (l *Liang) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *st
 // dispatchOneRegistryTool routes a single tool_call straight to the tool
 // registry. invoke_* names will return "unknown tool" because the registry
 // has no such entry.
-func (l *Liang) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+func (l *Liang) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub stream.EventHub) toolResult {
 	if !hub.SendCtx(ctx, stream.ToolCallEvent(l.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}

@@ -296,3 +296,116 @@ func TestMessagesToAgentMessages_MixedUserAssistantToolTurns(t *testing.T) {
 	}
 	assert.Equal(t, want, got)
 }
+
+// TestMessagesToAgentMessages_InterleavedRunsRegroupCoherently (task 4.1):
+// rows carrying run identity replay per (agent, run_id) — interleaved token
+// fragments of two runs flush into two coherent assistant messages, in
+// within-run arrival order, instead of merging across runs. The rows use a
+// top-level agent name so they reach the grouping state machine (sub-agent
+// rows are name-skipped from the LLM context by design; see the companion
+// test below). Physically the row order and msg_index stay untouched — only
+// the replay groups.
+func TestMessagesToAgentMessages_InterleavedRunsRegroupCoherently(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "go"},
+		// Two interleaved runs of the same agent, fragments alternating.
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "run1-alpha ", RunID: "call_x1"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "run2-omega ", RunID: "call_x2"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "run1-beta", RunID: "call_x1"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "run2-psi", RunID: "call_x2"},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "go"},
+		// Per-run fragments, within-run arrival order preserved.
+		{Role: "assistant", Content: "run1-alpha run1-beta"},
+		{Role: "assistant", Content: "run2-omega run2-psi"},
+	}
+	assert.Equal(t, want, got)
+}
+
+// TestMessagesToAgentMessages_NullRunIDGroupsByAgentAlone: rows without run
+// identity keep the pre-change behavior — same-agent fragments merge across
+// what would be run boundaries (this is exactly the historical garbling the
+// capability fixes only for stamped rows).
+func TestMessagesToAgentMessages_NullRunIDGroupsByAgentAlone(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "go"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "a "},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "b "},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeAgentStart, Content: "ignored"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "c"},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", Content: "a b c"},
+	}
+	assert.Equal(t, want, got)
+}
+
+// TestMessagesToAgentMessages_InterleavedRunsToolPairingUnchanged (task 4.1):
+// tool_call/tool_result pairing still matches by tool_call_id regardless of
+// run stamps and result-arrival interleaving. Tool-call batching keys on the
+// agent name (NOT the run composite): flushing on a run-key change would
+// strand calls whose results arrive later under parallel dispatch, so runs
+// interleave freely while pairing stays intact — identical to the pre-change
+// shape for unstamped rows.
+func TestMessagesToAgentMessages_InterleavedRunsToolPairingUnchanged(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "go"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall,
+			Content: `{"tool_call_id":"tc-a","name":"web_search","args":{"q":"a"}}`, RunID: "call_x1"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall,
+			Content: `{"tool_call_id":"tc-b","name":"web_search","args":{"q":"b"}}`, RunID: "call_x2"},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult,
+			Content: `{"tool_call_id":"tc-b","output":"B results"}`, RunID: "call_x2"},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult,
+			Content: `{"tool_call_id":"tc-a","output":"A results"}`, RunID: "call_x1"},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	// Both calls batch into one assistant message (agent-keyed batching);
+	// each call pairs with its own result by tool_call_id, results emitted in
+	// call order.
+	want := []agent.Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{
+			{ID: "tc-a", Function: agent.ToolCallFunction{Name: "web_search", Arguments: `{"q":"a"}`}},
+			{ID: "tc-b", Function: agent.ToolCallFunction{Name: "web_search", Arguments: `{"q":"b"}`}},
+		}},
+		{Role: "tool", Content: "A results", ToolCallID: "tc-a", Name: "web_search"},
+		{Role: "tool", Content: "B results", ToolCallID: "tc-b", Name: "web_search"},
+	}
+	assert.Equal(t, want, got)
+}
+
+// TestMessagesToAgentMessages_SubAgentRunRowsStillNameSkipped: real sub-agent
+// rows (Chongzhi/Liang carrying run ids) remain excluded from the LLM context
+// — the run grouping changes how identity-carrying rows replay, never WHICH
+// agents participate in the main prompt history.
+func TestMessagesToAgentMessages_SubAgentRunRowsStillNameSkipped(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "go"},
+		{Agent: model.AgentChongzhi, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "sub output x1", RunID: "call_x1"},
+		{Agent: model.AgentChongzhi, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "sub output x2", RunID: "call_x2"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "summary"},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", Content: "summary"},
+	}
+	assert.Equal(t, want, got)
+}

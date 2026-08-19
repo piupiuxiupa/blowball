@@ -47,8 +47,24 @@ type Agent interface {
 	//   - breakdown: per-agent usage + orchestration metadata. Only Confucius
 	//     (the dispatcher) populates this; leaf agents (Chongzhi/Liang)
 	//     return nil and their parent folds their usage into its own breakdown.
-	Run(ctx context.Context, messages []Message, hub *stream.Hub) (assistantContent string, usage Usage, breakdown *TurnBreakdown, err error)
+	//
+	// hub is the producer-facing EventHub view rather than a concrete *Hub so
+	// the dispatcher can hand a sub-agent a run-tagging view
+	// (stream.TaggedWithRunID) transparently: *Hub satisfies the interface and
+	// agent bodies only ever call Send/SendCtx, so leaf agents stay unaware of
+	// run identity (subagent-run-identity capability).
+	Run(ctx context.Context, messages []Message, hub stream.EventHub) (assistantContent string, usage Usage, breakdown *TurnBreakdown, err error)
 }
+
+// SubAgentFactory builds a fresh sub-agent instance for ONE invocation
+// (subagent-run-identity capability). Confucius holds factories — not
+// instances — so every invoke_* dispatch constructs its own agent and the
+// per-run mutable state (the side-effect flag backing ToolCallTracker, the
+// round-cap flag backing RoundCapTracker) is isolated per invocation: two
+// concurrent same-name invocations can never read each other's flags.
+// Read-only construction inputs (config, LLM client, per-turn MCP manager)
+// may be shared by capture. The factory must be safe to call concurrently.
+type SubAgentFactory func() (Agent, error)
 
 // ToolCallTracker is an optional capability implemented by sub-agents whose
 // Run may execute side-effecting tool calls (e.g. Chongzhi's xizhi write

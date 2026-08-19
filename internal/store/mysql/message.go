@@ -19,27 +19,27 @@ import (
 // write-behind queue guarantees at-least-once delivery, the UNIQUE key plus
 // IGNORE makes it effectively exactly-once.
 const appendMessageSQL = `
-INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, client_msg_id)
-VALUES (:session_id, :msg_time, :agent, :msg_index, :role, :event_type, :content, :trace_id, :client_msg_id)
+INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, client_msg_id, run_id)
+VALUES (:session_id, :msg_time, :agent, :msg_index, :role, :event_type, :content, :trace_id, :client_msg_id, :run_id)
 `
 
 // appendMessagesSQL inserts multiple message rows in a single statement. The
 // VALUES clause is expanded at runtime by AppendMessages. INSERT IGNORE for
 // the same idempotency reason as appendMessageSQL.
 const appendMessagesSQL = `
-INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, client_msg_id)
+INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, client_msg_id, run_id)
 VALUES %s
 `
 
 // listMessagesSQL returns every message for sessionID in (msg_time, msg_index)
 // order. The covering index idx_messages_session_time makes the leading
 // msg_time sort efficient; msg_index resolves ties within a single batch.
-// client_msg_id is COALESCEd to the empty string: legacy rows written before
-// migration 012 carry NULL, and sqlx cannot scan NULL into the model's plain
-// string field (nilIfEmpty performs the inverse empty→NULL mapping on write,
-// so the round trip is stable).
+// client_msg_id and run_id are COALESCEd to the empty string: legacy rows
+// written before their migrations carry NULL, and sqlx cannot scan NULL into
+// the model's plain string fields (nilIfEmpty performs the inverse
+// empty→NULL mapping on write, so the round trip is stable).
 const listMessagesSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, update_time
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
 FROM messages
 WHERE session_id = ?
 ORDER BY msg_time ASC, msg_index ASC
@@ -49,6 +49,8 @@ ORDER BY msg_time ASC, msg_index ASC
 // the idempotency key) onto SQL NULL. Binding the empty string instead would
 // violate uk_messages_client_msg_id the moment two such rows coexist, because
 // the empty string is a single colliding value while NULL repeats freely.
+// run_id shares the mapping for the plain NULL-tolerance reason (migration
+// 014): a non-sub-agent row is NULL, not a colliding empty string.
 func nilIfEmpty(s string) any {
 	if s == "" {
 		return nil
@@ -73,6 +75,7 @@ func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, erro
 		"content":       m.Content,
 		"trace_id":      m.TraceID,
 		"client_msg_id": nilIfEmpty(m.ClientMsgID),
+		"run_id":        nilIfEmpty(m.RunID),
 	}
 
 	res, err := sqlx.NamedExecContext(ctx, s.db, appendMessageSQL, params)
@@ -96,9 +99,9 @@ func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int
 	}
 
 	placeholders := make([]string, 0, len(msgs))
-	args := make([]any, 0, len(msgs)*9)
+	args := make([]any, 0, len(msgs)*10)
 	for _, m := range msgs {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			m.SessionID,
 			m.MsgTime,
@@ -109,6 +112,7 @@ func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int
 			m.Content,
 			m.TraceID,
 			nilIfEmpty(m.ClientMsgID),
+			nilIfEmpty(m.RunID),
 		)
 	}
 
@@ -140,7 +144,7 @@ func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int
 // (msg_time, msg_index, id) ascending. The id tie-breaker makes the cursor
 // stable when two rows share the same msg_time and msg_index.
 const listMessagesPagedAscSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, update_time
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
 FROM messages
 WHERE session_id = ?
   AND (msg_time, msg_index, id) > (?, ?, ?)
@@ -151,7 +155,7 @@ LIMIT ?
 // listMessagesPagedDescSQL returns messages before the cursor ordered by
 // (msg_time, msg_index, id) descending.
 const listMessagesPagedDescSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, update_time
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
 FROM messages
 WHERE session_id = ?
   AND (msg_time, msg_index, id) > (?, ?, ?)

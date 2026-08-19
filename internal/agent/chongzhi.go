@@ -73,7 +73,7 @@ func (c *Chongzhi) SystemPrompt() string { return c.cfg.SystemPrompt }
 func (c *Chongzhi) RetryPolicy() config.AgentRetryConfig { return c.cfg.Retry }
 
 // Run executes the Chongzhi agent loop with streaming and tool dispatch.
-func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub *stream.Hub) (string, Usage, *TurnBreakdown, error) {
+func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.EventHub) (string, Usage, *TurnBreakdown, error) {
 	// Attribute every LLM call this loop makes (including round-cap wrap-up
 	// rounds, which inherit this ctx) to this agent in the raw-capture log.
 	ctx = WithAgentName(ctx, c.Name())
@@ -243,7 +243,7 @@ func (c *Chongzhi) LastRunHitCap() bool {
 // dispatchToolCalls runs every tool_call in parallel. Unlike Confucius, there
 // is NO sub-agent interception — invoke_* tool names fall through to the
 // registry and error as "unknown tool", enforcing the flat topology.
-func (c *Chongzhi) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub *stream.Hub) map[string]toolResult {
+func (c *Chongzhi) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub) map[string]toolResult {
 	results := make(map[string]toolResult, len(calls))
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
@@ -264,7 +264,7 @@ func (c *Chongzhi) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub 
 // dispatchOneRegistryTool routes a single tool_call straight to the tool
 // registry. invoke_* names will return "unknown tool" because the registry
 // has no such entry (sub-agent tools are never registered).
-func (c *Chongzhi) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub *stream.Hub) toolResult {
+func (c *Chongzhi) dispatchOneRegistryTool(ctx context.Context, tc ToolCall, hub stream.EventHub) toolResult {
 	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}

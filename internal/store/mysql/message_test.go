@@ -37,10 +37,11 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 
 	// Create an isolated messages table without the FK constraint so tests do
 	// not require a sessions row. The column layout mirrors the production
-	// schema (migrations 004 + 005 + 012: nullable role, event_type,
-	// millisecond msg_time, nullable client_msg_id with its UNIQUE index) so
-	// the SELECT scan paths run against the real shape — this is exactly how
-	// the legacy-NULL scan bug escaped: an out-of-date test table.
+	// schema (migrations 004 + 005 + 012 + 014: nullable role, event_type,
+	// millisecond msg_time, nullable client_msg_id with its UNIQUE index,
+	// nullable run_id) so the SELECT scan paths run against the real shape —
+	// this is exactly how the legacy-NULL scan bug escaped: an out-of-date
+	// test table.
 	_, err = store.db.ExecContext(context.Background(), `
 		CREATE TABLE IF NOT EXISTS messages (
 			id          BIGINT       NOT NULL AUTO_INCREMENT,
@@ -53,6 +54,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			content     MEDIUMTEXT   NOT NULL,
 			trace_id    CHAR(36)     NOT NULL,
 			client_msg_id CHAR(36)   NULL,
+			run_id      CHAR(64)     NULL,
 			update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
 			KEY idx_messages_session_time (session_id, msg_time),
@@ -262,4 +264,53 @@ func TestAppendMessages_EmptyClientMsgIDWritesNull(t *testing.T) {
 	require.NoError(t, store.db.GetContext(context.Background(), &nulls,
 		`SELECT COUNT(*) FROM messages WHERE session_id = ? AND client_msg_id IS NULL`, sessionID))
 	assert.Equal(t, 2, nulls, "unstamped messages must persist as NULL, not ''")
+}
+
+// TestMessages_RunIDRoundTrip verifies the sub-agent run identity column
+// (migration 014): a row stamped with RunID survives the write→read round
+// trip on every read path, and rows written without one (pre-change shape,
+// direct SQL insert) read back as the empty string — NULL tolerance.
+func TestMessages_RunIDRoundTrip(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	sessionID := "aaaaaaaa-0000-7000-8000-0000000000cc"
+	base := time.Unix(1_700_000_000, 0).UTC()
+	// A legacy-shaped row inserted without run_id.
+	legacyID := insertTestMessage(t, store, sessionID, base, 0, "legacy")
+	// A stamped sub-agent row written through the store API.
+	stamped := model.Message{
+		SessionID:   sessionID,
+		MsgTime:     base.Add(time.Second),
+		Agent:       model.AgentChongzhi,
+		MsgIndex:    1,
+		Role:        model.RoleAssistant,
+		EventType:   model.EventTypeToken,
+		Content:     "interleaved fragment",
+		TraceID:     "trace-1",
+		ClientMsgID: "019a0000-0000-7000-8000-000000000002",
+		RunID:       "call_x1",
+	}
+	_, err := store.AppendMessages(context.Background(), []model.Message{stamped})
+	require.NoError(t, err)
+
+	msgs, err := store.ListMessages(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, legacyID, msgs[0].ID)
+	assert.Empty(t, msgs[0].RunID, "legacy NULL run_id must surface as the empty string")
+	assert.Equal(t, "call_x1", msgs[1].RunID, "stamped run_id must round-trip")
+
+	paged, _, err := store.ListMessagesPaged(context.Background(), sessionID, "", 10, "asc")
+	require.NoError(t, err)
+	require.Len(t, paged, 2)
+	assert.Empty(t, paged[0].RunID)
+	assert.Equal(t, "call_x1", paged[1].RunID)
+
+	// An unstamped model row writes SQL NULL (empty string would be a
+	// meaningless sentinel indistinguishable from a real id of "").
+	var nullRuns int
+	require.NoError(t, store.db.GetContext(context.Background(), &nullRuns,
+		`SELECT COUNT(*) FROM messages WHERE session_id = ? AND run_id IS NULL`, sessionID))
+	assert.Equal(t, 1, nullRuns, "unstamped run_id must persist as NULL")
 }
