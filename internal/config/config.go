@@ -315,14 +315,29 @@ type OpenAIConfig struct {
 	// negatives at load time so a typo fails fast rather than silently
 	// disabling the guard.
 	MaxContextTokens int `yaml:"max_context_tokens"`
+	// StreamIdleTimeout bounds the maximum gap between consecutive SSE frames
+	// of a streaming chat call, including time-to-first-frame (the
+	// llm-stream-watchdog capability). A stalled stream is aborted with a
+	// typed transient-classified error instead of hanging the turn forever.
+	// Zero (unset) disables the watchdog entirely (the pre-capability
+	// behavior — the tools.timeouts opt-in convention); validate() rejects
+	// negatives at load time. Unlike max_context_tokens no raw-value shadow
+	// check is needed: yaml.v3 decodes durations via time.ParseDuration,
+	// which parses fractions exactly (1.5s → 1500ms) and rejects garbage.
+	StreamIdleTimeout time.Duration `yaml:"stream_idle_timeout"`
 }
 
 // validate rejects a non-positive MaxContextTokens. Zero is valid (compaction
 // disabled); only a negative value — necessarily an operator typo — is an
-// error (mirrors the reasoning_effort / max_rounds fail-fast precedent).
+// error (mirrors the reasoning_effort / max_rounds fail-fast precedent). A
+// negative StreamIdleTimeout is likewise a typo: zero is the documented off
+// switch, so nothing legitimate decodes negative.
 func (o OpenAIConfig) validate() error {
 	if o.MaxContextTokens < 0 {
 		return fmt.Errorf("openai.max_context_tokens: must be a positive integer or 0 (0 disables context compaction; got %d)", o.MaxContextTokens)
+	}
+	if o.StreamIdleTimeout < 0 {
+		return fmt.Errorf("openai.stream_idle_timeout: must be a positive duration or 0 (0 disables the stream idle watchdog; got %s)", o.StreamIdleTimeout)
 	}
 	return nil
 }

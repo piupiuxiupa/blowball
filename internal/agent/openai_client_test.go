@@ -40,7 +40,7 @@ data: [DONE]
 	client := NewOpenAIClientFromClient(openai.NewClient(
 		option.WithAPIKey("test-key"),
 		option.WithBaseURL(srv.URL+"/v1"),
-	))
+	), 0)
 
 	var tokens []string
 	var reasoningTokens []string
@@ -96,7 +96,7 @@ data: [DONE]
 	client := NewOpenAIClientFromClient(openai.NewClient(
 		option.WithAPIKey("test-key"),
 		option.WithBaseURL(srv.URL+"/v1"),
-	))
+	), 0)
 
 	resp, err := client.StreamChat(context.Background(), LLMRequest{
 		Model:           "o3-mini",

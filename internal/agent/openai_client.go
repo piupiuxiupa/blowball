@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lush/blowball/internal/config"
@@ -133,6 +134,14 @@ func logLLMResponse(ctx context.Context, resp LLMResponse) {
 	logger.L().Debug("LLM response", fields...)
 }
 
+// ErrStreamIdleTimeout is returned by StreamChat when the stream idle
+// watchdog aborted a call: no SSE frame arrived within the configured
+// openai.stream_idle_timeout window (the gap starts at call issuance, so it
+// also covers a first frame that never comes). The wrapping error's message
+// carries "timeout" so the existing substring classifier (isTransientError,
+// retry.go) treats it as retryable with zero retry-logic changes.
+var ErrStreamIdleTimeout = errors.New("openai client: stream idle timeout")
+
 // OpenAIClient is the production LLMClient backed by openai-go v3. It is the
 // only file in this package that imports openai-go, so swapping SDKs (or
 // pointing at a non-OpenAI compatible endpoint) only touches this file.
@@ -142,6 +151,10 @@ type OpenAIClient struct {
 	// llm-raw-capture capability. Nil disables capture entirely; see
 	// rawcapture.go.
 	sink RawCaptureSink
+	// streamIdleTimeout bounds the maximum gap between consecutive SSE frames
+	// in StreamChat (llm-stream-watchdog capability). Zero disables the
+	// watchdog — byte-for-byte prior behavior.
+	streamIdleTimeout time.Duration
 }
 
 // NewOpenAIClient builds an OpenAIClient from the OpenAI section of config.
@@ -159,13 +172,15 @@ func NewOpenAIClientWithSink(cfg config.OpenAIConfig, sink RawCaptureSink) *Open
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
 	}
-	return &OpenAIClient{client: openai.NewClient(opts...), sink: sink}
+	return &OpenAIClient{client: openai.NewClient(opts...), sink: sink, streamIdleTimeout: cfg.StreamIdleTimeout}
 }
 
 // NewOpenAIClientFromClient wires an externally-constructed openai.Client —
-// used by tests / Phase 10 bootstrap paths that want to share one client.
-func NewOpenAIClientFromClient(c openai.Client) *OpenAIClient {
-	return &OpenAIClient{client: c}
+// used by tests / Phase 10 bootstrap paths that want to share one client. The
+// streamIdleTimeout parameter arms the idle watchdog the same way
+// NewOpenAIClientWithSink would from config (0 disables it).
+func NewOpenAIClientFromClient(c openai.Client, streamIdleTimeout time.Duration) *OpenAIClient {
+	return &OpenAIClient{client: c, streamIdleTimeout: streamIdleTimeout}
 }
 
 // StreamChat implements LLMClient. It opens a streaming chat completion,
@@ -227,9 +242,9 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	var frameIdx int
 	var frameBytes int
 	var framesCapped bool
+	start = time.Now()
 	if c.sink != nil {
 		callID, seq = newRawCall()
-		start = time.Now()
 		if raw, err := json.Marshal(params); err != nil {
 			logger.L().Warn("raw capture: marshal request params failed; skipping request row", zap.Error(err))
 		} else {
@@ -237,7 +252,64 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		}
 	}
 
-	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
+	// Stream idle watchdog (llm-stream-watchdog capability): bound the
+	// maximum gap between consecutive SSE frames. The timer starts BEFORE
+	// NewStreaming, so the first gap covers time-to-first-frame; the read
+	// loop kicks the watchdog after every accepted frame (any frame — empty
+	// delta, usage-only, reasoning — proves the stream is alive). When no
+	// frame arrives within the window the timer fires and cancels callCtx,
+	// unblocking stream.Next() so the call returns a typed error instead of
+	// hanging the turn forever. The goroutine cannot leak: it selects on
+	// callCtx.Done() and cancel is deferred below. idle <= 0 leaves callCtx
+	// as the parent ctx — byte-for-byte prior behavior, no goroutine.
+	callCtx := ctx
+	var watchdogReset chan struct{} // non-nil only while the watchdog is armed
+	var watchdogFired atomic.Bool
+	if idle := c.streamIdleTimeout; idle > 0 {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		watchdogReset = make(chan struct{}, 1)
+		go func() {
+			timer := time.NewTimer(idle)
+			defer timer.Stop()
+			for {
+				select {
+				case <-timer.C:
+					watchdogFired.Store(true)
+					cancel() // unblocks stream.Next()
+					return
+				case <-watchdogReset:
+					// Single-owner drain-and-reset: stop the timer and
+					// clear a pending fire so a kick racing the deadline
+					// cannot masquerade as the next idle gap.
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(idle)
+				case <-callCtx.Done():
+					return // normal end or parent cancel — always exits
+				}
+			}
+		}()
+	}
+	// kickWatchdog resets the idle gap after an accepted frame. The buffered-1
+	// channel coalesces bursts, so the non-blocking send never slows the read
+	// loop and a kick racing the timer fire resolves next loop iteration.
+	kickWatchdog := func() {
+		if watchdogReset == nil {
+			return
+		}
+		select {
+		case watchdogReset <- struct{}{}:
+		default:
+		}
+	}
+
+	stream := c.client.Chat.Completions.NewStreaming(callCtx, params)
 	defer stream.Close()
 
 	var (
@@ -245,6 +317,11 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		finish           string
 		toolStitch       = newToolCallStitcher()
 		reasoningContent strings.Builder
+		// frames counts accepted SSE frames (every loop iteration), independent
+		// of the capture-side frameIdx: the idle-timeout diagnostics report
+		// what the wire delivered even when no sink is attached or capture was
+		// budget-capped.
+		frames int
 	)
 
 	// capturePartial emits a response row for a stream that ended without the
@@ -327,6 +404,8 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 			capturePartial()
 			return resp, err
 		}
+		frames++
+		kickWatchdog()
 		chunk := stream.Current()
 		if respID == "" && chunk.ID != "" {
 			respID, respCreated = chunk.ID, chunk.Created
@@ -377,9 +456,30 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	if err := stream.Err(); err != nil && err != io.EOF {
 		// ssestream surfaces context cancellation as an error; surface ctx.Err
 		// directly when applicable so callers can branch on cancellation.
+		// The parent check comes FIRST (design D3): a canceled request cannot
+		// be retried anyway, so parent cancellation wins any race with the
+		// watchdog timer firing concurrently.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			capturePartial()
 			return resp, ctxErr
+		}
+		// The watchdog fired — the stream went silent past the configured
+		// idle window. Abort with the typed error (whose "timeout" message
+		// the transient classifier picks up) instead of surfacing the
+		// cancel-induced read error, and leave an error row for post-mortem
+		// (distinct from the partial-response row a local cancellation gets).
+		if watchdogFired.Load() {
+			idleErr := fmt.Errorf("%w: no frame for %s (frames=%d, model=%s)",
+				ErrStreamIdleTimeout, c.streamIdleTimeout, frames, req.Model)
+			logger.L().Warn("LLM stream idle timeout: stalled stream aborted",
+				zap.String("event", "llm_stream_idle_timeout"),
+				zap.String("agent", AgentNameFromContext(ctx)),
+				zap.String("model", req.Model),
+				zap.Int("frames", frames),
+				zap.Duration("idle", c.streamIdleTimeout),
+				zap.Duration("elapsed", time.Since(start)))
+			captureError(idleErr)
+			return resp, idleErr
 		}
 		captureError(err)
 		return resp, fmt.Errorf("openai client: stream: %w", err)

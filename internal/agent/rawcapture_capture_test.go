@@ -309,7 +309,7 @@ func TestStreamChatCapture_NilSinkZeroBehavior(t *testing.T) {
 	client := NewOpenAIClientFromClient(openai.NewClient(
 		option.WithAPIKey("test-key"),
 		option.WithBaseURL(srv.URL+"/v1"),
-	))
+	), 0)
 	resp, err := client.StreamChat(captureTestCtx(), LLMRequest{
 		Model:    "gpt-test",
 		Messages: []Message{{Role: "user", Content: "hi"}},

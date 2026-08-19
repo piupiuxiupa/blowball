@@ -23,6 +23,20 @@ openai:
   # configured value must be a positive integer (a negative value fails
   # config load).
   # max_context_tokens: 128000
+  # Stream idle watchdog (llm-stream-watchdog capability): the maximum allowed
+  # gap between consecutive SSE frames of a streaming chat call. The first gap
+  # starts when the call is issued, so time-to-first-frame is covered too — a
+  # gateway that completes the HTTP handshake but never sends a frame also
+  # trips it. It bounds frame INTER-ARRIVAL only, never total duration: a
+  # stream that keeps emitting frames (even empty/usage/reasoning deltas)
+  # runs as long as it needs. When no frame arrives within the window the
+  # call aborts with a typed error that the existing transient-error retry
+  # path classifies as retryable ("timeout"), instead of hanging the turn
+  # forever on a silently-stalled connection. Recommended 2m: healthy
+  # gateways stream deltas at millisecond cadence, so multi-minute silence
+  # means the stream broke. Zero/unset (the default) disables the watchdog —
+  # prior behavior exactly (a negative value fails config load).
+  # stream_idle_timeout: 2m
 
 mysql:
   dsn: ${MYSQL_DSN:user:password@tcp(127.0.0.1:3306)/blowball?charset=utf8mb4&parseTime=true&loc=Local}
