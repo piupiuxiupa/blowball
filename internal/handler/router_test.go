@@ -26,6 +26,8 @@ func stubRouteDeps() RouteDeps {
 		SessionCreate:               noop,
 		SessionMessages:             noop,
 		SendMessage:                 noop,
+		TurnCancel:                  noop,
+		TurnEvents:                  noop,
 		SessionDelete:               noop,
 		SessionUpdateTitle:          noop,
 		WorkspaceList:               noop,
@@ -38,6 +40,7 @@ func stubRouteDeps() RouteDeps {
 		WorkspaceOnlyOfficeCallback: noop,
 		MCPTools:                    noop,
 		SkillsList:                  noop,
+		ModelsList:                  noop,
 	}
 }
 
@@ -54,13 +57,15 @@ func routeSet(r *gin.Engine) []string {
 
 // expectedAPIRoutes is the exact route set the api role registers
 // (RegisterHealthz + RegisterAPIRoutes): health, auth, session CRUD, message
-// history read, workspace file CRUD, the OnlyOffice save callback, and skills.
-// It must NOT contain the streaming message endpoint or the MCP tool list.
+// history read, workspace file CRUD, the OnlyOffice save callback, skills,
+// and the model catalog list (per-request-model-selection). It must NOT
+// contain the streaming message endpoint or the MCP tool list.
 var expectedAPIRoutes = []string{
 	"DELETE /api/v1/sessions/:session_id",
 	"GET /api/v1/sessions",
 	"GET /api/v1/sessions/:session_id/messages",
 	"GET /api/v1/skills",
+	"GET /api/v1/models",
 	"GET /api/v1/workspace/files",
 	"GET /api/v1/workspace/files/*path",
 	"PATCH /api/v1/sessions/:session_id",
@@ -81,6 +86,8 @@ var expectedAgentRoutes = []string{
 	"GET /healthz",
 	"GET /api/v1/mcp/tools",
 	"POST /api/v1/sessions/:session_id/messages",
+	"POST /api/v1/sessions/:session_id/turns/:run_id/cancel",
+	"GET /api/v1/sessions/:session_id/turns/:run_id/events",
 }
 
 // TestRegisterAPIRoutes_ExactRouteSet asserts the api partition registers
@@ -122,9 +129,15 @@ func TestRegisterRoutes_AllRoleIsUnion(t *testing.T) {
 	RegisterRoutes(r, stubRouteDeps())
 
 	want := append([]string{}, expectedAPIRoutes...)
-	// Agent partition contributes two non-health routes (healthz already in the
-	// API set via RegisterRoutes' single RegisterHealthz call).
-	want = append(want, "GET /api/v1/mcp/tools", "POST /api/v1/sessions/:session_id/messages")
+	// Agent partition contributes its non-health routes (healthz already in
+	// the API set via RegisterRoutes' single RegisterHealthz call): the
+	// streaming endpoint, the turn-lifecycle endpoints (turn-detach-resume),
+	// and the MCP tool list.
+	want = append(want,
+		"GET /api/v1/mcp/tools",
+		"POST /api/v1/sessions/:session_id/messages",
+		"POST /api/v1/sessions/:session_id/turns/:run_id/cancel",
+		"GET /api/v1/sessions/:session_id/turns/:run_id/events")
 	sort.Strings(want)
 
 	got := routeSet(r)
@@ -183,6 +196,7 @@ func TestAgentPartition_CRUDRoutesReturn404(t *testing.T) {
 		{http.MethodPatch, "/api/v1/sessions/sess-1"},
 		{http.MethodGet, "/api/v1/workspace/files"},
 		{http.MethodGet, "/api/v1/skills"},
+		{http.MethodGet, "/api/v1/models"},
 	}
 	for _, tc := range targets {
 		req := httptest.NewRequest(tc.method, tc.path, nil)

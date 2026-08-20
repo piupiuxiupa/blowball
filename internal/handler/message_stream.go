@@ -18,6 +18,7 @@ import (
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/stream"
 )
@@ -38,17 +39,34 @@ type MessageStreamHandler struct {
 	titleSvc *service.TitleService
 	compSvc  *service.CompactionService
 	orch     OrchestratorRunner
-	dataDir  string
-	newHub   func() *stream.Hub
-	writeSSE func(ctx context.Context, w http.ResponseWriter, h *stream.Hub) error
+	// selection carries the model-catalog state (per-request-model-selection,
+	// dual-axis form of model-effort-v2): it resolves EVERY request's
+	// model/reasoning_effort pair into the turn's (model, effort) and fixes
+	// the turn's compaction threshold and recorded model name. The zero value
+	// carries no catalog and cannot resolve any request (test-only shape).
+	selection ModelSelectionConfig
+	// runs owns the turn-run lifecycle (turn-detach-resume): the Redis run
+	// state (event log, meta, session claim) and the process-local registry
+	// of running turns.
+	runs    *run.Manager
+	dataDir string
+	newHub  func() *stream.Hub
+	// writeRunEvents is the SSE subscription seam over the run event log —
+	// the same implementation the resume endpoint uses. Tests may stub it.
+	// turnDone is the owning turn's completion channel (the degraded-path
+	// close signal when the store is unreachable).
+	writeRunEvents func(ctx context.Context, w http.ResponseWriter, runs *run.Manager, runID, after string, headers map[string]string, turnDone <-chan struct{}) error
 }
 
 // NewMessageStreamHandler wires the streaming handler with its services, the
-// orchestrator adapter, and the dataDir used to resolve per-user workspace and
-// skills roots. compSvc is the context-compaction service; it may be nil (or
-// constructed with max_context_tokens 0), in which case every compaction
-// check is skipped and turns behave exactly as before the capability. The
-// agent role (and the all role) constructs this; the api role does not.
+// orchestrator adapter, the run-lifecycle manager, and the dataDir used to
+// resolve per-user workspace and skills roots. compSvc is the
+// context-compaction service; it may be nil (or constructed with
+// max_context_tokens 0), in which case every compaction check is skipped and
+// turns behave exactly as before the capability. selection is the
+// per-request-model-selection state (see ModelSelectionConfig); build it with
+// NewModelSelectionConfig from the loaded config. The agent role (and the all
+// role) constructs this; the api role does not.
 func NewMessageStreamHandler(
 	sessSvc *service.SessionService,
 	msgSvc *service.MessageService,
@@ -56,23 +74,39 @@ func NewMessageStreamHandler(
 	compSvc *service.CompactionService,
 	orch OrchestratorRunner,
 	dataDir string,
+	runs *run.Manager,
+	selection ModelSelectionConfig,
 ) *MessageStreamHandler {
 	h := &MessageStreamHandler{
-		sessSvc:  sessSvc,
-		msgSvc:   msgSvc,
-		titleSvc: titleSvc,
-		compSvc:  compSvc,
-		orch:     orch,
-		dataDir:  dataDir,
+		sessSvc:   sessSvc,
+		msgSvc:    msgSvc,
+		titleSvc:  titleSvc,
+		compSvc:   compSvc,
+		orch:      orch,
+		runs:      runs,
+		dataDir:   dataDir,
+		selection: selection,
 	}
 	h.newHub = func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) }
-	h.writeSSE = stream.WriteSSE
+	h.writeRunEvents = writeRunEventStream
 	return h
 }
 
 // sendMessageRequest is the JSON body for POST /api/v1/sessions/:session_id/messages.
 type sendMessageRequest struct {
 	Content string `json:"content"`
+	// Model optionally selects the turn's model from the openai.models
+	// catalog (per-request-model-selection); unknown names are rejected with
+	// 400 INVALID_MODEL. Omitted → the default catalog entry.
+	Model string `json:"model"`
+	// ReasoningEffort optionally selects the turn's thinking level
+	// (none|low|medium|high|xhigh|max). Omitted → the deployment default
+	// (openai.default_reasoning_effort, itself defaulting to none). Invalid
+	// values and non-"none" values on a thinking:false entry are rejected
+	// with 400 INVALID_EFFORT; "none" is sent to the provider as a literal
+	// value on thinking entries (B2 wire family) rather than meaning "omit
+	// the parameter".
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 // SendMessage handles POST /api/v1/sessions/:session_id/messages.
@@ -87,17 +121,23 @@ type sendMessageRequest struct {
 //  5. Capture the user message timestamp; the actual persistence happens later,
 //     after the orchestrator succeeds, so the first token is not delayed by a
 //     three-layer storage round-trip.
-//  6. Run the orchestrator via OrchestratorRunner in a goroutine bound to the
-//     request context (so a client disconnect cancels the agent loop). The
-//     runner streams events into a fresh hub AND returns the final assistant
-//     content.
-//  7. Concurrently, stream.WriteSSE consumes from the same hub and writes the
-//     SSE response.
-//  8. After the orchestrator returns successfully, persist the user message and
-//     the assistant reply together in a single batch using a detached
-//     (background-derived, trace_id-preserving) context so a client disconnect
-//     mid-stream does NOT lose the saved messages.
-//  9. If this was the first exchange, fire titleSvc.GenerateTitle in a
+//  6. Claim the session's single active-run slot (Redis SET NX). A running
+//     turn -> 409 SESSION_BUSY carrying the active run id.
+//  7. Run the orchestrator on a TURN-scoped context held by the run registry
+//     (turn-detach-resume): a client disconnect does NOT cancel the agent
+//     loop; only the cancel endpoint, an error, or process shutdown does. The
+//     runner streams events into a fresh hub whose single consumer (the
+//     drainer) appends every event to the Redis run event log.
+//  8. Concurrently, the SSE response subscribes to the run event log (the same
+//     reader the resume endpoint uses), replaying from the beginning — so a
+//     slow start never misses events and a disconnect only drops the
+//     subscription, never the turn.
+//  9. After the orchestrator returns (whenever that is — possibly long after
+//     the client disconnected), persist the user message and the assistant
+//     reply together in a single batch using a detached (background-derived,
+//     trace_id-preserving) context, then finalize the run (terminal status,
+//     session release, retain-window expiry).
+//  10. If this was the first exchange, fire titleSvc.GenerateTitle in a
 //     goroutine (fire-and-forget; never blocks the response).
 func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	var req sendMessageRequest
@@ -108,6 +148,27 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	if req.Content == "" {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "content is required"))
 		return
+	}
+
+	// Per-request model selection (model-effort-v2 dual axes): resolve
+	// model/reasoning_effort against the catalog into the turn config
+	// injected into all three agents, plus the turn-level values every
+	// downstream consumer uses — the compaction threshold (the resolved
+	// entry's window) and the model name recorded in run meta / turn_usage.
+	// Resolution ALWAYS produces a full selection; a parameter-less request
+	// takes the default entry + deployment default effort.
+	sel, errCode, errMsg := resolveModelSelection(h.selection, req.Model, req.ReasoningEffort)
+	if errCode != "" {
+		c.JSON(http.StatusBadRequest, errorBody(errCode, errMsg))
+		return
+	}
+	turnModel := sel.Model
+	turnLimit := sel.MaxContextTokens
+	if turnLimit == 0 {
+		// Safety net: a hand-built selection config without a window (tests)
+		// falls back to the compaction service's own limit. Production
+		// wiring derives both from the same mandatory catalog, so they agree.
+		turnLimit = h.compSvc.FallbackMaxContext()
 	}
 
 	userID := middleware.UserIDFromCtx(c)
@@ -180,7 +241,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 					zap.Error(terr))
 			} else {
 				lastContextTokens = tokens
-				overThreshold = h.compSvc.ShouldCompact(tokens)
+				overThreshold = h.compSvc.ShouldCompact(tokens, turnLimit)
 			}
 		}
 		if overThreshold || sess.ContextCompacted {
@@ -201,6 +262,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 							Rows:          durable,
 							AgentMsgs:     durableMsgs,
 							LastRow:       durableRow,
+							SummaryModel:  turnModel,
 						})
 					}
 					if activeRecord == nil && sess.ContextCompacted {
@@ -248,12 +310,70 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	var hooks TurnHooks
 	if h.compSvc.Enabled() {
 		tap := NewTurnEventTap()
-		hooks = TurnHooks{Round: h.newRoundHook(tap, persist, flushed), Tap: tap}
+		hooks = TurnHooks{Round: h.newRoundHook(tap, persist, flushed, turnLimit, turnModel), Tap: tap}
 	}
+
+	// ── turn-detach-resume: session claim, run registry, event log ──────────
+	//
+	// The turn runs on its OWN context, detached from the HTTP request: a
+	// client disconnect no longer cancels generation. The run id is the
+	// request's trace_id, delivered via the X-Run-Id response header and the
+	// run_id meta stamped on every event in the log.
+
+	// Claim the session's single active-run slot (Redis SET NX). A holder
+	// means a turn is still running: reject with SESSION_BUSY and hand back
+	// the run id so the client can attach instead of waiting blindly. A claim
+	// TRANSPORT failure degrades to running unguarded (WARN) rather than
+	// rejecting the chat: a Redis outage already puts persistence on its
+	// direct-write fallback, and "messages always win" outranks the mutex —
+	// the claim is best-effort mutual exclusion, not admission control.
+	holder, claimed, err := h.runs.Store.ClaimSession(ctx, sessionID, tid)
+	if err != nil {
+		logger.L().Warn("session run claim failed; proceeding without mutual exclusion",
+			zap.String("op", "handler.send_message"),
+			zap.String("session_id", sessionID),
+			zap.Error(err))
+	} else if !claimed {
+		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+			"code":    "SESSION_BUSY",
+			"message": "a turn is already running for this session",
+			"run_id":  holder,
+		}})
+		return
+	}
+
+	// Run meta (ownership + status + the turn's resolved model) in Redis.
+	// Best-effort: a failed write costs cancel/resume for this run, never the
+	// turn itself.
+	if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
+		SessionID: sessionID,
+		UserID:    userID,
+		Status:    run.StatusRunning,
+		Model:     turnModel,
+		CreatedAt: userMsgTime.Format(time.RFC3339),
+	}); err != nil {
+		logger.L().Warn("run meta init failed",
+			zap.String("op", "handler.send_message"),
+			zap.String("run_id", tid),
+			zap.Error(err))
+	}
+
+	// The turn context: detached, but carrying the same trace/session
+	// attribution (raw capture, llm_raw_log) as the request context did.
+	turnCtx, turnCancel := context.WithCancel(context.Background())
+	turnCtx = agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID)
+	regRun := h.runs.Registry.Register(tid, turnCancel)
 
 	workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")
 	skillsDir := filepath.Join(h.dataDir, userID, "skills")
 	hub := h.newHub()
+
+	// The drainer is the hub's single consumer: it appends every event to
+	// run:{rid}:events (done included), heartbeats, and polls the
+	// cross-process cancel flag. drained closes after the final drain, which
+	// orders the terminal status write strictly after the last event.
+	drainDone := run.StartDrainer(hub, h.runs.Store, h.runs.Registry, tid, run.HeartbeatEvery)
+
 	type runResult struct {
 		events []stream.StreamEvent
 		usage  map[string]any
@@ -262,18 +382,43 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	resultCh := make(chan runResult, 1)
 
 	go func() {
-		// The orchestrator uses the request context so a client disconnect
-		// cancels the agent loop. We close the hub when Handle returns so the
-		// SSE writer drains remaining events and exits cleanly.
-		defer hub.Close()
-		events, usage, err := h.orch.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub, hooks)
+		// Registry teardown: Unregister last so Finish (which unblocks
+		// WaitAll) happens while the entry still resolves.
+		defer h.runs.Registry.Unregister(tid)
+		defer regRun.Finish()
+		events, usage, err := h.orch.Handle(turnCtx, workspaceRoot, skillsDir, userID, messages, hub, hooks, sel.override())
+		hub.Close()
+		// Wait for the drainer to flush the final events into the log BEFORE
+		// flipping the run terminal: the status write must never precede the
+		// last replayable event.
+		<-drainDone
+
+		// Terminal run bookkeeping (turn-detach-resume) runs ON THE TURN
+		// goroutine, not the HTTP handler's: SSE subscribers (including this
+		// request's own response) close their streams on the terminal status,
+		// so it must be published without depending on the handler's own
+		// progress. Status first (unblocks SSE readers), then the session
+		// release (lifts SESSION_BUSY), then the retain-window expiry.
+		turnStatus := run.StatusDone
+		switch {
+		case err == nil:
+		case errors.Is(err, context.Canceled):
+			turnStatus = run.StatusCancelled
+		default:
+			turnStatus = run.StatusError
+		}
+		finalizeCtx := agent.WithSessionID(trace.WithContext(context.Background(), tid), sessionID)
+		h.runs.Finalize(finalizeCtx, tid, sessionID, turnStatus)
+		turnCancel()
+
 		resultCh <- runResult{events: events, usage: usage, err: err}
 	}()
 
-	// writeSSE returns when the hub is closed (orchestrator finished) or the
-	// request context is cancelled (client disconnect). Either way the HTTP
-	// response is finished after this call returns.
-	if sseErr := h.writeSSE(ctx, c.Writer, hub); sseErr != nil && !errors.Is(sseErr, context.Canceled) {
+	// The SSE response is just another subscription to the run's event log:
+	// it returns when the client disconnects (turn keeps running) or the run
+	// reaches a terminal state (the subscriber loop observes the status — or,
+	// on the degraded no-Redis path, the turn's own completion signal).
+	if sseErr := h.writeRunEvents(c.Request.Context(), c.Writer, h.runs, tid, "0", map[string]string{"X-Run-Id": tid}, regRun.Done()); sseErr != nil && !errors.Is(sseErr, context.Canceled) {
 		logger.L().Warn("sse write returned error",
 			zap.String("op", "handler.send_message"),
 			zap.String("session_id", sessionID),
@@ -281,7 +426,9 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	}
 
 	// Wait for the orchestrator to finish (success, error, or cancellation) so
-	// the event stream collected by the adapter is complete.
+	// the event stream collected by the adapter is complete. This can outlive
+	// the HTTP connection by design: a disconnected client's handler goroutine
+	// parks here until the detached turn completes.
 	res := <-resultCh
 
 	// saveCtx is a detached context that survives the HTTP request so the
@@ -345,7 +492,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 			// Persist per-agent token cost into turn_usage AFTER the message
 			// batch. Failure is logged only — never roll back messages.
-			if tu, ok := buildTurnUsage(sessionID, tid, userID, usage); ok {
+			if tu, ok := buildTurnUsage(sessionID, tid, userID, turnModel, usage); ok {
 				if err := h.sessSvc.SaveTurnUsage(saveCtx, tu); err != nil {
 					logger.L().Warn("save turn_usage failed; messages persisted",
 						zap.String("op", "handler.send_message"),
@@ -363,18 +510,20 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	if res.err != nil {
 		// Any orchestrator error interrupts the turn after content may
-		// already have been streamed to the client. That includes a client-
-		// initiated cancellation (context.Canceled) AND upstream/transport/
-		// timeout failures such as a model-provider 429 or 5xx, which can land
-		// mid-turn after several rounds of assistant tokens/tool results. In
-		// both cases we persist the partial event stream so the reloaded
-		// session history matches what the user saw and the user's own message
-		// is never silently lost. The persistEvents closure records the user
-		// message, the merged assistant events, the turn's token cost into
-		// turn_usage (the done event carries usage on the error path too), and
-		// fires first-turn title generation from the partial assistant content.
+		// already have been streamed to the client. That includes an explicit
+		// cancellation via the cancel endpoint or graceful shutdown
+		// (context.Canceled — a client disconnect no longer cancels the turn,
+		// see turn-detach-resume) AND upstream/transport/timeout failures such
+		// as a model-provider 429 or 5xx, which can land mid-turn after
+		// several rounds of assistant tokens/tool results. In both cases we
+		// persist the partial event stream so the reloaded session history
+		// matches what the user saw and the user's own message is never
+		// silently lost. The persistEvents closure records the user message,
+		// the merged assistant events, the turn's token cost into turn_usage
+		// (the done event carries usage on the error path too), and fires
+		// first-turn title generation from the partial assistant content.
 		if errors.Is(res.err, context.Canceled) {
-			logger.L().Warn("client disconnected; persisting partial interrupted turn",
+			logger.L().Warn("turn cancelled; persisting partial interrupted turn",
 				zap.String("op", "handler.send_message"),
 				zap.String("session_id", sessionID),
 				zap.String("user_id", userID),
@@ -404,10 +553,12 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 // its total.total_tokens is copied into the redundant TotalTokens column for
 // fast per-session SUM() aggregation. The meta.context_tokens key (emitted by
 // the agent layer from the turn's LAST LLM round) feeds ContextTokens for the
-// turn-start preventive compaction check. Returns ok=false when usage is nil
-// or missing total.total_tokens, so the caller can skip persistence cleanly
-// (e.g. a turn that errored before any LLM call produced usage).
-func buildTurnUsage(sessionID, traceID, userID string, usage map[string]any) (model.TurnUsage, bool) {
+// turn-start preventive compaction check. turnModel (per-request-model-
+// selection) is the turn's resolved model name recorded for per-model cost
+// aggregation (empty → NULL). Returns ok=false when usage is nil or missing
+// total.total_tokens, so the caller can skip persistence cleanly (e.g. a turn
+// that errored before any LLM call produced usage).
+func buildTurnUsage(sessionID, traceID, userID, turnModel string, usage map[string]any) (model.TurnUsage, bool) {
 	if len(usage) == 0 {
 		return model.TurnUsage{}, false
 	}
@@ -420,6 +571,7 @@ func buildTurnUsage(sessionID, traceID, userID string, usage map[string]any) (mo
 		SessionID:     sessionID,
 		TraceID:       traceID,
 		UserID:        userID,
+		Model:         turnModel,
 		UsageJSON:     string(raw),
 		TotalTokens:   totalTokens,
 		ContextTokens: extractContextTokens(usage),
@@ -539,10 +691,16 @@ func (f *turnFlushState) count() int {
 // recover+reconstruct → Compact → rewrite the in-memory round to the stitched
 // context. Every failure inside is best-effort — WARN and return nil so the
 // agent loop continues on the original conversation.
-func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState) agent.RoundHook {
+//
+// limit and summaryModel are the TURN's per-request-model-selection values:
+// the hook's threshold check compares against 0.8 × the request-selected
+// model's window, and the checkpoint summary call runs on the selected model
+// (captured here at turn start so the closure sees one consistent selection
+// even if the surrounding request scope changes).
+func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, limit int, summaryModel string) agent.RoundHook {
 	return func(ctx context.Context, lastUsage agent.Usage) []agent.Message {
 		contextTokens := lastUsage.PromptTokens + lastUsage.CompletionTokens
-		if !h.compSvc.ShouldCompact(contextTokens) {
+		if !h.compSvc.ShouldCompact(contextTokens, limit) {
 			return nil
 		}
 		log := logger.L().With(
@@ -599,6 +757,7 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 			Rows:          rows,
 			AgentMsgs:     agentMsgs,
 			LastRow:       lastRow,
+			SummaryModel:  summaryModel,
 		})
 		if !ok {
 			return nil

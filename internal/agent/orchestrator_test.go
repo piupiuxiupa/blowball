@@ -27,25 +27,22 @@ import (
 func newTestOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 	t.Helper()
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Tools:        []string{},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
-				Model:        "gpt-test",
 				SystemPrompt: "you are chongzhi",
 				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
-				Model:        "gpt-test",
 				SystemPrompt: "you are liang",
 				MaxTokens:    256,
 			},
@@ -87,18 +84,18 @@ func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
 		usage:        Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
 	})
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Tools:  config.ToolsConfig{Xizhi: xizhiCfg},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
-				Name: "Confucius", Model: "gpt-test", SystemPrompt: "you are confucius", MaxTokens: 256,
+				Name: "Confucius", SystemPrompt: "you are confucius", MaxTokens: 256,
 			},
 			Chongzhi: config.AgentConfig{
-				Name: "Chongzhi", Model: "gpt-test", SystemPrompt: "you are chongzhi", MaxTokens: 256,
+				Name: "Chongzhi", SystemPrompt: "you are chongzhi", MaxTokens: 256,
 				Tools: []string{"xizhi_write_file", "xizhi_delete"},
 			},
 			Liang: config.AgentConfig{
-				Name: "Liang", Model: "gpt-test", SystemPrompt: "you are liang", MaxTokens: 256,
+				Name: "Liang", SystemPrompt: "you are liang", MaxTokens: 256,
 			},
 		},
 	}
@@ -109,7 +106,7 @@ func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
 	hub := stream.NewHub(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, ModelOverride{})
 	require.NoError(t, err)
 	hub.Close()
 }
@@ -133,7 +130,7 @@ func TestOrchestrator_Handle_FullFlow(t *testing.T) {
 	type res struct{ err error }
 	resCh := make(chan res, 1)
 	go func() {
-		resCh <- res{err: o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)}
+		resCh <- res{err: o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, ModelOverride{})}
 	}()
 
 	var events []stream.StreamEvent
@@ -237,25 +234,22 @@ func TestOrchestrator_ExternalMCPTool(t *testing.T) {
 	)
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Tools:        []string{"external_greet"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
-				Model:        "gpt-test",
 				SystemPrompt: "you are chongzhi",
 				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
-				Model:        "gpt-test",
 				SystemPrompt: "you are liang",
 				MaxTokens:    256,
 			},
@@ -268,7 +262,7 @@ func TestOrchestrator_ExternalMCPTool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, ModelOverride{})
 	require.NoError(t, err)
 	hub.Close()
 
@@ -298,11 +292,10 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 	})
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				MCP: config.AgentMCPConfig{
@@ -314,14 +307,12 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
-				Model:        "gpt-test",
 				SystemPrompt: "you are chongzhi",
 				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
-				Model:        "gpt-test",
 				SystemPrompt: "you are liang",
 				MaxTokens:    256,
 			},
@@ -335,7 +326,7 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, ModelOverride{})
 	require.NoError(t, err)
 	hub.Close()
 
@@ -376,24 +367,21 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 	})
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
-				Model:        "gpt-test",
 				SystemPrompt: "you are chongzhi",
 				MaxTokens:    256,
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
-				Model:        "gpt-test",
 				SystemPrompt: "you are liang",
 				MaxTokens:    256,
 			},
@@ -413,7 +401,7 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, ModelOverride{})
 	require.NoError(t, err)
 	hub.Close()
 
@@ -450,24 +438,21 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 	})
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
-				Model:        "gpt-test",
 				SystemPrompt: "you are chongzhi",
 				MaxTokens:    256,
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
-				Model:        "gpt-test",
 				SystemPrompt: "you are liang",
 				MaxTokens:    256,
 			},
@@ -483,7 +468,7 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil)
+	err = o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, ModelOverride{})
 	require.NoError(t, err)
 	hub.Close()
 
@@ -508,16 +493,15 @@ func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
 		usage:        Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 	})
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius\n\nParallel Dispatch Guidance\n- Emit INDEPENDENT subtasks as multiple tool_calls in a SINGLE assistant turn.\n- Parallel budget: aim for 2-3 parallel invokes per turn and avoid more than 5.\n- Never issue overlapping/duplicate tasks to the same sub-agent in one turn.",
 				MaxTokens:    256,
 			},
-			Chongzhi: config.AgentConfig{Name: "Chongzhi", Model: "gpt-test", SystemPrompt: "you are chongzhi", MaxTokens: 256},
-			Liang:    config.AgentConfig{Name: "Liang", Model: "gpt-test", SystemPrompt: "you are liang", MaxTokens: 256},
+			Chongzhi: config.AgentConfig{Name: "Chongzhi", SystemPrompt: "you are chongzhi", MaxTokens: 256},
+			Liang:    config.AgentConfig{Name: "Liang", SystemPrompt: "you are liang", MaxTokens: 256},
 		},
 	}
 	o, err := NewOrchestrator(client, cfg, nil, nil, skill.NewLoader("", nil), nil)
@@ -526,7 +510,7 @@ func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
 	hub := stream.NewHub(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil))
+	require.NoError(t, o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, ModelOverride{}))
 	hub.Close()
 
 	prompt := client.lastRequest().Messages[0].Content

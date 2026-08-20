@@ -20,6 +20,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/msgflush"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	redisstore "github.com/lush/blowball/internal/store/redis"
@@ -70,10 +71,10 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
-	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test", Models: testCatalog()},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: agentConfig(),
 	}
@@ -83,8 +84,10 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 	// Real handler constructors — the same ones serveRun's wireAPI / wireAgent
 	// use. Login is stubbed (the harness does the same) since these tests assert
 	// route ownership, not the login flow.
-	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
+	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
+	turnRunH := handler.NewTurnRunHandler(runMgr)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -113,6 +116,8 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 	agentDeps := handler.RouteDeps{
 		AuthMW:      authMW,
 		SendMessage: streamH.SendMessage,
+		TurnCancel:  turnRunH.CancelTurn,
+		TurnEvents:  turnRunH.TurnEvents,
 		MCPTools:    mcpH.Tools,
 	}
 

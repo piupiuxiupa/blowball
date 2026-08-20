@@ -116,7 +116,11 @@ func (s *TitleService) callLLM(ctx context.Context, log *zap.Logger, userMsg, as
 		return ""
 	}
 
-	modelName := s.cfg.Model
+	// TitleModel is resolved at wiring time: openai.title_model when set,
+	// else the default catalog entry (Config.TitleModelName). The title call
+	// always runs on the non-thinking wire family — no reasoning_effort, plain
+	// max_tokens.
+	modelName := s.cfg.TitleModel
 	if modelName == "" {
 		log.Warn("llm model empty; falling back")
 		return ""

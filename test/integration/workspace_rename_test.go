@@ -65,7 +65,9 @@ func TestWorkspaceRename_DestinationExists_409(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
 	var body struct {
-		Error struct{ Code string `json:"code"` } `json:"error"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
@@ -135,7 +137,9 @@ func TestWorkspaceRename_PathOutsideWorkspace_403(t *testing.T) {
 
 			require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
 			var body struct {
-				Error struct{ Code string `json:"code"` } `json:"error"`
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 			assert.Equal(t, "FORBIDDEN", body.Error.Code)

@@ -21,9 +21,13 @@ import (
 // Chongzhi does not hold a subAgents map and its dispatch path only consults
 // the registry.
 type Chongzhi struct {
-	cfg           config.AgentConfig
-	client        LLMClient
-	toolRegistry  *tool.Registry
+	cfg          config.AgentConfig
+	client       LLMClient
+	toolRegistry *tool.Registry
+	// turn is the turn-level model/effort configuration (model-effort-v2),
+	// injected at construction — agents no longer carry model fields. See
+	// Confucius.turn.
+	turn          ModelOverride
 	toolsJSON     []byte
 	toolsIsNotNil bool
 	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
@@ -43,8 +47,10 @@ type Chongzhi struct {
 	hitCapThisRun bool
 }
 
-// NewChongzhi builds a Chongzhi agent.
-func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry) (*Chongzhi, error) {
+// NewChongzhi builds a Chongzhi agent. turn is the turn-resolved
+// model/effort configuration applied to every LLM call this agent makes
+// (model-effort-v2).
+func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride) (*Chongzhi, error) {
 	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build chongzhi tools: %w", err)
@@ -57,6 +63,7 @@ func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry) (
 		cfg:           cfg,
 		client:        client,
 		toolRegistry:  reg,
+		turn:          turn,
 		toolsJSON:     toolsJSON,
 		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
 		maxRounds:     maxRounds,
@@ -105,11 +112,11 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		}
 
 		req := LLMRequest{
-			Model:           c.cfg.Model,
+			Model:           c.turn.Model,
 			Messages:        withSystem(c.cfg.SystemPrompt, round),
 			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.cfg.Thinking,
-			ReasoningEffort: c.cfg.ReasoningEffort,
+			Thinking:        c.turn.Thinking,
+			ReasoningEffort: c.turn.ReasoningEffort,
 		}
 		if c.toolsIsNotNil {
 			req.Tools = c.toolsJSON
@@ -191,11 +198,11 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		c.runMu.Unlock()
 		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
 		wrapReq := LLMRequest{
-			Model:           c.cfg.Model,
+			Model:           c.turn.Model,
 			Messages:        withSystem(c.cfg.SystemPrompt, round),
 			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.cfg.Thinking,
-			ReasoningEffort: c.cfg.ReasoningEffort,
+			Thinking:        c.turn.Thinking,
+			ReasoningEffort: c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
 		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq)

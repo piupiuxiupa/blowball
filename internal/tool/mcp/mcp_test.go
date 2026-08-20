@@ -877,6 +877,15 @@ func TestListTools_ReturnsLiveToolList(t *testing.T) {
 	assert.Equal(t, "adds", out[0].Description)
 	assert.JSONEq(t, `{"type":"object","required":["a","b"]}`, string(out[0].InputSchema))
 	assert.Equal(t, "mul", out[1].Name)
+
+	// listTools fires a fire-and-forget cache write-back goroutine that can
+	// otherwise race t.TempDir's RemoveAll cleanup (observed as a flaky
+	// "unlinkat ... directory not empty" under load). Wait for the write to
+	// land before the test returns.
+	require.Eventually(t, func() bool {
+		b, err := os.ReadFile(filepath.Join(ws, ".blowball", "mcp", "calc", "config.json"))
+		return err == nil && strings.Contains(string(b), `"adds"`)
+	}, 2*time.Second, 10*time.Millisecond, "async tool-cache write-back never landed")
 }
 
 func TestListTools_UnknownServerRejected(t *testing.T) {

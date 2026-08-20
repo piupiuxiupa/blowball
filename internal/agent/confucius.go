@@ -23,6 +23,12 @@ type Confucius struct {
 	cfg          config.AgentConfig
 	client       LLMClient
 	toolRegistry *tool.Registry
+	// turn is the turn-level model/effort configuration (model-effort-v2):
+	// the handler-resolved catalog entry + effort injected at construction —
+	// agents no longer carry model fields of their own. Read-only after
+	// construction, so per-invocation isolation is preserved by the factory
+	// building a fresh agent per dispatch.
+	turn ModelOverride
 	// subAgents maps ToolInvokeChongzhi / ToolInvokeLiang to per-invocation
 	// factories (not shared instances): every dispatch builds a fresh sub-agent
 	// so concurrent same-name invocations never share mutable run state
@@ -53,8 +59,10 @@ func (c *Confucius) SetRoundHook(hook RoundHook) { c.roundHook = hook }
 // invoke_liang to SubAgentFactories; it must contain at least those keys. Each
 // factory is invoked once per dispatch to build a per-invocation instance (see
 // SubAgentFactory). The tools[] JSON is rendered once at construction time
-// from cfg.Tools plus the two synthetic invoke_* tools.
-func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory) (*Confucius, error) {
+// from cfg.Tools plus the two synthetic invoke_* tools. turn is the
+// turn-resolved model/effort configuration applied to every LLM call this
+// agent makes (model-effort-v2).
+func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory, turn ModelOverride) (*Confucius, error) {
 	if _, ok := subAgents[ToolInvokeChongzhi]; !ok {
 		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeChongzhi)
 	}
@@ -73,6 +81,7 @@ func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, 
 		cfg:           cfg,
 		client:        client,
 		toolRegistry:  reg,
+		turn:          turn,
 		subAgents:     subAgents,
 		toolsJSON:     toolsJSON,
 		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
@@ -151,11 +160,11 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		}
 
 		req := LLMRequest{
-			Model:           c.cfg.Model,
+			Model:           c.turn.Model,
 			Messages:        withSystem(c.cfg.SystemPrompt, round),
 			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.cfg.Thinking,
-			ReasoningEffort: c.cfg.ReasoningEffort,
+			Thinking:        c.turn.Thinking,
+			ReasoningEffort: c.turn.ReasoningEffort,
 		}
 		if c.toolsIsNotNil {
 			req.Tools = c.toolsJSON
@@ -287,11 +296,11 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
 		tmeta.observeRoundCapped()
 		wrapReq := LLMRequest{
-			Model:           c.cfg.Model,
+			Model:           c.turn.Model,
 			Messages:        withSystem(c.cfg.SystemPrompt, round),
 			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.cfg.Thinking,
-			ReasoningEffort: c.cfg.ReasoningEffort,
+			Thinking:        c.turn.Thinking,
+			ReasoningEffort: c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
 		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq)

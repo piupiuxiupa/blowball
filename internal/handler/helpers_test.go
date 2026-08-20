@@ -52,6 +52,29 @@ func (c *fakeTitleLLM) StreamChat(_ context.Context, _ agent.LLMRequest, _ func(
 func newTitleSvcWithFake(t *testing.T, deps service.SessionDeps, llmContent string) *service.TitleService {
 	t.Helper()
 	llm := &fakeTitleLLM{resp: agent.LLMResponse{Content: llmContent}}
-	cfg := config.OpenAIConfig{Model: "title-model"}
+	cfg := config.OpenAIConfig{TitleModel: "title-model"}
 	return service.NewTitleService(llm, deps.MySQL, cfg)
+}
+
+// testSelectionConfig is the minimal model-selection state handler tests wire
+// into the streaming handler (model-effort-v2): a one-entry catalog with a
+// non-thinking default and the none deployment effort, so parameter-less
+// requests resolve exactly as production's minimal deployment would.
+func testSelectionConfig() ModelSelectionConfig {
+	return ModelSelectionConfig{
+		Catalog: []config.ModelCatalogEntry{
+			{Name: "test-model", MaxContextTokens: 128000, Thinking: false},
+		},
+		Default:       "test-model",
+		DefaultEffort: "none",
+	}
+}
+
+// testSelectionConfigWindow is testSelectionConfig with the catalog entry's
+// window overridden — compaction handler tests drive thresholds against the
+// turn limit, which the selection config (not the compaction service) owns.
+func testSelectionConfigWindow(window int) ModelSelectionConfig {
+	msc := testSelectionConfig()
+	msc.Catalog[0].MaxContextTokens = window
+	return msc
 }

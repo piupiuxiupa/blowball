@@ -13,6 +13,7 @@ import (
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 )
 
@@ -23,18 +24,25 @@ import (
 type SessionHandler struct {
 	sessSvc  *service.SessionService
 	titleSvc *service.TitleService
+	// runStore optionally reads the session active-run claims so the session
+	// list can mark sessions with a running turn (turn-detach-resume). Nil
+	// (e.g. unit tests) lists every session with generating=false.
+	runStore run.Store
 }
 
-// NewSessionHandler wires the CRUD handler with its session service and the
-// title service used for manual title updates. It deliberately takes no
-// orchestrator: the streaming concern is owned by MessageStreamHandler.
+// NewSessionHandler wires the CRUD handler with its session service, the
+// title service used for manual title updates, and optionally the run store
+// backing the list's generating flag. It deliberately takes no orchestrator:
+// the streaming concern is owned by MessageStreamHandler.
 func NewSessionHandler(
 	sessSvc *service.SessionService,
 	titleSvc *service.TitleService,
+	runStore run.Store,
 ) *SessionHandler {
 	return &SessionHandler{
 		sessSvc:  sessSvc,
 		titleSvc: titleSvc,
+		runStore: runStore,
 	}
 }
 
@@ -186,11 +194,22 @@ type sessionListEntry struct {
 	SessionID  string `json:"session_id"`
 	Title      string `json:"title"`
 	UpdateTime string `json:"update_time"`
+	// Generating reports whether the session has a turn currently running
+	// (turn-detach-resume): the Redis active-run claim exists. Clients use it
+	// to offer attach/resume and a cancel affordance in the session list.
+	Generating bool `json:"generating"`
+	// RunID is the active turn's run id — the attach
+	// (GET .../turns/{run_id}/events) and cancel target. Present only while
+	// generating: it is THE reload discovery path, since a reloaded page has
+	// lost the X-Run-Id header / event meta it saw when the turn started.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // ListSessions handles GET /api/v1/sessions. Returns 200 with the user's
 // sessions most-recently-updated first. An empty list returns 200 with
-// {"sessions": []}.
+// {"sessions": []}. Entries carry a generating flag derived from the Redis
+// active-run claims; a claim-read failure degrades to generating=false for
+// every entry (the list itself still succeeds).
 func (h *SessionHandler) ListSessions(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	tid := middleware.TraceIDFromCtx(c)
@@ -206,12 +225,34 @@ func (h *SessionHandler) ListSessions(c *gin.Context) {
 		return
 	}
 
+	// Active-run claims: one batched read feeding both the generating flag
+	// and the run_id (the reload discovery path) per entry.
+	activeRuns := make(map[string]string, len(sessions))
+	if h.runStore != nil {
+		sids := make([]string, 0, len(sessions))
+		for _, s := range sessions {
+			sids = append(sids, s.SessionID)
+		}
+		runs, err := h.runStore.ActiveRuns(ctx, sids)
+		if err != nil {
+			logger.L().Warn("active run lookup failed; listing without generating flags",
+				zap.String("op", "handler.list_sessions"),
+				zap.String("user_id", userID),
+				zap.Error(err))
+		} else {
+			activeRuns = runs
+		}
+	}
+
 	entries := make([]sessionListEntry, 0, len(sessions))
 	for _, s := range sessions {
+		rid := activeRuns[s.SessionID]
 		entries = append(entries, sessionListEntry{
 			SessionID:  s.SessionID,
 			Title:      s.Title,
 			UpdateTime: s.UpdateTime.UTC().Format(time.RFC3339),
+			Generating: rid != "",
+			RunID:      rid,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"sessions": entries})

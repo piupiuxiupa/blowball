@@ -306,15 +306,19 @@ func (s *ServerConfig) applyDefaults() {
 type OpenAIConfig struct {
 	APIKey  string `yaml:"api_key"`
 	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
-	// MaxContextTokens is the model's maximum context window in tokens — the
-	// single value driving the context-compaction capability (see
-	// internal/service/compaction.go). Compaction triggers at a fixed 80% of
-	// it. Zero (unset) disables compaction entirely (the pre-capability
-	// behavior); a configured value must be positive — validate() rejects
-	// negatives at load time so a typo fails fast rather than silently
-	// disabling the guard.
-	MaxContextTokens int `yaml:"max_context_tokens"`
+	// TitleModel names the model used ONLY for async title generation
+	// (model-effort-v2): it is a plain gateway model name, does NOT have to
+	// appear in the Models catalog, and defaults to the default catalog entry
+	// (see Config.TitleModelName). It replaced the legacy dual-meaning
+	// openai.model field, which load now rejects as a residual.
+	TitleModel string `yaml:"title_model"`
+	// DefaultReasoningEffort is the deployment-level default thinking effort
+	// (model-effort-v2): the single configuration source for the effort axis,
+	// overridden per request by the `reasoning_effort` parameter. Closed set
+	// none|low|medium|high|xhigh|max; unset normalizes to "none"
+	// (applyDefaults) preserving the pre-change "thinking off by default"
+	// spirit.
+	DefaultReasoningEffort string `yaml:"default_reasoning_effort"`
 	// StreamIdleTimeout bounds the maximum gap between consecutive SSE frames
 	// of a streaming chat call, including time-to-first-frame (the
 	// llm-stream-watchdog capability). A stalled stream is aborted with a
@@ -325,19 +329,103 @@ type OpenAIConfig struct {
 	// check is needed: yaml.v3 decodes durations via time.ParseDuration,
 	// which parses fractions exactly (1.5s → 1500ms) and rejects garbage.
 	StreamIdleTimeout time.Duration `yaml:"stream_idle_timeout"`
+	// Models is the MANDATORY model catalog (per-request-model-selection,
+	// tightened by model-effort-v2): the list of models a request may select
+	// via the `model` / `reasoning_effort` body parameters, and the only
+	// source of per-turn models — agents no longer carry model fields. All
+	// entries share this single gateway's base_url/api_key. An empty catalog
+	// fails config load (no implicit single-entry synthesis anymore). Catalog
+	// entries must have unique, non-empty names and a positive-integer
+	// max_context_tokens (the context-compaction threshold for turns that
+	// resolve to that entry).
+	Models []ModelCatalogEntry `yaml:"models"`
+	// DefaultModel names the catalog entry used when a request omits `model`
+	// (and the entry whose window bounds compaction for parameter-less
+	// turns). Empty (the default) selects the FIRST catalog entry. Setting it
+	// to a name outside the catalog fails validation.
+	DefaultModel string `yaml:"default_model"`
 }
 
-// validate rejects a non-positive MaxContextTokens. Zero is valid (compaction
-// disabled); only a negative value — necessarily an operator typo — is an
-// error (mirrors the reasoning_effort / max_rounds fail-fast precedent). A
-// negative StreamIdleTimeout is likewise a typo: zero is the documented off
-// switch, so nothing legitimate decodes negative.
-func (o OpenAIConfig) validate() error {
-	if o.MaxContextTokens < 0 {
-		return fmt.Errorf("openai.max_context_tokens: must be a positive integer or 0 (0 disables context compaction; got %d)", o.MaxContextTokens)
+// ModelCatalogEntry is one selectable model in the openai.models catalog
+// (per-request-model-selection). The entry carries only the per-model
+// dimensions a request can select on: the model name (what the request sends
+// and what the agents run), its context window in tokens (drives the
+// context-compaction threshold for turns that resolve to this model), and
+// whether the model supports reasoning — a capability marker that decides the
+// entry's wire family (thinking entries always send reasoning_effort, literal
+// none included, plus max_completion_tokens) and gates request
+// reasoning_effort values (a non-thinking entry only accepts none, with the
+// deployment default clamped to none + WARN).
+type ModelCatalogEntry struct {
+	Name             string `yaml:"name"`
+	MaxContextTokens int    `yaml:"max_context_tokens"`
+	Thinking         bool   `yaml:"thinking"`
+}
+
+// reasoningEfforts is the closed set of legal openai.default_reasoning_effort
+// (and request reasoning_effort) values.
+var reasoningEfforts = map[string]bool{
+	"none": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true,
+}
+
+// applyDefaults normalizes an omitted DefaultReasoningEffort to "none". It is
+// idempotent and leaves explicit values (valid or not) untouched — validate
+// rejects illegal ones.
+func (o *OpenAIConfig) applyDefaults() {
+	if strings.TrimSpace(o.DefaultReasoningEffort) == "" {
+		o.DefaultReasoningEffort = "none"
 	}
+}
+
+// FindModelCatalogEntry returns the explicit catalog entry with the given
+// name, ok=false when the catalog is unconfigured or holds no such entry.
+func (o OpenAIConfig) FindModelCatalogEntry(name string) (ModelCatalogEntry, bool) {
+	for _, m := range o.Models {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return ModelCatalogEntry{}, false
+}
+
+// validate enforces the model-effort-v2 config shape. The openai.models
+// catalog is MANDATORY (≥1 entry — an empty catalog fails load instead of
+// synthesizing an implicit one). Entries must have unique, non-empty names
+// and a positive-integer max_context_tokens (the compaction threshold;
+// fractional values are caught by the raw-value shadow check in Load —
+// yaml.v3 silently truncates them — negatives decode exactly and are
+// rejected here). default_model (when set) must name a catalog entry, and
+// default_reasoning_effort must be inside the closed set
+// none|low|medium|high|xhigh|max (applyDefaults already normalized an empty
+// value to none). A negative StreamIdleTimeout is a typo: zero is the
+// documented off switch, so nothing legitimate decodes negative.
+func (o OpenAIConfig) validate() error {
 	if o.StreamIdleTimeout < 0 {
 		return fmt.Errorf("openai.stream_idle_timeout: must be a positive duration or 0 (0 disables the stream idle watchdog; got %s)", o.StreamIdleTimeout)
+	}
+	if len(o.Models) == 0 {
+		return fmt.Errorf("openai.models: the model catalog is required (model-effort-v2): configure at least one {name, max_context_tokens, thinking} entry")
+	}
+	seen := make(map[string]struct{}, len(o.Models))
+	for i, m := range o.Models {
+		if strings.TrimSpace(m.Name) == "" {
+			return fmt.Errorf("openai.models[%d].name: must be non-empty", i)
+		}
+		if _, dup := seen[m.Name]; dup {
+			return fmt.Errorf("openai.models[%d].name: duplicate model name %q (catalog names must be unique)", i, m.Name)
+		}
+		seen[m.Name] = struct{}{}
+		if m.MaxContextTokens <= 0 {
+			return fmt.Errorf("openai.models[%d].max_context_tokens: must be a positive integer (got %d)", i, m.MaxContextTokens)
+		}
+	}
+	if o.DefaultModel != "" {
+		if _, ok := seen[o.DefaultModel]; !ok {
+			return fmt.Errorf("openai.default_model: %q is not an openai.models catalog entry", o.DefaultModel)
+		}
+	}
+	if !reasoningEfforts[o.DefaultReasoningEffort] {
+		return fmt.Errorf("openai.default_reasoning_effort: invalid value %q (must be none, low, medium, high, xhigh or max)", o.DefaultReasoningEffort)
 	}
 	return nil
 }
@@ -451,17 +539,19 @@ const defaultAgentMaxRounds = 100
 // omits max_rounds). Mirrors the private constant above.
 func DefaultAgentMaxRounds() int { return defaultAgentMaxRounds }
 
-// AgentConfig describes a single agent's runtime settings.
+// AgentConfig describes a single agent's runtime settings. It carries ONLY
+// the agent's capability surface — prompt, quotas, tools, skills, round cap,
+// structured output, retry (model-effort-v2 removed the model/thinking/
+// reasoning_effort fields: the model and effort are turn-level attributes
+// resolved from the openai.models catalog + openai.default_reasoning_effort +
+// request parameters, and load rejects the removed fields as residuals).
 type AgentConfig struct {
-	Name            string         `yaml:"name"`
-	Model           string         `yaml:"model"`
-	SystemPrompt    string         `yaml:"system_prompt"`
-	MaxTokens       int            `yaml:"max_tokens"`
-	Tools           []string       `yaml:"tools"`
-	MCP             AgentMCPConfig `yaml:"mcp"`
-	Skills          []string       `yaml:"skills"`
-	Thinking        bool           `yaml:"thinking"`
-	ReasoningEffort string         `yaml:"reasoning_effort"`
+	Name         string         `yaml:"name"`
+	SystemPrompt string         `yaml:"system_prompt"`
+	MaxTokens    int            `yaml:"max_tokens"`
+	Tools        []string       `yaml:"tools"`
+	MCP          AgentMCPConfig `yaml:"mcp"`
+	Skills       []string       `yaml:"skills"`
 	// MaxRounds bounds the agent's tool-calling loop — the number of LLM
 	// rounds the loop runs before terminating. When the model keeps emitting
 	// tool_calls without converging, the loop stops at MaxRounds and the agent
@@ -476,13 +566,11 @@ type AgentConfig struct {
 	// round with no tool_calls, finish_reason=stop). This constrains the
 	// content returned to the parent to conform to the schema. Only meaningful
 	// for sub-agents (Liang); Confucius never sets it and Chongzhi's output is
-	// file changes, not structured text. When Thinking is true (reasoning
-	// models), structured output is incompatible, so validate() rejects the
-	// combination unless the agent is willing to degrade to a prompt-only
-	// constraint — enforced by rejecting Thinking+OutputSchema outright here
-	// (the spec's model-gate: only the prompt-only degradation path is
-	// allowed, and that path is driven purely by prompt text, not this field,
-	// so a reasoning agent MUST NOT set output_schema).
+	// file changes, not structured text. Structured output is incompatible
+	// with reasoning (effort != none), so Config.validate fails the load when
+	// any output_schema agent coexists with a non-none
+	// openai.default_reasoning_effort (model-effort-v2's config-level gate),
+	// and the handler 400s requests whose resolved effort is not none.
 	//
 	// Decision (task 6.1, design Open Question): the schema is inlined as a
 	// YAML multi-line string rather than referenced via output_schema_file —
@@ -503,9 +591,11 @@ type AgentsConfig struct {
 }
 
 // validate checks every agent's MCP server references point to a declared
-// global MCP server and that reasoning_effort values are valid. Tool and skill
-// existence are validated later once the remote tool list and skill directories
-// are known.
+// global MCP server. Tool and skill existence are validated later once the
+// remote tool list and skill directories are known. (model-effort-v2 removed
+// the per-agent thinking/effort validation — those fields no longer exist;
+// the output_schema × reasoning gate now lives in Config.validate against
+// openai.default_reasoning_effort.)
 func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 	for _, name := range []string{"confucius", "chongzhi", "liang"} {
 		var cfg *AgentConfig
@@ -516,26 +606,6 @@ func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 			cfg = &a.Chongzhi
 		case "liang":
 			cfg = &a.Liang
-		}
-		if cfg.Thinking {
-			if cfg.ReasoningEffort == "" {
-				cfg.ReasoningEffort = "medium"
-			}
-			if cfg.ReasoningEffort != "low" && cfg.ReasoningEffort != "medium" && cfg.ReasoningEffort != "high" && cfg.ReasoningEffort != "xhigh" && cfg.ReasoningEffort != "max" {
-				return fmt.Errorf("agents.%s.reasoning_effort: invalid value %q (must be low, medium, high, xhigh or max)", name, cfg.ReasoningEffort)
-			}
-		} else if cfg.ReasoningEffort != "" {
-			return fmt.Errorf("agents.%s.reasoning_effort: cannot be set when thinking is disabled", name)
-		}
-		// Structured output model-gate (capability A): thinking (reasoning
-		// models) is incompatible with OpenAI structured output. The spec's
-		// only allowed degradation path for a reasoning model is a prompt-only
-		// constraint, which is driven purely by system-prompt text and does
-		// NOT use OutputSchema. So a reasoning agent MUST NOT set output_schema;
-		// reject the contradictory config at load time rather than failing at
-		// runtime.
-		if cfg.Thinking && strings.TrimSpace(cfg.OutputSchema) != "" {
-			return fmt.Errorf("agents.%s: output_schema cannot be set when thinking is enabled (reasoning models do not support structured output; use prompt-only constraints instead)", name)
 		}
 		// Validate OutputSchema parses as JSON when set (fail fast at load
 		// rather than on the final sub-agent round).
@@ -956,29 +1026,69 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
 
-	// openai.max_context_tokens MUST be an integer. yaml.v3 silently truncates
-	// a fractional value into the int field (12.5 → 12), so the integer-ness
-	// is checked on a shadow decode of the raw value — a float that is not
-	// whole, or any non-numeric value, fails fast here (context-compaction
+	// Shadow decode of the raw YAML for the checks the typed Config cannot
+	// express (the fraction-truncation precedent): (1) model-effort-v2's
+	// residual-field rejection — the removed keys (openai.model, top-level
+	// openai.max_context_tokens, agents.<name>.model|thinking|reasoning_effort)
+	// would otherwise be silently ignored by the typed decode, and a silently
+	// dropped `thinking: true` in particular would turn reasoning off without
+	// a trace; (2) every openai.models[].max_context_tokens MUST be an integer
+	// — yaml.v3 silently truncates a fractional value into the int field
+	// (12.5 → 12), so integer-ness is checked on the raw value (a float that
+	// is not whole, or any non-numeric value, fails fast; context-compaction
 	// spec: "a configured value MUST be a positive integer").
 	var shadow struct {
-		OpenAI struct {
-			MaxContextTokens any `yaml:"max_context_tokens"`
-		} `yaml:"openai"`
+		OpenAI map[string]any `yaml:"openai"`
 	}
 	if err := yaml.Unmarshal([]byte(expanded), &shadow); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
-	switch v := shadow.OpenAI.MaxContextTokens.(type) {
-	case nil, int, uint, int64:
-	case float64:
-		if v != float64(int64(v)) {
-			return nil, fmt.Errorf("config validation error: openai.max_context_tokens: must be a positive integer (got %v)", v)
+	if _, ok := shadow.OpenAI["model"]; ok {
+		return nil, fmt.Errorf("config validation error: openai.model was removed (model-effort-v2): rename it to openai.title_model if it only served title generation; per-turn models now come from the openai.models catalog")
+	}
+	if _, ok := shadow.OpenAI["max_context_tokens"]; ok {
+		return nil, fmt.Errorf("config validation error: openai.max_context_tokens was removed (model-effort-v2): set max_context_tokens on each openai.models catalog entry instead")
+	}
+	var residualAgentFields struct {
+		Agents map[string]map[string]any `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal([]byte(expanded), &residualAgentFields); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	for agentName, fields := range residualAgentFields.Agents {
+		for _, removed := range []string{"model", "thinking", "reasoning_effort"} {
+			if _, ok := fields[removed]; !ok {
+				continue
+			}
+			switch removed {
+			case "model":
+				return nil, fmt.Errorf("config validation error: agents.%s.model was removed (model-effort-v2): the model now comes from the openai.models catalog (openai.default_model or the request `model` parameter)", agentName)
+			case "thinking":
+				return nil, fmt.Errorf("config validation error: agents.%s.thinking was removed (model-effort-v2): thinking is a catalog-entry capability (openai.models[].thinking) plus openai.default_reasoning_effort", agentName)
+			case "reasoning_effort":
+				return nil, fmt.Errorf("config validation error: agents.%s.reasoning_effort was removed (model-effort-v2): promote the level to openai.default_reasoning_effort if it was uniform across agents", agentName)
+			}
 		}
-	default:
-		return nil, fmt.Errorf("config validation error: openai.max_context_tokens: must be a positive integer (got %T)", v)
+	}
+	if rawModels, ok := shadow.OpenAI["models"].([]any); ok {
+		for i, raw := range rawModels {
+			entry, _ := raw.(map[string]any)
+			if entry == nil {
+				continue
+			}
+			switch v := entry["max_context_tokens"].(type) {
+			case nil, int, uint, int64:
+			case float64:
+				if v != float64(int64(v)) {
+					return nil, fmt.Errorf("config validation error: openai.models[%d].max_context_tokens: must be a positive integer (got %v)", i, v)
+				}
+			default:
+				return nil, fmt.Errorf("config validation error: openai.models[%d].max_context_tokens: must be a positive integer (got %T)", i, v)
+			}
+		}
 	}
 
+	cfg.OpenAI.applyDefaults()
 	cfg.Logging.applyDefaults()
 	cfg.OnlyOffice.applyDefaults()
 	cfg.Server.applyDefaults()
@@ -1035,7 +1145,58 @@ func (c *Config) validate() error {
 	if err := c.OpenAI.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
+	// output_schema × reasoning cross-check (model-effort-v2): structured
+	// output and reasoning are mutually exclusive, and with a deployment-level
+	// default effort a parameter-less turn would silently hit the conflict at
+	// runtime — so fail the load when any output_schema agent coexists with a
+	// non-none default. The runtime twin (request-resolved effort != none →
+	// 400) lives in the handler.
+	if c.OpenAI.DefaultReasoningEffort != "none" {
+		for _, name := range []string{"confucius", "chongzhi", "liang"} {
+			var cfg AgentConfig
+			switch name {
+			case "confucius":
+				cfg = c.Agents.Confucius
+			case "chongzhi":
+				cfg = c.Agents.Chongzhi
+			case "liang":
+				cfg = c.Agents.Liang
+			}
+			if strings.TrimSpace(cfg.OutputSchema) != "" {
+				return fmt.Errorf("config validation error: agents.%s.output_schema conflicts with openai.default_reasoning_effort %q (structured output and reasoning are mutually exclusive; use a none default and select effort per request)", name, c.OpenAI.DefaultReasoningEffort)
+			}
+		}
+	}
 	return nil
+}
+
+// ModelCatalog returns the deployment's model catalog (per-request-model-
+// selection, made mandatory by model-effort-v2): the openai.models list
+// verbatim. The catalog is required at load, so there is no implicit
+// synthesized fallback anymore.
+func (c *Config) ModelCatalog() []ModelCatalogEntry {
+	return c.OpenAI.Models
+}
+
+// DefaultModelName returns the effective default model name: openai.default_model
+// when set, else the first catalog entry. This is the model a parameter-less
+// turn resolves to for run-meta/turn_usage recording and the compaction
+// threshold.
+func (c *Config) DefaultModelName() string {
+	if c.OpenAI.DefaultModel != "" {
+		return c.OpenAI.DefaultModel
+	}
+	return c.OpenAI.Models[0].Name
+}
+
+// TitleModelName resolves the title-generation model (model-effort-v2):
+// openai.title_model when set, else the default catalog entry. Wiring calls
+// this once and hands the resolved name to the TitleService.
+func (c *Config) TitleModelName() string {
+	if strings.TrimSpace(c.OpenAI.TitleModel) != "" {
+		return c.OpenAI.TitleModel
+	}
+	return c.DefaultModelName()
 }
 
 // validate checks the logging format and output sink names. Format must be one

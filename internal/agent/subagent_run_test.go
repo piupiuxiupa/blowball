@@ -21,7 +21,7 @@ import (
 // to newTestConfucius, which hands out one shared fake per name).
 func newTestConfuciusWithFactories(t *testing.T, client LLMClient, factories map[string]SubAgentFactory) *Confucius {
 	t.Helper()
-	c, err := NewConfucius(testConfuciusConfig(), client, nil, factories)
+	c, err := NewConfucius(testConfuciusConfig(), client, nil, factories, testTurn())
 	require.NoError(t, err)
 	return c
 }
@@ -52,8 +52,8 @@ const (
 	concurrentWaiterTask   = "collect from source B"
 )
 
-func (a *concurrentSubAgent) Name() string           { return a.name }
-func (a *concurrentSubAgent) SystemPrompt() string   { return "" }
+func (a *concurrentSubAgent) Name() string                         { return a.name }
+func (a *concurrentSubAgent) SystemPrompt() string                 { return "" }
 func (a *concurrentSubAgent) RetryPolicy() config.AgentRetryConfig { return a.policy }
 func (a *concurrentSubAgent) LastRunExecutedTool() bool {
 	a.mu.Lock()

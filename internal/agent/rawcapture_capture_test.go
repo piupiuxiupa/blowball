@@ -157,7 +157,6 @@ func TestStreamChatCapture_GatewayError(t *testing.T) {
 	client := newCapturingClient(sink, srv.URL)
 
 	_, err := client.StreamChat(captureTestCtx(), LLMRequest{
-		Model:    "gpt-test",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	}, nil, nil)
 	require.Error(t, err)
@@ -200,7 +199,6 @@ func TestStreamChatCapture_CancelMidStream(t *testing.T) {
 	// Cancel from inside onToken: after the first delta arrives the stream is
 	// torn down mid-flight.
 	_, err := client.StreamChat(ctx, LLMRequest{
-		Model:    "gpt-test",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	}, func(_ string) error {
 		cancel()

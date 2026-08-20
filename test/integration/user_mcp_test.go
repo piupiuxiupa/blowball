@@ -22,6 +22,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/msgflush"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	redisstore "github.com/lush/blowball/internal/store/redis"
@@ -154,18 +155,17 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 	}}
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test", Models: testCatalog()},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         stream.AgentConfucius,
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    512,
 				Tools:        []string{"mcp_add_server", "mcp_call", "mcp_list_servers", "mcp_remove_server"},
 			},
-			Chongzhi: config.AgentConfig{Name: stream.AgentChongzhi, Model: "gpt-test", SystemPrompt: "you are chongzhi", MaxTokens: 256},
-			Liang:    config.AgentConfig{Name: stream.AgentLiang, Model: "gpt-test", SystemPrompt: "you are liang", MaxTokens: 256},
+			Chongzhi: config.AgentConfig{Name: stream.AgentChongzhi, SystemPrompt: "you are chongzhi", MaxTokens: 256},
+			Liang:    config.AgentConfig{Name: stream.AgentLiang, SystemPrompt: "you are liang", MaxTokens: 256},
 		},
 	}
 
@@ -191,19 +191,23 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
-	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	baseReg := tool.NewRegistry()
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, nil, nil)
 	require.NoError(t, err)
 
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
+	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
+	turnRunH := handler.NewTurnRunHandler(runMgr)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
 
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())
 	handler.RegisterRoutes(r, handler.RouteDeps{
 		AuthMW:      middleware.AuthMiddleware(integrationTestSecret),
 		SendMessage: streamH.SendMessage,
+		TurnCancel:  turnRunH.CancelTurn,
+		TurnEvents:  turnRunH.TurnEvents,
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-umcp/messages", jsonBody(t, map[string]string{"content": "echo hi for me"}))

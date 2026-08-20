@@ -26,11 +26,10 @@ func TestLiang_NoTools_PassesEmptyToolsJSON(t *testing.T) {
 	)
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
-		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
 		// Tools intentionally empty.
-	}, client, tool.NewRegistry())
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -105,11 +104,10 @@ func TestLiang_ToolCall(t *testing.T) {
 
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
-		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
 		Tools:        []string{"ping"},
-	}, client, reg)
+	}, client, reg, testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -173,11 +171,10 @@ func TestLiang_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
-		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
 		Tools:        []string{"ping"},
-	}, client, reg)
+	}, client, reg, testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -212,10 +209,9 @@ func TestLiang_StreamsTokens(t *testing.T) {
 	)
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
-		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
-	}, client, tool.NewRegistry())
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -285,13 +281,10 @@ func TestLiang_ReasoningRequest(t *testing.T) {
 		},
 	)
 	liang, err := NewLiang(config.AgentConfig{
-		Name:            "Liang",
-		Model:           "gpt-test",
-		SystemPrompt:    "you are liang",
-		MaxTokens:       512,
-		Thinking:        true,
-		ReasoningEffort: "low",
-	}, client, tool.NewRegistry())
+		Name:         "Liang",
+		SystemPrompt: "you are liang",
+		MaxTokens:    512,
+	}, client, tool.NewRegistry(), ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "low"})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -324,11 +317,10 @@ func TestLiang_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound(t *testing
 	schema := `{"type":"object","properties":{"verdict":{"type":"string"}},"required":["verdict"],"additionalProperties":false}`
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
-		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
 		OutputSchema: schema,
-	}, client, tool.NewRegistry())
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -369,8 +361,8 @@ func TestLiang_OutputSchema_ToolCall_TerminalRoundOnly(t *testing.T) {
 		// Round 1 (intermediate): emits a tool_call -> must NOT carry response_format.
 		fakeResponse{
 			finishReason: "tool_calls",
-			toolCalls: []ToolCall{{ID: "tc_1", Function: ToolCallFunction{Name: "ping", Arguments: `{"msg":"x"}`}}},
-			usage: Usage{PromptTokens: 5, CompletionTokens: 1, TotalTokens: 6},
+			toolCalls:    []ToolCall{{ID: "tc_1", Function: ToolCallFunction{Name: "ping", Arguments: `{"msg":"x"}`}}},
+			usage:        Usage{PromptTokens: 5, CompletionTokens: 1, TotalTokens: 6},
 		},
 		// Round 2 (terminal): stop -> MUST carry response_format.
 		fakeResponse{
@@ -382,12 +374,11 @@ func TestLiang_OutputSchema_ToolCall_TerminalRoundOnly(t *testing.T) {
 	schema := `{"type":"object","properties":{"verdict":{"type":"string"}},"required":["verdict"]}`
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
-		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
 		Tools:        []string{"ping"},
 		OutputSchema: schema,
-	}, client, reg)
+	}, client, reg, testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -419,10 +410,9 @@ func TestLiang_NoOutputSchema_NoResponseFormat(t *testing.T) {
 	)
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
-		Model:        "gpt-test",
 		SystemPrompt: "you are liang",
 		MaxTokens:    256,
-	}, client, tool.NewRegistry())
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)

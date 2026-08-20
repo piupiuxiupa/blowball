@@ -9,14 +9,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/stream"
 )
 
-// TestMessageFlow_ReasoningConfig_Propagated verifies that when Confucius is
-// configured with thinking=true and reasoning_effort=high, the orchestrator
-// forwards those fields on the LLMRequest, streams reasoning events, persists
-// reasoning content, and echoes it back in multi-turn context.
+// TestMessageFlow_ReasoningConfig_Propagated verifies that with a
+// thinking:true catalog entry and openai.default_reasoning_effort: high
+// (model-effort-v2's deployment-level effort source), the orchestrator
+// forwards the wire family + effort on the LLMRequest, streams reasoning
+// events, persists reasoning content, and echoes it back in multi-turn
+// context.
 func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	llm := newScriptedLLMClient(
 		scriptedLLMResponse{
@@ -38,7 +41,15 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 			usage:        agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 		},
 	)
-	env := newTestEnvWithAgentsConfig(t, llm, agentConfigWithReasoning())
+	env := newTestEnvWithConfig(t, llm, &config.Config{
+		OpenAI: config.OpenAIConfig{
+			APIKey:                 "test",
+			Models:                 []config.ModelCatalogEntry{{Name: "gpt-test", MaxContextTokens: 128000, Thinking: true}},
+			DefaultReasoningEffort: "high",
+		},
+		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
+		Agents: agentConfig(),
+	})
 
 	token := authToken(t, defaultUserID)
 	w := env.postMessage(`{"content":"hello"}`, token)
@@ -94,8 +105,8 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	}
 	require.NotNil(t, reasoningReq, "expected a reasoning LLMRequest")
 	assert.True(t, reasoningReq.Thinking, "Thinking must be true")
-	assert.Equal(t, "high", reasoningReq.ReasoningEffort, "reasoning_effort must match config")
-	assert.Equal(t, 512, reasoningReq.MaxTokens, "max_tokens must match config")
+	assert.Equal(t, "high", reasoningReq.ReasoningEffort, "reasoning_effort must match the deployment default")
+	assert.Equal(t, 512, reasoningReq.MaxTokens, "max_tokens must match agent config")
 
 	// Verify reasoning content was persisted.
 	var foundReasoning bool

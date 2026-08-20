@@ -198,6 +198,15 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		Model:    shared.ChatModel(req.Model),
 		Messages: toOpenAIMessages(req.Messages),
 	}
+	// B2 wire family (model-effort-v2): the shape follows the resolved
+	// catalog entry's thinking capability. A thinking entry ALWAYS carries
+	// reasoning_effort — the literal "none" included, so OpenAI-compatible
+	// gateways actually disable thinking instead of falling back to the
+	// model's own default level — and maps the max_tokens quota to
+	// max_completion_tokens. A non-thinking entry never sends
+	// reasoning_effort and uses plain max_tokens. Sampling parameters
+	// (temperature etc.) are sent on neither family (the former always-0
+	// temperature is dead code, removed).
 	if req.Thinking {
 		params.ReasoningEffort = shared.ReasoningEffort(req.ReasoningEffort)
 		if req.MaxTokens > 0 {
@@ -206,9 +215,6 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	} else {
 		if req.MaxTokens > 0 {
 			params.MaxTokens = openai.Int(int64(req.MaxTokens))
-		}
-		if req.Temperature != 0 {
-			params.Temperature = openai.Float(float64(req.Temperature))
 		}
 	}
 	if len(req.Tools) > 0 {

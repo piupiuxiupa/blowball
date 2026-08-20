@@ -23,6 +23,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/msgflush"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	redisstore "github.com/lush/blowball/internal/store/redis"
@@ -101,12 +102,11 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test", Models: testCatalog()},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         stream.AgentConfucius,
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				MCP: config.AgentMCPConfig{
@@ -118,14 +118,12 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         stream.AgentChongzhi,
-				Model:        "gpt-test",
 				SystemPrompt: "you are chongzhi",
 				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         stream.AgentLiang,
-				Model:        "gpt-test",
 				SystemPrompt: "you are liang",
 				MaxTokens:    256,
 			},
@@ -194,12 +192,11 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test", Models: testCatalog()},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         stream.AgentConfucius,
-				Model:        "gpt-test",
 				SystemPrompt: "you are confucius",
 				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
@@ -207,14 +204,12 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         stream.AgentChongzhi,
-				Model:        "gpt-test",
 				SystemPrompt: "you are chongzhi",
 				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         stream.AgentLiang,
-				Model:        "gpt-test",
 				SystemPrompt: "you are liang",
 				MaxTokens:    256,
 			},
@@ -274,16 +269,19 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
-	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, serverTools, loader, nil)
 	require.NoError(t, err)
 
-	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
+	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
+	turnRunH := handler.NewTurnRunHandler(runMgr)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg, serverTools, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
+	modelsH := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), "none")
 
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())
@@ -295,6 +293,8 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            streamH.SendMessage,
+		TurnCancel:             turnRunH.CancelTurn,
+		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
@@ -306,6 +306,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 		WorkspaceRename:        wsH.Rename,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
+		ModelsList:             modelsH.List,
 	})
 	return r, mysqlFake, redisSvc
 }

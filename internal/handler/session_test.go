@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/stream"
@@ -39,7 +41,7 @@ type stubOrchestrator struct {
 	preCloseSleep time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, _ TurnHooks) ([]stream.StreamEvent, map[string]any, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, _ TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
 	s.gotSkillsDir = skillsDir
@@ -454,11 +456,11 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	deps := sessionDeps(mysql, redis, fs)
 	sessSvc := newSessionSvc(deps)
 	msgSvc := newMessageSvc(deps)
-	titleSvc := service.NewTitleService(nil, mysql, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(nil, mysql, config.OpenAIConfig{TitleModel: "title-model"})
 	// SessionHandler owns CRUD only; MessageStreamHandler owns the streaming
 	// endpoint and the orchestrator dependency. Both share the same services.
-	h := NewSessionHandler(sessSvc, titleSvc)
-	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, stub, "/tmp/blowball-test-data")
+	h := NewSessionHandler(sessSvc, titleSvc, nil)
+	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfig())
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -872,16 +874,27 @@ func TestSendMessage_ProducesDeterministicSSESequence(t *testing.T) {
 
 	// Parse every SSE block (delimited by \n\n) into structured form so we can
 	// assert the exact event sequence: agent_start, token, agent_end, done.
+	// Since turn-detach-resume every frame also carries an id line (the run
+	// event log's stream entry id, echoed back by clients as Last-Event-ID).
 	blocks := strings.Split(strings.TrimRight(w.Body.String(), "\n"), "\n\n")
 	require.Len(t, blocks, 4, "expected exactly 4 SSE events")
 
 	types := make([]string, 0, 4)
+	prevID := 0
 	for _, b := range blocks {
 		lines := strings.Split(b, "\n")
-		require.True(t, strings.HasPrefix(lines[0], "event: "), "block %q", b)
-		types = append(types, strings.TrimPrefix(lines[0], "event: "))
-		require.Len(t, lines, 2, "expected event + data line per block; got %q", b)
-		require.True(t, strings.HasPrefix(lines[1], "data: "), "block %q", b)
+		require.Len(t, lines, 3, "expected id + event + data line per block; got %q", b)
+		require.True(t, strings.HasPrefix(lines[0], "id: "), "block %q", b)
+		require.True(t, strings.HasPrefix(lines[1], "event: "), "block %q", b)
+		require.True(t, strings.HasPrefix(lines[2], "data: "), "block %q", b)
+		// Stream entry ids are strictly increasing cursors ("<seq>-1" here).
+		id := strings.TrimSuffix(strings.TrimPrefix(lines[0], "id: "), "-1")
+		seq := 0
+		_, err := fmt.Sscanf(id, "%d", &seq)
+		require.NoError(t, err, "block %q", b)
+		require.Greater(t, seq, prevID, "ids must strictly increase: %q", b)
+		prevID = seq
+		types = append(types, strings.TrimPrefix(lines[1], "event: "))
 	}
 	assert.Equal(t, []string{"agent_start", "token", "agent_end", "done"}, types)
 }

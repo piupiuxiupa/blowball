@@ -34,7 +34,14 @@ type OrchestratorRunner interface {
 	// capability): the between-rounds Round hook installed on the agent loop
 	// and the event tap serving synchronized mid-turn snapshots. A zero
 	// TurnHooks runs the turn hook-free (the pre-capability behavior).
-	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks) (events []stream.StreamEvent, usage map[string]any, err error)
+	//
+	// override (per-request-model-selection, model-effort-v2) is the
+	// request-resolved turn config — (model, wire-family, effort) — injected
+	// uniformly into all three agents. It is always non-zero: the handler
+	// resolves every request against the mandatory catalog, and a
+	// parameter-less request resolves to the default entry + deployment
+	// default effort.
+	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) (events []stream.StreamEvent, usage map[string]any, err error)
 }
 
 // TurnHooks bundles the per-turn optional seams handed to OrchestratorRunner.
@@ -142,7 +149,7 @@ func NewOrchestratorAdapter(o *agent.Orchestrator) OrchestratorRunner {
 }
 
 // Handle implements OrchestratorRunner.
-func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks) ([]stream.StreamEvent, map[string]any, error) {
+func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	// Tap side: drain innerHub.Events() in a goroutine, forwarding to the
 	// caller's hub, accumulating the raw event stream, and capturing the done
 	// event's usage object (without adding the done event to the persisted
@@ -221,7 +228,7 @@ func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsD
 		}
 	}()
 
-	err := a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round)
+	err := a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, override)
 	innerHub.Close()
 	res := <-eventsCh
 	return res.events, res.usage, err

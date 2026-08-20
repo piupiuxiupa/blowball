@@ -227,14 +227,39 @@ type LLMClient interface {
 // sub-agents set this on their final tool-calling round when configured with
 // an output_schema (capability A).
 type LLMRequest struct {
-	Model           string
-	Messages        []Message
-	Tools           []byte
-	MaxTokens       int
-	Temperature     float32
+	Model     string
+	Messages  []Message
+	Tools     []byte
+	MaxTokens int
+	// Thinking is the turn's WIRE-FAMILY marker (model-effort-v2): a copy of
+	// the resolved catalog entry's thinking capability, not a mode switch.
+	// true → the client always sends ReasoningEffort (literal "none"
+	// included) and maps MaxTokens to max_completion_tokens; false → no
+	// reasoning_effort, plain max_tokens. Sampling parameters (temperature
+	// etc.) are never sent on either family.
 	Thinking        bool
 	ReasoningEffort string
 	ResponseFormat  json.RawMessage
+}
+
+// ModelOverride is the per-turn model/effort configuration resolved from the
+// chat request against the mandatory openai.models catalog (per-request-model-
+// selection, model-effort-v2). The name is historical — since agents no
+// longer carry model fields, this is not an "override" of agent config but
+// the turn's ONLY source of model and effort; the structure survives so the
+// AgentFactory.Build signature and existing tests stay put.
+//
+// It is ALWAYS non-zero in production: the handler resolves every request
+// (a parameter-less request takes the default entry + the deployment default
+// effort), and the factory injects the same value into every agent of the
+// turn. Thinking is the wire-family marker (the entry's thinking capability
+// copy); ReasoningEffort is the effective effort, never empty in the thinking
+// family — "none" rides as a literal value so compatible gateways actually
+// disable thinking.
+type ModelOverride struct {
+	Model           string
+	Thinking        bool
+	ReasoningEffort string
 }
 
 // LLMResponse is the aggregated result of one streaming chat completion call.

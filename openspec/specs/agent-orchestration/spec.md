@@ -70,7 +70,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子
 - **THEN** 系统推送 StreamEvent{Type: "agent_error", Agent: "xxx", Content: "错误描述", Meta: {error_code: "..."}}，然后推送 agent_end 事件
 
 ### Requirement: Agent configuration from file
-每个 Agent 的 system_prompt、model、max_tokens、tools 列表、mcp 配置、skills 配置、thinking 开关、reasoning_effort 配置及 max_rounds（tool-calling 循环上限）SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。未设置或 `<= 0` 的 `max_rounds` SHALL 回退到默认值 `100`。
+每个 Agent 的 name、system_prompt、max_tokens、tools 列表、mcp 配置、skills 配置、output_schema 及 max_rounds（tool-calling 循环上限）SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。agent 配置 SHALL NOT 包含模型、思考开关或思考等级字段——模型与思考等级是 turn 级属性，由模型目录 + 部署默认 + 请求参数解析得出（见 per-request-model-selection），并统一注入该 turn 的全部 agent。未设置或 `<= 0` 的 `max_rounds` SHALL 回退到默认值 `100`。
 
 #### Scenario: Load agent config on startup
 - **WHEN** 服务启动
@@ -78,7 +78,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子
 
 #### Scenario: Configurable tool permissions
 - **WHEN** Agent 配置中 tools 列表为空且 mcp.servers 为空
-- **THEN** 该 Agent 调用 OpenAI 时不传递 tools 参数
+- **THEN** 该 Agent 调用 LLM 时不传递 tools 参数
 
 #### Scenario: Configurable MCP permissions
 - **WHEN** Agent 配置中 mcp.servers 非空
@@ -136,7 +136,7 @@ Confucius 的 dispatch 循环 SHALL 在折叠子 agent usage 进 turn 总量的�
 - **THEN** 该 usage 归入 per-agent 拆分的 `Confucius` 键，与子 agent usage 分离
 
 ### Requirement: Structured sub-agent return contract
-配置了 `output_schema` 的子 agent SHALL 在其 tool-calling 循环的终轮（模型不再 emit tool_call、即将返回最终内容给父级时）启用 OpenAI structured output（`response_format: json_schema`），使返回给父级的内容符合声明 schema。未配置 `output_schema` 的子 agent SHALL 返回自由文本。
+配置了 `output_schema` 的子 agent SHALL 在其 tool-calling 循环的终轮（模型不再 emit tool_call、即将返回最终内容给父级时）启用 OpenAI structured output（`response_format: json_schema`），使返回给父级的内容符合声明 schema。未配置 `output_schema` 的子 agent SHALL 返回自由文本。结构化输出与 reasoning 互斥，该冲突 SHALL 在到达 LLM 之前被拦截：部署默认等级 ≠ none 时配置加载失败（见 agent-reasoning-configuration）；请求解析结果 effort ≠ none 时返回 400（见 per-request-model-selection）。
 
 #### Scenario: Sub-agent with output schema uses structured output on final round
 - **WHEN** 一个配置了 `output_schema` 的子 agent（如 Liang）在其循环中进入终轮（`finish_reason=stop`，无 tool_call）
@@ -147,10 +147,9 @@ Confucius 的 dispatch 循环 SHALL 在折叠子 agent usage 进 turn 总量的�
 - **WHEN** 配置了 `output_schema` 的子 agent 在中间轮仍需调用工具（emit tool_call）
 - **THEN** 这些中间轮的 LLM 请求不携带 `response_format`，避免与 tool_call 冲突
 
-#### Scenario: Reasoning model degrades to prompt-only constraint
-- **WHEN** 配置了 `output_schema` 的子 agent 同时启用 `thinking: true`（reasoning 模型）
-- **THEN** 系统跳过 API 强制的 `response_format`，改为在系统 prompt 中以文本约束要求返回该 schema 的 JSON（model-gate 降级）
-- **AND THEN** 启动校验拒绝 `thinking:true` 且要求强制 structured output 的矛盾配置
+#### Scenario: Reasoning turn never reaches a structured-output agent
+- **WHEN** 某配置了 `output_schema` 的 agent 存在,且部署默认等级为非 `none`,或请求解析结果 effort ≠ none
+- **THEN** 前者使配置加载失败、后者返回 HTTP 400,任何 `output_schema` agent 的 LLM 调用都不会以 effort ≠ none 执行
 
 #### Scenario: Sub-agent without output schema returns free text
 - **WHEN** 一个未配置 `output_schema` 的子 agent（如 Chongzhi）完成执行
@@ -319,7 +318,7 @@ The orchestrator SHALL accept the complete session conversation history recovere
 - **THEN** 该用量 SHALL 折入该 Agent 的 per-agent 与 turn 总用量，与正常回合一致
 
 #### Scenario: Reasoning agent wrap-up round
-- **WHEN** 一个启用 `thinking: true` 的 Agent 触达上限并执行收尾回合
+- **WHEN** 一个运行在 reasoning wire 家族的 Agent（该 turn 解析到 `thinking: true` 的目录条目）触达上限并执行收尾回合
 - **THEN** 收尾回合 SHALL 正常产出 reasoning + content，不发生 response_format 冲突
 
 #### Scenario: Structured-output agent wrap-up round

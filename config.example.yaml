@@ -12,17 +12,20 @@ server:
 openai:
   api_key: ${OPENAI_API_KEY}
   base_url: https://api.openai.com/v1
-  model: gpt-4o-mini
-  # Context-compaction guard (context-compaction capability): the model's max
-  # context window in tokens. When measured context pressure reaches a fixed
-  # 80% of this value (mid-turn: the last LLM round's prompt+completion usage;
-  # turn-start: the previous turn's recorded turn_usage.context_tokens), the
-  # middle history is condensed into a structured checkpoint summary so long
-  # sessions never hit the hard window limit. Zero/unset (the default)
-  # disables compaction entirely — turns behave exactly as before. A
-  # configured value must be a positive integer (a negative value fails
-  # config load).
-  # max_context_tokens: 128000
+  # Title-generation model (model-effort-v2, renamed from the legacy
+  # openai.model): the model used ONLY by the async TitleService. It does not
+  # have to appear in the models catalog below; unset → the default catalog
+  # entry. Title calls always run on the non-thinking wire family (plain
+  # max_tokens, no reasoning_effort).
+  # title_model: gpt-4o-mini
+  # Deployment-level default thinking effort (model-effort-v2): the single
+  # configuration source for the effort axis, overridden per request by the
+  # POST /messages `reasoning_effort` parameter. Closed set
+  # none|low|medium|high|xhigh|max; unset (the default) → none. On a
+  # thinking:false catalog entry a non-none default is clamped to none (WARN)
+  # and the turn proceeds; a non-none default also fails config load when any
+  # agent configures output_schema (structured output × reasoning conflict).
+  # default_reasoning_effort: none
   # Stream idle watchdog (llm-stream-watchdog capability): the maximum allowed
   # gap between consecutive SSE frames of a streaming chat call. The first gap
   # starts when the call is issued, so time-to-first-frame is covered too — a
@@ -37,6 +40,32 @@ openai:
   # means the stream broke. Zero/unset (the default) disables the watchdog —
   # prior behavior exactly (a negative value fails config load).
   # stream_idle_timeout: 2m
+  # Model catalog (per-request-model-selection; MANDATORY since
+  # model-effort-v2 — the config no longer loads without it): the list of
+  # models a chat request may select via the POST /messages body parameters
+  # `model` (a catalog name; unknown → 400 INVALID_MODEL) and
+  # `reasoning_effort` (none|low|medium|high|xhigh|max). Resolution is two
+  # independent axes: model = request || default entry, effort = request ||
+  # default_reasoning_effort. Agents no longer carry model fields — the
+  # resolved values are injected into every agent of the turn. Each entry's
+  # max_context_tokens is that model's context window — the
+  # context-compaction threshold follows the request-selected model (0.8 ×
+  # its window), and turn_usage.model records the resolved name per turn.
+  # Entries need unique non-empty names and positive-integer windows;
+  # default_model (unset → the first entry) must name a catalog entry.
+  # Migration from the pre-model-effort-v2 layout (load now REJECTS the old
+  # keys with a pointed error): openai.model → openai.title_model (if it only
+  # served titles); top-level openai.max_context_tokens → the per-entry
+  # max_context_tokens; agents.<name>.model|thinking|reasoning_effort →
+  # deleted (a uniform effort level moves to default_reasoning_effort).
+  models:
+    - name: gpt-5
+      max_context_tokens: 400000
+      thinking: true
+    - name: glm-4.7
+      max_context_tokens: 200000
+      thinking: false
+  default_model: gpt-5
 
 mysql:
   dsn: ${MYSQL_DSN:user:password@tcp(127.0.0.1:3306)/blowball?charset=utf8mb4&parseTime=true&loc=Local}
@@ -165,7 +194,6 @@ onlyoffice:
 agents:
   confucius:
     name: Confucius
-    model: gpt-4o-mini
     system_prompt: |
       You are Commander Confucius. Your sole responsibility is to understand, decompose, and dispatch tasks. You never perform concrete operations yourself.
 
@@ -212,12 +240,6 @@ agents:
       # never issue overlapping tasks to the same sub-agent, and serialize
       # dependent work across turns.
     max_tokens: 8192
-    # Enable OpenAI reasoning mode (o1/o3/o4-mini/GPT-5 reasoning variants).
-    # When true, max_tokens is sent as max_completion_tokens and reasoning_effort
-    # is included in the request. Omit or set to false for standard models.
-    thinking: true
-    # reasoning_effort: medium  # only valid when thinking: true
-    reasoning_effort: xhigh
     tools: 
       - luban_list_skills
       - luban_read_skill
@@ -243,7 +265,6 @@ agents:
 
   chongzhi:
     name: Chongzhi
-    model: gpt-4o-mini
     system_prompt: |
       You are Execution Expert Chongzhi(冲之). Your sole duty is to complete the assigned concrete task efficiently and accurately. You do not question, refuse, or go beyond the given scope.
 
@@ -282,8 +303,6 @@ agents:
       - Parallel environment: multiple Chongzhi instances may be processing different subtasks simultaneously. Focus only on your own task; do not consider other instances.
       - Deliverables must be accompanied by reproducible evidence (tool name, parameters, outputs). Never provide conclusions alone.
     max_tokens: 8192
-    thinking: true
-    reasoning_effort: xhigh
     # max_rounds: 100  # tool-calling loop cap (unset → default 100). On a cap
     #                   # hit the agent runs one tool-disabled wrap-up round,
     #                   # emits a WARN log + usage.meta.round_capped, and only
@@ -308,7 +327,6 @@ agents:
 
   liang:
     name: Liang
-    model: gpt-4o-mini
     system_prompt: |
       You are Auditor Liang(亮). Your duty is to objectively and rigorously verify task completeness, judging whether the execution result matches the expectation. You never gloss over deviations.
 
@@ -347,8 +365,6 @@ agents:
       - Never modify Chongzhi’s deliverable. Only point out issues and let the executor correct them.
       - For parallel scenarios, pay special attention to interface consistency between subtasks, ensuring no conflicts after assembly.
     max_tokens: 8192
-    thinking: true
-    reasoning_effort: xhigh
     tools:
       - webfetch
       - luban_list_skills
@@ -364,8 +380,10 @@ agents:
     # Structured sub-agent return (capability A): when set, the sub-agent enables
     # OpenAI structured output (response_format: json_schema) on its final
     # tool-calling round so the content handed back to Confucius conforms to
-    # this schema. Cannot be combined with thinking: true (reasoning models do
-    # not support structured output — use prompt-only constraints instead).
+    # this schema. Incompatible with reasoning: a non-none
+    # openai.default_reasoning_effort fails config load when any agent sets
+    # output_schema, and requests resolving to effort != none return 400 (use
+    # prompt-only constraints for reasoning turns).
     # output_schema: |
     #   {
     #     "type": "object",

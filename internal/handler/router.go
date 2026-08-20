@@ -41,6 +41,16 @@ type RouteDeps struct {
 	// SendMessage handles POST /api/v1/sessions/:session_id/messages (SSE). Required.
 	SendMessage gin.HandlerFunc
 
+	// TurnCancel handles POST /api/v1/sessions/:session_id/turns/:run_id/cancel
+	// (turn-detach-resume): cancels the running turn and releases its
+	// resources. Required for the agent partition.
+	TurnCancel gin.HandlerFunc
+
+	// TurnEvents handles GET /api/v1/sessions/:session_id/turns/:run_id/events
+	// (turn-detach-resume): replays + live-tails a run's event log over SSE.
+	// Required for the agent partition.
+	TurnEvents gin.HandlerFunc
+
 	// SessionDelete handles DELETE /api/v1/sessions/:session_id. Required.
 	SessionDelete gin.HandlerFunc
 
@@ -96,6 +106,11 @@ type RouteDeps struct {
 
 	// SkillsList handles GET /api/v1/skills. Required.
 	SkillsList gin.HandlerFunc
+
+	// ModelsList handles GET /api/v1/models (per-request-model-selection):
+	// the selectable model catalog + default. Required for the api partition;
+	// the agent partition does not register it.
+	ModelsList gin.HandlerFunc
 }
 
 // contentRouteSuffix is the URL suffix that selects the text-content handler
@@ -152,6 +167,7 @@ const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
 //	POST /api/v1/workspace/onlyoffice-callback     (query token, save callback)
 //	GET  /api/v1/mcp/tools                        (auth)         [agent]
 //	GET  /api/v1/skills                           (auth)
+//	GET  /api/v1/models                           (auth)
 //
 // The auth group is mounted at /api/v1 and gated by deps.AuthMW; /auth/login
 // is registered outside the group.
@@ -232,21 +248,30 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	v1.POST(onlyOfficeCallbackRoute, deps.QueryTokenAuthMW, deps.WorkspaceOnlyOfficeCallback)
 
 	authed.GET("/skills", deps.SkillsList)
+
+	// Model catalog list (per-request-model-selection): pure config echo, so
+	// it sits in the api partition with the skills list. The agent role does
+	// not register it (frontend model pickers talk to the api port).
+	authed.GET("/models", deps.ModelsList)
 }
 
 // RegisterAgentRoutes mounts the agent-route partition owned by the agent role
 // (and contributed by the all role): the streaming message endpoint
-// POST /api/v1/sessions/:session_id/messages and the MCP tool list
-// GET /api/v1/mcp/tools. Both are gated by deps.AuthMW. The streaming endpoint
-// is the only place the lightweight CRUD path and the heavy agent-execution
-// path meet; isolating its registration here is what lets the api role run
-// with no dependency on the agent layer.
+// POST /api/v1/sessions/:session_id/messages, the turn-lifecycle endpoints
+// POST /api/v1/sessions/:session_id/turns/:run_id/cancel and
+// GET /api/v1/sessions/:session_id/turns/:run_id/events (turn-detach-resume),
+// and the MCP tool list GET /api/v1/mcp/tools. All are gated by deps.AuthMW.
+// The streaming endpoint is the only place the lightweight CRUD path and the
+// heavy agent-execution path meet; isolating its registration here is what
+// lets the api role run with no dependency on the agent layer.
 func RegisterAgentRoutes(r *gin.Engine, deps RouteDeps) {
 	v1 := r.Group("/api/v1")
 	authed := v1.Group("/")
 	authed.Use(deps.AuthMW)
 
 	authed.POST("/sessions/:session_id/messages", deps.SendMessage)
+	authed.POST("/sessions/:session_id/turns/:run_id/cancel", deps.TurnCancel)
+	authed.GET("/sessions/:session_id/turns/:run_id/events", deps.TurnEvents)
 	authed.GET("/mcp/tools", deps.MCPTools)
 }
 

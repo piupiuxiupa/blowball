@@ -17,7 +17,7 @@ import (
 )
 
 func newTitleSvc(m *fakeMySQLStore, llm agent.LLMClient) *TitleService {
-	return NewTitleService(llm, m, config.OpenAIConfig{Model: "gpt-4o-mini"})
+	return NewTitleService(llm, m, config.OpenAIConfig{TitleModel: "gpt-4o-mini"})
 }
 
 func TestGenerateTitle_Success(t *testing.T) {

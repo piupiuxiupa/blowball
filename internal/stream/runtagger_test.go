@@ -104,10 +104,14 @@ func TestTaggedWithRunID_LifecycleDelegatesToInner(t *testing.T) {
 	defer cancel()
 	assert.False(t, tagged.SendCtx(ctx, TokenEvent("Chongzhi", "x")), "sendCtx on closed inner hub must fail")
 
-	// A cancelled context must also win through the view, exactly as on a raw hub.
-	inner2 := NewHub(0)
+	// A cancelled context must also win through the view, exactly as on a raw
+	// hub. The buffer is pre-filled so the send case is NOT also ready: with
+	// both cases ready Go's select would pick randomly and the assertion
+	// would flap (a latent flake in the original form of this test).
+	inner2 := NewHub(1)
 	defer inner2.Close()
 	tagged2 := TaggedWithRunID(inner2, "call_x1")
+	require.True(t, tagged2.Send(TokenEvent("Chongzhi", "filler"))) // fills the buffer
 	cancelled, cancel2 := context.WithCancel(context.Background())
 	cancel2()
 	assert.False(t, tagged2.SendCtx(cancelled, TokenEvent("Chongzhi", "x")))

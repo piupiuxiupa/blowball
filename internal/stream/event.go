@@ -27,9 +27,9 @@ const (
 // declared locally to avoid an import cycle (model depends on packages that may
 // eventually depend on stream). Keep these in sync with internal/model/message.go.
 const (
-	AgentConfucius  = "Confucius"
-	AgentChongzhi = "Chongzhi"
-	AgentLiang    = "Liang"
+	AgentConfucius = "Confucius"
+	AgentChongzhi  = "Chongzhi"
+	AgentLiang     = "Liang"
 )
 
 // Meta keys used by event constructors.

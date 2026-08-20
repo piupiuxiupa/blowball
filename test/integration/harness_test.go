@@ -32,6 +32,7 @@ import (
 	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
 	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
@@ -593,21 +594,18 @@ func agentConfig() config.AgentsConfig {
 	return config.AgentsConfig{
 		Confucius: config.AgentConfig{
 			Name:         stream.AgentConfucius,
-			Model:        "gpt-test",
 			SystemPrompt: "you are confucius",
 			MaxTokens:    512,
 			Tools:        []string{},
 		},
 		Chongzhi: config.AgentConfig{
 			Name:         stream.AgentChongzhi,
-			Model:        "gpt-test",
 			SystemPrompt: "you are chongzhi",
 			MaxTokens:    512,
 			Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
 		},
 		Liang: config.AgentConfig{
 			Name:         stream.AgentLiang,
-			Model:        "gpt-test",
 			SystemPrompt: "you are liang",
 			MaxTokens:    512,
 			Tools:        []string{},
@@ -666,10 +664,10 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	// TitleService is given the same scripted LLM; for these tests we never
 	// script a title round so it falls back to the first-20-chars heuristic.
-	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test", Models: testCatalog()},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: agentConfig(),
 	}
@@ -677,8 +675,10 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
-	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
+	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
+	turnRunH := handler.NewTurnRunHandler(runMgr)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -693,6 +693,8 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            streamH.SendMessage,
+		TurnCancel:             turnRunH.CancelTurn,
+		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
@@ -706,6 +708,7 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 		WorkspaceCreate:        wsH.Create,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
+		ModelsList:             handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort).List,
 	})
 
 	return &testEnv{
@@ -758,18 +761,20 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
-	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
+		OpenAI: config.OpenAIConfig{APIKey: "test", Models: testCatalog()},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: agentConfigWithTools(confuciusTools),
 	}
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
-	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
+	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
+	turnRunH := handler.NewTurnRunHandler(runMgr)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -784,6 +789,8 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            streamH.SendMessage,
+		TurnCancel:             turnRunH.CancelTurn,
+		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
@@ -797,6 +804,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		WorkspaceCreate:        wsH.Create,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
+		ModelsList:             handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort).List,
 	})
 
 	return &testEnv{
@@ -821,20 +829,11 @@ func agentConfigWithTools(confuciusTools []string) config.AgentsConfig {
 	return cfg
 }
 
-// agentConfigWithReasoning returns the standard agent config with Confucius
-// configured for OpenAI reasoning mode.
-func agentConfigWithReasoning() config.AgentsConfig {
-	cfg := agentConfig()
-	cfg.Confucius.Thinking = true
-	cfg.Confucius.ReasoningEffort = "high"
-	return cfg
-}
-
-// newTestEnvWithAgentsConfig is like newTestEnv but lets the caller supply a
-// custom agents configuration. Useful for integration tests that verify
-// per-agent settings (e.g., reasoning effort) propagate through the
-// orchestrator.
-func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg config.AgentsConfig) *testEnv {
+// newTestEnvWithConfig is the general newTestEnv variant taking a full config
+// (e.g. with an openai.models catalog for per-request-model-selection tests).
+// The config drives the orchestrator, the streaming handler's model-selection
+// state, and the models list endpoint, mirroring production wiring.
+func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config) *testEnv {
 	t.Helper()
 
 	t.Cleanup(func() { goleak.VerifyNone(t) })
@@ -866,22 +865,20 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
-	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
-	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test"},
-		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
-		Agents: agentsCfg,
-	}
 	baseReg := tool.NewRegistry()
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
-	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
+	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
+	turnRunH := handler.NewTurnRunHandler(runMgr)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
+	modelsH := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
 
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())
@@ -893,6 +890,8 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            streamH.SendMessage,
+		TurnCancel:             turnRunH.CancelTurn,
+		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,
@@ -906,6 +905,7 @@ func newTestEnvWithAgentsConfig(t *testing.T, llm agent.LLMClient, agentsCfg con
 		WorkspaceCreate:        wsH.Create,
 		MCPTools:               mcpH.Tools,
 		SkillsList:             skillH.List,
+		ModelsList:             modelsH.List,
 	})
 
 	return &testEnv{
@@ -1022,4 +1022,11 @@ func requireEventPresent(t *testing.T, events []string, evt string) {
 		}
 	}
 	require.Greaterf(t, n, 0, "expected SSE event %q in %v", evt, events)
+}
+
+// testCatalog is the mandatory single-entry model catalog every integration
+// env carries (model-effort-v2): a non-thinking default so parameter-less
+// requests resolve to gpt-test / effort none.
+func testCatalog() []config.ModelCatalogEntry {
+	return []config.ModelCatalogEntry{{Name: "gpt-test", MaxContextTokens: 128000, Thinking: false}}
 }

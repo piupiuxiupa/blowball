@@ -19,12 +19,17 @@ import (
 func testConfuciusConfig() config.AgentConfig {
 	return config.AgentConfig{
 		Name:         "Confucius",
-		Model:        "gpt-test",
 		SystemPrompt: "you are confucius",
 		MaxTokens:    512,
 		Tools:        []string{},
 	}
 }
+
+// testTurn is the turn-level model config the direct-constructor tests inject
+// (model-effort-v2): the non-thinking wire family on the shared fake model
+// name that used to ride AgentConfig.Model. Thinking variants construct their
+// own ModelOverride inline.
+func testTurn() ModelOverride { return ModelOverride{Model: "gpt-test"} }
 
 // newTestConfucius builds a Confucius with a registry holding no real tools and
 // per-invocation factories returning the provided sub-agent implementations
@@ -34,7 +39,7 @@ func testConfuciusConfig() config.AgentConfig {
 func newTestConfucius(t *testing.T, client LLMClient, subAgents map[string]Agent) *Confucius {
 	t.Helper()
 	reg := tool.NewRegistry()
-	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents))
+	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents), testTurn())
 	require.NoError(t, err)
 	return c
 }
@@ -612,13 +617,13 @@ func TestConfucius_ReasoningRequest(t *testing.T) {
 		},
 	)
 	cfg := testConfuciusConfig()
-	cfg.Thinking = true
-	cfg.ReasoningEffort = "medium"
+	// The thinking wire family rides the turn config (model-effort-v2), not
+	// the agent config.
 	reg := tool.NewRegistry()
 	c, err := NewConfucius(cfg, client, reg, staticFactories(map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
-	}))
+	}), ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "medium"})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -662,13 +667,13 @@ func eventTypes(events []stream.StreamEvent) []string {
 // the ToolCallTracker signal (for Chongzhi idempotency scenarios); retryPolicy
 // is returned by RetryPolicy().
 type scriptedRetryAgent struct {
-	name        string
-	prompt      string
-	outcomes    []scriptedOutcome
+	name         string
+	prompt       string
+	outcomes     []scriptedOutcome
 	executedTool bool
-	policy      config.AgentRetryConfig
-	mu          sync.Mutex
-	runCalls    int
+	policy       config.AgentRetryConfig
+	mu           sync.Mutex
+	runCalls     int
 }
 
 type scriptedOutcome struct {
@@ -677,10 +682,10 @@ type scriptedOutcome struct {
 	err     error
 }
 
-func (a *scriptedRetryAgent) Name() string                     { return a.name }
-func (a *scriptedRetryAgent) SystemPrompt() string             { return a.prompt }
+func (a *scriptedRetryAgent) Name() string                         { return a.name }
+func (a *scriptedRetryAgent) SystemPrompt() string                 { return a.prompt }
 func (a *scriptedRetryAgent) RetryPolicy() config.AgentRetryConfig { return a.policy }
-func (a *scriptedRetryAgent) LastRunExecutedTool() bool        { return a.executedTool }
+func (a *scriptedRetryAgent) LastRunExecutedTool() bool            { return a.executedTool }
 
 func (a *scriptedRetryAgent) Run(ctx context.Context, _ []Message, hub stream.EventHub) (string, Usage, *TurnBreakdown, error) {
 	a.mu.Lock()
@@ -761,7 +766,7 @@ func subIf(cond bool, sub, other Agent) Agent {
 func TestRetry_TransientErrorRetriedThenSucceeds(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	liang := &scriptedRetryAgent{
-		name: "Liang",
+		name:   "Liang",
 		policy: config.AgentRetryConfig{Enabled: true, MaxAttempts: 2, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
 		outcomes: []scriptedOutcome{
 			{err: transientErr, usage: Usage{TotalTokens: 5}},
@@ -776,8 +781,8 @@ func TestRetry_TransientErrorRetriedThenSucceeds(t *testing.T) {
 func TestRetry_SemanticErrorNotRetried(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	liang := &scriptedRetryAgent{
-		name: "Liang",
-		policy: config.AgentRetryConfig{Enabled: true, MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
+		name:     "Liang",
+		policy:   config.AgentRetryConfig{Enabled: true, MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
 		outcomes: []scriptedOutcome{{err: semanticErr, usage: Usage{TotalTokens: 5}}},
 	}
 	content, calls, _ := runConfuciusRetry(t, liang, ToolInvokeLiang)
@@ -788,7 +793,7 @@ func TestRetry_SemanticErrorNotRetried(t *testing.T) {
 func TestRetry_DisabledPolicyNotRetried(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	liang := &scriptedRetryAgent{
-		name: "Liang",
+		name:   "Liang",
 		policy: config.AgentRetryConfig{Enabled: false, MaxAttempts: 3},
 		outcomes: []scriptedOutcome{
 			{err: transientErr, usage: Usage{TotalTokens: 5}},
@@ -876,8 +881,8 @@ func TestRetry_ExhaustedSurfacesErrorToConfucius(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	// MaxAttempts=1 => no retries at all; transient error surfaces to Confucius.
 	liang := &scriptedRetryAgent{
-		name: "Liang",
-		policy: config.AgentRetryConfig{Enabled: true, MaxAttempts: 1, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
+		name:     "Liang",
+		policy:   config.AgentRetryConfig{Enabled: true, MaxAttempts: 1, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
 		outcomes: []scriptedOutcome{{err: transientErr, usage: Usage{TotalTokens: 5}}},
 	}
 	content, calls, events := runConfuciusRetry(t, liang, ToolInvokeLiang)

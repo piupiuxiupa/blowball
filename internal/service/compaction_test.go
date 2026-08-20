@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/model"
 )
 
@@ -43,11 +42,7 @@ func compactionFixture(n int) ([]model.Message, []agent.Message, []int) {
 }
 
 func newCompactionTestService(m *fakeMySQLStore, r *fakeRedisStore, llm agent.LLMClient, maxTokens int) *CompactionService {
-	return NewCompactionService(newDeps(m, r, &fakeFSStore{}), llm, config.AgentConfig{
-		Name:      "Confucius",
-		Model:     "gpt-test",
-		MaxTokens: 512,
-	}, maxTokens)
+	return NewCompactionService(newDeps(m, r, &fakeFSStore{}), llm, "gpt-test", maxTokens)
 }
 
 func compactionInput(rows []model.Message, msgs []agent.Message, lastRow []int) CompactionInput {
@@ -71,21 +66,29 @@ func TestCompactionService_ShouldCompact(t *testing.T) {
 	if svc.Enabled() == false {
 		t.Fatal("configured service must be enabled")
 	}
-	if got := svc.ThresholdTokens(); got != 800 {
-		t.Errorf("ThresholdTokens = %d, want 800 (80%% of 1000)", got)
+	if got := svc.ThresholdTokens(1000); got != 800 {
+		t.Errorf("ThresholdTokens(1000) = %d, want 800 (80%% of 1000)", got)
+	}
+	if got := svc.ThresholdTokens(5000); got != 4000 {
+		t.Errorf("ThresholdTokens(5000) = %d, want 4000 (the limit is per-turn)", got)
 	}
 	cases := []struct {
 		tokens int
+		limit  int
 		want   bool
 	}{
-		{0, false},   // nothing measured
-		{799, false}, // below 80%
-		{800, true},  // exact threshold triggers
-		{1000, true}, // at the window
+		{0, 1000, false},      // nothing measured
+		{799, 1000, false},    // below 80%
+		{800, 1000, true},     // exact threshold triggers
+		{1000, 1000, true},    // at the window
+		{799, 500, true},      // same size against a smaller window triggers
+		{1000, 5000, false},   // a model switch re-evaluates old turns against the new window
+		{4000, 5000, true},    // exact 80% of the new window
+		{1_000_000, 0, false}, // zero limit: compaction disabled for that model
 	}
 	for _, tc := range cases {
-		if got := svc.ShouldCompact(tc.tokens); got != tc.want {
-			t.Errorf("ShouldCompact(%d) = %v, want %v", tc.tokens, got, tc.want)
+		if got := svc.ShouldCompact(tc.tokens, tc.limit); got != tc.want {
+			t.Errorf("ShouldCompact(%d, %d) = %v, want %v", tc.tokens, tc.limit, got, tc.want)
 		}
 	}
 
@@ -93,8 +96,48 @@ func TestCompactionService_ShouldCompact(t *testing.T) {
 	if disabled.Enabled() {
 		t.Fatal("max_context_tokens 0 must disable the service")
 	}
-	if disabled.ShouldCompact(1_000_000) {
+	if disabled.ShouldCompact(1_000_000, 1000) {
 		t.Fatal("disabled service must never trigger")
+	}
+}
+
+// TestCompactionService_Compact_SummaryModelPerTurn verifies the summary model
+// follows the TURN: CompactionInput.SummaryModel drives both the compaction
+// record and the LLM request, and an empty input falls back to the service's
+// startup default (the deployment default model, model-effort-v2). Each
+// sub-case runs against a fresh store — a second Compact over the same
+// session would merge with the first record's already-shadowed scope.
+func TestCompactionService_Compact_SummaryModelPerTurn(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(50)
+
+	m := &fakeMySQLStore{}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "checkpoint"}}
+	svc := newCompactionTestService(m, &fakeRedisStore{}, llm, 1000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.SummaryModel = "glm-4.7"
+	rec, ok := svc.Compact(context.Background(), in)
+	if !ok {
+		t.Fatal("Compact with a per-turn summary model returned ok=false")
+	}
+	if rec.SummaryModel != "glm-4.7" {
+		t.Errorf("rec.SummaryModel = %q, want glm-4.7", rec.SummaryModel)
+	}
+	if llm.lastReq.Model != "glm-4.7" {
+		t.Errorf("summary LLM request model = %q, want glm-4.7", llm.lastReq.Model)
+	}
+
+	// Empty input falls back to the deployment default model.
+	llmDef := &fakeLLMClient{resp: agent.LLMResponse{Content: "checkpoint"}}
+	svcDef := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llmDef, 1000)
+	rec2, ok := svcDef.Compact(context.Background(), compactionInput(rows, msgs, lastRow))
+	if !ok {
+		t.Fatal("Compact without a summary model returned ok=false")
+	}
+	if rec2.SummaryModel != "gpt-test" {
+		t.Errorf("fallback rec.SummaryModel = %q, want gpt-test (deployment default)", rec2.SummaryModel)
+	}
+	if llmDef.lastReq.Model != "gpt-test" {
+		t.Errorf("fallback summary LLM request model = %q, want gpt-test", llmDef.lastReq.Model)
 	}
 }
 

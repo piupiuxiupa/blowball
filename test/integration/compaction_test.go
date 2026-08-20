@@ -22,6 +22,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/msgflush"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
 	redisstore "github.com/lush/blowball/internal/store/redis"
@@ -67,9 +68,11 @@ func seedHistory(t *testing.T, m *memoryMySQL, sessionID string, n int) {
 }
 
 // newCompactionTestEnv mirrors newTestEnvWithRegistry but wires a real
-// CompactionService with the given openai.max_context_tokens into the
-// streaming handler, so mid-turn and turn-start compaction run end-to-end
-// through the real orchestrator, adapter, event tap, and persistence path.
+// CompactionService and a single-entry model catalog whose window is the
+// given maxContextTokens into the streaming handler, so mid-turn and
+// turn-start compaction run end-to-end through the real orchestrator,
+// adapter, event tap, and persistence path (model-effort-v2: the threshold
+// follows the turn-resolved catalog entry's window).
 func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Registry, confuciusTools []string, maxContextTokens int) *testEnv {
 	t.Helper()
 
@@ -103,20 +106,27 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
-	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	cfg := &config.Config{
-		OpenAI: config.OpenAIConfig{APIKey: "test", Model: "gpt-test", MaxContextTokens: maxContextTokens},
+		OpenAI: config.OpenAIConfig{
+			APIKey: "test",
+			Models: []config.ModelCatalogEntry{
+				{Name: "gpt-test", MaxContextTokens: maxContextTokens, Thinking: false},
+			},
+		},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: agentConfigWithTools(confuciusTools),
 	}
 	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
 	require.NoError(t, err)
 
-	compSvc := service.NewCompactionService(deps, llm, cfg.Agents.Confucius, maxContextTokens)
+	compSvc := service.NewCompactionService(deps, llm, "gpt-test", maxContextTokens)
 
-	sessH := handler.NewSessionHandler(sessSvc, titleSvc)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, handler.NewOrchestratorAdapter(orch), dataDir)
+	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
+	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
+	turnRunH := handler.NewTurnRunHandler(runMgr)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)
@@ -131,6 +141,8 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
 		SendMessage:            streamH.SendMessage,
+		TurnCancel:             turnRunH.CancelTurn,
+		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,
 		SessionUpdateTitle:     sessH.UpdateTitle,
 		WorkspaceList:          wsH.List,

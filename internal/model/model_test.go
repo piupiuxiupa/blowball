@@ -29,7 +29,7 @@ var expectedDBTags = map[string][]string{
 	},
 	"TurnUsage": {
 		"id", "session_id", "trace_id", "user_id", "usage_json",
-		"total_tokens", "context_tokens", "created_at",
+		"total_tokens", "model", "context_tokens", "created_at",
 	},
 	"ContextCompaction": {
 		"id", "session_id", "user_id", "trace_id", "trigger_kind",

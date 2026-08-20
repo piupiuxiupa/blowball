@@ -12,6 +12,7 @@ package mysql
 import (
 	"context"
 	"fmt"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql" // register the mysql driver
 	"github.com/jmoiron/sqlx"
@@ -34,6 +35,10 @@ func New(dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mysql connect: %w", err)
 	}
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	db.SetConnMaxLifetime(1 * time.Hour)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(2)
 	return &Store{db: db}, nil
 }
 

@@ -1,0 +1,140 @@
+# turn-run-lifecycle 变更规格
+
+## ADDED Requirements
+
+### Requirement: Turn 执行独立于发起连接的生命周期
+
+系统 SHALL 在与发起 HTTP 请求解耦的服务端上下文中执行 turn：SSE 连接断开（页面关闭、网络中断、客户端主动断流）SHALL NOT 取消或暂停 turn。turn SHALL 仅因以下原因终止：正常完成（done）、orchestrator 错误（error）、显式取消（cancel）或进程终止。
+
+#### Scenario: 客户端断开后生成继续
+
+- **WHEN** turn 流式输出进行中，发起 SSE 连接断开
+- **THEN** turn 继续执行直到终局（done/error），断开后产生的事件继续写入该 run 的事件日志
+- **AND** 该 turn 的消息持久化（`SaveMessagesBatch`）照常发生
+
+#### Scenario: 断开后重连可看到全部输出
+
+- **WHEN** 客户端断开后通过恢复端点重新 attach 同一 run
+- **THEN** 客户端可回放断开期间错过的事件并继续接收 live 输出
+
+### Requirement: Run 身份签发与下发
+
+系统 SHALL 为每个被接受的消息请求签发 run id，其值 SHALL 等于该请求的 trace_id。run id SHALL 通过 `X-Run-Id` 响应头与首个 `agent_start` 事件的 `meta.run_id` 下发。
+
+#### Scenario: 发起请求获得 run id
+
+- **WHEN** 用户发送 POST /api/v1/sessions/:session_id/messages 且该 session 无运行中 turn
+- **THEN** SSE 响应携带 `X-Run-Id` 头，值为该请求的 trace_id
+- **AND** 首个 `agent_start` 事件的 `meta.run_id` 携带相同值
+
+### Requirement: Session 单活动 run 互斥
+
+系统 SHALL 以 Redis 原子认领（`SET session:{sid}:run {rid} NX`，带 TTL）保证一个 session 同时至多一个运行中 turn。认领失败时 SHALL 返回 409 `SESSION_BUSY` 且 body 携带当前运行中 turn 的 `run_id`。认领 SHALL 在 turn 终局释放， SHALL 在 turn 启动失败路径（如 orchestrator 构建失败）同样释放。
+
+#### Scenario: 运行中 session 再发消息被拒
+
+- **WHEN** session 已有运行中 turn，用户再向该 session POST 消息
+- **THEN** 系统返回 HTTP 409，body 为 `{"error": {"code": "SESSION_BUSY", "message": ..., "run_id": "<当前 run id>"}}`
+- **AND** 运行中 turn 不受影响
+
+#### Scenario: turn 终局后 session 解锁
+
+- **WHEN** 运行中 turn 到达终局（done/error/cancel）
+- **THEN** `session:{sid}:run` 认领被释放，后续向该 session 的消息请求被正常接受
+
+#### Scenario: turn 启动失败释放认领
+
+- **WHEN** 消息请求已认领 session 但 turn 未成功启动（orchestrator 构建失败等）
+- **THEN** 认领被释放，session 不会因失败请求被锁死
+
+#### Scenario: Redis 认领不可达时降级放行
+
+- **WHEN** 认领操作因 Redis 故障无法执行
+- **THEN** 系统 WARN 后无锁执行该 turn（不拒绝请求），与消息持久化的直写降级一致；该 turn 的取消/恢复能力降级但生成不受影响
+
+### Requirement: 按 run id 取消运行中 turn
+
+系统 SHALL 提供取消端点（JWT 鉴权），接收 run id 并取消对应运行中请求、释放其资源。取消 SHALL 复用现有 interrupted-turn 持久化路径持久化部分输出。取消 SHALL 先校验 run 归属（meta 中的 user_id/session_id 与调用者匹配），不匹配返回 404。三种取 SHALL 分别成立：本进程运行中（registry 直接 cancel）、其他副本运行中（写取消标志，运行侧在心跳周期内观察到并取消）、进程已死（心跳过期且状态仍为 running → 标记 interrupted 并强制清理、解锁 session）。
+
+#### Scenario: 取消本进程运行中 turn
+
+- **WHEN** 用户对运行中 turn 调用取消端点，且该 run 在当前进程 registry 中
+- **THEN** turn 被取消，部分输出按 interrupted-turn 路径持久化
+- **AND** run 状态置为 cancelled，session 认领释放
+
+#### Scenario: 取消其他副本上的 turn
+
+- **WHEN** 取消端点所在进程 registry 未命中该 run，但 run 心跳仍存活
+- **THEN** 系统写入取消标志，运行该 turn 的进程在心跳周期内取消 turn，终态为 cancelled
+
+#### Scenario: 清理死 run
+
+- **WHEN** 取消端点发现 run 心跳已过期且状态仍为 running
+- **THEN** run 状态标记为 interrupted，session 认领释放，相关 Redis key 清理
+
+#### Scenario: 取消他人 run
+
+- **WHEN** 用户调用的 run id 其 meta 归属（user_id/session_id）与调用者不匹配
+- **THEN** 系统返回 HTTP 404，且 run 状态不变
+
+### Requirement: 恢复端点重放并续传运行中 turn 的事件流
+
+系统 SHALL 提供恢复端点 `GET /api/v1/sessions/:session_id/turns/:run_id/events`（JWT + 归属校验），以 SSE 返回该 run 的事件：先重放已有事件日志（从头，或从 `Last-Event-ID` 指定的事件之后），再追 live 输出直至终局。SSE 的 `id:` 行 SHALL 等于事件在 Redis Stream 中的 entry id。多个并发订阅（多标签页）SHALL 互不干扰。
+
+#### Scenario: 重开会话自动恢复
+
+- **WHEN** 用户重开一个存在运行中 turn 的 session 并 attach 其 run
+- **THEN** 端点回放自开始以来的全部事件，随后继续推送 live 事件直到终局
+
+#### Scenario: Last-Event-ID 断点续传
+
+- **WHEN** 客户端携带 `Last-Event-ID` attach
+- **THEN** 端点从该事件之后继续推送，无事件丢失且无重复
+
+#### Scenario: attach 已终局的 run
+
+- **WHEN** run 已终局但仍处保留窗口内
+- **THEN** 端点回放全部事件（含终局事件）后关闭流
+
+#### Scenario: attach 超出保留窗口的 run
+
+- **WHEN** run 的 Redis key 已被清理（保留窗口已过或从未存在）
+- **THEN** 端点返回 HTTP 410，客户端回落普通历史读取
+
+### Requirement: Run 事件日志与状态保存于 Redis
+
+系统 SHALL 将 turn 的全部事件（含 `done` 终局事件）逐事件追加到 Redis Stream `run:{rid}:events`，并将 run 元数据（session_id、user_id、status、model、created_at）保存于 `run:{rid}:meta`。运行期间系统 SHALL 周期性刷新 run 心跳（`run:{rid}:alive`，短 TTL）。全部 run key SHALL 有 TTL 兜底（30 分钟）与 Stream 长度上限，事件追加失败 SHALL 仅告警、SHALL NOT 阻塞或中断 turn。
+
+#### Scenario: 事件逐条入日志且含终局
+
+- **WHEN** turn 产生事件（token/tool_call/tool_result/agent_*/done）
+- **THEN** 每个事件作为一条 Stream entry 追加到 `run:{rid}:events`，`done` 事件同样入日志
+
+#### Scenario: Redis 追加失败不阻断 turn
+
+- **WHEN** XADD 失败（Redis 暂不可用）
+- **THEN** 系统记录 WARN 并继续 turn；turn 的消息持久化不受影响（该 turn 不可恢复续传）
+
+### Requirement: 进程崩溃的中断语义
+
+进程死亡时该进程上的运行中 turn SHALL 视为中断：事件日志保留可回放，run 状态 SHALL 由存活检测方（attach 端点或取消端点）在心跳过期后标记为 interrupted 并释放 session 认领；TTL 到期 SHALL 作为最终兜底解锁。
+
+#### Scenario: attach 检测到死 run
+
+- **WHEN** 客户端 attach 一个状态仍为 running 但心跳已过期的 run
+- **THEN** 端点回放已入日志的事件后，合成携带 interrupted 错误信息的终局 `done` 事件并关流
+- **AND** run 状态标记为 interrupted，session 认领释放
+
+### Requirement: Run 资源清理与优雅关闭
+
+turn 到达终局时系统 SHALL：将终态写入 meta、释放 session 认领、在固定保留窗口（60 秒）后清理 run 的事件日志与 meta（TTL 30 分钟兜底）。进程优雅关闭时 SHALL 在有界时间内取消全部运行中 turn（各 turn 走 interrupted-turn 持久化路径）。
+
+#### Scenario: 终局后的保留窗口与清理
+
+- **WHEN** turn 到达终局
+- **THEN** session 认领立即释放；run 事件日志保留 60 秒供晚到 attach，随后被清理
+
+#### Scenario: 优雅关闭取消运行中 turn
+
+- **WHEN** 进程收到关闭信号且存在运行中 turn
+- **THEN** 系统在有界时间内逐个取消这些 turn，部分输出被持久化

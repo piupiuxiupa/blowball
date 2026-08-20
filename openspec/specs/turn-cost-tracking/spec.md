@@ -7,11 +7,11 @@
 ## Requirements
 
 ### Requirement: Per-turn token usage persistence
-系统 SHALL 为每个完成的 chat turn 持久化一条 `turn_usage` 记录，记录该 turn 的总 token 用量与 per-agent 明细，使历史成本可查、可按会话汇总、并为成本护栏提供数据基础。
+系统 SHALL 为每个完成的 chat turn 持久化一条 `turn_usage` 记录，记录该 turn 的总 token 用量、per-agent 明细与该 turn 实际使用的模型名（`model` 列），使历史成本可查、可按会话与按模型汇总、并为成本护栏提供数据基础。
 
 #### Scenario: Successful turn persists usage
 - **WHEN** 一次用户请求处理完成（成功路径），orchestrator 发射 done 事件
-- **THEN** 系统向 `turn_usage` 表插入一行，包含 `session_id`、`trace_id`、`user_id`、`usage_json`（完整 usage 对象）与冗余的 `total_tokens`
+- **THEN** 系统向 `turn_usage` 表插入一行，包含 `session_id`、`trace_id`、`user_id`、`model`（该 turn 解析后的模型名）、`usage_json`（完整 usage 对象）与冗余的 `total_tokens`
 - **AND THEN** `usage_json` 同时包含 `total`（聚合）与 `by_agent`（per-agent 拆分，键为 agent 名）两段
 
 #### Scenario: Parallel sub-agent turn attributes per-agent cost
@@ -22,6 +22,10 @@
 #### Scenario: Turn with no sub-agents
 - **WHEN** 一个 turn 中 Confucius 未调度任何子 agent（直接回答）
 - **THEN** `turn_usage.usage_json.by_agent` 仅含 `Confucius` 一个键，其值等于 `total`
+
+#### Scenario: Model recorded for per-model cost aggregation
+- **WHEN** 一个 turn 以请求参数选择了非缺省模型并完成
+- **THEN** 该 turn 的 `turn_usage.model` 记录该模型名，存量行（本变更前）的 `model` 为 NULL
 
 ### Requirement: Usage written independently of message persistence
 `turn_usage` 的写入 SHALL 作为独立调用执行，SHALL NOT 与消息持久化共事务（消息批次自 Redis-first 改造后不再存在同步 MySQL 事务；即便消息仍处于入库队列中，usage 行也可独立先行落地）。usage 写入失败 SHALL NOT 影响消息持久化（usage 是观测数据，消息是业务数据，优先级不同）。

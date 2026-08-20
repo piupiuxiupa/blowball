@@ -29,6 +29,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/storage"
 	"github.com/lush/blowball/internal/store/fs"
@@ -169,19 +170,22 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 	// orchestrator, OpenAI client, tool registry, or MCP manager.
 	var mcpMgr *mcpclient.Manager
 	var rawFlusher *llmraw.Flusher
+	var runReg *run.Registry
 	switch role {
 	case "all":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
-		agentDeps, mgr, fl := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
 		rawFlusher = fl
+		runReg = reg
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	case "api":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
 	case "agent":
-		agentDeps, mgr, fl := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
 		rawFlusher = fl
+		runReg = reg
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	}
 	if mcpMgr != nil {
@@ -226,6 +230,24 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 		log.Error("server shutdown error", zap.Error(err))
 	}
 	log.Info("server stopped", zap.String("role", role))
+
+	// Cancel every running turn (turn-detach-resume) so graceful shutdown is
+	// bounded: each cancelled turn persists its partial output through the
+	// ordinary interrupted-turn path and finalizes its run state. A short
+	// grace period follows so the detached persistence goroutines enqueue
+	// their batches before the write-behind flushers run their final drains
+	// below; RunKeyTTL backstops anything that misses the window.
+	if runReg != nil {
+		if n := runReg.CancelAll(); n > 0 {
+			log.Info("cancelling running turns for shutdown", zap.Int("turns", n))
+			wctx, wcancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+			if err := runReg.WaitAll(wctx); err != nil {
+				log.Warn("shutdown turn wait timed out; proceeding", zap.Error(err))
+			}
+			wcancel()
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
 
 	// Drain the raw-capture write-behind buffer before the deferred store
 	// closes release Redis/MySQL, so a graceful restart does not leave the
@@ -455,8 +477,14 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 
 	// The api role never calls the LLM; a nil client is safe because
 	// SetManualTitle only touches MySQL (see TitleService.SetManualTitle).
-	titleSvc := service.NewTitleService(nil, rt.mysqlStore, cfg.OpenAI)
-	sessionHandler := handler.NewSessionHandler(sessSvc, titleSvc)
+	// The title config carries the wiring-resolved title model (title_model
+	// or the default catalog entry) — see TitleModelName.
+	titleCfg := cfg.OpenAI
+	titleCfg.TitleModel = cfg.TitleModelName()
+	titleSvc := service.NewTitleService(nil, rt.mysqlStore, titleCfg)
+	// The run store feeds the session list's generating flag; the api role
+	// reads the shared Redis claims but never constructs a run registry.
+	sessionHandler := handler.NewSessionHandler(sessSvc, titleSvc, rt.redisStore.RunStore())
 	workspaceHandler := handler.NewWorkspaceHandler(rt.fsStore, MaxUploadBytes, handler.OnlyOfficeSettings{
 		Secret:            cfg.OnlyOffice.Secret,
 		ServerURL:         cfg.OnlyOffice.ServerURL,
@@ -464,6 +492,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		VersionServiceURL: cfg.OnlyOffice.VersionServiceURL,
 	})
 	skillHandler := handler.NewSkillHandler(rt.fsStore)
+	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
 
 	return handler.RouteDeps{
 		AuthMW:                           middleware.AuthMiddleware(cfg.JWT.Secret),
@@ -487,6 +516,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		WorkspaceOnlyOfficeVersionConfig: workspaceHandler.OnlyOfficeVersionConfig,
 		WorkspaceOnlyOfficeCallback:      workspaceHandler.OnlyOfficeCallback,
 		SkillsList:                       skillHandler.List,
+		ModelsList:                       modelListHandler.List,
 	}
 }
 
@@ -497,7 +527,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 // populated with only the agent-route handlers (SendMessage, MCPTools) plus
 // the auth middleware, the MCP manager so serveRun can defer its Close, and
 // the raw-capture flusher so serveRun can drain it on shutdown.
-func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher) {
+func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry) {
 	cfg := rt.cfg
 	dataDir := rt.dataDir
 	fsStore := rt.fsStore
@@ -581,17 +611,27 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	rawFlusher.Start()
 
 	openAIClient := agent.NewOpenAIClientWithSink(cfg.OpenAI, rawSink)
-	titleSvc := service.NewTitleService(openAIClient, rt.mysqlStore, cfg.OpenAI)
+	// Title generation runs on its own resolved model (openai.title_model or
+	// the default catalog entry) over the shared client.
+	titleCfg := cfg.OpenAI
+	titleCfg.TitleModel = cfg.TitleModelName()
+	titleSvc := service.NewTitleService(openAIClient, rt.mysqlStore, titleCfg)
 
 	// Context-compaction service (context-compaction capability): reuses the
-	// shared OpenAI client (summary calls land in llm_raw_log) and the
-	// Confucius agent config's model. Inert while openai.max_context_tokens
-	// is unset — the handler skips every check and turns behave as before.
+	// shared OpenAI client (summary calls land in llm_raw_log). The summary
+	// fallback is the deployment default model; the max-context argument is
+	// the FALLBACK limit — the default catalog entry's window (the catalog is
+	// mandatory, so compaction is always armed). The handler substitutes the
+	// request-resolved model's window per turn.
+	defaultMaxContext := 0
+	if e, ok := cfg.OpenAI.FindModelCatalogEntry(cfg.DefaultModelName()); ok {
+		defaultMaxContext = e.MaxContextTokens
+	}
 	compSvc := service.NewCompactionService(
 		service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: fsStore},
 		openAIClient,
-		cfg.Agents.Confucius,
-		cfg.OpenAI.MaxContextTokens,
+		cfg.DefaultModelName(),
+		defaultMaxContext,
 	)
 
 	// The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
@@ -604,14 +644,24 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	}
 
 	orchAdapter := handler.NewOrchestratorAdapter(orch)
-	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, orchAdapter, dataDir)
+
+	// Turn-run lifecycle (turn-detach-resume): the Redis run state (event
+	// log, meta, session claim) is shared across agent processes; the
+	// registry is process-local and holds every running turn's cancel. The
+	// registry is returned so serveRun can cancel all running turns within
+	// the bounded graceful-shutdown window.
+	runMgr := run.NewManager(rt.redisStore.RunStore(), run.NewRegistry())
+	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg))
+	turnRunHandler := handler.NewTurnRunHandler(runMgr)
 	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn)
 
 	return handler.RouteDeps{
 		AuthMW:      middleware.AuthMiddleware(cfg.JWT.Secret),
 		SendMessage: streamHandler.SendMessage,
+		TurnCancel:  turnRunHandler.CancelTurn,
+		TurnEvents:  turnRunHandler.TurnEvents,
 		MCPTools:    mcpHandler.Tools,
-	}, mcpManager, rawFlusher
+	}, mcpManager, rawFlusher, runMgr.Registry
 }
 
 // newEngine builds a gin.Engine with the standard middleware chain shared by

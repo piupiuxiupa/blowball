@@ -16,6 +16,7 @@ import (
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/stream"
 )
@@ -71,14 +72,12 @@ func newCompactionHandlerEnv(t *testing.T, stub *stubOrchestrator, llm agent.LLM
 	deps := sessionDeps(mysql, redis, fs)
 	sessSvc := newSessionSvc(deps)
 	msgSvc := newMessageSvc(deps)
-	titleSvc := service.NewTitleService(nil, mysql, config.OpenAIConfig{Model: "title-model"})
+	titleSvc := service.NewTitleService(nil, mysql, config.OpenAIConfig{TitleModel: "title-model"})
 
-	compSvc := service.NewCompactionService(deps, llm, config.AgentConfig{
-		Name: "Confucius", Model: "gpt-test", MaxTokens: 256,
-	}, maxContextTokens)
+	compSvc := service.NewCompactionService(deps, llm, "gpt-test", maxContextTokens)
 
-	h := NewSessionHandler(sessSvc, titleSvc)
-	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, stub, "/tmp/blowball-test-data")
+	h := NewSessionHandler(sessSvc, titleSvc, nil)
+	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfigWindow(maxContextTokens))
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -335,21 +334,25 @@ func TestTurnEventTap_SnapshotAndClose(t *testing.T) {
 }
 
 // TestBuildTurnUsage_ContextTokens checks meta.context_tokens flows into the
-// turn_usage row.
+// turn_usage row, and (per-request-model-selection) that the turn's resolved
+// model name rides the row.
 func TestBuildTurnUsage_ContextTokens(t *testing.T) {
 	usage := map[string]any{
 		"total": map[string]any{"total_tokens": float64(42)},
 		"meta":  map[string]any{"context_tokens": float64(37), "parallel": false},
 	}
-	tu, ok := buildTurnUsage("s", "t", "u", usage)
+	tu, ok := buildTurnUsage("s", "t", "u", "glm-4.7", usage)
 	require.True(t, ok)
 	require.Equal(t, 42, tu.TotalTokens)
 	require.Equal(t, 37, tu.ContextTokens)
+	require.Equal(t, "glm-4.7", tu.Model, "the turn's resolved model must ride the row")
 
-	// Absent meta/context_tokens → 0, not a failure.
-	tu2, ok := buildTurnUsage("s", "t", "u", map[string]any{
+	// Absent meta/context_tokens → 0, not a failure. An empty model is kept
+	// verbatim (the store's NULLIF maps it to NULL).
+	tu2, ok := buildTurnUsage("s", "t", "u", "", map[string]any{
 		"total": map[string]any{"total_tokens": 3},
 	})
 	require.True(t, ok)
 	require.Equal(t, 0, tu2.ContextTokens)
+	require.Empty(t, tu2.Model)
 }

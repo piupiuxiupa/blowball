@@ -6,12 +6,16 @@ import (
 	"testing"
 )
 
-// validBaseYAML is the minimal loadable config; the max_context_tokens cases
-// below splice a value into the openai block via openaiExtra ("" for unset).
+// validBaseYAML is the minimal loadable config under model-effort-v2: a
+// mandatory one-entry openai.models catalog and no model fields on the agent.
+// The residual-field cases below splice removed keys into the openai block
+// via openaiExtra ("" for a clean load).
 const validBaseYAML = `
 openai:
   api_key: sk-test
-  model: gpt-4o-mini
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 %s
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
@@ -21,78 +25,70 @@ jwt:
 agents:
   confucius:
     name: Confucius
-    model: gpt-4o-mini
     system_prompt: "you are confucius"
 `
 
-func loadWithMaxContextTokens(t *testing.T, extra string) (*Config, error) {
+// loadWithRemovedOpenAIField loads validBaseYAML with an extra raw line
+// spliced into the openai block.
+func loadWithRemovedOpenAIField(t *testing.T, extra string) (*Config, error) {
 	t.Helper()
 	return Load(writeTempYAML(t, fmt.Sprintf(validBaseYAML, extra)))
 }
 
-// TestLoad_MaxContextTokens_UnsetIsZeroDisabled covers the default: an omitted
-// openai.max_context_tokens loads as 0, which the compaction service reads as
-// "disabled" (context-compaction spec: zero value disables compaction).
-func TestLoad_MaxContextTokens_UnsetIsZeroDisabled(t *testing.T) {
-	cfg, err := loadWithMaxContextTokens(t, "")
+// TestLoad_OpenAIModelResidualRejected: openai.model was renamed
+// openai.title_model by model-effort-v2; a residual key fails load with an
+// error pointing at the migration (any value, including a null/empty one,
+// counts as residual — the typed decode would silently drop it).
+func TestLoad_OpenAIModelResidualRejected(t *testing.T) {
+	for _, extra := range []string{
+		"  model: gpt-4o-mini\n",
+		"  model: \"\"\n",
+		"  model:\n",
+	} {
+		_, err := loadWithRemovedOpenAIField(t, extra)
+		if err == nil {
+			t.Fatalf("Load accepted residual openai.model %q; want migration error", extra)
+		}
+		if !strings.Contains(err.Error(), "openai.model was removed") || !strings.Contains(err.Error(), "openai.title_model") {
+			t.Errorf("error %q does not point at the openai.title_model migration", err)
+		}
+	}
+}
+
+// TestLoad_OpenAIMaxContextTokensResidualRejected: the top-level
+// openai.max_context_tokens moved into the catalog entries; every residual
+// form (zero, negative, fractional, string) fails load pointing at the
+// replacement — never silently ignored, never rounded.
+func TestLoad_OpenAIMaxContextTokensResidualRejected(t *testing.T) {
+	for _, extra := range []string{
+		"  max_context_tokens: 0\n",
+		"  max_context_tokens: 128000\n",
+		"  max_context_tokens: -5\n",
+		"  max_context_tokens: 12.5\n",
+		"  max_context_tokens: \"128k\"\n",
+		"  max_context_tokens:\n",
+	} {
+		_, err := loadWithRemovedOpenAIField(t, extra)
+		if err == nil {
+			t.Fatalf("Load accepted residual openai.max_context_tokens %q; want migration error", extra)
+		}
+		if !strings.Contains(err.Error(), "openai.max_context_tokens was removed") || !strings.Contains(err.Error(), "openai.models") {
+			t.Errorf("error %q does not point at the openai.models catalog migration", err)
+		}
+	}
+}
+
+// TestLoad_BaseConfigLoads: the new minimal base config loads cleanly with
+// the catalog required (regression guard for the harness itself).
+func TestLoad_BaseConfigLoads(t *testing.T) {
+	cfg, err := loadWithRemovedOpenAIField(t, "")
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.OpenAI.MaxContextTokens != 0 {
-		t.Errorf("OpenAI.MaxContextTokens = %d, want 0 (unset disables compaction)", cfg.OpenAI.MaxContextTokens)
+	if got := cfg.DefaultModelName(); got != "gpt-4o-mini" {
+		t.Errorf("DefaultModelName() = %q, want gpt-4o-mini", got)
 	}
-}
-
-// TestLoad_MaxContextTokens_ExplicitZero passes: an explicit zero is the same
-// documented off switch as omitting the key.
-func TestLoad_MaxContextTokens_ExplicitZero(t *testing.T) {
-	cfg, err := loadWithMaxContextTokens(t, "  max_context_tokens: 0")
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.OpenAI.MaxContextTokens != 0 {
-		t.Errorf("OpenAI.MaxContextTokens = %d, want 0", cfg.OpenAI.MaxContextTokens)
-	}
-}
-
-// TestLoad_MaxContextTokens_Positive passes a positive window through.
-func TestLoad_MaxContextTokens_Positive(t *testing.T) {
-	cfg, err := loadWithMaxContextTokens(t, "  max_context_tokens: 128000")
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.OpenAI.MaxContextTokens != 128000 {
-		t.Errorf("OpenAI.MaxContextTokens = %d, want 128000", cfg.OpenAI.MaxContextTokens)
-	}
-}
-
-// TestLoad_MaxContextTokens_NegativeRejected: a negative value is necessarily
-// a typo, and the spec's "Invalid value fails config load" scenario requires
-// the server not to start.
-func TestLoad_MaxContextTokens_NegativeRejected(t *testing.T) {
-	_, err := loadWithMaxContextTokens(t, "  max_context_tokens: -5")
-	if err == nil {
-		t.Fatal("Load accepted a negative openai.max_context_tokens; want config validation error")
-	}
-	if !strings.Contains(err.Error(), "openai.max_context_tokens") {
-		t.Errorf("error %q does not name openai.max_context_tokens", err)
-	}
-}
-
-// TestLoad_MaxContextTokens_NonIntegerRejected: yaml.v3 silently truncates a
-// fractional value into an int field (12.5 → 12), so the loader shadow-checks
-// the raw value — a non-integer MUST fail load, not silently round.
-func TestLoad_MaxContextTokens_NonIntegerRejected(t *testing.T) {
-	// 12.5 is caught by the shadow check, which names the field.
-	_, err := loadWithMaxContextTokens(t, "  max_context_tokens: 12.5")
-	if err == nil {
-		t.Fatal("Load accepted fractional openai.max_context_tokens 12.5; want an error")
-	}
-	if !strings.Contains(err.Error(), "openai.max_context_tokens") {
-		t.Errorf("error %q does not name openai.max_context_tokens", err)
-	}
-	// A string value fails the main unmarshal itself (line-level error).
-	if _, err := loadWithMaxContextTokens(t, `  max_context_tokens: "128k"`); err == nil {
-		t.Fatal(`Load accepted string openai.max_context_tokens "128k"; want an error`)
+	if cfg.OpenAI.DefaultReasoningEffort != "none" {
+		t.Errorf("DefaultReasoningEffort = %q, want none (normalized default)", cfg.OpenAI.DefaultReasoningEffort)
 	}
 }

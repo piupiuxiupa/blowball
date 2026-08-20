@@ -10,21 +10,23 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
 )
 
 // Fixed context-compaction parameters (context-compaction capability). The
-// trigger threshold is a hard-coded 80% of openai.max_context_tokens —
-// intentionally NOT configurable (design D-risk: keep it one constant so a
-// future config knob is a one-line change); retainedTail is the number of
-// trailing agent messages kept verbatim on compaction.
+// trigger threshold is a hard-coded 80% of the resolved catalog entry's
+// max_context_tokens — intentionally NOT configurable (design D-risk: keep it
+// one constant so a future config knob is a one-line change); retainedTail is
+// the number of trailing agent messages kept verbatim on compaction;
+// summaryMaxTokens bounds the one-shot checkpoint-summary call (model-effort-v2
+// removed the Confucius-agent quota it used to borrow).
 const (
 	compactionThresholdNumerator   = 8
 	compactionThresholdDenominator = 10
 	compactionRetainedTail         = 5
+	compactionSummaryMaxTokens     = 4096
 )
 
 // compactionSystemPrompt is the structured checkpoint instruction handed to
@@ -57,56 +59,83 @@ Rules:
 // sessions.context_compacted flag). Every failure is best-effort — a WARN and
 // a skipped compaction never block the conversation.
 //
-// The service is inert while openai.max_context_tokens is unset (0): Enabled
+// The service is inert while its fallback max context is unset (0): Enabled
 // reports false and callers skip every check, reproducing the pre-capability
-// behavior byte for byte.
+// behavior byte for byte. Per-request-model-selection moved the effective
+// threshold to the TURN: callers pass the request-selected model's window to
+// ShouldCompact/ThresholdTokens, and the fallback here only decides whether
+// the capability is armed at all (and thresholds parameter-less turns).
 type CompactionService struct {
-	deps      SessionDeps
-	llm       agent.LLMClient
-	confucius config.AgentConfig
-	// maxContextTokens is openai.max_context_tokens; 0 disables compaction.
+	deps SessionDeps
+	llm  agent.LLMClient
+	// defaultSummaryModel is the fallback summary model (model-effort-v2):
+	// the deployment's default catalog entry name (Config.DefaultModelName),
+	// resolved at wiring. A turn that knows its resolved model overrides it
+	// via CompactionInput.SummaryModel.
+	defaultSummaryModel string
+	// maxContextTokens is the FALLBACK effective max context for turns whose
+	// selection config carries no window (hand-built tests): the default
+	// catalog entry's window in production. 0 disables compaction entirely.
 	maxContextTokens int
 }
 
 // NewCompactionService wires a CompactionService from the shared store deps,
 // the LLM client (the same OpenAIClient the agents use, so summary calls land
-// in llm_raw_log like any other call), the Confucius agent config (the
-// summary reuses its model — no separate summarizer model by design), and the
-// configured max context window.
-func NewCompactionService(deps SessionDeps, llm agent.LLMClient, confucius config.AgentConfig, maxContextTokens int) *CompactionService {
+// in llm_raw_log like any other call), the fallback summary model name (the
+// deployment default — pass Config.DefaultModelName()), and the fallback max
+// context window.
+func NewCompactionService(deps SessionDeps, llm agent.LLMClient, defaultSummaryModel string, maxContextTokens int) *CompactionService {
 	return &CompactionService{
-		deps:             deps,
-		llm:              llm,
-		confucius:        confucius,
-		maxContextTokens: maxContextTokens,
+		deps:                deps,
+		llm:                 llm,
+		defaultSummaryModel: defaultSummaryModel,
+		maxContextTokens:    maxContextTokens,
 	}
 }
 
-// Enabled reports whether compaction is configured at all. Zero (unset
-// max_context_tokens) means disabled: no trigger checks fire anywhere.
+// Enabled reports whether compaction is configured at all. Zero fallback
+// max context means disabled: no trigger checks fire anywhere.
 func (s *CompactionService) Enabled() bool {
 	return s != nil && s.maxContextTokens > 0
 }
 
-// ThresholdTokens returns the absolute trigger threshold (80% of the
-// configured max context). Integer math: the comparison in ShouldCompact is
-// tokens*10 >= max*8, so an exact tie at the threshold triggers.
-func (s *CompactionService) ThresholdTokens() int {
-	if !s.Enabled() {
+// FallbackMaxContext exposes the fallback max context (the constructor's
+// maxContextTokens) so handlers whose model-selection state carries no
+// default window (zero ModelSelectionConfig — tests, or a wiring that predates
+// per-request-model-selection) still threshold parameter-less turns exactly
+// as before. Production wiring derives both from the same config, so they
+// agree and this accessor is only a safety net.
+func (s *CompactionService) FallbackMaxContext() int {
+	if s == nil {
 		return 0
 	}
-	return s.maxContextTokens * compactionThresholdNumerator / compactionThresholdDenominator
+	return s.maxContextTokens
+}
+
+// ThresholdTokens returns the absolute trigger threshold (80% of the given
+// max context). Integer math: the comparison in ShouldCompact is
+// tokens*10 >= max*8, so an exact tie at the threshold triggers. A
+// non-positive limit (compaction disabled for that model) yields 0.
+func (s *CompactionService) ThresholdTokens(maxContextTokens int) int {
+	if !s.Enabled() || maxContextTokens <= 0 {
+		return 0
+	}
+	return maxContextTokens * compactionThresholdNumerator / compactionThresholdDenominator
 }
 
 // ShouldCompact reports whether the measured context pressure (the
 // authoritative prompt+completion of the last LLM round, or the latest
 // turn_usage.context_tokens for turn-start checks) has reached the trigger
-// threshold. Disabled service → always false.
-func (s *CompactionService) ShouldCompact(contextTokens int) bool {
-	if !s.Enabled() {
+// threshold of the GIVEN max context. The limit is a per-turn value
+// (per-request-model-selection): the request-selected catalog model's
+// max_context_tokens — callers compare the stored raw size against the
+// CURRENT request's model, so a model switch re-evaluates old turns against
+// the new window. Disabled service or non-positive limit → always false.
+func (s *CompactionService) ShouldCompact(contextTokens, maxContextTokens int) bool {
+	if !s.Enabled() || maxContextTokens <= 0 {
 		return false
 	}
-	return contextTokens*compactionThresholdDenominator >= s.maxContextTokens*compactionThresholdNumerator
+	return contextTokens*compactionThresholdDenominator >= maxContextTokens*compactionThresholdNumerator
 }
 
 // LatestContextTokens returns the session's most recent recorded end-of-turn
@@ -154,6 +183,11 @@ type CompactionInput struct {
 	Rows          []model.Message
 	AgentMsgs     []agent.Message
 	LastRow       []int
+	// SummaryModel (per-request-model-selection) is the model this turn
+	// resolved to — the checkpoint summary call uses it, and it is recorded
+	// on the compaction row. Empty falls back to the service's startup
+	// default (the deployment's default catalog entry, model-effort-v2).
+	SummaryModel string
 }
 
 // Compact runs one compaction attempt: it selects the compressible range
@@ -216,7 +250,15 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	middle := in.AgentMsgs[scopeStart:tailStart]
 	boundaryRow := in.Rows[in.LastRow[tailStart-1]]
 
-	content, usage, ok := s.summarize(ctx, log, prior, middle)
+	// The summary model follows the TURN (per-request-model-selection): the
+	// resolved catalog model, falling back to the deployment default when
+	// the caller passes none.
+	summaryModel := in.SummaryModel
+	if summaryModel == "" {
+		summaryModel = s.defaultSummaryModel
+	}
+
+	content, usage, ok := s.summarize(ctx, log, prior, middle, summaryModel)
 	if !ok {
 		return nil, false
 	}
@@ -235,7 +277,7 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		// instruction), so its prompt size is the faithful measured proxy for
 		// the shadowed content.
 		ShadowedTokens:          usage.PromptTokens,
-		SummaryModel:            s.confucius.Model,
+		SummaryModel:            summaryModel,
 		SummaryPromptTokens:     usage.PromptTokens,
 		SummaryCompletionTokens: usage.CompletionTokens,
 	}
@@ -266,9 +308,11 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 // prior checkpoint when the session was compacted before. Only the returned
 // text is retained; reasoning content and tool calls are discarded (never
 // persisted into the record). The call itself flows through the ordinary
-// OpenAI client, so raw capture (llm_raw_log) observes it for free.
-func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prior *model.ContextCompaction, middle []agent.Message) (string, agent.Usage, bool) {
-	if s.llm == nil || s.confucius.Model == "" {
+// OpenAI client, so raw capture (llm_raw_log) observes it for free. model is
+// the TURN's selected model (per-request-model-selection) — the summary rides
+// the same model the agents run this turn.
+func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prior *model.ContextCompaction, middle []agent.Message, model string) (string, agent.Usage, bool) {
+	if s.llm == nil || model == "" {
 		log.Warn("compaction summarizer unavailable (no llm client or model); skipping compaction")
 		return "", agent.Usage{}, false
 	}
@@ -285,12 +329,12 @@ func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prio
 	// capture log; session_id already rides the caller's context.
 	agentCtx := agent.WithAgentName(ctx, "compaction")
 	req := agent.LLMRequest{
-		Model: s.confucius.Model,
+		Model: model,
 		Messages: []agent.Message{
 			{Role: "system", Content: compactionSystemPrompt},
 			{Role: "user", Content: b.String()},
 		},
-		MaxTokens: s.confucius.MaxTokens,
+		MaxTokens: compactionSummaryMaxTokens,
 	}
 
 	resp, err := s.llm.StreamChat(agentCtx, req, nil, nil)

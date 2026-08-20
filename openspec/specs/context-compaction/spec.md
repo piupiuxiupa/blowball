@@ -2,19 +2,19 @@
 
 ## Purpose
 
-Define the context-compaction capability: when conversation context pressure reaches 80% of the configured `openai.max_context_tokens` window, the compressible middle history is condensed into a structured checkpoint summary (first message and recent tail preserved) so long sessions never grow unbounded into the provider's hard window limit. Covers trigger conditions and authoritative measurement, range selection with tool-pairing boundaries, summary generation, compaction record storage (MySQL + Redis cache + session flag), stitched model context, the mid-turn pause-compact-continue flow, idempotent persistence, and best-effort failure degradation — with the display path untouched.
+Define the context-compaction capability: when conversation context pressure reaches 80% of the request-selected catalog entry's `max_context_tokens` window, the compressible middle history is condensed into a structured checkpoint summary (first message and recent tail preserved) so long sessions never grow unbounded into the provider's hard window limit. Covers trigger conditions and authoritative measurement, range selection with tool-pairing boundaries, summary generation, compaction record storage (MySQL + Redis cache + session flag), stitched model context, the mid-turn pause-compact-continue flow, idempotent persistence, and best-effort failure degradation — with the display path untouched.
 
 ## Requirements
 
 ### Requirement: Compaction is disabled without a configured max context
-The system SHALL treat a zero or missing `openai.max_context_tokens` value as compaction-disabled: no trigger checks fire, no compaction records are written, and the model context path behaves exactly as before this capability existed. A configured value MUST be a positive integer; any other value SHALL fail configuration load.
+The system SHALL treat a missing effective max-context value for the selected model as compaction-disabled: no trigger checks fire, no compaction records are written, and the model context path behaves exactly as before this capability existed. The effective max context for a turn SHALL be **exclusively** the request-selected catalog model's `max_context_tokens` (with the catalog mandatory, every turn resolves to an entry; the legacy top-level `openai.max_context_tokens` field no longer exists). A configured value MUST be a positive integer; any other value SHALL fail configuration load.
 
 #### Scenario: Zero value disables compaction
-- **WHEN** `openai.max_context_tokens` is unset or `0`
+- **WHEN** the selected model's effective max context is `0` (a catalog entry with `max_context_tokens: 0`)
 - **THEN** no context pressure check runs and conversation turns behave identically to the pre-compaction system
 
 #### Scenario: Invalid value fails config load
-- **WHEN** `openai.max_context_tokens` is negative or non-integer
+- **WHEN** a catalog entry's `max_context_tokens` is negative or non-integer
 - **THEN** configuration loading returns an error and the server does not start
 
 ### Requirement: Context pressure is measured from authoritative token usage
@@ -33,15 +33,19 @@ The system SHALL measure context pressure using authoritative provider usage, ne
 - **THEN** the sum of all rounds' usage is not used as the context pressure measure
 
 ### Requirement: Compaction triggers at 80 percent of configured max context with a non-empty middle
-The system SHALL trigger compaction when measured context reaches `0.8 × max_context_tokens` AND the compressible middle (everything after the first message and before the retained tail) is non-empty. The 80 percent threshold is fixed and not configurable.
+The system SHALL trigger compaction when measured context reaches `0.8 × effective max context` — the request-selected model's `max_context_tokens` for that turn — AND the compressible middle (everything after the first message and before the retained tail) is non-empty. The 80 percent threshold is fixed and not configurable.
 
 #### Scenario: Threshold reached with compressible middle
-- **WHEN** measured context is at or above `0.8 × max_context_tokens` and messages exist between the first message and the retained tail
+- **WHEN** measured context is at or above `0.8 × the selected model's max_context_tokens` and messages exist between the first message and the retained tail
 - **THEN** compaction runs
 
 #### Scenario: Threshold reached but middle is empty
 - **WHEN** measured context reaches the threshold but the conversation consists only of the first message and the retained tail
 - **THEN** compaction is skipped and the conversation continues unchanged
+
+#### Scenario: Model switch changes the threshold
+- **WHEN** the previous turn used a 400k-context model and ended at 300k context tokens, and the new request selects a 200k-context model
+- **THEN** the turn-start check compares the stored 300k against `0.8 × 200k` and compaction runs before the first LLM call
 
 ### Requirement: Compaction preserves the first message, the last five agent messages, and tool pairing boundaries
 The system SHALL select the compaction range on the reconstructed agent-message sequence: the first user message is never compacted, the last five agent messages (complete conversation units after `MessagesToAgentMessages`) are retained verbatim, and everything between them is shadowed. The range boundary SHALL NOT split an assistant message carrying tool calls from its corresponding tool result messages. The boundary SHALL be persisted as the composite cursor `(msg_time, msg_index, id)` of the last shadowed persistence row.
@@ -63,7 +67,7 @@ The system SHALL select the compaction range on the reconstructed agent-message 
 - **THEN** it carries the shadowed range's final persistence row as `(boundary_msg_time, boundary_msg_index, boundary_msg_id)`
 
 ### Requirement: Summary generation uses the current agent model with a structured checkpoint template
-The system SHALL generate the summary using the orchestrating agent's (Confucius) configured model via the existing LLM client. The summarization instruction SHALL require a structured checkpoint (sections for primary intent, technical concepts, files and code, errors and fixes, pending jobs, current work, next step, critical context) preserving exact paths, commands, error strings, identifiers, and numeric values. Only returned text SHALL be retained; reasoning content and tool calls SHALL be discarded.
+The system SHALL generate the summary using the turn's request-selected model (the same model the three agents run for that turn) via the existing LLM client. The summarization instruction SHALL require a structured checkpoint (sections for primary intent, technical concepts, files and code, errors and fixes, pending jobs, current work, next step, critical context) preserving exact paths, commands, error strings, identifiers, and numeric values. Only returned text SHALL be retained; reasoning content and tool calls SHALL be discarded.
 
 #### Scenario: Structured summary replaces the middle
 - **WHEN** compaction completes
@@ -159,14 +163,14 @@ Messages persisted by a mid-turn flush SHALL carry deterministic client message 
 - **THEN** `msgs:{session_id}` gains only the post-flush messages, not a second copy of the flushed prefix
 
 ### Requirement: Turn usage records end-of-turn context size
-The system SHALL record, for every completed turn, the last LLM round's `prompt_tokens + completion_tokens` in `turn_usage.context_tokens`, enabling turn-start preventive compaction checks without estimation.
+The system SHALL record, for every completed turn, the last LLM round's `prompt_tokens + completion_tokens` in `turn_usage.context_tokens` as a raw, model-independent size, enabling turn-start preventive compaction checks without estimation. The turn-start check SHALL compare this stored raw size against the CURRENT request's selected-model threshold.
 
 #### Scenario: Context size persisted per turn
 - **WHEN** a turn with at least one LLM call completes
 - **THEN** its `turn_usage` row carries the final round's context size in `context_tokens`
 
 #### Scenario: Turn start compacts before sending when context is already over threshold
-- **WHEN** a new message is sent and the latest `turn_usage.context_tokens` is at or above `0.8 × max_context_tokens` with a non-empty middle
+- **WHEN** a new message is sent and the latest `turn_usage.context_tokens` is at or above `0.8 × the selected model's max_context_tokens` with a non-empty middle
 - **THEN** compaction runs before the first LLM call of the turn
 
 ### Requirement: Compaction failures never block the conversation

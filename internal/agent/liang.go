@@ -17,9 +17,13 @@ import (
 // in its config (built-ins and MCP proxies), but unlike Confucius it never
 // dispatches sub-agents.
 type Liang struct {
-	cfg           config.AgentConfig
-	client        LLMClient
-	toolRegistry  *tool.Registry
+	cfg          config.AgentConfig
+	client       LLMClient
+	toolRegistry *tool.Registry
+	// turn is the turn-level model/effort configuration (model-effort-v2),
+	// injected at construction — agents no longer carry model fields. See
+	// Confucius.turn.
+	turn          ModelOverride
 	toolsJSON     []byte
 	toolsIsNotNil bool
 	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
@@ -39,7 +43,9 @@ type Liang struct {
 
 // NewLiang builds a Liang agent. reg contains the tools this Liang instance is
 // allowed to call, filtered by the orchestrator from the process-wide registry.
-func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry) (*Liang, error) {
+// turn is the turn-resolved model/effort configuration applied to every LLM
+// call this agent makes (model-effort-v2).
+func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride) (*Liang, error) {
 	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build liang tools: %w", err)
@@ -52,6 +58,7 @@ func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry) (*Li
 		cfg:            cfg,
 		client:         client,
 		toolRegistry:   reg,
+		turn:           turn,
 		toolsJSON:      toolsJSON,
 		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
 		maxRounds:      maxRounds,
@@ -104,11 +111,11 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		}
 
 		req := LLMRequest{
-			Model:           l.cfg.Model,
+			Model:           l.turn.Model,
 			Messages:        withSystem(l.cfg.SystemPrompt, round),
 			MaxTokens:       l.cfg.MaxTokens,
-			Thinking:        l.cfg.Thinking,
-			ReasoningEffort: l.cfg.ReasoningEffort,
+			Thinking:        l.turn.Thinking,
+			ReasoningEffort: l.turn.ReasoningEffort,
 		}
 		if l.toolsIsNotNil {
 			req.Tools = l.toolsJSON
@@ -121,10 +128,11 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		// model is now synthesizing), or (b) no tools are configured (the model
 		// can only answer directly). The first round of a tooled agent is NOT
 		// treated as terminal because the model may still emit tool_calls, and
-		// response_format conflicts with tool use. thinking:true never reaches
-		// here: config validation rejects output_schema+thinking (reasoning
-		// models degrade to prompt-only constraints via system-prompt text, not
-		// this field).
+		// response_format conflicts with tool use. A reasoning turn (effort !=
+		// none) never reaches here: config load rejects output_schema with a
+		// non-none default effort, and the handler 400s requests resolving to
+		// effort != none (reasoning degrades to prompt-only constraints via
+		// system-prompt text, not this field).
 		if rf, ok := l.terminalResponseFormat(round); ok {
 			req.ResponseFormat = rf
 		}
@@ -195,11 +203,11 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		l.hitCapThisRun = true
 		emitCapHitWarn(l.Name(), l.maxRounds, l.maxRounds)
 		wrapReq := LLMRequest{
-			Model:           l.cfg.Model,
+			Model:           l.turn.Model,
 			Messages:        withSystem(l.cfg.SystemPrompt, round),
 			MaxTokens:       l.cfg.MaxTokens,
-			Thinking:        l.cfg.Thinking,
-			ReasoningEffort: l.cfg.ReasoningEffort,
+			Thinking:        l.turn.Thinking,
+			ReasoningEffort: l.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose/structured answer.
 		}
 		// The wrap-up IS the terminal round, so a structured-output Liang still

@@ -27,7 +27,9 @@ server:
 openai:
   api_key: sk-test
   base_url: https://api.openai.com/v1
-  model: gpt-4o-mini
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
   host: 127.0.0.1
@@ -45,19 +47,16 @@ jwt:
 agents:
   confucius:
     name: Confucius
-    model: gpt-4o-mini
     system_prompt: "you are confucius"
     max_tokens: 2048
     tools: [chongzhi, liang]
   chongzhi:
     name: Chongzhi
-    model: gpt-4o-mini
     system_prompt: "you are chongzhi"
     max_tokens: 4096
     tools: [read_file, write_file]
   liang:
     name: Liang
-    model: gpt-4o-mini
     system_prompt: "you are liang"
     max_tokens: 2048
     tools: []
@@ -108,6 +107,11 @@ func TestLoad_EnvSubstitution(t *testing.T) {
 	t.Setenv("MYSQL_DSN", "env-user:env-pass@tcp(localhost:3306)/envdb")
 
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: ${MYSQL_DSN}
 jwt:
@@ -137,6 +141,11 @@ func TestLoad_EnvSubstitution_WithDefault(t *testing.T) {
 	os.Unsetenv("TEST_MISSING_VAR")
 
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "${TEST_MISSING_VAR:fallback-dsn}"
 jwt:
@@ -161,6 +170,11 @@ func TestLoad_MissingFile(t *testing.T) {
 
 func TestLoad_InvalidSecret(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -175,6 +189,11 @@ jwt:
 
 func TestLoad_InvalidDSN(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: ""
 jwt:
@@ -189,6 +208,11 @@ jwt:
 
 func TestLoad_MCP_Valid(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -245,6 +269,11 @@ func TestLoad_MCP_EnvSubstitution(t *testing.T) {
 	t.Setenv("MCP_CMD", "./env-mcp")
 
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -289,6 +318,11 @@ func TestLoad_MCP_Invalid(t *testing.T) {
 		{
 			name: "missing name",
 			content: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -302,6 +336,11 @@ mcp:
 		{
 			name: "missing transport",
 			content: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -315,6 +354,11 @@ mcp:
 		{
 			name: "sse missing url",
 			content: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -328,6 +372,11 @@ mcp:
 		{
 			name: "http missing url",
 			content: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -341,6 +390,11 @@ mcp:
 		{
 			name: "stdio missing command",
 			content: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -354,6 +408,11 @@ mcp:
 		{
 			name: "unsupported transport",
 			content: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -367,6 +426,11 @@ mcp:
 		{
 			name: "duplicate name",
 			content: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -396,6 +460,11 @@ mcp:
 
 func TestLoad_AgentMCP_UnknownServer(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -423,6 +492,11 @@ agents:
 
 func TestLoad_AgentMCP_EmptyServerName(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -468,76 +542,54 @@ func TestConfig_ValidateAgentMCPTools(t *testing.T) {
 	}
 }
 
-func TestLoad_ReasoningConfig(t *testing.T) {
+// TestLoad_RemovedAgentModelFields: model-effort-v2 removed the per-agent
+// model/thinking/reasoning_effort fields; residual keys fail load with an
+// error pointing at the replacement configuration (never silently ignored).
+func TestLoad_RemovedAgentModelFields(t *testing.T) {
 	cases := []struct {
 		name        string
 		agentBlock  string
-		wantEffort  string
-		wantErr     bool
 		errContains string
 	}{
 		{
-			name:       "thinking true defaults to medium",
-			agentBlock: "confucius:\n    name: Confucius\n    thinking: true",
-			wantEffort: "medium",
+			name:        "residual agent model",
+			agentBlock:  "confucius:\n    name: Confucius\n    model: gpt-4o-mini",
+			errContains: "agents.confucius.model was removed",
 		},
 		{
-			name:       "thinking true with low effort",
-			agentBlock: "confucius:\n    name: Confucius\n    thinking: true\n    reasoning_effort: low",
-			wantEffort: "low",
+			name:        "residual agent thinking",
+			agentBlock:  "confucius:\n    name: Confucius\n    thinking: true",
+			errContains: "agents.confucius.thinking was removed",
 		},
 		{
-			name:       "thinking true with high effort",
-			agentBlock: "confucius:\n    name: Confucius\n    thinking: true\n    reasoning_effort: high",
-			wantEffort: "high",
-		},
-		{
-			name:        "thinking true with invalid effort fails",
-			agentBlock:  "confucius:\n    name: Confucius\n    thinking: true\n    reasoning_effort: ultra",
-			wantErr:     true,
-			errContains: "reasoning_effort",
-		},
-		{
-			name:        "reasoning_effort set without thinking fails",
-			agentBlock:  "confucius:\n    name: Confucius\n    reasoning_effort: low",
-			wantErr:     true,
-			errContains: "reasoning_effort",
-		},
-		{
-			name:       "thinking false ignores absent reasoning_effort",
-			agentBlock: "confucius:\n    name: Confucius\n    thinking: false",
-			wantEffort: "",
+			name:        "residual agent reasoning_effort",
+			agentBlock:  "chongzhi:\n    name: Chongzhi\n    reasoning_effort: low",
+			errContains: "agents.chongzhi.reasoning_effort was removed",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeTempYAML(t, fmt.Sprintf(`
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
   secret: "ok"
 agents:
   %s
-  chongzhi: {name: Chongzhi}
-  liang: {name: Liang}
 `, tc.agentBlock))
 
-			cfg, err := Load(path)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("Load expected error for %q, got nil", tc.name)
-				}
-				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.errContains)
-				}
-				return
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("Load expected residual-field error for %q, got nil", tc.name)
 			}
-			if err != nil {
-				t.Fatalf("Load returned error: %v", err)
-			}
-			if cfg.Agents.Confucius.ReasoningEffort != tc.wantEffort {
-				t.Errorf("Agents.Confucius.ReasoningEffort = %q, want %q", cfg.Agents.Confucius.ReasoningEffort, tc.wantEffort)
+			if !strings.Contains(err.Error(), tc.errContains) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.errContains)
 			}
 		})
 	}
@@ -546,20 +598,22 @@ agents:
 func TestLoad_OutputSchemaConfig(t *testing.T) {
 	cases := []struct {
 		name        string
+		openaiExtra string
 		agentBlock  string
 		wantErr     bool
 		errContains string
 	}{
 		{
-			name:       "output_schema without thinking is valid",
+			name:       "output_schema with none default is valid",
 			agentBlock: "liang:\n    name: Liang\n    output_schema: '{\"type\":\"object\"}'",
 			wantErr:    false,
 		},
 		{
-			name:        "output_schema with thinking rejected",
-			agentBlock:  "liang:\n    name: Liang\n    thinking: true\n    output_schema: '{\"type\":\"object\"}'",
+			name:        "output_schema with non-none default rejected",
+			openaiExtra: "  default_reasoning_effort: high\n",
+			agentBlock:  "liang:\n    name: Liang\n    output_schema: '{\"type\":\"object\"}'",
 			wantErr:     true,
-			errContains: "output_schema",
+			errContains: "output_schema conflicts with openai.default_reasoning_effort",
 		},
 		{
 			name:        "invalid JSON output_schema rejected",
@@ -578,6 +632,11 @@ func TestLoad_OutputSchemaConfig(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeTempYAML(t, fmt.Sprintf(`
+openai:
+  api_key: sk-test
+%s  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -586,7 +645,7 @@ agents:
   confucius: {name: Confucius}
   chongzhi: {name: Chongzhi}
   %s
-`, tc.agentBlock))
+`, tc.openaiExtra, tc.agentBlock))
 
 			cfg, err := Load(path)
 			if tc.wantErr {
@@ -611,6 +670,11 @@ agents:
 // and an explicit retry block is respected.
 func TestLoad_RetryDefaults(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -647,6 +711,11 @@ agents:
 
 func TestLoad_ExecutorConfig(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -691,6 +760,11 @@ tools:
 func TestLoad_ExecutorEnv(t *testing.T) {
 	t.Run("valid env passes and round-trips", func(t *testing.T) {
 		path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -795,6 +869,11 @@ func TestLoad_ExecutorEnvRejections(t *testing.T) {
 
 func TestLoad_ExecutorConfigDefaults(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -833,6 +912,11 @@ tools:
 // succeeds. Python/pip now run via bash.
 func TestLoad_ExecutorConfig_PythonPipBlocksIgnored(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -882,6 +966,11 @@ func TestConfig_ValidateAgentSkills(t *testing.T) {
 func TestLoad_LoggingDefaults(t *testing.T) {
 	// No logging block at all: defaults must populate.
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -913,6 +1002,11 @@ jwt:
 
 func TestLoad_LoggingInvalidFormat(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -932,6 +1026,11 @@ logging:
 
 func TestLoad_LoggingInvalidOutput(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -951,6 +1050,11 @@ logging:
 
 func TestLoad_LoggingExplicitValues(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1010,6 +1114,11 @@ func TestLoad_AuthPasswordRequired(t *testing.T) {
 		path := writeTempYAML(t, `
 server:
   port: 9090
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 redis:
@@ -1033,6 +1142,11 @@ jwt:
 		path := writeTempYAML(t, `
 server:
   port: 9090
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 redis:
@@ -1054,6 +1168,11 @@ jwt:
 func TestLoad_StorageBackendDefault(t *testing.T) {
 	// Omitting storage entirely must default to "local" (zero-behavior-change).
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1073,6 +1192,11 @@ jwt:
 
 func TestLoad_StorageBackendShared(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1097,6 +1221,11 @@ func TestLoad_StorageBackendEnvSubstitution(t *testing.T) {
 	// storage.workspace.backend must honor ${VAR} expansion like other fields.
 	t.Setenv("WS_BACKEND", "shared")
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1119,6 +1248,11 @@ func TestLoad_StorageBackendInvalid(t *testing.T) {
 	// an empty value is valid because it defaults to "local".
 	for _, b := range []string{"nfs", "s3", "object-store"} {
 		path := writeTempYAML(t, fmt.Sprintf(`
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1140,6 +1274,11 @@ storage:
 func TestWorkspaceStorageConfig_NormalizesCase(t *testing.T) {
 	// Backend is lower-cased on load so "Shared" / "LOCAL" are accepted.
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1158,8 +1297,14 @@ storage:
 }
 
 // minimalValidYAML is the smallest config that passes validation; sandbox /
-// landlock-focused tests append their own block to it.
+// landlock-focused tests append their own block to it. The openai.models
+// catalog is mandatory (model-effort-v2).
 const minimalValidYAML = `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1414,6 +1559,11 @@ func TestLoad_MessagesDefaults(t *testing.T) {
 	// Omitting the messages block must default flush_interval to 1s and
 	// flush_batch_size to 100.
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1433,6 +1583,11 @@ jwt:
 
 func TestLoad_MessagesExplicitValues(t *testing.T) {
 	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1461,6 +1616,11 @@ func TestLoad_MessagesNegativeRejected(t *testing.T) {
 		{
 			name: "negative flush_interval",
 			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1472,6 +1632,11 @@ messages:
 		{
 			name: "negative flush_batch_size",
 			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:

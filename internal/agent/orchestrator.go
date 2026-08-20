@@ -37,7 +37,12 @@ type AgentFactory interface {
 	// The returned TurnCloser releases per-turn resources (the per-user MCP
 	// connection manager) once the turn's Run completes; it is nil when no
 	// per-turn resources were created.
-	Build(workspaceRoot, skillsDir, userID string) (Agent, TurnCloser, error)
+	//
+	// override (per-request-model-selection, model-effort-v2) is the
+	// request-resolved turn config — (model, wire-family, effort) — injected
+	// uniformly into all three agents. It is always non-zero in production:
+	// the handler resolves every request against the mandatory catalog.
+	Build(workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error)
 }
 
 // TurnCloser releases per-turn resources created by AgentFactory.Build (the
@@ -57,7 +62,7 @@ type orchestratorFactory struct {
 }
 
 // Build implements AgentFactory.
-func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Agent, TurnCloser, error) {
+func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error) {
 	// agent.skills must reference global skills only; user skills are discovered
 	// at runtime via luban tools.
 	if err := f.cfg.ValidateAgentSkills(userID, func(name, _ string) bool {
@@ -67,6 +72,16 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 	}
 
 	globalSkillsDir := f.skillLoader.GlobalDir()
+
+	// Per-turn model selection (per-request-model-selection, model-effort-v2):
+	// the handler ALWAYS resolves a turn config (model + wire family + effort
+	// — a parameter-less request takes the default entry + deployment default
+	// effort), and Build injects that one value into every agent constructed
+	// below — one turn, one model, one effort across Confucius, Chongzhi, and
+	// Liang. Agent configs carry no model fields of their own anymore.
+	confuciusCfg := f.cfg.Agents.Confucius
+	chongzhiCfg := f.cfg.Agents.Chongzhi
+	liangCfg := f.cfg.Agents.Liang
 
 	// Per-user MCP connection manager is created once per turn and shared
 	// across Confucius + its sub-agents so connections are reused within the
@@ -90,17 +105,18 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 	// constructs a fresh Chongzhi/Liang so concurrent same-name invocations
 	// never share mutable run state (side-effect / round-cap flags). The
 	// factories capture the turn-scoped inputs below — including the
-	// turn-shared per-user MCP manager — so connection reuse within the turn
-	// is unchanged; only the per-run mutable shell is rebuilt per call.
+	// turn-shared per-user MCP manager and the overridden configs — so
+	// connection reuse within the turn is unchanged; only the per-run mutable
+	// shell is rebuilt per call.
 	subFactories := map[string]SubAgentFactory{
 		ToolInvokeChongzhi: func() (Agent, error) {
-			return f.buildChongzhi(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+			return f.buildChongzhi(chongzhiCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
 		},
 		ToolInvokeLiang: func() (Agent, error) {
-			return f.buildLiang(workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+			return f.buildLiang(liangCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
 		},
 	}
-	confucius, err := f.buildConfucius(workspaceRoot, globalSkillsDir, skillsDir, userID, subFactories, mcpMgr)
+	confucius, err := f.buildConfucius(confuciusCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, subFactories, mcpMgr, override)
 	if err != nil {
 		if closer != nil {
 			closer()
@@ -110,28 +126,28 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string) (Ag
 	return confucius, closer, nil
 }
 
-func (f *orchestratorFactory) buildConfucius(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]SubAgentFactory, mcpMgr *mcp.Manager) (*Confucius, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Confucius, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
+func (f *orchestratorFactory) buildConfucius(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]SubAgentFactory, mcpMgr *mcp.Manager, turn ModelOverride) (*Confucius, error) {
+	reg, agentCfg, err := f.buildAgentRegistry(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
-	return NewConfucius(cfg, f.client, reg, subAgents)
+	return NewConfucius(agentCfg, f.client, reg, subAgents, turn)
 }
 
-func (f *orchestratorFactory) buildChongzhi(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*Chongzhi, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Chongzhi, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
+func (f *orchestratorFactory) buildChongzhi(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Chongzhi, error) {
+	reg, agentCfg, err := f.buildAgentRegistry(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
-	return NewChongzhi(cfg, f.client, reg)
+	return NewChongzhi(agentCfg, f.client, reg, turn)
 }
 
-func (f *orchestratorFactory) buildLiang(workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*Liang, error) {
-	reg, cfg, err := f.buildAgentRegistry(f.cfg.Agents.Liang, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
+func (f *orchestratorFactory) buildLiang(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Liang, error) {
+	reg, agentCfg, err := f.buildAgentRegistry(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
-	return NewLiang(cfg, f.client, reg)
+	return NewLiang(agentCfg, f.client, reg, turn)
 }
 
 // buildAgentRegistry creates a registry scoped to workspaceRoot containing the
@@ -422,12 +438,17 @@ type WorkspaceRootForUser = func(userID string) string
 // freshly-built Confucius as the between-rounds mid-turn compaction seam; nil
 // runs the loop hook-free.
 //
+// override (per-request-model-selection, model-effort-v2) is the
+// request-resolved turn config — (model, wire-family, effort) — the factory
+// injects uniformly into all three agents. Always non-zero in production:
+// the handler resolves every request against the mandatory catalog.
+//
 // workspaceRoot is the absolute path to the requesting user's workspace
 // directory (data/{user_uuid}/workspace). userID identifies the caller so the
 // factory can load user-specific skills and validate skill permissions.
-func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook) error {
+func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, override ModelOverride) error {
 	ctx = skill.WithUserID(ctx, userID)
-	confucius, closer, err := o.factory.Build(workspaceRoot, skillsDir, userID)
+	confucius, closer, err := o.factory.Build(workspaceRoot, skillsDir, userID, override)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}
