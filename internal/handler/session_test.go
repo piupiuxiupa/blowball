@@ -97,6 +97,8 @@ type handlerFakeMySQL struct {
 	deleteSessionErr    error
 	listSessionsRows    []mysqlstore.SessionWithTitle
 	listSessionsErr     error
+	getTitleFound       *model.Title
+	getTitleErr         error
 	upsertTitleCalls    int
 	upsertTitleArg      model.Title
 	appendMessagesCalls int
@@ -169,7 +171,16 @@ func (m *handlerFakeMySQL) UpsertTitleManual(_ context.Context, t model.Title) e
 	return nil
 }
 func (m *handlerFakeMySQL) GetTitle(_ context.Context, _ string) (*model.Title, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getTitleErr != nil {
+		return nil, m.getTitleErr
+	}
+	if m.getTitleFound == nil {
+		return nil, nil
+	}
+	cp := *m.getTitleFound
+	return &cp, nil
 }
 func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
 	m.mu.Lock()
@@ -470,6 +481,7 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	})
 	r.POST("/api/v1/sessions", h.CreateSession)
 	r.GET("/api/v1/sessions", h.ListSessions)
+	r.GET("/api/v1/sessions/:session_id", h.GetSession)
 	r.GET("/api/v1/sessions/:session_id/messages", h.GetSessionMessages)
 	r.POST("/api/v1/sessions/:session_id/messages", stream.SendMessage)
 	r.PATCH("/api/v1/sessions/:session_id", h.UpdateTitle)
@@ -717,6 +729,125 @@ func TestListSessions_EmptyArray(t *testing.T) {
 	// The sessions array must be present (not null) and empty.
 	assert.NotNil(t, resp.Sessions)
 	assert.Empty(t, resp.Sessions)
+}
+
+// TestGetSession_ReturnsDetailFields verifies the single-session read returns
+// the list-entry superset — session_id, title, create_time, update_time
+// (RFC3339 UTC) — and, with no run store wired, generating=false and no
+// run_id key.
+func TestGetSession_ReturnsDetailFields(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	ts := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	env.mysql.getSessionByIDFound = &model.Session{
+		SessionID:  "sess-1",
+		UserID:     "user-1",
+		CreateTime: ts,
+		UpdateTime: ts,
+	}
+	env.mysql.getTitleFound = &model.Title{SessionID: "sess-1", Title: "调研纪要"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		SessionID  string `json:"session_id"`
+		Title      string `json:"title"`
+		CreateTime string `json:"create_time"`
+		UpdateTime string `json:"update_time"`
+		Generating bool   `json:"generating"`
+		RunID      string `json:"run_id"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "sess-1", resp.SessionID)
+	assert.Equal(t, "调研纪要", resp.Title)
+	assert.Equal(t, "2026-08-21T12:00:00Z", resp.CreateTime)
+	assert.Equal(t, "2026-08-21T12:00:00Z", resp.UpdateTime)
+	assert.False(t, resp.Generating)
+	assert.Empty(t, resp.RunID, "run_id must be omitted when not generating")
+	assert.NotContains(t, w.Body.String(), `"run_id"`, "run_id key must be absent entirely (omitempty)")
+}
+
+// TestGetSession_ActiveRunMarkedGenerating verifies a session with an active
+// run claim reports generating=true and carries the run id (the reload
+// discovery path), mirroring the list entry.
+func TestGetSession_ActiveRunMarkedGenerating(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+
+	store := run.NewMemStore()
+	_, ok, err := store.ClaimSession(context.Background(), "sess-1", "run-9")
+	require.NoError(t, err)
+	require.True(t, ok, "claim must succeed on an idle session")
+
+	h := NewSessionHandler(
+		newSessionSvc(sessionDeps(env.mysql, env.redis, env.fs)),
+		service.NewTitleService(nil, env.mysql, config.OpenAIConfig{TitleModel: "title-model"}),
+		store,
+	)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Set(middleware.TraceIDKey, "trace-1")
+		c.Next()
+	})
+	r.GET("/api/v1/sessions/:session_id", h.GetSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Generating bool   `json:"generating"`
+		RunID      string `json:"run_id"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp.Generating)
+	assert.Equal(t, "run-9", resp.RunID)
+}
+
+// TestGetSession_WrongOwner_404 verifies a session owned by another user is a
+// 404 (existence never disclosed), matching the other session endpoints.
+func TestGetSession_WrongOwner_404(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-1", UserID: "someone-else"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}
+
+// TestGetSession_Missing_404 verifies an unknown session_id is a 404.
+func TestGetSession_Missing_404(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getSessionByIDFound = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/nope", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}
+
+// TestGetSession_TitleError_DegradesToEmptyTitle verifies a title lookup
+// failure degrades to an empty title instead of failing the detail read.
+func TestGetSession_TitleError_DegradesToEmptyTitle(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.getTitleErr = errors.New("titles table unavailable")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Title string `json:"title"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Empty(t, resp.Title)
 }
 
 // TestCreateSession_ReturnsUUIDv7SessionID verifies the new session endpoint

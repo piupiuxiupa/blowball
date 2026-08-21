@@ -38,6 +38,11 @@ type RouteDeps struct {
 	// SessionMessages handles GET /api/v1/sessions/:session_id/messages. Required.
 	SessionMessages gin.HandlerFunc
 
+	// SessionGet handles GET /api/v1/sessions/:session_id — the single-session
+	// detail read (list-entry superset incl. create_time and the generating /
+	// run_id active-turn markers). Required.
+	SessionGet gin.HandlerFunc
+
 	// SendMessage handles POST /api/v1/sessions/:session_id/messages (SSE). Required.
 	SendMessage gin.HandlerFunc
 
@@ -210,6 +215,7 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 
 	authed.GET("/sessions", deps.SessionList)
 	authed.POST("/sessions", deps.SessionCreate)
+	authed.GET("/sessions/:session_id", deps.SessionGet)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
 	authed.PATCH("/sessions/:session_id", deps.SessionUpdateTitle)
 	authed.DELETE("/sessions/:session_id", deps.SessionDelete)

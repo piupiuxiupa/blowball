@@ -43,6 +43,7 @@
 - **THEN** 注册以下需要鉴权的路由：
   - GET /api/v1/sessions
   - POST /api/v1/sessions
+  - GET /api/v1/sessions/:session_id
   - GET /api/v1/sessions/:session_id/messages
 
 - **AND** 当且仅当角色为 `all` 时，额外注册 POST /api/v1/sessions/:session_id/messages（流式端点；`agent` 角色独立注册此路由）
@@ -73,6 +74,20 @@
 #### Scenario: Route is authenticated
 - **WHEN** 服务启动
 - **THEN** GET /api/v1/sessions/:session_id/messages 位于鉴权路由组内，未携带有效 token 时返回 401
+
+### Requirement: Session detail route
+
+系统 SHALL 暴露 GET /api/v1/sessions/:session_id 路由，用于读取单个会话的详情（响应契约见 `session-management` 的 Session detail 需求）。
+
+#### Scenario: Route is authenticated
+
+- **WHEN** 服务以 `api` 或 `all` 角色启动
+- **THEN** GET /api/v1/sessions/:session_id 位于鉴权路由组内，未携带有效 token 时返回 401
+
+#### Scenario: Route is not registered by the agent role
+
+- **WHEN** 服务以 `agent` 角色启动
+- **THEN** GET /api/v1/sessions/:session_id 不被注册，对该端点的请求返回 404
 
 ### Requirement: Request context with trace_id
 系统 SHALL 为每个 HTTP 请求生成唯一 trace_id，贯穿整个请求链路。

@@ -94,6 +94,50 @@ func (s *SessionService) GetSessionByID(ctx context.Context, sessionID string) (
 	return s.mysql.GetSessionByID(ctx, sessionID)
 }
 
+// SessionDetail is the read model for the single-session endpoint: the session
+// row plus its title (empty string when no title has been generated yet).
+type SessionDetail struct {
+	Session model.Session
+	Title   string
+}
+
+// GetSessionDetail returns one session joined with its title for the
+// single-session read endpoint (GET /api/v1/sessions/:session_id). The two
+// reads are composed in the service rather than joined in SQL — a low-frequency
+// endpoint does not justify a store method overlapping
+// ListSessionsWithTitle. A missing title row yields an empty title; a title
+// read failure degrades the same way (WARN + empty) so the detail read never
+// fails on the title side. The session lookup propagates errors; a missing
+// session returns (nil, nil) like GetSessionByID.
+func (s *SessionService) GetSessionDetail(ctx context.Context, sessionID string) (*SessionDetail, error) {
+	tid := trace.FromContext(ctx)
+	log := logger.L().With(
+		zap.String("op", "session.get_detail"),
+		zap.String("session_id", sessionID),
+	)
+	if tid != "" {
+		log = log.With(zap.String("trace_id", tid))
+	}
+
+	sess, err := s.mysql.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		log.Error("session lookup failed", zap.Error(err))
+		return nil, fmt.Errorf("session.get_detail: %w", err)
+	}
+	if sess == nil {
+		return nil, nil
+	}
+
+	title := ""
+	t, terr := s.mysql.GetTitle(ctx, sessionID)
+	if terr != nil {
+		log.Warn("title lookup failed; returning empty title", zap.Error(terr))
+	} else if t != nil {
+		title = t.Title
+	}
+	return &SessionDetail{Session: *sess, Title: title}, nil
+}
+
 // ErrSessionNotFound is returned by DeleteSession when the session does not
 // exist or does not belong to the caller. Both cases map to the same sentinel
 // (and the same HTTP 404) so existence of another user's session is never

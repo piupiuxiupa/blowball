@@ -24,6 +24,7 @@ func stubRouteDeps() RouteDeps {
 		Login:                       noop,
 		SessionList:                 noop,
 		SessionCreate:               noop,
+		SessionGet:                  noop,
 		SessionMessages:             noop,
 		SendMessage:                 noop,
 		TurnCancel:                  noop,
@@ -63,6 +64,7 @@ func routeSet(r *gin.Engine) []string {
 var expectedAPIRoutes = []string{
 	"DELETE /api/v1/sessions/:session_id",
 	"GET /api/v1/sessions",
+	"GET /api/v1/sessions/:session_id",
 	"GET /api/v1/sessions/:session_id/messages",
 	"GET /api/v1/skills",
 	"GET /api/v1/models",
@@ -191,6 +193,7 @@ func TestAgentPartition_CRUDRoutesReturn404(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/sessions"},
 		{http.MethodPost, "/api/v1/sessions"},
+		{http.MethodGet, "/api/v1/sessions/sess-1"},
 		{http.MethodGet, "/api/v1/sessions/sess-1/messages"},
 		{http.MethodDelete, "/api/v1/sessions/sess-1"},
 		{http.MethodPatch, "/api/v1/sessions/sess-1"},

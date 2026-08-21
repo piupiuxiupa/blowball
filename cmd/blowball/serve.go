@@ -500,6 +500,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		Login:                            authHandler.Login,
 		SessionList:                      sessionHandler.ListSessions,
 		SessionCreate:                    sessionHandler.CreateSession,
+		SessionGet:                       sessionHandler.GetSession,
 		SessionMessages:                  sessionHandler.GetSessionMessages,
 		SessionDelete:                    sessionHandler.DeleteSession,
 		SessionUpdateTitle:               sessionHandler.UpdateTitle,

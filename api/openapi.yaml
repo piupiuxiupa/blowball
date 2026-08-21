@@ -111,6 +111,36 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SessionListEntry'
+    SessionDetail:
+      type: object
+      description: |
+        Single-session read (GET /api/v1/sessions/{session_id}) — the
+        SessionListEntry superset plus create_time.
+      required: [session_id, title, create_time, update_time, generating]
+      properties:
+        session_id:
+          type: string
+        title:
+          type: string
+        create_time:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp of session creation.
+        update_time:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp of the last update.
+        generating:
+          type: boolean
+          description: |
+            Whether a turn is currently running for this session
+            (turn-detach-resume) — same active-run-claim semantics as the
+            session list. An unreadable claim degrades to false.
+        run_id:
+          type: string
+          description: |
+            The active turn's run id — the attach/cancel target. Present only
+            while `generating` is true (the reload discovery path).
     CreateSessionResponse:
       type: object
       required: [session_id]
@@ -816,6 +846,49 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
   /api/v1/sessions/{session_id}:
+    get:
+      tags: [Session]
+      summary: Read a single session owned by the authenticated user.
+      description: |
+        Returns the session detail — the session-list entry superset plus
+        create_time. A session that does not exist or belongs to another user
+        returns 404 (existence is never disclosed). An active-run claim read
+        failure degrades to generating=false; a title lookup failure degrades
+        to an empty title.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+          description: ID of the session to read.
+      responses:
+        '200':
+          description: Session detail.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionDetail'}
+              examples:
+                generating:
+                  value:
+                    session_id: sess_1
+                    title: "Plan release"
+                    create_time: "2026-06-10T09:00:00Z"
+                    update_time: "2026-06-11T10:00:00Z"
+                    generating: true
+                    run_id: "018f9b8a-7c1a-7e6a-8e6a-6c1a7c1a7c1a"
+                idle:
+                  value:
+                    session_id: sess_2
+                    title: "Notes"
+                    create_time: "2026-06-10T09:00:00Z"
+                    update_time: "2026-06-10T09:00:00Z"
+                    generating: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
     delete:
       tags: [Session]
       summary: Delete a session owned by the authenticated user.

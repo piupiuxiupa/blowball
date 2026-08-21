@@ -258,6 +258,70 @@ func (h *SessionHandler) ListSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"sessions": entries})
 }
 
+// getSessionResponse is the body for GET /api/v1/sessions/:session_id — the
+// session-list entry plus create_time (the single-session detail superset).
+type getSessionResponse struct {
+	SessionID  string `json:"session_id"`
+	Title      string `json:"title"`
+	CreateTime string `json:"create_time"`
+	UpdateTime string `json:"update_time"`
+	// Generating / RunID mirror the list entry: both derive from the Redis
+	// active-run claim, and RunID is present only while generating (the
+	// reload discovery path for attach/cancel).
+	Generating bool   `json:"generating"`
+	RunID      string `json:"run_id,omitempty"`
+}
+
+// GetSession handles GET /api/v1/sessions/:session_id. It returns the session
+// detail for the owner; a missing or non-owned session returns 404 without
+// disclosing existence. An active-run claim read failure degrades to
+// generating=false (WARN), matching ListSessions. The title rides the detail
+// read; a title lookup failure already degraded to an empty title there.
+func (h *SessionHandler) GetSession(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	sessionID := c.Param("session_id")
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	detail, err := h.sessSvc.GetSessionDetail(ctx, sessionID)
+	if err != nil {
+		logger.L().Error("session lookup failed",
+			zap.String("op", "handler.get_session"),
+			zap.String("session_id", sessionID),
+			zap.String("user_id", userID),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "session lookup failed"))
+		return
+	}
+	if detail == nil || detail.Session.UserID != userID {
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "session not found"))
+		return
+	}
+
+	rid := ""
+	if h.runStore != nil {
+		runs, rerr := h.runStore.ActiveRuns(ctx, []string{sessionID})
+		if rerr != nil {
+			logger.L().Warn("active run lookup failed; returning generating=false",
+				zap.String("op", "handler.get_session"),
+				zap.String("session_id", sessionID),
+				zap.String("user_id", userID),
+				zap.Error(rerr))
+		} else {
+			rid = runs[sessionID]
+		}
+	}
+
+	c.JSON(http.StatusOK, getSessionResponse{
+		SessionID:  detail.Session.SessionID,
+		Title:      detail.Title,
+		CreateTime: detail.Session.CreateTime.UTC().Format(time.RFC3339),
+		UpdateTime: detail.Session.UpdateTime.UTC().Format(time.RFC3339),
+		Generating: rid != "",
+		RunID:      rid,
+	})
+}
+
 // UpdateTitle handles PATCH /api/v1/sessions/:session_id. It lets the session
 // owner set a manual title. Manual titles are not overwritten by asynchronous
 // AI title generation and the session's update_time is refreshed so the

@@ -99,6 +99,7 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 		Login:                       func(*gin.Context) {},
 		SessionList:                 sessH.ListSessions,
 		SessionCreate:               sessH.CreateSession,
+		SessionGet:                  sessH.GetSession,
 		SessionMessages:             sessH.GetSessionMessages,
 		SessionDelete:               sessH.DeleteSession,
 		SessionUpdateTitle:          sessH.UpdateTitle,
@@ -149,6 +150,13 @@ func TestAPIRoleEngine_OwnsCRUDRejectsAgentRoutes(t *testing.T) {
 	env.apiEngine.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code, "api engine should serve GET /sessions; body: %s", w.Body.String())
 
+	// The single-session detail read is served by the api engine too.
+	detailReq := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+defaultSessionID, nil)
+	detailReq.Header.Set("Authorization", "Bearer "+token)
+	detailW := httptest.NewRecorder()
+	env.apiEngine.ServeHTTP(detailW, detailReq)
+	assert.Equal(t, http.StatusOK, detailW.Code, "api engine should serve GET /sessions/:id; body: %s", detailW.Body.String())
+
 	// Agent-owned routes are absent from the api engine (404, not 401).
 	for _, tc := range []struct {
 		method, path string
@@ -188,6 +196,7 @@ func TestAgentRoleEngine_OwnsStreamingRejectsCRUD(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/sessions"},
 		{http.MethodPost, "/api/v1/sessions"},
+		{http.MethodGet, "/api/v1/sessions/" + defaultSessionID},
 		{http.MethodGet, "/api/v1/skills"},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
