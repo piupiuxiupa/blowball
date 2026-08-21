@@ -13,8 +13,10 @@ import (
 // to dispatch sub-agents. The invoke_* tools are NOT registered in the tool
 // registry — they are intercepted by the Confucius Run loop. Returns nil when
 // the agent has no tools at all so callers can omit the field from the request.
-func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string, maxTokens int) ([]byte, error) {
-	regularJSON, err := buildRegularToolsJSON(reg, regularToolNames, maxTokens)
+// maxCompletionTokens is the TURN-resolved catalog-entry quota
+// (per-model-completion-budget) behind the write-budget guidance number.
+func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string, maxCompletionTokens int) ([]byte, error) {
+	regularJSON, err := buildRegularToolsJSON(reg, regularToolNames, maxCompletionTokens)
 	if err != nil {
 		return nil, err
 	}
@@ -45,13 +47,14 @@ func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string, maxT
 }
 
 // buildRegularToolsJSON renders the OpenAI tools[] for an agent's plain tools
-// (xizhi_*), with the per-agent write-budget guidance injected into the
-// write-family tool descriptions (llm-length-continuation prevention side,
-// design D10 — the registry is process-wide while max_tokens is per-agent, so
-// the budget number can only be computed here, at the agent's render time).
-// Returns nil when names is empty so the caller can omit Tools from the LLM
-// request entirely.
-func buildRegularToolsJSON(reg *tool.Registry, names []string, maxTokens int) ([]byte, error) {
+// (xizhi_*), with the write-budget guidance injected into the write-family
+// tool descriptions (llm-length-continuation prevention side, design D10).
+// The budget number's source is the TURN-resolved catalog entry's
+// max_completion_tokens (per-model-completion-budget D4) — the registry is
+// process-wide while the quota is per-turn/per-model, so the number can only
+// be computed here, at the agent's render time. Returns nil when names is
+// empty so the caller can omit Tools from the LLM request entirely.
+func buildRegularToolsJSON(reg *tool.Registry, names []string, maxCompletionTokens int) ([]byte, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -66,7 +69,7 @@ func buildRegularToolsJSON(reg *tool.Registry, names []string, maxTokens int) ([
 	if err := json.Unmarshal(raw, &tools); err != nil {
 		return nil, fmt.Errorf("agent: unmarshal regular tools: %w", err)
 	}
-	injectWriteBudgetGuidance(tools, maxTokens)
+	injectWriteBudgetGuidance(tools, maxCompletionTokens)
 	out, err := json.Marshal(tools)
 	if err != nil {
 		return nil, fmt.Errorf("agent: marshal regular tools: %w", err)
@@ -74,23 +77,26 @@ func buildRegularToolsJSON(reg *tool.Registry, names []string, maxTokens int) ([
 	return out, nil
 }
 
-// writeBudgetGuidanceFraction is the fraction of the agent's configured
-// max_tokens used as the per-single-write budget steering number (design
-// D10): 70% leaves headroom for the arguments' JSON escaping inflation, any
-// prose preamble, and parallel calls sharing one output budget. Applied as
-// maxTokens*7/10 (NOT a precomputed 7/10 constant — integer division would
-// make it zero).
+// writeBudgetGuidanceFraction is the fraction of the turn-resolved catalog
+// entry's max_completion_tokens used as the per-single-write budget steering
+// number (design D10): 70% leaves headroom for the arguments' JSON escaping
+// inflation, any prose preamble, and parallel calls sharing one output
+// budget. Applied as maxCompletionTokens*7/10 (NOT a precomputed 7/10
+// constant — integer division would make it zero).
 const writeBudgetGuidanceNumerator, writeBudgetGuidanceDenominator = 7, 10
 
 // injectWriteBudgetGuidance appends the write-budget sentence to the
 // xizhi_write_file / xizhi_modify_file descriptions with the number computed
-// from THIS agent's max_tokens (floor(max_tokens × 0.7)). The static ToolSpec
-// descriptions already carry the pattern advice (split large content into
-// multiple smaller writes); the injected sentence carries the concrete
-// budget. A non-positive maxTokens (unconfigured) skips the injection — there
-// is no number to steer by. Tools an agent does not list are untouched.
-func injectWriteBudgetGuidance(tools openAIToolList, maxTokens int) {
-	budget := maxTokens * writeBudgetGuidanceNumerator / writeBudgetGuidanceDenominator
+// from the turn's resolved quota (floor(max_completion_tokens × 0.7),
+// per-model-completion-budget D4 — anchored to the BASE quota, not quota +
+// retries × step, because the guidance's semantics are "keep a single write
+// clear of the cap"). The static ToolSpec descriptions already carry the
+// pattern advice (split large content into multiple smaller writes); the
+// injected sentence carries the concrete budget. A non-positive
+// maxCompletionTokens (unresolved) skips the injection — there is no number
+// to steer by. Tools an agent does not list are untouched.
+func injectWriteBudgetGuidance(tools openAIToolList, maxCompletionTokens int) {
+	budget := maxCompletionTokens * writeBudgetGuidanceNumerator / writeBudgetGuidanceDenominator
 	if budget <= 0 {
 		return
 	}

@@ -37,13 +37,28 @@ type fakeTitleLLM struct {
 	mu      sync.Mutex
 	gotCall bool
 	resp    agent.LLMResponse
+	lastReq agent.LLMRequest
 }
 
-func (c *fakeTitleLLM) StreamChat(_ context.Context, _ agent.LLMRequest, _ func(string) error, _ func(string) error) (agent.LLMResponse, error) {
+func (c *fakeTitleLLM) StreamChat(_ context.Context, req agent.LLMRequest, _ func(string) error, _ func(string) error) (agent.LLMResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gotCall = true
+	c.lastReq = req
 	return c.resp, nil
+}
+
+// lastUserContent returns the content of the last user-role message the fake
+// saw (empty when no call happened yet).
+func (c *fakeTitleLLM) lastUserContent() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.lastReq.Messages) - 1; i >= 0; i-- {
+		if c.lastReq.Messages[i].Role == "user" {
+			return c.lastReq.Messages[i].Content
+		}
+	}
+	return ""
 }
 
 // newTitleSvcWithFake wires a *service.TitleService with a fake LLM that

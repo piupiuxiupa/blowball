@@ -92,12 +92,26 @@ type modelSelection struct {
 	// MaxContextTokens is the resolved entry's context window (the turn's
 	// compaction threshold).
 	MaxContextTokens int
+	// MaxCompletionTokens is the resolved entry's output-token quota
+	// (per-model-completion-budget): shared by every LLM call of the turn's
+	// three agents (wrap-up rounds included).
+	MaxCompletionTokens int
+	// LengthContinue is the resolved entry's finish_reason=length
+	// continuation policy: zero when the entry does not configure the
+	// sub-block (continuation off for that model).
+	LengthContinue config.LengthContinueConfig
 }
 
 // override renders the selection as the agent-layer turn config. The value is
 // always non-zero — Build injects it into every agent of the turn.
 func (s modelSelection) override() agent.ModelOverride {
-	return agent.ModelOverride{Model: s.Model, Thinking: s.Thinking, ReasoningEffort: s.Effort}
+	return agent.ModelOverride{
+		Model:               s.Model,
+		Thinking:            s.Thinking,
+		ReasoningEffort:     s.Effort,
+		MaxCompletionTokens: s.MaxCompletionTokens,
+		LengthContinue:      s.LengthContinue,
+	}
 }
 
 // requestEfforts is the closed set of accepted reasoning_effort values
@@ -167,10 +181,12 @@ func resolveModelSelection(msc ModelSelectionConfig, model, effort string) (mode
 	}
 
 	return modelSelection{
-		Model:            entry.Name,
-		Thinking:         entry.Thinking,
-		Effort:           effective,
-		MaxContextTokens: entry.MaxContextTokens,
+		Model:               entry.Name,
+		Thinking:            entry.Thinking,
+		Effort:              effective,
+		MaxContextTokens:    entry.MaxContextTokens,
+		MaxCompletionTokens: entry.MaxCompletionTokens,
+		LengthContinue:      entry.LengthContinue,
 	}, "", ""
 }
 

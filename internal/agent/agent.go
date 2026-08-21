@@ -227,16 +227,22 @@ type LLMClient interface {
 // sub-agents set this on their final tool-calling round when configured with
 // an output_schema (capability A).
 type LLMRequest struct {
-	Model     string
-	Messages  []Message
-	Tools     []byte
-	MaxTokens int
+	Model    string
+	Messages []Message
+	Tools    []byte
+	// MaxCompletionTokens is the output-token quota for the call (renamed
+	// from MaxTokens by per-model-completion-budget): the resolved catalog
+	// entry's max_completion_tokens for agent calls, a fixed budget for the
+	// compaction summary, and 0 (uncapped) for title generation. The wire
+	// family translates it — thinking:true sends max_completion_tokens,
+	// thinking:false sends the legacy max_tokens.
+	MaxCompletionTokens int
 	// Thinking is the turn's WIRE-FAMILY marker (model-effort-v2): a copy of
 	// the resolved catalog entry's thinking capability, not a mode switch.
 	// true → the client always sends ReasoningEffort (literal "none"
-	// included) and maps MaxTokens to max_completion_tokens; false → no
-	// reasoning_effort, plain max_tokens. Sampling parameters (temperature
-	// etc.) are never sent on either family.
+	// included) and maps MaxCompletionTokens to max_completion_tokens;
+	// false → no reasoning_effort, plain max_tokens. Sampling parameters
+	// (temperature etc.) are never sent on either family.
 	Thinking        bool
 	ReasoningEffort string
 	ResponseFormat  json.RawMessage
@@ -255,11 +261,16 @@ type LLMRequest struct {
 // turn. Thinking is the wire-family marker (the entry's thinking capability
 // copy); ReasoningEffort is the effective effort, never empty in the thinking
 // family — "none" rides as a literal value so compatible gateways actually
-// disable thinking.
+// disable thinking. MaxCompletionTokens and LengthContinue carry the entry's
+// output quota and per-entry finish_reason=length continuation policy
+// (per-model-completion-budget) — one turn, one model, one quota across
+// Confucius/Chongzhi/Liang.
 type ModelOverride struct {
-	Model           string
-	Thinking        bool
-	ReasoningEffort string
+	Model               string
+	Thinking            bool
+	ReasoningEffort     string
+	MaxCompletionTokens int
+	LengthContinue      config.LengthContinueConfig
 }
 
 // LLMResponse is the aggregated result of one streaming chat completion call.

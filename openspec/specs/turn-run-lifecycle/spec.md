@@ -3,9 +3,7 @@
 ## Purpose
 
 定义与发起 SSE 连接解耦的服务端 turn 生命周期能力：run 身份签发与下发（trace_id 即 run id，经 `X-Run-Id` 响应头与 `meta.run_id` 下发）、session 单活动 run 互斥（Redis 原子认领，忙时 409 SESSION_BUSY）、按 run id 的取消端点与事件流恢复端点（重放 + live 续传）、Redis Stream 事件日志 + run 元数据 + 心跳的运行状态保存、进程崩溃的中断语义（心跳过期 → interrupted），以及终局后的保留窗口资源清理与优雅关闭取消。
-
 ## Requirements
-
 ### Requirement: Turn 执行独立于发起连接的生命周期
 
 系统 SHALL 在与发起 HTTP 请求解耦的服务端上下文中执行 turn：SSE 连接断开（页面关闭、网络中断、客户端主动断流）SHALL NOT 取消或暂停 turn。turn SHALL 仅因以下原因终止：正常完成（done）、orchestrator 错误（error）、显式取消（cancel）或进程终止。
@@ -83,12 +81,13 @@
 
 ### Requirement: 恢复端点重放并续传运行中 turn 的事件流
 
-系统 SHALL 提供恢复端点 `GET /api/v1/sessions/:session_id/turns/:run_id/events`（JWT + 归属校验），以 SSE 返回该 run 的事件：先重放已有事件日志（从头，或从 `Last-Event-ID` 指定的事件之后），再追 live 输出直至终局。SSE 的 `id:` 行 SHALL 等于事件在 Redis Stream 中的 entry id。多个并发订阅（多标签页）SHALL 互不干扰。
+系统 SHALL 提供恢复端点 `GET /api/v1/sessions/:session_id/turns/:run_id/events`（JWT + 归属校验），以 SSE 返回该 run 的事件：先重放已有事件日志（从头，或从 `Last-Event-ID` 指定的事件之后），再追 live 输出直至终局。SSE 的 `id:` 行 SHALL 等于事件在 Redis Stream 中的 entry id。多个并发订阅（多标签页）SHALL 互不干扰。事件日志 SHALL 只含 agent 事件——用户消息行不进事件日志（`message` 为持久化 sentinel，不上 SSE）；重连侧的完整视图 SHALL 由历史读取（含该 turn 发送时已持久化的用户消息行，见 session-management / message-write-behind 能力）与事件重放共同构成。
 
 #### Scenario: 重开会话自动恢复
 
 - **WHEN** 用户重开一个存在运行中 turn 的 session 并 attach 其 run
 - **THEN** 端点回放自开始以来的全部事件，随后继续推送 live 事件直到终局
+- **AND** 客户端经历史读取可见该 turn 的用户消息行（发送时已持久化），与事件重放共同构成含用户提问与 agent 输出的完整视图
 
 #### Scenario: Last-Event-ID 断点续传
 
@@ -142,3 +141,4 @@ turn 到达终局时系统 SHALL：将终态写入 meta、释放 session 认领�
 
 - **WHEN** 进程收到关闭信号且存在运行中 turn
 - **THEN** 系统在有界时间内逐个取消这些 turn，部分输出被持久化
+

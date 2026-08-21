@@ -86,8 +86,8 @@ func logLLMRequest(ctx context.Context, req LLMRequest) {
 	if traceID != "" {
 		fields = append(fields, zap.String("trace_id", traceID))
 	}
-	if req.MaxTokens > 0 {
-		fields = append(fields, zap.Int("max_tokens", req.MaxTokens))
+	if req.MaxCompletionTokens > 0 {
+		fields = append(fields, zap.Int("max_completion_tokens", req.MaxCompletionTokens))
 	}
 	if req.Thinking {
 		fields = append(fields, zap.Bool("thinking", true))
@@ -202,19 +202,21 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	// catalog entry's thinking capability. A thinking entry ALWAYS carries
 	// reasoning_effort — the literal "none" included, so OpenAI-compatible
 	// gateways actually disable thinking instead of falling back to the
-	// model's own default level — and maps the max_tokens quota to
+	// model's own default level — and sends the output quota as
 	// max_completion_tokens. A non-thinking entry never sends
-	// reasoning_effort and uses plain max_tokens. Sampling parameters
-	// (temperature etc.) are sent on neither family (the former always-0
-	// temperature is dead code, removed).
+	// reasoning_effort and sends the same quota as the legacy max_tokens
+	// (the wire family translates the one quota concept;
+	// per-model-completion-budget D1). Sampling parameters (temperature
+	// etc.) are sent on neither family (the former always-0 temperature is
+	// dead code, removed).
 	if req.Thinking {
 		params.ReasoningEffort = shared.ReasoningEffort(req.ReasoningEffort)
-		if req.MaxTokens > 0 {
-			params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
+		if req.MaxCompletionTokens > 0 {
+			params.MaxCompletionTokens = openai.Int(int64(req.MaxCompletionTokens))
 		}
 	} else {
-		if req.MaxTokens > 0 {
-			params.MaxTokens = openai.Int(int64(req.MaxTokens))
+		if req.MaxCompletionTokens > 0 {
+			params.MaxTokens = openai.Int(int64(req.MaxCompletionTokens))
 		}
 	}
 	if len(req.Tools) > 0 {

@@ -161,11 +161,10 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         stream.AgentConfucius,
 				SystemPrompt: "you are confucius",
-				MaxTokens:    512,
 				Tools:        []string{"mcp_add_server", "mcp_call", "mcp_list_servers", "mcp_remove_server"},
 			},
-			Chongzhi: config.AgentConfig{Name: stream.AgentChongzhi, SystemPrompt: "you are chongzhi", MaxTokens: 256},
-			Liang:    config.AgentConfig{Name: stream.AgentLiang, SystemPrompt: "you are liang", MaxTokens: 256},
+			Chongzhi: config.AgentConfig{Name: stream.AgentChongzhi, SystemPrompt: "you are chongzhi"},
+			Liang:    config.AgentConfig{Name: stream.AgentLiang, SystemPrompt: "you are liang"},
 		},
 	}
 

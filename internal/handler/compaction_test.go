@@ -289,7 +289,7 @@ func TestTurnPersistMessages_DeterministicIDsAndSuffixSplit(t *testing.T) {
 		userContent: "hi", userMsgTime: time.Unix(1, 0).UTC(),
 	}
 
-	full, err := info.buildTurnMessages(merged, 0, time.Now().UTC())
+	full, err := info.buildTurnMessages(merged, 0, false, time.Now().UTC())
 	require.NoError(t, err)
 	require.Len(t, full, 6) // user + 5 events
 	require.Equal(t, "trace-1:0", full[0].ClientMsgID)
@@ -301,17 +301,125 @@ func TestTurnPersistMessages_DeterministicIDsAndSuffixSplit(t *testing.T) {
 	// render exactly the suffix with CONTINUING ids and no user row.
 	var flushed turnFlushState
 	flushed.mark(3)
-	suffix, err := info.buildTurnMessages(merged, flushed.count(), time.Now().UTC())
+	suffix, err := info.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC())
 	require.NoError(t, err)
 	require.Len(t, suffix, 2)
 	require.Equal(t, "trace-1:4", suffix[0].ClientMsgID)
 	require.Equal(t, "trace-1:5", suffix[1].ClientMsgID)
 
 	// Re-rendering the full range yields the SAME ids (idempotency source).
-	again, err := info.buildTurnMessages(merged, 0, time.Now().UTC())
+	again, err := info.buildTurnMessages(merged, 0, false, time.Now().UTC())
 	require.NoError(t, err)
 	for i := range full {
 		require.Equal(t, full[i].ClientMsgID, again[i].ClientMsgID)
+	}
+}
+
+// TestBuildTurnMessages_UserPersistedGating covers the send-time persistence
+// gating (send-time-user-message-persistence) in three states: a fresh turn
+// (user row + events), a user row already persisted at send time (pure event
+// suffix from 0), and a mid-turn flush boundary from > 0 (suffix only, the
+// user row excluded regardless of the flag).
+func TestBuildTurnMessages_UserPersistedGating(t *testing.T) {
+	events := []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "one"),
+		stream.TokenEvent(stream.AgentConfucius, "two"),
+	}
+	merged := MergeEvents(events) // start, "onetwo" = 2
+
+	info := turnPersistInfo{
+		sessionID: "s", userID: "u", traceID: "trace-9",
+		userContent: "hi", userMsgTime: time.Unix(1, 0).UTC(),
+	}
+
+	// Nothing persisted yet: the batch includes the user row + all events.
+	fresh, err := info.buildTurnMessages(merged, 0, false, time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, fresh, 3)
+	require.Equal(t, "trace-9:0", fresh[0].ClientMsgID)
+	require.Equal(t, model.RoleUser, fresh[0].Role)
+
+	// User row already landed at send time: from=0 renders a pure event
+	// suffix with the same deterministic ids — no user row re-included.
+	sendTimeLanded, err := info.buildTurnMessages(merged, 0, true, time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, sendTimeLanded, 2)
+	require.Equal(t, "trace-9:1", sendTimeLanded[0].ClientMsgID)
+	require.Equal(t, "trace-9:2", sendTimeLanded[1].ClientMsgID)
+	for _, m := range sendTimeLanded {
+		require.NotEqual(t, model.RoleUser, m.Role, "no user row may re-enter the batch")
+	}
+
+	// from > 0 (mid-turn flush boundary): suffix only on either flag value —
+	// from > 0 already excludes the user row.
+	for _, userPersisted := range []bool{false, true} {
+		got, err := info.buildTurnMessages(merged, 1, userPersisted, time.Now().UTC())
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, "trace-9:2", got[0].ClientMsgID)
+		require.NotEqual(t, model.RoleUser, got[0].Role)
+	}
+}
+
+// TestTurnPersistBatches_UserRowExactlyOnce simulates the full batch sequence
+// of a turn with a mid-turn flush under send-time persistence:
+// send-time [user] → mid-turn flush [events 0..k) → turn-end [events k..N).
+// Concatenated, the batches must reproduce the turn exactly once — the user
+// row appears exactly once and the event suffixes continue without gap or
+// overlap (task 4.2: flush → 终局 suffix 续接不重不漏).
+func TestTurnPersistBatches_UserRowExactlyOnce(t *testing.T) {
+	events := []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "Hel"),
+		stream.TokenEvent(stream.AgentConfucius, "lo"),
+		stream.ToolCallEvent(stream.AgentConfucius, "c1", "t", json.RawMessage(`{}`)),
+		stream.ToolResultEvent(stream.AgentConfucius, "c1", "out"),
+		stream.TokenEvent(stream.AgentConfucius, "done"),
+	}
+	merged := MergeEvents(events) // 5 merged events
+
+	info := turnPersistInfo{
+		sessionID: "s", userID: "u", traceID: "trace-9",
+		userContent: "hi", userMsgTime: time.Unix(1, 0).UTC(),
+	}
+	var flushed turnFlushState
+
+	// Send-time batch — production renders it directly (not through
+	// buildTurnMessages): the user row alone, then the flag flips.
+	sendBatch := []model.Message{UserMessage(info.sessionID, info.traceID, info.userContent, info.userMsgTime)}
+	flushed.markUserPersisted()
+
+	// Mid-turn flush after 3 merged events: production snapshots only the
+	// events emitted so far (merged[:3]), so the flush batch renders from 0
+	// over the PREFIX — a pure event suffix because userPersisted is set.
+	midBatch, err := info.buildTurnMessages(merged[:3], 0, flushed.userPersisted(), time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, midBatch, 3)
+	flushed.mark(3)
+
+	// Turn-end save: the remaining suffix from 3.
+	endBatch, err := info.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, endBatch, 2)
+
+	all := make([]model.Message, 0, len(sendBatch)+len(midBatch)+len(endBatch))
+	all = append(all, sendBatch...)
+	all = append(all, midBatch...)
+	all = append(all, endBatch...)
+
+	require.Len(t, all, 6, "user + 5 merged events, nothing duplicated or dropped")
+	userRows := 0
+	for _, m := range all {
+		if m.Role == model.RoleUser {
+			userRows++
+		}
+	}
+	require.Equal(t, 1, userRows, "the user row must appear exactly once across the batches")
+
+	// The concatenated ids are the exact deterministic sequence {trace}:0..5.
+	for i, want := range []string{"trace-9:0", "trace-9:1", "trace-9:2", "trace-9:3", "trace-9:4", "trace-9:5"} {
+		require.Equal(t, want, all[i].ClientMsgID, "row %d", i)
 	}
 }
 

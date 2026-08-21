@@ -28,22 +28,27 @@ func NewModelListHandler(catalog []config.ModelCatalogEntry, def, defaultEffort 
 
 // modelEntry is one element of the GET /api/v1/models response array.
 type modelEntry struct {
-	Name             string `json:"name"`
-	MaxContextTokens int    `json:"max_context_tokens"`
-	Thinking         bool   `json:"thinking"`
+	Name                string `json:"name"`
+	MaxContextTokens    int    `json:"max_context_tokens"`
+	MaxCompletionTokens int    `json:"max_completion_tokens"`
+	Thinking            bool   `json:"thinking"`
 }
 
 // List handles GET /api/v1/models. Returns 200 with the selectable model
 // catalog, the default model name, and the deployment default reasoning
 // effort; a thinking flag tells the frontend whether reasoning_effort values
-// other than none are valid for the model.
+// other than none are valid for the model. Each entry also carries its
+// max_completion_tokens output quota (per-model-completion-budget); the
+// per-entry length_continue sub-block is deliberately NOT exposed (an
+// operator-side continuation switch, not a user selection axis).
 func (h *ModelListHandler) List(c *gin.Context) {
 	models := make([]modelEntry, 0, len(h.catalog))
 	for _, e := range h.catalog {
 		models = append(models, modelEntry{
-			Name:             e.Name,
-			MaxContextTokens: e.MaxContextTokens,
-			Thinking:         e.Thinking,
+			Name:                e.Name,
+			MaxContextTokens:    e.MaxContextTokens,
+			MaxCompletionTokens: e.MaxCompletionTokens,
+			Thinking:            e.Thinking,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{

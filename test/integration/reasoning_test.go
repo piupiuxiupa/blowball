@@ -31,12 +31,13 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 			usage:            agent.Usage{PromptTokens: 10, CompletionTokens: 1, ReasoningTokens: 2, TotalTokens: 13},
 		},
 		scriptedLLMResponse{
-			content:      "Greeting",
+			content:      "Again",
 			finishReason: "stop",
 			usage:        agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 		},
+	).withTitleResponses(
 		scriptedLLMResponse{
-			content:      "Again",
+			content:      "Greeting",
 			finishReason: "stop",
 			usage:        agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 		},
@@ -44,7 +45,7 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	env := newTestEnvWithConfig(t, llm, &config.Config{
 		OpenAI: config.OpenAIConfig{
 			APIKey:                 "test",
-			Models:                 []config.ModelCatalogEntry{{Name: "gpt-test", MaxContextTokens: 128000, Thinking: true}},
+			Models:                 []config.ModelCatalogEntry{{Name: "gpt-test", MaxContextTokens: 128000, MaxCompletionTokens: 512, Thinking: true}},
 			DefaultReasoningEffort: "high",
 		},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
@@ -106,7 +107,7 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	require.NotNil(t, reasoningReq, "expected a reasoning LLMRequest")
 	assert.True(t, reasoningReq.Thinking, "Thinking must be true")
 	assert.Equal(t, "high", reasoningReq.ReasoningEffort, "reasoning_effort must match the deployment default")
-	assert.Equal(t, 512, reasoningReq.MaxTokens, "max_tokens must match agent config")
+	assert.Equal(t, 512, reasoningReq.MaxCompletionTokens, "quota must match the turn-resolved catalog entry")
 
 	// Verify reasoning content was persisted.
 	var foundReasoning bool

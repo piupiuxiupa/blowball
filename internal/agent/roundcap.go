@@ -68,7 +68,7 @@ func runWrapUpRound(ctx context.Context, client LLMClient, agentName string, hub
 		return "", result.Usage, nil
 	}
 	if lc.Enabled() && result.LengthHit {
-		return "", result.Usage, fmt.Errorf("length exhausted after continuation (final budget %d tokens)", req.MaxTokens)
+		return "", result.Usage, fmt.Errorf("length exhausted after continuation (final budget %d tokens)", req.MaxCompletionTokens)
 	}
 	// Match the main loop's precedence: prefer the content accumulated across
 	// the round's attempts (continuation keeps partial output — the final

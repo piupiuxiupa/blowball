@@ -82,12 +82,12 @@ type roundResult struct {
 // response ends finish_reason=length and the configured continuation budget
 // allows — the continuation loop: scaffold the round (assistant partial +
 // user instruction, or assistant-with-half-calls + per-call triage), expand
-// req.MaxTokens by ExpandStep, rebuild req.Messages from the mutated round,
-// and re-request. With the capability disabled (lc zero) it degenerates to a
-// single StreamChat call — byte-for-byte prior loop behavior.
+// req.MaxCompletionTokens by ExpandStep, rebuild req.Messages from the mutated
+// round, and re-request. With the capability disabled (lc zero) it degenerates
+// to a single StreamChat call — byte-for-byte prior loop behavior.
 //
 // req is the caller-built request for the round (Messages = rebuild(round) at
-// entry); the helper owns only req.MaxTokens and req.Messages across
+// entry); the helper owns only req.MaxCompletionTokens and req.Messages across
 // attempts. round is the caller's conversation slice (pointer — scaffolding
 // appends must persist for the rest of the turn); rebuild maps a round to the
 // full messages array (the loops use withSystem; the wrap-up path appends its
@@ -101,7 +101,7 @@ func runLLMRound(ctx context.Context, client LLMClient, hub stream.EventHub, age
 	onToken, onReasoning func(string) error) (roundResult, error) {
 
 	step, maxRetries := lc.Resolve() // (0, 0) when disabled
-	baseTokens := req.MaxTokens
+	baseTokens := req.MaxCompletionTokens
 	var res roundResult
 	for attempt := 0; ; attempt++ {
 		resp, err := client.StreamChat(ctx, req, onToken, onReasoning)
@@ -125,7 +125,7 @@ func runLLMRound(ctx context.Context, client LLMClient, hub stream.EventHub, age
 			zap.Int("continuation", attempt+1),
 			zap.Int("max_continuations", maxRetries))
 		scaffoldLengthRound(ctx, hub, agentName, round, resp, dispatch)
-		req.MaxTokens = baseTokens + (attempt+1)*step
+		req.MaxCompletionTokens = baseTokens + (attempt+1)*step
 		req.Messages = rebuild(*round)
 	}
 }

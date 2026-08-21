@@ -70,7 +70,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子
 - **THEN** 系统推送 StreamEvent{Type: "agent_error", Agent: "xxx", Content: "错误描述", Meta: {error_code: "..."}}，然后推送 agent_end 事件
 
 ### Requirement: Agent configuration from file
-每个 Agent 的 name、system_prompt、max_tokens、tools 列表、mcp 配置、skills 配置、output_schema 及 max_rounds（tool-calling 循环上限）SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。agent 配置 SHALL NOT 包含模型、思考开关或思考等级字段——模型与思考等级是 turn 级属性，由模型目录 + 部署默认 + 请求参数解析得出（见 per-request-model-selection），并统一注入该 turn 的全部 agent。未设置或 `<= 0` 的 `max_rounds` SHALL 回退到默认值 `100`。
+每个 Agent 的 name、system_prompt、tools 列表、mcp 配置、skills 配置、output_schema 及 max_rounds（tool-calling 循环上限）SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。agent 配置 SHALL NOT 包含任何 LLM 参数字段——模型、思考等级、输出配额（`max_tokens`/`max_completion_tokens`）与续写配置均为 turn 级属性，由模型目录 + 部署默认 + 请求参数解析得出（见 per-request-model-selection），并统一注入该 turn 的全部 agent。未设置或 `<= 0` 的 `max_rounds` SHALL 回退到默认值 `100`。
 
 #### Scenario: Load agent config on startup
 - **WHEN** 服务启动
@@ -91,6 +91,10 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子
 #### Scenario: Default max_rounds when unset
 - **WHEN** 某 Agent 配置未设置 `max_rounds`（或设为 `<= 0`）
 - **THEN** 该 Agent 的 tool-calling 循环上限 SHALL 取默认值 `100`
+
+#### Scenario: agent 残留 max_tokens 拒绝加载
+- **WHEN** config.yaml 的某 agent 段包含 `max_tokens`
+- **THEN** 配置加载失败,错误信息指向 `openai.models[].max_completion_tokens` 迁移(残留拒绝见 per-request-model-selection)
 
 ### Requirement: Confucius agent loop
 Confucius SHALL 实现多轮 tool-calling 循环，循环在 LLM 返回 finish_reason 为 stop 时自然终止；当循环用尽配置的 `max_rounds` 上限仍未自然终止时，SHALL 按「Agent tool-calling loop round cap and graceful termination」受控终止（WARN 日志、`usage.meta.round_capped`、一次 tool-disabled 收尾回合；详见该需求）。当某回合返回 `finish_reason=length` 时，SHALL 按 `llm-length-continuation` 能力处理：能力启用时不再将 `length` 视为循环终止信号，而是保留已输出内容并以扩容预算续写（续写尝试不消耗 `max_rounds`；耗尽时的 `length_exhausted` 终止见该能力）；能力未启用时维持 `length` 静默终止的现状行为。同一续写规则 SHALL 等价作用于 Chongzhi 与 Liang 的 tool-calling 循环及各 agent 的 tool-disabled 收尾回合。

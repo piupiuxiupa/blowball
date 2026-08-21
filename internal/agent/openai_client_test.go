@@ -158,7 +158,7 @@ func TestOpenAIClient_RequestBranch_NonThinkingFamilyOmitsEffort(t *testing.T) {
 	body := captureRequestBody(t, LLMRequest{
 		Model:     "glm-4.7",
 		Messages:  []Message{{Role: "user", Content: "hi"}},
-		MaxTokens: 512,
+		MaxCompletionTokens: 512,
 		Thinking:  false,
 		// The effort axis is clamped to none before the request is built;
 		// the value here is inert on this family.
@@ -178,7 +178,7 @@ func TestOpenAIClient_RequestBranch_EffortSendsReasoningParams(t *testing.T) {
 	body := captureRequestBody(t, LLMRequest{
 		Model:           "gpt-5",
 		Messages:        []Message{{Role: "user", Content: "hi"}},
-		MaxTokens:       512,
+		MaxCompletionTokens:       512,
 		Thinking:        true,
 		ReasoningEffort: "high",
 	})
@@ -197,7 +197,7 @@ func TestOpenAIClient_RequestBranch_NoneEffortSentLiterally(t *testing.T) {
 	body := captureRequestBody(t, LLMRequest{
 		Model:           "glm-5.2",
 		Messages:        []Message{{Role: "user", Content: "hi"}},
-		MaxTokens:       512,
+		MaxCompletionTokens:       512,
 		Thinking:        true,
 		ReasoningEffort: "none",
 	})

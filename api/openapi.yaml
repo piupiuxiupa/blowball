@@ -609,7 +609,7 @@ components:
           description: The deployment default reasoning effort applied to requests that omit `reasoning_effort`.
     ModelEntry:
       type: object
-      required: [name, max_context_tokens, thinking]
+      required: [name, max_context_tokens, max_completion_tokens, thinking]
       properties:
         name:
           type: string
@@ -617,6 +617,15 @@ components:
         max_context_tokens:
           type: integer
           description: The model's context window; the context-compaction threshold for turns selecting it (0.8 × this value).
+        max_completion_tokens:
+          type: integer
+          description: |
+            The model's output-token quota, shared by every agent of a turn
+            that resolves to this entry (per-model-completion-budget). The wire
+            family translates it: a `thinking: true` model sends it as
+            `max_completion_tokens`, a `thinking: false` model as the legacy
+            `max_tokens` parameter. The per-entry `length_continue`
+            continuation switch is operator-only and not exposed here.
         thinking:
           type: boolean
           description: Whether the model supports reasoning (gates non-`none` reasoning_effort values).

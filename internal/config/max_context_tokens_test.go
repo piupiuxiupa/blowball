@@ -16,6 +16,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 %s
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"

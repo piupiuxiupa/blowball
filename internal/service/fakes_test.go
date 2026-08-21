@@ -36,6 +36,9 @@ type fakeMySQLStore struct {
 	upsertTitleCalls int
 	upsertTitleArg   model.Title
 	upsertTitleErr   error
+	// titles mirrors the titles table for the upsert manual-guard semantics
+	// (title-generation-cadence); tests using getTitleFound override reads.
+	titles map[string]model.Title
 
 	getTitleCalls int
 	getTitleFound *model.Title
@@ -124,19 +127,36 @@ func (f *fakeMySQLStore) ListSessionsWithTitle(_ context.Context, userID string)
 	return out, nil
 }
 
+// UpsertTitle records the call AND mirrors the AI upsert's SQL manual-guard
+// (title-generation-cadence) in the titles map: a pre-existing is_manual =
+// TRUE row is left untouched — title, trace_id and is_manual all keep their
+// values. Non-manual rows are inserted or overwritten as before.
 func (f *fakeMySQLStore) UpsertTitle(_ context.Context, t model.Title) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upsertTitleCalls++
 	f.upsertTitleArg = t
+	if cur, ok := f.titles[t.SessionID]; ok && cur.IsManual {
+		return f.upsertTitleErr
+	}
+	if f.titles == nil {
+		f.titles = map[string]model.Title{}
+	}
+	f.titles[t.SessionID] = t
 	return f.upsertTitleErr
 }
 
+// UpsertTitleManual records the call and stores the manual title — manual
+// always wins, mirroring the unguarded manual upsert SQL.
 func (f *fakeMySQLStore) UpsertTitleManual(_ context.Context, t model.Title) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upsertTitleCalls++
 	f.upsertTitleArg = t
+	if f.titles == nil {
+		f.titles = map[string]model.Title{}
+	}
+	f.titles[t.SessionID] = t
 	return f.upsertTitleErr
 }
 
@@ -148,7 +168,14 @@ func (f *fakeMySQLStore) GetTitle(_ context.Context, sessionID string) (*model.T
 		return nil, f.getTitleErr
 	}
 	if f.getTitleFound == nil {
-		return nil, nil
+		// Fall back to the titles map the upserts maintain (the guard's
+		// source of truth); an empty map behaves as "no title yet".
+		t, ok := f.titles[sessionID]
+		if !ok {
+			return nil, nil
+		}
+		cp := t
+		return &cp, nil
 	}
 	cp := *f.getTitleFound
 	return &cp, nil

@@ -21,7 +21,7 @@ import (
 // to newTestConfucius, which hands out one shared fake per name).
 func newTestConfuciusWithFactories(t *testing.T, client LLMClient, factories map[string]SubAgentFactory) *Confucius {
 	t.Helper()
-	c, err := NewConfucius(testConfuciusConfig(), client, nil, factories, testTurn(), config.LengthContinueConfig{})
+	c, err := NewConfucius(testConfuciusConfig(), client, nil, factories, testTurn())
 	require.NoError(t, err)
 	return c
 }

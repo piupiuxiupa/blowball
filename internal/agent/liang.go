@@ -39,20 +39,16 @@ type Liang struct {
 	// attached to the terminal round's LLMRequest to enable structured output
 	// (capability A).
 	responseFormat json.RawMessage
-	// lengthContinue is the finish_reason=length continuation policy
-	// (llm-length-continuation capability); zero = disabled = the loop
-	// treats a length round as terminal exactly as before.
-	lengthContinue config.LengthContinueConfig
 }
 
 // NewLiang builds a Liang agent. reg contains the tools this Liang instance is
 // allowed to call, filtered by the orchestrator from the process-wide registry.
-// turn is the turn-resolved model/effort configuration applied to every LLM
-// call this agent makes (model-effort-v2). lc is the global
-// finish_reason=length continuation policy (llm-length-continuation); zero
-// disables it.
-func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride, lc config.LengthContinueConfig) (*Liang, error) {
-	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools, cfg.MaxTokens)
+// turn is the turn-resolved model/effort/quota/continuation configuration
+// applied to every LLM call this agent makes (model-effort-v2,
+// per-model-completion-budget) — including the turn's finish_reason=length
+// continuation policy.
+func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride) (*Liang, error) {
+	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools, turn.MaxCompletionTokens)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build liang tools: %w", err)
 	}
@@ -61,15 +57,14 @@ func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn
 		maxRounds = config.DefaultAgentMaxRounds()
 	}
 	return &Liang{
-		cfg:            cfg,
-		client:         client,
-		toolRegistry:   reg,
-		turn:           turn,
-		toolsJSON:      toolsJSON,
-		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
-		maxRounds:      maxRounds,
+		cfg:           cfg,
+		client:        client,
+		toolRegistry:  reg,
+		turn:          turn,
+		toolsJSON:     toolsJSON,
+		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:     maxRounds,
 		responseFormat: buildResponseFormatPayload(cfg.OutputSchema, cfg.Name),
-		lengthContinue: lc,
 	}, nil
 }
 
@@ -118,11 +113,11 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		}
 
 		req := LLMRequest{
-			Model:           l.turn.Model,
-			Messages:        withSystem(l.cfg.SystemPrompt, round),
-			MaxTokens:       l.cfg.MaxTokens,
-			Thinking:        l.turn.Thinking,
-			ReasoningEffort: l.turn.ReasoningEffort,
+			Model:               l.turn.Model,
+			Messages:            withSystem(l.cfg.SystemPrompt, round),
+			MaxCompletionTokens: l.turn.MaxCompletionTokens,
+			Thinking:            l.turn.Thinking,
+			ReasoningEffort:     l.turn.ReasoningEffort,
 		}
 		if l.toolsIsNotNil {
 			req.Tools = l.toolsJSON
@@ -145,7 +140,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		}
 
 		var assistantText string
-		result, err := runLLMRound(ctx, l.client, hub, l.Name(), req, &round, l.lengthContinue,
+		result, err := runLLMRound(ctx, l.client, hub, l.Name(), req, &round, l.turn.LengthContinue,
 			func(r []Message) []Message { return withSystem(l.cfg.SystemPrompt, r) },
 			// Parseable tool_calls of an intermediate length response dispatch
 			// through the same record path as the main loop.
@@ -179,9 +174,9 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		// the accumulated partial content. The error text deliberately avoids
 		// transient-error substrings so the sub-agent retry pipeline (which
 		// Liang runs under when dispatched by Confucius) never retries it.
-		if l.lengthContinue.Enabled() && result.LengthHit {
-			step, retries := l.lengthContinue.Resolve()
-			msg := lengthExhaustedMessage(l.Name(), retries, l.cfg.MaxTokens+retries*step)
+		if l.turn.LengthContinue.Enabled() && result.LengthHit {
+			step, retries := l.turn.LengthContinue.Resolve()
+			msg := lengthExhaustedMessage(l.Name(), retries, l.turn.MaxCompletionTokens+retries*step)
 			hub.SendCtx(ctx, stream.AgentErrorEvent(l.Name(), msg, "length_exhausted"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(l.Name()))
 			return result.Content, total, nil, fmt.Errorf("liang: %s", msg)
@@ -217,11 +212,11 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		l.hitCapThisRun = true
 		emitCapHitWarn(l.Name(), l.maxRounds, l.maxRounds)
 		wrapReq := LLMRequest{
-			Model:           l.turn.Model,
-			Messages:        withSystem(l.cfg.SystemPrompt, round),
-			MaxTokens:       l.cfg.MaxTokens,
-			Thinking:        l.turn.Thinking,
-			ReasoningEffort: l.turn.ReasoningEffort,
+			Model:               l.turn.Model,
+			Messages:            withSystem(l.cfg.SystemPrompt, round),
+			MaxCompletionTokens: l.turn.MaxCompletionTokens,
+			Thinking:            l.turn.Thinking,
+			ReasoningEffort:     l.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose/structured answer.
 		}
 		// The wrap-up IS the terminal round, so a structured-output Liang still
@@ -232,7 +227,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		if rf, ok := l.terminalResponseFormat(round); ok {
 			wrapReq.ResponseFormat = rf
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, l.client, l.Name(), hub, wrapReq, &round, l.lengthContinue,
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, l.client, l.Name(), hub, wrapReq, &round, l.turn.LengthContinue,
 			func(r []Message) []Message {
 				return append(withSystem(l.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
 			})

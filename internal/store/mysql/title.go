@@ -14,13 +14,21 @@ import (
 // when a row already exists for the same session_id. The MySQL-specific
 // ON DUPLICATE KEY UPDATE keeps it a single round trip and avoids a separate
 // "does it exist?" probe. is_manual is always FALSE for AI-generated titles.
+//
+// Manual-title guard (title-generation-cadence): every updated column is
+// wrapped in IF(is_manual, <existing>, VALUES(<new>)), so an AI upsert landing
+// on an is_manual = TRUE row has ZERO effect — title, trace_id and is_manual
+// all keep their existing values. This closes the race where the user sets a
+// manual title while an AI generation is in flight: the service's GetTitle
+// early-exit only trims cost, correctness lives here in the SQL. Rows with
+// is_manual = FALSE (or no row at all) are inserted/overwritten as before.
 const upsertTitleSQL = `
 INSERT INTO titles (session_id, title, trace_id, is_manual)
 VALUES (:session_id, :title, :trace_id, FALSE)
 ON DUPLICATE KEY UPDATE
-    title      = VALUES(title),
-    trace_id   = VALUES(trace_id),
-    is_manual  = FALSE
+    title      = IF(is_manual, title, VALUES(title)),
+    trace_id   = IF(is_manual, trace_id, VALUES(trace_id)),
+    is_manual  = is_manual
 `
 
 // upsertTitleManualSQL is used for user-edited titles. It inserts a new row or
@@ -43,7 +51,8 @@ WHERE session_id = ?
 LIMIT 1
 `
 
-// UpsertTitle creates or replaces the title for t.SessionID.
+// UpsertTitle creates or replaces the title for t.SessionID. A pre-existing
+// manual title row is left untouched (see upsertTitleSQL's guard).
 func (s *Store) UpsertTitle(ctx context.Context, t model.Title) error {
 	logQuery(ctx, "title.upsert", upsertTitleSQL)
 	_, err := sqlx.NamedExecContext(ctx, s.db, upsertTitleSQL, t)

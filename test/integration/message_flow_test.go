@@ -153,6 +153,80 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.Equal(t, model.EventTypeAgentEnd, recovered[3].EventType)
 }
 
+// TestMessageFlow_UserMessageVisibleWhileTurnRunning is the regression anchor
+// for the mid-turn refresh problem (send-time-user-message-persistence,
+// "Mid-turn visibility after refresh"): while a turn is still streaming, the
+// history view must already contain this turn's user row and no assistant
+// rows. The send-time write lands the user row in the Redis read tier within
+// the request (zero window); the history endpoint reads MySQL directly
+// (cursor pagination), so the explicit drain stands in for the background
+// flusher's ≤ flush_interval lag — the same read-your-writes window every
+// turn-end write has always had.
+func TestMessageFlow_UserMessageVisibleWhileTurnRunning(t *testing.T) {
+	// A slow LLM keeps the turn streaming for ~600ms, leaving ample time to
+	// probe the history mid-turn.
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{
+			tokens:       []string{"slow ", "streaming ", "answer ", "in ", "progress", "!"},
+			content:      "slow streaming answer in progress!",
+			finishReason: "stop",
+			usage:        agent.Usage{TotalTokens: 6},
+			tokenDelay:   100 * time.Millisecond,
+		},
+		scriptedLLMResponse{content: "T", finishReason: "stop", usage: agent.Usage{TotalTokens: 1}},
+	)
+	env := newTestEnv(t, llm)
+	token := authToken(t, defaultUserID)
+	ctx := context.Background()
+
+	// Post in the background: the SSE response only completes when the turn
+	// ends, so the probe below runs strictly mid-turn.
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- env.postMessage(`{"content":"mid-turn question"}`, token)
+	}()
+
+	// The send-time user row is readable through the Redis-first tier the
+	// moment the write returns — poll the read cache until it shows up.
+	require.Eventually(t, func() bool {
+		raws, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
+		return err == nil && len(raws) == 1
+	}, 2*time.Second, 5*time.Millisecond, "the send-time user row must be readable while the turn runs")
+
+	// Move the queued row into MySQL (the flusher's job) and read the history
+	// endpoint mid-turn: the user row is present, no assistant rows are.
+	require.NoError(t, env.drainMessages(ctx))
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/"+defaultSessionID+"/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	hw := httptest.NewRecorder()
+	env.engine.ServeHTTP(hw, req)
+	require.Equal(t, http.StatusOK, hw.Code, "body: %s", hw.Body.String())
+	var resp struct {
+		Messages []model.Message `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(hw.Body.Bytes(), &resp))
+	require.Len(t, resp.Messages, 1, "mid-turn history must contain exactly this turn's user row")
+	assert.Equal(t, model.RoleUser, resp.Messages[0].Role)
+	assert.Equal(t, model.EventTypeMessage, resp.Messages[0].EventType)
+	assert.Equal(t, "mid-turn question", resp.Messages[0].Content)
+
+	// Let the turn finish; the assistant suffix lands afterwards and the
+	// completed history keeps exactly one user row.
+	<-done
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
+	require.NoError(t, env.drainMessages(ctx))
+	final := env.mysqlFake.messagesFor(defaultSessionID)
+	require.Len(t, final, 4, "user + 3 merged assistant events after the turn")
+	userRows := 0
+	for _, m := range final {
+		if m.EventType == model.EventTypeMessage {
+			userRows++
+		}
+	}
+	assert.Equal(t, 1, userRows, "the turn's user row must appear exactly once in the final history")
+}
+
 // TestMessageFlow_OrchestratorFailure_PersistsPartialTurn verifies that when
 // the orchestrator returns a non-cancellation error mid-stream (here a provider
 // failure that lands AFTER the model has already streamed a token), the user
@@ -357,8 +431,9 @@ func TestGetSessionMessages_WrongOwner_404(t *testing.T) {
 func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 	llm := newScriptedLLMClient(
 		scriptedLLMResponse{tokens: []string{"first reply"}, content: "first reply", finishReason: "stop", usage: agent.Usage{TotalTokens: 3}},
-		scriptedLLMResponse{content: "First Title", finishReason: "stop", usage: agent.Usage{TotalTokens: 2}},
 		scriptedLLMResponse{tokens: []string{"second reply"}, content: "second reply", finishReason: "stop", usage: agent.Usage{TotalTokens: 3}},
+	).withTitleResponses(
+		scriptedLLMResponse{content: "First Title", finishReason: "stop", usage: agent.Usage{TotalTokens: 2}},
 	)
 	env := newTestEnv(t, llm)
 	token := authToken(t, defaultUserID)
@@ -442,9 +517,10 @@ func TestMessageFlow_ToolCallMemory(t *testing.T) {
 			}},
 			usage: agent.Usage{TotalTokens: 3},
 		},
-		scriptedLLMResponse{content: "Tool Title", finishReason: "stop", usage: agent.Usage{TotalTokens: 2}},
 		scriptedLLMResponse{tokens: []string{"result was hello"}, content: "result was hello", finishReason: "stop", usage: agent.Usage{TotalTokens: 4}},
 		scriptedLLMResponse{tokens: []string{"I remember"}, content: "I remember", finishReason: "stop", usage: agent.Usage{TotalTokens: 3}},
+	).withTitleResponses(
+		scriptedLLMResponse{content: "Tool Title", finishReason: "stop", usage: agent.Usage{TotalTokens: 2}},
 	)
 
 	env := newTestEnvWithRegistry(t, llm, baseReg, []string{"echo"})

@@ -32,10 +32,13 @@ Aim for about %d words in non-CJK languages or %d CJK characters.`
 
 var titleSystemPrompt = fmt.Sprintf(text, maxTitleRunes, maxTitleRunes)
 
-// TitleService generates a short session title asynchronously from the first
-// user/assistant exchange. Generation is fire-and-forget: callers run it in a
-// goroutine. Any failure (LLM error, network, parse) degrades to the first 20
-// runes of the user message so the session-list UI always has something.
+// TitleService generates a short session title asynchronously from the
+// session's first user message plus the message that triggered the generation
+// (title-generation-cadence: the trigger fires at send time, every 3rd user
+// message starting with the 1st). Generation is fire-and-forget: callers run
+// it in a goroutine. Any failure (LLM error, network, parse) degrades to the
+// first 20 runes of the triggering user message so the session-list UI always
+// has something.
 type TitleService struct {
 	llm   agent.LLMClient
 	mysql MySQLStore
@@ -51,7 +54,13 @@ func NewTitleService(llm agent.LLMClient, mysqlStore MySQLStore, cfg config.Open
 // GenerateTitle is intended to be called from a goroutine (go svc.GenerateTitle(...)).
 // It MUST NOT panic the host process under any failure mode: a top-level
 // recover converts any panic into a logged error.
-func (s *TitleService) GenerateTitle(ctx context.Context, sessionID, userMsg, assistantMsg string) {
+//
+// firstUserMsg is the session's first user message (the topic anchor) and
+// currentUserMsg the message that triggered this generation (the latest-topic
+// signal); on the first message (n=1) both carry the same text. Assistant
+// content is deliberately NOT part of the input (title-generation-cadence:
+// generation fires at send time, before any reply exists).
+func (s *TitleService) GenerateTitle(ctx context.Context, sessionID, firstUserMsg, currentUserMsg string) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.L().Error("title.generate panicked",
@@ -72,19 +81,22 @@ func (s *TitleService) GenerateTitle(ctx context.Context, sessionID, userMsg, as
 	}
 	bg = agent.WithSessionID(bg, sessionID)
 	bg = agent.WithAgentName(bg, "title")
-	s.generate(bg, sessionID, userMsg, assistantMsg)
+	s.generate(bg, sessionID, firstUserMsg, currentUserMsg)
 }
 
 // generate runs the LLM call, computes the final title (LLM output or
 // fallback), and upserts the row.
-func (s *TitleService) generate(ctx context.Context, sessionID, userMsg, assistantMsg string) {
+func (s *TitleService) generate(ctx context.Context, sessionID, firstUserMsg, currentUserMsg string) {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(zap.String("op", "title.generate"), zap.String("session_id", sessionID))
 	if tid != "" {
 		log = log.With(zap.String("trace_id", tid))
 	}
 
-	// If the user has manually set the title, do not overwrite it.
+	// If the user has manually set the title, do not overwrite it. This early
+	// exit only trims the LLM cost — correctness lives in the upsert's SQL
+	// manual-guard (a manual title set while this call is in flight survives
+	// the upsert below unchanged).
 	existing, err := s.mysql.GetTitle(ctx, sessionID)
 	if err != nil {
 		log.Error("get title failed; proceeding with generation", zap.Error(err))
@@ -93,8 +105,8 @@ func (s *TitleService) generate(ctx context.Context, sessionID, userMsg, assista
 		return
 	}
 
-	title := s.callLLM(ctx, log, userMsg, assistantMsg)
-	title = sanitizeTitle(title, userMsg)
+	title := s.callLLM(ctx, log, firstUserMsg, currentUserMsg)
+	title = sanitizeTitle(title, currentUserMsg)
 
 	if err := s.mysql.UpsertTitle(ctx, model.Title{
 		SessionID: sessionID,
@@ -107,10 +119,11 @@ func (s *TitleService) generate(ctx context.Context, sessionID, userMsg, assista
 	log.Info("title generated", zap.String("title", title))
 }
 
-// callLLM invokes the LLM with the title-generation prompt. On any error or an
-// empty response, an empty string is returned so the caller can apply the
-// fallback.
-func (s *TitleService) callLLM(ctx context.Context, log *zap.Logger, userMsg, assistantMsg string) string {
+// callLLM invokes the LLM with the title-generation prompt. The input is the
+// two user-side anchors (first question + latest question), never assistant
+// content. On any error or an empty response, an empty string is returned so
+// the caller can apply the fallback.
+func (s *TitleService) callLLM(ctx context.Context, log *zap.Logger, firstUserMsg, currentUserMsg string) string {
 	if s.llm == nil {
 		log.Warn("llm client nil; falling back")
 		return ""
@@ -130,7 +143,7 @@ func (s *TitleService) callLLM(ctx context.Context, log *zap.Logger, userMsg, as
 		Model: modelName,
 		Messages: []agent.Message{
 			{Role: "system", Content: titleSystemPrompt},
-			{Role: "user", Content: "Generate the session title from the following messages: \n\n User: " + userMsg + "\n\nAssistant: " + assistantMsg},
+			{Role: "user", Content: "Generate the session title from the following human messages: \n\nFirst question: " + firstUserMsg + "\n\nLatest question: " + currentUserMsg},
 		},
 	}
 

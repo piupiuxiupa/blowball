@@ -27,9 +27,8 @@ func TestLiang_NoTools_PassesEmptyToolsJSON(t *testing.T) {
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    256,
 		// Tools intentionally empty.
-	}, client, tool.NewRegistry(), testTurn(), config.LengthContinueConfig{})
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -105,9 +104,8 @@ func TestLiang_ToolCall(t *testing.T) {
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    256,
 		Tools:        []string{"ping"},
-	}, client, reg, testTurn(), config.LengthContinueConfig{})
+	}, client, reg, testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -172,9 +170,8 @@ func TestLiang_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    256,
 		Tools:        []string{"ping"},
-	}, client, reg, testTurn(), config.LengthContinueConfig{})
+	}, client, reg, testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -210,8 +207,7 @@ func TestLiang_StreamsTokens(t *testing.T) {
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    256,
-	}, client, tool.NewRegistry(), testTurn(), config.LengthContinueConfig{})
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -280,11 +276,12 @@ func TestLiang_ReasoningRequest(t *testing.T) {
 			usage:        Usage{PromptTokens: 3, CompletionTokens: 1, TotalTokens: 4},
 		},
 	)
+	turn := testTurn()
+	turn.Thinking, turn.ReasoningEffort = true, "low"
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    512,
-	}, client, tool.NewRegistry(), ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "low"}, config.LengthContinueConfig{})
+	}, client, tool.NewRegistry(), turn)
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -297,7 +294,7 @@ func TestLiang_ReasoningRequest(t *testing.T) {
 	req := client.lastRequest()
 	assert.True(t, req.Thinking, "Thinking must be true")
 	assert.Equal(t, "low", req.ReasoningEffort)
-	assert.Equal(t, 512, req.MaxTokens)
+	assert.Equal(t, 512, req.MaxCompletionTokens)
 }
 
 // TestLiang_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound verifies
@@ -318,9 +315,8 @@ func TestLiang_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound(t *testing
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    256,
 		OutputSchema: schema,
-	}, client, tool.NewRegistry(), testTurn(), config.LengthContinueConfig{})
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -375,10 +371,9 @@ func TestLiang_OutputSchema_ToolCall_TerminalRoundOnly(t *testing.T) {
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    256,
 		Tools:        []string{"ping"},
 		OutputSchema: schema,
-	}, client, reg, testTurn(), config.LengthContinueConfig{})
+	}, client, reg, testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -411,8 +406,7 @@ func TestLiang_NoOutputSchema_NoResponseFormat(t *testing.T) {
 	liang, err := NewLiang(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "you are liang",
-		MaxTokens:    256,
-	}, client, tool.NewRegistry(), testTurn(), config.LengthContinueConfig{})
+	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)

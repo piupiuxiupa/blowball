@@ -79,29 +79,62 @@ type scriptedLLMResponse struct {
 	tokenDelay time.Duration
 }
 
+// scriptedTitleModel routes title-generation calls in the shared scripted
+// client. It must match the TitleModel every test env wires into
+// TitleService. Routing by model keeps scripts deterministic under
+// title-generation-cadence: the send-time title call races the turn's own
+// LLM calls, so a single FIFO queue could hand a turn a scripted title
+// response (or vice versa) depending on goroutine scheduling.
+const scriptedTitleModel = "title-model"
+
 // scriptedLLMClient is a fake agent.LLMClient shared across the agent tree.
 // Each StreamChat call pops the next prepared response; a panic surfaces if
-// the queue runs dry, since that always indicates a test-authoring bug. The
-// client is concurrency-safe because parallel sub-agent dispatch hits the same
-// client from multiple goroutines.
+// the queue runs dry, since that always indicates a test-authoring bug.
+// Requests whose model is scriptedTitleModel (the async title generation)
+// pop from the separate titleResponses queue instead — falling back to a
+// canned response when a test did not script one, so the cadence's extra
+// title calls never perturb the turn scripting. The client is
+// concurrency-safe because parallel sub-agent dispatch hits the same client
+// from multiple goroutines.
 type scriptedLLMClient struct {
-	mu        sync.Mutex
-	responses []scriptedLLMResponse
-	calls     []agent.LLMRequest
+	mu             sync.Mutex
+	responses      []scriptedLLMResponse
+	titleResponses []scriptedLLMResponse
+	calls          []agent.LLMRequest
 }
 
 func newScriptedLLMClient(responses ...scriptedLLMResponse) *scriptedLLMClient {
 	return &scriptedLLMClient{responses: responses}
 }
 
+// withTitleResponses queues scripted responses consumed by title-generation
+// calls only (see scriptedTitleModel). Returns the client for chaining at
+// env construction.
+func (c *scriptedLLMClient) withTitleResponses(resps ...scriptedLLMResponse) *scriptedLLMClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.titleResponses = append(c.titleResponses, resps...)
+	return c
+}
+
 func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	c.mu.Lock()
-	if len(c.responses) == 0 {
-		c.mu.Unlock()
-		panic("scriptedLLMClient: responses queue exhausted; test scripted too few LLM rounds")
+	var resp scriptedLLMResponse
+	if req.Model == scriptedTitleModel {
+		if len(c.titleResponses) > 0 {
+			resp = c.titleResponses[0]
+			c.titleResponses = c.titleResponses[1:]
+		} else {
+			resp = scriptedLLMResponse{content: "Scripted Title", finishReason: "stop"}
+		}
+	} else {
+		if len(c.responses) == 0 {
+			c.mu.Unlock()
+			panic("scriptedLLMClient: responses queue exhausted; test scripted too few LLM rounds")
+		}
+		resp = c.responses[0]
+		c.responses = c.responses[1:]
 	}
-	resp := c.responses[0]
-	c.responses = c.responses[1:]
 	c.calls = append(c.calls, req)
 	c.mu.Unlock()
 
@@ -160,6 +193,21 @@ func (c *scriptedLLMClient) requests() []agent.LLMRequest {
 	defer c.mu.Unlock()
 	out := make([]agent.LLMRequest, len(c.calls))
 	copy(out, c.calls)
+	return out
+}
+
+// turnRequests is requests() minus the title-generation calls (the send-time
+// title round races the turn; tests asserting the turn's exact call sequence
+// want it excluded).
+func (c *scriptedLLMClient) turnRequests() []agent.LLMRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []agent.LLMRequest
+	for _, r := range c.calls {
+		if r.Model != scriptedTitleModel {
+			out = append(out, r)
+		}
+	}
 	return out
 }
 
@@ -298,9 +346,16 @@ func (m *memoryMySQL) ListSessionsWithTitle(_ context.Context, userID string) ([
 	return out, nil
 }
 
+// UpsertTitle mirrors the AI upsert's SQL manual-guard (title-generation-
+// cadence): a pre-existing is_manual = TRUE row is left untouched — title,
+// trace_id and is_manual all keep their values. Non-manual rows are inserted
+// or overwritten as before.
 func (m *memoryMySQL) UpsertTitle(_ context.Context, t model.Title) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if cur, ok := m.titles[t.SessionID]; ok && cur.IsManual {
+		return nil
+	}
 	m.titles[t.SessionID] = t
 	return nil
 }
@@ -595,19 +650,16 @@ func agentConfig() config.AgentsConfig {
 		Confucius: config.AgentConfig{
 			Name:         stream.AgentConfucius,
 			SystemPrompt: "you are confucius",
-			MaxTokens:    512,
 			Tools:        []string{},
 		},
 		Chongzhi: config.AgentConfig{
 			Name:         stream.AgentChongzhi,
 			SystemPrompt: "you are chongzhi",
-			MaxTokens:    512,
 			Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
 		},
 		Liang: config.AgentConfig{
 			Name:         stream.AgentLiang,
 			SystemPrompt: "you are liang",
-			MaxTokens:    512,
 			Tools:        []string{},
 		},
 	}
@@ -1028,5 +1080,5 @@ func requireEventPresent(t *testing.T, events []string, evt string) {
 // env carries (model-effort-v2): a non-thinking default so parameter-less
 // requests resolve to gpt-test / effort none.
 func testCatalog() []config.ModelCatalogEntry {
-	return []config.ModelCatalogEntry{{Name: "gpt-test", MaxContextTokens: 128000, Thinking: false}}
+	return []config.ModelCatalogEntry{{Name: "gpt-test", MaxContextTokens: 128000, MaxCompletionTokens: 512, Thinking: false}}
 }

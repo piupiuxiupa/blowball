@@ -48,11 +48,6 @@ type Confucius struct {
 	// mid-turn trigger). Nil on leaf-agent-free runs unless the orchestrator
 	// installed one right after the factory built this agent; see roundhook.go.
 	roundHook RoundHook
-	// lengthContinue is the finish_reason=length continuation policy
-	// (llm-length-continuation capability), injected at construction from the
-	// global openai.length_continue block. Zero = disabled = the loop treats
-	// a length round as terminal exactly as before.
-	lengthContinue config.LengthContinueConfig
 }
 
 // SetRoundHook implements RoundHookSetter. The orchestrator calls it on the
@@ -65,17 +60,18 @@ func (c *Confucius) SetRoundHook(hook RoundHook) { c.roundHook = hook }
 // factory is invoked once per dispatch to build a per-invocation instance (see
 // SubAgentFactory). The tools[] JSON is rendered once at construction time
 // from cfg.Tools plus the two synthetic invoke_* tools. turn is the
-// turn-resolved model/effort configuration applied to every LLM call this
-// agent makes (model-effort-v2). lc is the global finish_reason=length
-// continuation policy (llm-length-continuation); zero disables it.
-func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory, turn ModelOverride, lc config.LengthContinueConfig) (*Confucius, error) {
+// turn-resolved model/effort/quota/continuation configuration applied to every
+// LLM call this agent makes (model-effort-v2, per-model-completion-budget) —
+// including the write-budget number injected into the tools[] descriptions
+// and the turn's finish_reason=length continuation policy.
+func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory, turn ModelOverride) (*Confucius, error) {
 	if _, ok := subAgents[ToolInvokeChongzhi]; !ok {
 		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeChongzhi)
 	}
 	if _, ok := subAgents[ToolInvokeLiang]; !ok {
 		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeLiang)
 	}
-	toolsJSON, err := buildConfuciusToolsJSON(reg, cfg.Tools, cfg.MaxTokens)
+	toolsJSON, err := buildConfuciusToolsJSON(reg, cfg.Tools, turn.MaxCompletionTokens)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build confucius tools: %w", err)
 	}
@@ -84,15 +80,14 @@ func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, 
 		maxRounds = config.DefaultAgentMaxRounds()
 	}
 	return &Confucius{
-		cfg:            cfg,
-		client:         client,
-		toolRegistry:   reg,
-		turn:           turn,
-		subAgents:      subAgents,
-		toolsJSON:      toolsJSON,
-		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
-		maxRounds:      maxRounds,
-		lengthContinue: lc,
+		cfg:           cfg,
+		client:        client,
+		toolRegistry:  reg,
+		turn:          turn,
+		subAgents:     subAgents,
+		toolsJSON:     toolsJSON,
+		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:     maxRounds,
 	}, nil
 }
 
@@ -167,11 +162,11 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		}
 
 		req := LLMRequest{
-			Model:           c.turn.Model,
-			Messages:        withSystem(c.cfg.SystemPrompt, round),
-			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.turn.Thinking,
-			ReasoningEffort: c.turn.ReasoningEffort,
+			Model:               c.turn.Model,
+			Messages:            withSystem(c.cfg.SystemPrompt, round),
+			MaxCompletionTokens: c.turn.MaxCompletionTokens,
+			Thinking:            c.turn.Thinking,
+			ReasoningEffort:     c.turn.ReasoningEffort,
 		}
 		if c.toolsIsNotNil {
 			req.Tools = c.toolsJSON
@@ -181,7 +176,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		// (across ALL attempts of the round — the continuation stream is
 		// seamless, so the fallback accumulates too).
 		var assistantText string
-		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.lengthContinue,
+		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.turn.LengthContinue,
 			func(r []Message) []Message { return withSystem(c.cfg.SystemPrompt, r) },
 			// Dispatch of the parseable tool_calls of an intermediate length
 			// response (design D5): reuses the main loop's
@@ -227,9 +222,9 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		// turn fails loudly (agent_error + done.error) but keeps the
 		// accumulated partial content as finalContent — continuation never
 		// discards. Mirrors the round_cap_exhausted shape.
-		if c.lengthContinue.Enabled() && result.LengthHit {
-			step, retries := c.lengthContinue.Resolve()
-			msg := lengthExhaustedMessage(c.Name(), retries, c.cfg.MaxTokens+retries*step)
+		if c.turn.LengthContinue.Enabled() && result.LengthHit {
+			step, retries := c.turn.LengthContinue.Resolve()
+			msg := lengthExhaustedMessage(c.Name(), retries, c.turn.MaxCompletionTokens+retries*step)
 			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), msg, "length_exhausted"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
 			return result.Content, total, buildBreakdown(byAgent, tmeta), fmt.Errorf("confucius: %s", msg)
@@ -293,14 +288,14 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
 		tmeta.observeRoundCapped()
 		wrapReq := LLMRequest{
-			Model:           c.turn.Model,
-			Messages:        withSystem(c.cfg.SystemPrompt, round),
-			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.turn.Thinking,
-			ReasoningEffort: c.turn.ReasoningEffort,
+			Model:               c.turn.Model,
+			Messages:            withSystem(c.cfg.SystemPrompt, round),
+			MaxCompletionTokens: c.turn.MaxCompletionTokens,
+			Thinking:            c.turn.Thinking,
+			ReasoningEffort:     c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.lengthContinue,
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue,
 			func(r []Message) []Message {
 				return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
 			})

@@ -32,19 +32,16 @@ func newTestOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
 				SystemPrompt: "you are confucius",
-				MaxTokens:    256,
 				Tools:        []string{},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
 				SystemPrompt: "you are chongzhi",
-				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
 				SystemPrompt: "you are liang",
-				MaxTokens:    256,
 			},
 		},
 	}
@@ -88,14 +85,13 @@ func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
 		Tools:  config.ToolsConfig{Xizhi: xizhiCfg},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
-				Name: "Confucius", SystemPrompt: "you are confucius", MaxTokens: 256,
-			},
+				Name: "Confucius", SystemPrompt: "you are confucius"},
 			Chongzhi: config.AgentConfig{
-				Name: "Chongzhi", SystemPrompt: "you are chongzhi", MaxTokens: 256,
+				Name: "Chongzhi", SystemPrompt: "you are chongzhi",
 				Tools: []string{"xizhi_write_file", "xizhi_delete"},
 			},
 			Liang: config.AgentConfig{
-				Name: "Liang", SystemPrompt: "you are liang", MaxTokens: 256,
+				Name: "Liang", SystemPrompt: "you are liang",
 			},
 		},
 	}
@@ -239,19 +235,16 @@ func TestOrchestrator_ExternalMCPTool(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
 				SystemPrompt: "you are confucius",
-				MaxTokens:    256,
 				Tools:        []string{"external_greet"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
 				SystemPrompt: "you are chongzhi",
-				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
 				SystemPrompt: "you are liang",
-				MaxTokens:    256,
 			},
 		},
 	}
@@ -297,7 +290,6 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
 				SystemPrompt: "you are confucius",
-				MaxTokens:    256,
 				MCP: config.AgentMCPConfig{
 					Servers: []config.AgentMCPServerConfig{{
 						Name:  "remote",
@@ -308,13 +300,11 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
 				SystemPrompt: "you are chongzhi",
-				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
 				SystemPrompt: "you are liang",
-				MaxTokens:    256,
 			},
 		},
 	}
@@ -372,18 +362,15 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
 				SystemPrompt: "you are confucius",
-				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
 				SystemPrompt: "you are chongzhi",
-				MaxTokens:    256,
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
 				SystemPrompt: "you are liang",
-				MaxTokens:    256,
 			},
 		},
 	}
@@ -443,18 +430,15 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
 				SystemPrompt: "you are confucius",
-				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         "Chongzhi",
 				SystemPrompt: "you are chongzhi",
-				MaxTokens:    256,
 			},
 			Liang: config.AgentConfig{
 				Name:         "Liang",
 				SystemPrompt: "you are liang",
-				MaxTokens:    256,
 			},
 		},
 	}
@@ -498,10 +482,9 @@ func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
 				SystemPrompt: "you are confucius\n\nParallel Dispatch Guidance\n- Emit INDEPENDENT subtasks as multiple tool_calls in a SINGLE assistant turn.\n- Parallel budget: aim for 2-3 parallel invokes per turn and avoid more than 5.\n- Never issue overlapping/duplicate tasks to the same sub-agent in one turn.",
-				MaxTokens:    256,
 			},
-			Chongzhi: config.AgentConfig{Name: "Chongzhi", SystemPrompt: "you are chongzhi", MaxTokens: 256},
-			Liang:    config.AgentConfig{Name: "Liang", SystemPrompt: "you are liang", MaxTokens: 256},
+			Chongzhi: config.AgentConfig{Name: "Chongzhi", SystemPrompt: "you are chongzhi"},
+			Liang:    config.AgentConfig{Name: "Liang", SystemPrompt: "you are liang"},
 		},
 	}
 	o, err := NewOrchestrator(client, cfg, nil, nil, skill.NewLoader("", nil), nil)

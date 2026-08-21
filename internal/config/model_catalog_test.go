@@ -35,9 +35,11 @@ const twoModelCatalog = `
   models:
     - name: gpt-5
       max_context_tokens: 400000
+      max_completion_tokens: 16384
       thinking: true
     - name: glm-4.7
       max_context_tokens: 200000
+      max_completion_tokens: 8192
       thinking: false
 `
 
@@ -53,12 +55,12 @@ func TestLoad_ModelCatalog_Valid(t *testing.T) {
 		t.Fatalf("OpenAI.Models has %d entries, want 2", got)
 	}
 	first := cfg.OpenAI.Models[0]
-	if first.Name != "gpt-5" || first.MaxContextTokens != 400000 || !first.Thinking {
-		t.Errorf("Models[0] = %+v, want {gpt-5 400000 true}", first)
+	if first.Name != "gpt-5" || first.MaxContextTokens != 400000 || first.MaxCompletionTokens != 16384 || !first.Thinking {
+		t.Errorf("Models[0] = %+v, want {gpt-5 400000 16384 true}", first)
 	}
 	second := cfg.OpenAI.Models[1]
-	if second.Name != "glm-4.7" || second.MaxContextTokens != 200000 || second.Thinking {
-		t.Errorf("Models[1] = %+v, want {glm-4.7 200000 false}", second)
+	if second.Name != "glm-4.7" || second.MaxContextTokens != 200000 || second.MaxCompletionTokens != 8192 || second.Thinking {
+		t.Errorf("Models[1] = %+v, want {glm-4.7 200000 8192 false}", second)
 	}
 	if cfg.OpenAI.DefaultModel != "glm-4.7" {
 		t.Errorf("OpenAI.DefaultModel = %q, want glm-4.7", cfg.OpenAI.DefaultModel)
@@ -109,8 +111,10 @@ func TestLoad_ModelCatalog_DuplicateNameRejected(t *testing.T) {
   models:
     - name: gpt-5
       max_context_tokens: 400000
+      max_completion_tokens: 16384
     - name: gpt-5
       max_context_tokens: 200000
+      max_completion_tokens: 8192
 `)
 	if err == nil {
 		t.Fatal("Load accepted a duplicate catalog name; want validation error")

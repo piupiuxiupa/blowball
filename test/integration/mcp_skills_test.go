@@ -46,6 +46,13 @@ func (s *scriptedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onTo
 	s.mu.Lock()
 	s.lastReq = req
 	s.requests = append(s.requests, req)
+	// The send-time title generation (title-generation-cadence) races the
+	// turn's LLM calls through this shared client; serve it a canned response
+	// WITHOUT consuming the positional queue so turn rounds stay aligned.
+	if req.Model == scriptedTitleModel {
+		s.mu.Unlock()
+		return agent.LLMResponse{FinishReason: "stop", Content: "Scripted Title"}, nil
+	}
 	if s.calls >= len(s.responses) {
 		s.mu.Unlock()
 		return agent.LLMResponse{FinishReason: "stop", Content: "done"}, nil
@@ -108,7 +115,6 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         stream.AgentConfucius,
 				SystemPrompt: "you are confucius",
-				MaxTokens:    256,
 				MCP: config.AgentMCPConfig{
 					Servers: []config.AgentMCPServerConfig{{
 						Name:  "remote",
@@ -119,13 +125,11 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 			Chongzhi: config.AgentConfig{
 				Name:         stream.AgentChongzhi,
 				SystemPrompt: "you are chongzhi",
-				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         stream.AgentLiang,
 				SystemPrompt: "you are liang",
-				MaxTokens:    256,
 			},
 		},
 	}
@@ -198,20 +202,17 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 			Confucius: config.AgentConfig{
 				Name:         stream.AgentConfucius,
 				SystemPrompt: "you are confucius",
-				MaxTokens:    256,
 				Skills:       []string{"coding-style"},
 				Tools:        []string{"luban_list_skills", "luban_read_skill", "luban_install_skill"},
 			},
 			Chongzhi: config.AgentConfig{
 				Name:         stream.AgentChongzhi,
 				SystemPrompt: "you are chongzhi",
-				MaxTokens:    256,
 				Tools:        []string{"xizhi_write_file"},
 			},
 			Liang: config.AgentConfig{
 				Name:         stream.AgentLiang,
 				SystemPrompt: "you are liang",
-				MaxTokens:    256,
 			},
 		},
 	}

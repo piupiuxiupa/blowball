@@ -313,21 +313,24 @@ func (m *handlerFakeMySQL) LatestContextTokens(_ context.Context, _ string) (int
 // handlerFakeRedis records the write-behind dual writes. The decoded rows
 // (dualRows) are what handler tests assert on — with the Redis-first change
 // the dual-write pipeline IS the persistence call, so the batch previously
-// observed on the MySQL fake now lands here.
+// observed on the MySQL fake now lands here. dualBatches records each
+// pipeline call's rows separately so tests can assert the batch SPLIT
+// (send-time [user] + turn-end [events], send-time-user-message-persistence).
 type handlerFakeRedis struct {
-	mu         sync.Mutex
-	dualCalls  int
-	dualSID    string
-	dualRows   []model.Message
-	dualErr    error
-	clearCalls int
-	delSessErr error
-	getCalls   int
-	getResult  [][]byte
-	getErr     error
-	setCalls   int
-	setErr     error
-	setArgRows int
+	mu          sync.Mutex
+	dualCalls   int
+	dualSID     string
+	dualRows    []model.Message
+	dualBatches [][]model.Message
+	dualErr     error
+	clearCalls  int
+	delSessErr  error
+	getCalls    int
+	getResult   [][]byte
+	getErr      error
+	setCalls    int
+	setErr      error
+	setArgRows  int
 
 	// Compaction-cache recording (context-compaction capability).
 	compactionCache    []byte
@@ -341,13 +344,16 @@ func (r *handlerFakeRedis) AppendMessagesDual(_ context.Context, sessionID strin
 	defer r.mu.Unlock()
 	r.dualCalls++
 	r.dualSID = sessionID
+	batch := make([]model.Message, 0, len(raws))
 	for _, b := range raws {
 		var m model.Message
 		if err := json.Unmarshal(b, &m); err != nil {
 			return err
 		}
-		r.dualRows = append(r.dualRows, m)
+		batch = append(batch, m)
 	}
+	r.dualRows = append(r.dualRows, batch...)
+	r.dualBatches = append(r.dualBatches, batch)
 	return r.dualErr
 }
 func (r *handlerFakeRedis) dualCount() int {
@@ -360,6 +366,15 @@ func (r *handlerFakeRedis) dualSnapshot() []model.Message {
 	defer r.mu.Unlock()
 	out := make([]model.Message, len(r.dualRows))
 	copy(out, r.dualRows)
+	return out
+}
+
+// dualBatchSnapshot returns a copy of the per-call batches in call order.
+func (r *handlerFakeRedis) dualBatchSnapshot() [][]model.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]model.Message, len(r.dualBatches))
+	copy(out, r.dualBatches)
 	return out
 }
 func (r *handlerFakeRedis) GetMessages(_ context.Context, _ string) ([][]byte, error) {
@@ -558,23 +573,36 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	require.Contains(t, env.stub.gotWorkspace, "user-1/workspace")
 	env.stub.mu.Unlock()
 
-	// One dual write happened: the single batch containing the user message
-	// and the merged assistant event stream (the write-behind queue and the
-	// read cache receive the same blobs in one pipeline).
+	// TWO dual writes happened (send-time-user-message-persistence): the
+	// send-time batch carrying the user row alone, then the turn-end batch
+	// carrying the merged assistant events (the write-behind queue and the
+	// read cache receive the same blobs in one pipeline per batch).
 	require.Eventually(t, func() bool {
-		return env.redis.dualCount() == 1
-	}, time.Second, 10*time.Millisecond, "expected one dual write for the combined batch")
+		return env.redis.dualCount() == 2
+	}, time.Second, 10*time.Millisecond, "expected one send-time batch + one turn-end batch")
 
-	rows := env.redis.dualSnapshot()
-	// Batch: user message followed by merged assistant events (agent_start, token, agent_end).
-	require.Len(t, rows, 4, "batch must contain user + 3 merged assistant events")
-	userMsg := rows[0]
+	batches := env.redis.dualBatchSnapshot()
+	require.Len(t, batches, 2)
+	// Batch 1 (send-time, synchronous before the turn started): the user row
+	// alone.
+	require.Len(t, batches[0], 1, "send-time batch must contain only the user row")
+	userMsg := batches[0][0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
 	assert.Equal(t, 0, userMsg.MsgIndex)
 	assert.Equal(t, "hi there", userMsg.Content)
 	require.NotEmpty(t, userMsg.ClientMsgID, "persisted rows carry the idempotency key")
+
+	// Batch 2 (turn-end): the assistant events only — the user row must not
+	// re-enter (msgs:{sid} has no dedup).
+	for _, m := range batches[1] {
+		assert.NotEqual(t, model.EventTypeMessage, m.EventType, "turn-end batch must not repeat the user row")
+	}
+
+	rows := env.redis.dualSnapshot()
+	// Concatenated: user message followed by merged assistant events (agent_start, token, agent_end).
+	require.Len(t, rows, 4, "batches must contain user + 3 merged assistant events")
 
 	// Assistant event stream is merged: agent_start, merged token, agent_end (done excluded).
 	wantTypes := []string{
@@ -680,6 +708,7 @@ func TestSendMessage_ContentTooLong_RejectedBeforeClaim(t *testing.T) {
 	env.mysql.mu.Lock()
 	assert.Zero(t, env.mysql.appendMessagesCalls, "rejected input must not persist")
 	env.mysql.mu.Unlock()
+	assert.Zero(t, env.redis.dualCount(), "rejected input must not reach the dual-write path")
 	env.stub.mu.Lock()
 	assert.Empty(t, env.stub.gotMessages, "orchestrator must not run for rejected input")
 	env.stub.mu.Unlock()
@@ -785,6 +814,7 @@ func TestSendMessage_OversizedBody_413(t *testing.T) {
 	env.mysql.mu.Lock()
 	assert.Zero(t, env.mysql.appendMessagesCalls, "oversized body must not persist")
 	env.mysql.mu.Unlock()
+	assert.Zero(t, env.redis.dualCount(), "oversized body must not reach the dual-write path")
 	env.stub.mu.Lock()
 	assert.Empty(t, env.stub.gotMessages, "orchestrator must not run for an oversized body")
 	env.stub.mu.Unlock()
@@ -817,6 +847,7 @@ func TestSendMessage_SessionNotFound_404(t *testing.T) {
 	env.stub.mu.Lock()
 	defer env.stub.mu.Unlock()
 	assert.Nil(t, env.stub.gotMessages, "orchestrator must NOT be called when session not found")
+	assert.Zero(t, env.redis.dualCount(), "a 404 request must not write any message row — not even the send-time user row")
 }
 
 // TestSendMessage_WrongOwner_404 verifies that a user cannot send messages to
@@ -1080,9 +1111,10 @@ func TestGetSessionMessages_WrongOwner_404(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
 }
 
-// TestSendMessage_FirstTurnFiresTitle verifies that when there are no prior
-// messages, title generation is invoked. TitleService is nil in the env above,
-// so we configure one with a fake LLM and assert the title is upserted.
+// TestSendMessage_FirstTurnFiresTitle verifies that the first user message
+// (n=1) fires title generation at SEND time — in parallel with the turn, not
+// after it. The env's default TitleService has a nil LLM, so we configure one
+// with a fake LLM and assert the title is upserted.
 func TestSendMessage_FirstTurnFiresTitle(t *testing.T) {
 	env := newSessionHandlerEnv(t, nil)
 	// Wire a real TitleService backed by a fake LLM and the env's MySQL fake.
@@ -1110,41 +1142,193 @@ func TestSendMessage_FirstTurnFiresTitle(t *testing.T) {
 	assert.Equal(t, "sess-new", env.mysql.upsertTitleArg.SessionID)
 }
 
-// TestSendMessage_NotFirstTurnDoesNotFireTitle verifies that title generation
-// is suppressed when prior messages already exist for the session.
-func TestSendMessage_NotFirstTurnDoesNotFireTitle(t *testing.T) {
-	env := newSessionHandlerEnv(t, nil)
-	// Seed the Redis tier so RecoverMessages returns a non-empty list —
-	// making the handler treat this as a non-first turn.
-	priorMsg := model.Message{
-		SessionID: "sess-old",
-		Agent:     model.AgentUser,
-		MsgIndex:  0,
-		Role:      model.RoleUser,
-		EventType: model.EventTypeMessage,
-		Content:   "old",
+// TestSendMessage_TitleCadence verifies the user-message-ordinal throttle
+// (title-generation-cadence): n = persisted prior user rows + 1, generation
+// fires iff n % 3 == 1 — the 1st message always, then the 4th, 7th, ... All
+// other ordinals (2, 3, 5, ...) never fire.
+func TestSendMessage_TitleCadence(t *testing.T) {
+	cases := []struct {
+		name       string
+		priorUsers int // seeded persisted user rows before the request
+		fires      bool
+	}{
+		{"n=1 first message fires", 0, true},
+		{"n=2 does not fire", 1, false},
+		{"n=3 does not fire", 2, false},
+		{"n=4 fires", 3, true},
+		{"n=5 does not fire", 4, false},
+		{"n=7 fires", 6, true},
 	}
-	raw, err := json.Marshal(priorMsg)
-	require.NoError(t, err)
-	env.redis.getResult = [][]byte{raw}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSessionHandlerEnv(t, nil)
+			// Seed the Redis read tier so RecoverMessages returns the prior
+			// user rows the ordinal count is derived from.
+			raws := make([][]byte, 0, tc.priorUsers)
+			for i := 0; i < tc.priorUsers; i++ {
+				raw, err := json.Marshal(model.Message{
+					SessionID: "sess-1",
+					Agent:     model.AgentUser,
+					MsgIndex:  0,
+					Role:      model.RoleUser,
+					EventType: model.EventTypeMessage,
+					Content:   fmt.Sprintf("prior user message %d", i+1),
+				})
+				require.NoError(t, err)
+				raws = append(raws, raw)
+			}
+			env.redis.getResult = raws
 
-	env.stream.titleSvc = newTitleSvcWithFake(t, sessionDeps(env.mysql, env.redis, env.fs), "should not be used")
+			env.stream.titleSvc = newTitleSvcWithFake(t, sessionDeps(env.mysql, env.redis, env.fs), "should not be used")
+
+			req := httptest.NewRequest(http.MethodPost,
+				"/api/v1/sessions/sess-1/messages",
+				strings.NewReader(`{"content":"current message"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			env.engine.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+			if tc.fires {
+				require.Eventually(t, func() bool {
+					env.mysql.mu.Lock()
+					defer env.mysql.mu.Unlock()
+					return env.mysql.upsertTitleCalls == 1
+				}, time.Second, 10*time.Millisecond, "expected one title upsert at this ordinal")
+			} else {
+				// Give the would-be fire-and-forget goroutine plenty of time
+				// it would NOT be scheduled; assert no upsert ever happened.
+				time.Sleep(50 * time.Millisecond)
+				env.mysql.mu.Lock()
+				defer env.mysql.mu.Unlock()
+				assert.Equal(t, 0, env.mysql.upsertTitleCalls, "title generation must NOT fire at this ordinal")
+			}
+		})
+	}
+}
+
+// TestSendMessage_TitleInputIsFirstPlusCurrentMessage verifies the generation
+// input shape: the session's FIRST user message plus the message triggering
+// the generation (n=4 here), never assistant content.
+func TestSendMessage_TitleInputIsFirstPlusCurrentMessage(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	// Three prior user rows → the request is n=4, which fires; the first
+	// anchor must come from the FIRST prior row, not the latest one.
+	raws := make([][]byte, 0, 3)
+	for i := 0; i < 3; i++ {
+		raw, err := json.Marshal(model.Message{
+			SessionID: "sess-1",
+			Agent:     model.AgentUser,
+			MsgIndex:  0,
+			Role:      model.RoleUser,
+			EventType: model.EventTypeMessage,
+			Content:   fmt.Sprintf("prior question %d", i+1),
+		})
+		require.NoError(t, err)
+		raws = append(raws, raw)
+	}
+	env.redis.getResult = raws
+
+	llm := &fakeTitleLLM{resp: agent.LLMResponse{Content: "Refreshed Title"}}
+	env.stream.titleSvc = service.NewTitleService(llm, env.mysql, config.OpenAIConfig{TitleModel: "title-model"})
 
 	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/sessions/sess-old/messages",
-		strings.NewReader(`{"content":"second message"}`))
+		"/api/v1/sessions/sess-1/messages",
+		strings.NewReader(`{"content":"the fourth question"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	env.engine.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Give the fire-and-forget goroutine plenty of time it would NOT be
-	// scheduled; assert no upsert ever happened.
+	require.Eventually(t, func() bool {
+		env.mysql.mu.Lock()
+		defer env.mysql.mu.Unlock()
+		return env.mysql.upsertTitleCalls == 1
+	}, time.Second, 10*time.Millisecond, "expected the n=4 title upsert")
+
+	content := llm.lastUserContent()
+	assert.Contains(t, content, "prior question 1", "the FIRST user message must be an anchor")
+	assert.Contains(t, content, "the fourth question", "the triggering message must be an anchor")
+	assert.NotContains(t, content, "Assistant", "assistant content must not be part of the title input")
+}
+
+// TestSendMessage_SessionBusy_DoesNotFireTitle verifies that a request
+// rejected with 409 SESSION_BUSY never triggers title generation (the trigger
+// sits after the claim, and a busy session is not worth a wasted LLM call).
+func TestSendMessage_SessionBusy_DoesNotFireTitle(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	deps := sessionDeps(env.mysql, env.redis, env.fs)
+
+	// A run store with the session's slot already claimed by another run.
+	store := run.NewMemStore()
+	_, ok, err := store.ClaimSession(context.Background(), "sess-1", "run-holder")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	stream := NewMessageStreamHandler(
+		newSessionSvc(deps), newMessageSvc(deps),
+		newTitleSvcWithFake(t, deps, "Busy Title"),
+		nil, env.stub, "/tmp/blowball-test-data",
+		run.NewManager(store, run.NewRegistry()), testSelectionConfig(), 0)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Set(middleware.TraceIDKey, "trace-1")
+		c.Next()
+	})
+	r.POST("/api/v1/sessions/:session_id/messages", stream.SendMessage)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-1/messages",
+		strings.NewReader(`{"content":"no title for you"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+
 	time.Sleep(50 * time.Millisecond)
 	env.mysql.mu.Lock()
 	defer env.mysql.mu.Unlock()
-	assert.Equal(t, 0, env.mysql.upsertTitleCalls, "title generation must NOT fire on non-first turn")
+	assert.Equal(t, 0, env.mysql.upsertTitleCalls, "a 409-rejected request must not trigger title generation")
+}
+
+// TestSendMessage_SessionBusy_NoPersistence verifies the zero-write invariant
+// of the send-time user-row persistence (send-time-user-message-persistence,
+// "Rejected requests write nothing" scenario): the write sits AFTER the
+// session-run claim, so a request rejected with 409 SESSION_BUSY — every
+// 400/404 rejection likewise returns before it — persists nothing at all.
+func TestSendMessage_SessionBusy_NoPersistence(t *testing.T) {
+	env := newSessionHandlerEnv(t, &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "must not run")},
+	})
+
+	// The session's run slot is already claimed by another run.
+	store := run.NewMemStore()
+	_, ok, err := store.ClaimSession(context.Background(), "sess-1", "run-holder")
+	require.NoError(t, err)
+	require.True(t, ok)
+	env.stream.runs = run.NewManager(store, run.NewRegistry())
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-1/messages",
+		strings.NewReader(`{"content":"busy"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+
+	time.Sleep(50 * time.Millisecond)
+	assert.Zero(t, env.redis.dualCount(), "a 409-rejected request must not write any message row — not even the send-time user row")
+	env.mysql.mu.Lock()
+	assert.Zero(t, env.mysql.appendMessagesCalls, "no fallback direct write either")
+	env.mysql.mu.Unlock()
+	env.stub.mu.Lock()
+	assert.Nil(t, env.stub.gotMessages, "orchestrator must not run")
+	env.stub.mu.Unlock()
 }
 
 // TestSendMessage_ProducesDeterministicSSESequence asserts the exact SSE byte
@@ -1226,15 +1410,15 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	require.Eventually(t, func() bool {
-		return env.redis.dualCount() == 1
-	}, time.Second, 10*time.Millisecond, "expected single combined batch")
+		return env.redis.dualCount() == 2
+	}, time.Second, 10*time.Millisecond, "expected send-time batch + turn-end batch")
 
 	rows := env.redis.dualSnapshot()
 
-	// Combined batch: 1 user message + 7 assistant events, done excluded.
+	// Concatenated batches: 1 user message + 7 assistant events, done excluded.
 	require.Len(t, rows, 8)
 
-	// User message comes first.
+	// User message comes first (from the send-time batch).
 	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
@@ -1302,15 +1486,16 @@ func TestSendMessage_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// One combined batch must land despite the failure.
+	// The send-time batch plus the partial turn-end batch must land despite
+	// the failure.
 	require.Eventually(t, func() bool {
-		return env.redis.dualCount() == 1
-	}, time.Second, 10*time.Millisecond, "expected single batch for failed turn")
+		return env.redis.dualCount() == 2
+	}, time.Second, 10*time.Millisecond, "expected send-time + turn-end batches for failed turn")
 
 	rows := env.redis.dualSnapshot()
 
 	// 1 user message + 2 merged assistant events (agent_start, token).
-	require.Len(t, rows, 3, "batch must contain user + partial assistant events")
+	require.Len(t, rows, 3, "batches must contain user + partial assistant events")
 	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
@@ -1352,15 +1537,16 @@ func TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents(t *testing.T) 
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// One combined batch must land despite the cancellation.
+	// The send-time batch plus the partial turn-end batch must land despite
+	// the cancellation.
 	require.Eventually(t, func() bool {
-		return env.redis.dualCount() == 1
-	}, time.Second, 10*time.Millisecond, "expected single batch for interrupted turn")
+		return env.redis.dualCount() == 2
+	}, time.Second, 10*time.Millisecond, "expected send-time + turn-end batches for interrupted turn")
 
 	rows := env.redis.dualSnapshot()
 
 	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
-	require.Len(t, rows, 4, "batch must contain user + partial assistant events")
+	require.Len(t, rows, 4, "batches must contain user + partial assistant events")
 	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
@@ -1380,7 +1566,9 @@ func TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents(t *testing.T) 
 
 // TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser verifies
 // that when cancellation happens before the assistant emits any event, only the
-// user message is persisted.
+// user message is persisted — here as the send-time batch ALONE: the turn-end
+// render produces an empty suffix (user row gated out, no events), so no
+// second dual write ever happens.
 func TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{},
@@ -1399,7 +1587,12 @@ func TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser(t *testi
 
 	require.Eventually(t, func() bool {
 		return env.redis.dualCount() == 1
-	}, time.Second, 10*time.Millisecond, "expected single batch for user-only interrupted turn")
+	}, time.Second, 10*time.Millisecond, "expected the send-time batch for the user-only interrupted turn")
+
+	// The async turn-end save runs after the response; give it the time it
+	// would use to (wrongly) re-emit the user row, then assert it never did.
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 1, env.redis.dualCount(), "the empty turn-end suffix must not produce another dual write")
 
 	rows := env.redis.dualSnapshot()
 	require.Len(t, rows, 1, "only the user message should be persisted")
@@ -1407,9 +1600,11 @@ func TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser(t *testi
 	assert.Equal(t, "hello?", rows[0].Content)
 }
 
-// TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle verifies that title
-// generation still fires when the first turn is interrupted, using the partial
-// assistant content collected before cancellation.
+// TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle verifies that a
+// cancelled first turn still ends up with a title: generation fired at SEND
+// time (before the turn started), so the interruption path neither needs nor
+// performs any extra triggering, and the partial assistant content never
+// enters the title input (title-generation-cadence).
 func TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle(t *testing.T) {
 	env := newSessionHandlerEnv(t, nil)
 	stub := &stubOrchestrator{
@@ -1457,9 +1652,9 @@ func TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle(t *testing.T) {
 
 // TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialEvents
 // verifies that a non-cancellation orchestrator error (e.g. a model-provider
-// 429) returned after several events have been streamed results in a single
-// persisted batch containing the user message and the merged partial assistant
-// events.
+// 429) returned after several events have been streamed results in the
+// send-time user batch plus a turn-end batch carrying the merged partial
+// assistant events.
 func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialEvents(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{
@@ -1482,13 +1677,13 @@ func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialE
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	require.Eventually(t, func() bool {
-		return env.redis.dualCount() == 1
-	}, time.Second, 10*time.Millisecond, "expected single batch for failed turn")
+		return env.redis.dualCount() == 2
+	}, time.Second, 10*time.Millisecond, "expected send-time + turn-end batches for failed turn")
 
 	rows := env.redis.dualSnapshot()
 
 	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
-	require.Len(t, rows, 4, "batch must contain user + partial assistant events")
+	require.Len(t, rows, 4, "batches must contain user + partial assistant events")
 	assert.Equal(t, model.RoleUser, rows[0].Role)
 	assert.Equal(t, "hi", rows[0].Content)
 
@@ -1505,7 +1700,8 @@ func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialE
 
 // TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser
 // verifies that a non-cancellation orchestrator error returned before any
-// assistant event still persists the user message (never silently lost).
+// assistant event still persists the user message (never silently lost) — as
+// the send-time batch alone, with the turn-end suffix empty.
 func TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{},
@@ -1524,7 +1720,12 @@ func TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser(t *t
 
 	require.Eventually(t, func() bool {
 		return env.redis.dualCount() == 1
-	}, time.Second, 10*time.Millisecond, "expected single batch for user-only failed turn")
+	}, time.Second, 10*time.Millisecond, "expected the send-time batch for the user-only failed turn")
+
+	// The async turn-end save runs after the response; give it the time it
+	// would use to (wrongly) re-emit the user row, then assert it never did.
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 1, env.redis.dualCount(), "the empty turn-end suffix must not produce another dual write")
 
 	rows := env.redis.dualSnapshot()
 	require.Len(t, rows, 1, "only the user message should be persisted")
@@ -1533,8 +1734,9 @@ func TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser(t *t
 }
 
 // TestSendMessage_OrchestratorFailure_FirstTurnGeneratesTitle verifies that a
-// non-cancellation orchestrator error on a first turn still triggers title
-// generation using the partial assistant content emitted before the failure.
+// non-cancellation orchestrator error on a first turn still ends up with a
+// title: generation fired at send time, so the failure path performs no extra
+// triggering and the title is unaffected by the turn's outcome.
 func TestSendMessage_OrchestratorFailure_FirstTurnGeneratesTitle(t *testing.T) {
 	stub := &stubOrchestrator{
 		eventsToEmit: []stream.StreamEvent{

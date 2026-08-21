@@ -131,7 +131,7 @@ func (f *orchestratorFactory) buildConfucius(cfg config.AgentConfig, workspaceRo
 	if err != nil {
 		return nil, err
 	}
-	return NewConfucius(agentCfg, f.client, reg, subAgents, turn, f.cfg.OpenAI.LengthContinue)
+	return NewConfucius(agentCfg, f.client, reg, subAgents, turn)
 }
 
 func (f *orchestratorFactory) buildChongzhi(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Chongzhi, error) {
@@ -139,7 +139,7 @@ func (f *orchestratorFactory) buildChongzhi(cfg config.AgentConfig, workspaceRoo
 	if err != nil {
 		return nil, err
 	}
-	return NewChongzhi(agentCfg, f.client, reg, turn, f.cfg.OpenAI.LengthContinue)
+	return NewChongzhi(agentCfg, f.client, reg, turn)
 }
 
 func (f *orchestratorFactory) buildLiang(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Liang, error) {
@@ -147,7 +147,7 @@ func (f *orchestratorFactory) buildLiang(cfg config.AgentConfig, workspaceRoot, 
 	if err != nil {
 		return nil, err
 	}
-	return NewLiang(agentCfg, f.client, reg, turn, f.cfg.OpenAI.LengthContinue)
+	return NewLiang(agentCfg, f.client, reg, turn)
 }
 
 // buildAgentRegistry creates a registry scoped to workspaceRoot containing the

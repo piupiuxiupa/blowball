@@ -2,7 +2,9 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -27,8 +29,8 @@ func TestMessageWriteBehind_DualWriteMirrorsQueueAndCache(t *testing.T) {
 			finishReason: "stop",
 			usage:        agent.Usage{TotalTokens: 1},
 		},
-		// Title round for the first turn.
-		scriptedLLMResponse{content: "T", finishReason: "stop", usage: agent.Usage{TotalTokens: 1}},
+		// The send-time title round routes to the scripted client's canned
+		// title queue and never touches this queue.
 	))
 	ctx := context.Background()
 
@@ -70,6 +72,76 @@ func TestMessageWriteBehind_DualWriteMirrorsQueueAndCache(t *testing.T) {
 		assert.NotEmpty(t, m.ClientMsgID, "drained rows carry the idempotency key")
 	}
 	assert.Equal(t, before+len(rows), env.mysqlFake.insertAttemptCount())
+}
+
+// TestMessageWriteBehind_SendTimeBatchSplitsUserRow verifies the batch split
+// on both Redis keys (send-time-user-message-persistence): while the turn is
+// still running, msgs:buffer and msgs:{sid} each hold exactly the user row;
+// after the turn ends, the event suffix appends to BOTH keys in order; and
+// across the whole turn the user row appears exactly once per key.
+func TestMessageWriteBehind_SendTimeBatchSplitsUserRow(t *testing.T) {
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{
+			tokens:       []string{"slow ", "answer"},
+			content:      "slow answer",
+			finishReason: "stop",
+			usage:        agent.Usage{TotalTokens: 2},
+			tokenDelay:   100 * time.Millisecond,
+		},
+		scriptedLLMResponse{content: "T", finishReason: "stop", usage: agent.Usage{TotalTokens: 1}},
+	)
+	env := newTestEnv(t, llm)
+	ctx := context.Background()
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- env.postMessage(`{"content":"wb-split"}`, authToken(t, defaultUserID))
+	}()
+
+	// Mid-turn: both keys hold exactly the send-time user row.
+	require.Eventually(t, func() bool {
+		raws, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
+		return err == nil && len(raws) == 1
+	}, 2*time.Second, 5*time.Millisecond, "the send-time user row must be the sole cache entry mid-turn")
+	queuedMid, err := env.redisSvc.Client().LRange(ctx, "msgs:buffer", 0, -1).Result()
+	require.NoError(t, err)
+	require.Len(t, queuedMid, 1, "mid-turn the ingest queue holds only the user row")
+	assert.Contains(t, queuedMid[0], "wb-split")
+
+	// Turn-end: the suffix appends to both keys; the user row appears once.
+	<-done
+	require.Eventually(t, func() bool {
+		raws, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
+		return err == nil && len(raws) == 4
+	}, 2*time.Second, 10*time.Millisecond, "user + 3 merged assistant events must land in the read cache")
+
+	cached, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
+	require.NoError(t, err)
+	queued, err := env.redisSvc.Client().LRange(ctx, "msgs:buffer", 0, -1).Result()
+	require.NoError(t, err)
+	require.Len(t, queued, 4, "queue and cache receive the same blobs from both batches")
+
+	userRows := 0
+	for i, raw := range cached {
+		var m model.Message
+		require.NoError(t, json.Unmarshal(raw, &m))
+		if m.EventType == model.EventTypeMessage {
+			userRows++
+			assert.Equal(t, 0, m.MsgIndex, "the user row keeps msg_index 0")
+		}
+		// Queue and cache elements are the identical canonical blobs, in
+		// order, across the two batches.
+		assert.Equal(t, string(raw), queued[i], "queue/cache blob %d must match", i)
+	}
+	assert.Equal(t, 1, userRows, "the user row must appear exactly once in msgs:{sid}")
+
+	// Order: user first, then the merged assistant events.
+	var first model.Message
+	require.NoError(t, json.Unmarshal(cached[0], &first))
+	assert.Equal(t, model.RoleUser, first.Role)
+	var last model.Message
+	require.NoError(t, json.Unmarshal(cached[len(cached)-1], &last))
+	assert.Equal(t, model.EventTypeAgentEnd, last.EventType)
 }
 
 // TestMessageWriteBehind_BackgroundFlusherLandsTurn runs a REAL

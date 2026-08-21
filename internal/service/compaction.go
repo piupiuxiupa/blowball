@@ -334,7 +334,7 @@ func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prio
 			{Role: "system", Content: compactionSystemPrompt},
 			{Role: "user", Content: b.String()},
 		},
-		MaxTokens: compactionSummaryMaxTokens,
+		MaxCompletionTokens: compactionSummaryMaxTokens,
 	}
 
 	resp, err := s.llm.StreamChat(agentCtx, req, nil, nil)

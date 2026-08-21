@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -95,7 +96,7 @@ func TestRunLLMRound_ContentLengthContinues(t *testing.T) {
 		fakeResponse{content: "beta", tokens: []string{"beta"}, finishReason: "stop", usage: Usage{PromptTokens: 11, CompletionTokens: 4, TotalTokens: 15}},
 	)
 	round := []Message{{Role: "user", Content: "write"}}
-	req := LLMRequest{Model: "m", Messages: withSystem("sys", round), MaxTokens: 1000}
+	req := LLMRequest{Model: "m", Messages: withSystem("sys", round), MaxCompletionTokens: 1000}
 
 	var res roundResult
 	var err error
@@ -108,8 +109,8 @@ func TestRunLLMRound_ContentLengthContinues(t *testing.T) {
 
 	// Two attempts; the second carries the expanded budget (design D6).
 	require.Equal(t, 2, client.requestCount())
-	assert.Equal(t, 1000, client.calls[0].MaxTokens)
-	assert.Equal(t, 1512, client.calls[1].MaxTokens)
+	assert.Equal(t, 1000, client.calls[0].MaxCompletionTokens)
+	assert.Equal(t, 1512, client.calls[1].MaxCompletionTokens)
 
 	// Content accumulates across attempts (design D2/D4); usage sums; the
 	// final response is the stop attempt; LengthHit is false.
@@ -141,7 +142,7 @@ func TestRunLLMRound_EmptyLengthContinues(t *testing.T) {
 		fakeResponse{content: "answer", finishReason: "stop"},
 	)
 	round := []Message{{Role: "user", Content: "q"}}
-	req := LLMRequest{Model: "m", Messages: round, MaxTokens: 800}
+	req := LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 800}
 
 	res, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang", req, &round,
 		enabledPolicy(512, 3), func(r []Message) []Message { return r }, nil,
@@ -162,7 +163,7 @@ func TestRunLLMRound_EmptyLengthContinues(t *testing.T) {
 func TestRunLLMRound_DisabledSingleAttempt(t *testing.T) {
 	client := newFake(fakeResponse{content: "cut", finishReason: "length"})
 	round := []Message{{Role: "user", Content: "q"}}
-	req := LLMRequest{Model: "m", Messages: round, MaxTokens: 100}
+	req := LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 100}
 
 	res, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang", req, &round,
 		config.LengthContinueConfig{}, func(r []Message) []Message { return r }, nil,
@@ -182,7 +183,7 @@ func TestRunLLMRound_Exhaustion(t *testing.T) {
 		fakeResponse{content: "c", finishReason: "length"},
 	)
 	round := []Message{{Role: "user", Content: "q"}}
-	req := LLMRequest{Model: "m", Messages: round, MaxTokens: 8192}
+	req := LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 8192}
 
 	res, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang", req, &round,
 		enabledPolicy(8192, 2), func(r []Message) []Message { return r }, nil,
@@ -190,7 +191,7 @@ func TestRunLLMRound_Exhaustion(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 3, client.requestCount()) // initial + 2 continuations
-	assert.Equal(t, []int{8192, 16384, 24576}[2], client.calls[2].MaxTokens)
+	assert.Equal(t, []int{8192, 16384, 24576}[2], client.calls[2].MaxCompletionTokens)
 	assert.True(t, res.LengthHit)
 	assert.Equal(t, "abc", res.Content, "accumulated content survives exhaustion")
 }
@@ -206,7 +207,7 @@ func TestRunLLMRound_ToolCallsTriage(t *testing.T) {
 		fakeResponse{content: "done", finishReason: "stop"},
 	)
 	round := []Message{{Role: "user", Content: "q"}}
-	req := LLMRequest{Model: "m", Messages: round, MaxTokens: 100}
+	req := LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 100}
 
 	var dispatched []ToolCall
 	var res roundResult
@@ -300,7 +301,7 @@ func TestRunLLMRound_EmptyArgsRouteToSynthetic(t *testing.T) {
 	var dispatched []ToolCall
 	events := collectEvents(t, func(hub *stream.Hub) {
 		_, err := runLLMRound(context.Background(), client, hub, "Chongzhi",
-			LLMRequest{Model: "m", Messages: round, MaxTokens: 100}, &round,
+			LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 100}, &round,
 			enabledPolicy(512, 3), func(r []Message) []Message { return r },
 			// The production closure is executeAndRecordToolCalls; the stub
 			// mirrors its round effect (append each call's answer) so the
@@ -334,7 +335,7 @@ func TestRunLLMRound_ErrorMidContinuation(t *testing.T) {
 	)
 	round := []Message{{Role: "user", Content: "q"}}
 	_, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang",
-		LLMRequest{Model: "m", Messages: round, MaxTokens: 100}, &round,
+		LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 100}, &round,
 		enabledPolicy(512, 3), func(r []Message) []Message { return r }, nil,
 		func(string) error { return nil }, func(string) error { return nil })
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
@@ -350,13 +351,20 @@ func TestLengthExhaustedMessage_NotTransient(t *testing.T) {
 
 // --- agent-loop integration (adoption at the four call sites) ----------------
 
-func testLiangCfg(maxTokens int) config.AgentConfig {
-	return config.AgentConfig{Name: "Liang", SystemPrompt: "sys", MaxTokens: maxTokens, MaxRounds: 10}
+// testLiangCfg carries NO quota: since per-model-completion-budget the output
+// quota and continuation policy both ride the turn's ModelOverride (resolved
+// from the catalog entry), so the agent config holds only capability fields.
+func testLiangCfg() config.AgentConfig {
+	return config.AgentConfig{Name: "Liang", SystemPrompt: "sys", MaxRounds: 10}
 }
 
-func newTestLiang(t *testing.T, client LLMClient, maxTokens int, lc config.LengthContinueConfig) *Liang {
+// newTestLiang builds a Liang whose turn resolves to a catalog entry with the
+// given quota and continuation policy (the entry-driven form of the old
+// cfg.max_tokens + global lc constructor pair).
+func newTestLiang(t *testing.T, client LLMClient, quota int, lc config.LengthContinueConfig) *Liang {
 	t.Helper()
-	l, err := NewLiang(testLiangCfg(maxTokens), client, tool.NewRegistry(), ModelOverride{Model: "m"}, lc)
+	l, err := NewLiang(testLiangCfg(), client, tool.NewRegistry(),
+		ModelOverride{Model: "m", MaxCompletionTokens: quota, LengthContinue: lc})
 	require.NoError(t, err)
 	return l
 }
@@ -395,12 +403,13 @@ func TestConfuciusRun_LengthContinuation(t *testing.T) {
 		fakeResponse{content: "first half ", tokens: []string{"first half "}, finishReason: "length", usage: Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150}},
 		fakeResponse{content: "second half", tokens: []string{"second half"}, finishReason: "stop", usage: Usage{PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150}},
 	)
-	cfg := config.AgentConfig{Name: "Confucius", SystemPrompt: "sys", MaxTokens: 8192}
+	cfg := config.AgentConfig{Name: "Confucius", SystemPrompt: "sys"}
 	subAgents := map[string]SubAgentFactory{
 		ToolInvokeChongzhi: func() (Agent, error) { return &fakeAgent{name: "Chongzhi"}, nil },
 		ToolInvokeLiang:    func() (Agent, error) { return &fakeAgent{name: "Liang"}, nil },
 	}
-	c, err := NewConfucius(cfg, client, tool.NewRegistry(), subAgents, ModelOverride{Model: "m"}, enabledPolicy(8192, 3))
+	c, err := NewConfucius(cfg, client, tool.NewRegistry(), subAgents,
+		ModelOverride{Model: "m", MaxCompletionTokens: 8192, LengthContinue: enabledPolicy(8192, 3)})
 	require.NoError(t, err)
 
 	var content string
@@ -414,8 +423,8 @@ func TestConfuciusRun_LengthContinuation(t *testing.T) {
 
 	// Expansion arithmetic visible on the wire (llm_raw_log parity).
 	require.Equal(t, 2, client.requestCount())
-	assert.Equal(t, 8192, client.calls[0].MaxTokens)
-	assert.Equal(t, 16384, client.calls[1].MaxTokens)
+	assert.Equal(t, 8192, client.calls[0].MaxCompletionTokens)
+	assert.Equal(t, 16384, client.calls[1].MaxCompletionTokens)
 
 	// Usage sums both attempts; context_tokens is the FINAL attempt's
 	// prompt+completion, never the cross-attempt sum (design D8).
@@ -471,10 +480,11 @@ func TestLiangRun_WrapUpContinuesOnLength(t *testing.T) {
 		fakeResponse{content: "wrap ", finishReason: "length"},
 		fakeResponse{content: "answer", finishReason: "stop"},
 	)
-	cfg := testLiangCfg(8192)
+	cfg := testLiangCfg()
 	cfg.MaxRounds = 2
 	cfg.Tools = []string{xizhi.NameReadFile}
-	l, err := NewLiang(cfg, client, reg, ModelOverride{Model: "m"}, enabledPolicy(8192, 3))
+	l, err := NewLiang(cfg, client, reg,
+		ModelOverride{Model: "m", MaxCompletionTokens: 8192, LengthContinue: enabledPolicy(8192, 3)})
 	require.NoError(t, err)
 
 	var content string
@@ -508,7 +518,7 @@ func testXizhiConfigLike() config.XizhiConfig {
 	}
 }
 
-func TestBuildRegularToolsJSON_InjectsPerAgentWriteBudget(t *testing.T) {
+func TestBuildRegularToolsJSON_InjectsPerEntryWriteBudget(t *testing.T) {
 	reg := writeToolsRegistry(t)
 	names := []string{xizhi.NameReadFile, xizhi.NameWriteFile, xizhi.NameModifyFile}
 
@@ -527,7 +537,7 @@ func TestBuildRegularToolsJSON_InjectsPerAgentWriteBudget(t *testing.T) {
 	// floor(8192 × 0.7) = 5734 appears in both write-family descriptions,
 	// with the chunked-writes steering.
 	for _, name := range []string{xizhi.NameWriteFile, xizhi.NameModifyFile} {
-		assert.Contains(t, byName[name].Description, "5734", "%s description must carry the per-agent budget", name)
+		assert.Contains(t, byName[name].Description, "5734", "%s description must carry the turn-resolved entry budget", name)
 		assert.Contains(t, byName[name].Description, "multiple smaller writes", "%s description must keep the chunking pattern advice", name)
 	}
 
@@ -542,25 +552,75 @@ func TestBuildRegularToolsJSON_InjectsPerAgentWriteBudget(t *testing.T) {
 	}
 	require.NotEmpty(t, static)
 	assert.Contains(t, static, "append")
-	assert.NotContains(t, static, "5734", "the static registry description must not hardcode a per-agent number")
+	assert.NotContains(t, static, "5734", "the static registry description must not hardcode a per-entry number")
 }
 
-func TestBuildRegularToolsJSON_BudgetVariesByAgentAndSkipsZero(t *testing.T) {
+// TestBuildRegularToolsJSON_BudgetVariesByEntryAndSkipsZero: the budget
+// number follows the turn-resolved catalog entry (per-model-completion-budget
+// D4 — 8192→5734, 4096→2867), and an unresolved quota (0) skips injection.
+func TestBuildRegularToolsJSON_BudgetVariesByEntryAndSkipsZero(t *testing.T) {
 	reg := writeToolsRegistry(t)
 	names := []string{xizhi.NameWriteFile}
 
-	raw, err := buildRegularToolsJSON(reg, names, 10000)
-	require.NoError(t, err)
-	var tools openAIToolList
-	require.NoError(t, json.Unmarshal(raw, &tools))
-	assert.Contains(t, tools[0].Function.Description, "7000") // floor(10000 × 0.7)
+	for _, tc := range []struct{ quota, budget int }{
+		{8192, 5734}, // floor(8192 × 0.7)
+		{4096, 2867}, // floor(4096 × 0.7) — a different catalog entry
+	} {
+		raw, err := buildRegularToolsJSON(reg, names, tc.quota)
+		require.NoError(t, err)
+		var tools openAIToolList
+		require.NoError(t, json.Unmarshal(raw, &tools))
+		require.Len(t, tools, 1)
+		assert.Contains(t, tools[0].Function.Description, fmt.Sprintf("~%d tokens", tc.budget),
+			"quota %d must steer a %d-token budget", tc.quota, tc.budget)
+	}
 
-	// max_tokens unconfigured: no number to steer by — no injection.
-	raw, err = buildRegularToolsJSON(reg, names, 0)
+	// Quota unresolved: no number to steer by — no injection.
+	raw, err := buildRegularToolsJSON(reg, names, 0)
 	require.NoError(t, err)
-	tools = nil
+	tools := openAIToolList(nil)
 	require.NoError(t, json.Unmarshal(raw, &tools))
 	assert.NotContains(t, tools[0].Function.Description, "Write budget:")
+}
+
+// TestLiangRun_PerEntryContinuationSplit: two turns of one deployment select
+// two catalog entries — A with length_continue configured, B without — and
+// only the A turn continues; the B turn keeps the disabled behavior
+// byte-for-byte (per-model-completion-budget D3: per-entry opt-in).
+func TestLiangRun_PerEntryContinuationSplit(t *testing.T) {
+	// Entry A's turn: length → continuation with the expanded budget.
+	clientA := newFake(
+		fakeResponse{content: "first ", finishReason: "length"},
+		fakeResponse{content: "rest", finishReason: "stop"},
+	)
+	l := newTestLiang(t, clientA, 8192, enabledPolicy(8192, 3))
+	var contentA string
+	var runErrA error
+	collectEvents(t, func(hub *stream.Hub) {
+		contentA, _, _, runErrA = l.Run(context.Background(), []Message{{Role: "user", Content: "q"}}, hub)
+	})
+	require.NoError(t, runErrA)
+	assert.Equal(t, "first rest", contentA)
+	require.Equal(t, 2, clientA.requestCount())
+	assert.Equal(t, 8192, clientA.calls[0].MaxCompletionTokens)
+	assert.Equal(t, 8192+8192, clientA.calls[1].MaxCompletionTokens)
+
+	// Entry B's turn (same deployment, no length_continue): the length round
+	// terminates the run silently — one attempt, content kept, no error.
+	clientB := newFake(
+		fakeResponse{content: "cut off", finishReason: "length"},
+	)
+	l2 := newTestLiang(t, clientB, 4096, config.LengthContinueConfig{})
+	var contentB string
+	var runErrB error
+	events := collectEvents(t, func(hub *stream.Hub) {
+		contentB, _, _, runErrB = l2.Run(context.Background(), []Message{{Role: "user", Content: "q"}}, hub)
+	})
+	require.NoError(t, runErrB, "a disabled entry must keep the silent-terminal behavior")
+	assert.Equal(t, "cut off", contentB)
+	assert.Equal(t, 1, clientB.requestCount())
+	assert.Equal(t, 4096, clientB.calls[0].MaxCompletionTokens)
+	assert.Empty(t, findEvents(events, stream.EventAgentError))
 }
 
 // errString wraps a plain string as an error (test helper).

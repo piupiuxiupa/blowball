@@ -14,22 +14,22 @@ import (
 )
 
 // newTurnConfigOrchestrator builds an orchestrator whose three agents carry
-// DISTINCT per-agent settings (max_tokens, prompts) but NO model fields —
-// model/effort are turn-level only (model-effort-v2) — so any turn-config
-// leakage (or absence) is observable in the recorded LLM requests.
+// distinct prompts but NO model or quota fields — model/effort/quota are
+// turn-level only (model-effort-v2, per-model-completion-budget) — so any
+// turn-config leakage (or absence) is observable in the recorded LLM requests.
 func newTurnConfigOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 	t.Helper()
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test"},
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
-				Name: "Confucius", SystemPrompt: "you are confucius", MaxTokens: 256,
+				Name: "Confucius", SystemPrompt: "you are confucius",
 			},
 			Chongzhi: config.AgentConfig{
-				Name: "Chongzhi", SystemPrompt: "you are chongzhi", MaxTokens: 257,
+				Name: "Chongzhi", SystemPrompt: "you are chongzhi",
 			},
 			Liang: config.AgentConfig{
-				Name: "Liang", SystemPrompt: "you are liang", MaxTokens: 258,
+				Name: "Liang", SystemPrompt: "you are liang",
 			},
 		},
 	}
@@ -71,7 +71,7 @@ func signatures(f *fakeLLMClient) []callSignature {
 	defer f.mu.Unlock()
 	out := make([]callSignature, 0, len(f.calls))
 	for _, c := range f.calls {
-		out = append(out, callSignature{model: c.Model, think: c.Thinking, effort: c.ReasoningEffort, maxTokens: c.MaxTokens})
+		out = append(out, callSignature{model: c.Model, think: c.Thinking, effort: c.ReasoningEffort, maxTokens: c.MaxCompletionTokens})
 	}
 	return out
 }
@@ -118,15 +118,15 @@ func runTurn(t *testing.T, o *Orchestrator, override ModelOverride) {
 
 // TestOrchestrator_TurnConfig_ReachesAllAgents verifies the handler-resolved
 // turn config reaches EVERY LLM call of the turn — Confucius's two rounds and
-// both dispatched sub-agents — while per-agent max_tokens stays untouched
-// (model-effort-v2: agents carry no model fields; the ModelOverride is their
-// only model source).
+// both dispatched sub-agents — including the resolved entry's output quota,
+// which all agents of the turn share (per-model-completion-budget: agents
+// carry no quota field; the ModelOverride is their only quota source).
 func TestOrchestrator_TurnConfig_ReachesAllAgents(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	client := newFake(dispatchScript()...)
 	o := newTurnConfigOrchestrator(t, client)
-	runTurn(t, o, ModelOverride{Model: "sel-x", Thinking: true, ReasoningEffort: "xhigh"})
+	runTurn(t, o, ModelOverride{Model: "sel-x", Thinking: true, ReasoningEffort: "xhigh", MaxCompletionTokens: 1024})
 
 	sigs := signatures(client)
 	require.Len(t, sigs, 4, "want Confucius×2 + Chongzhi + Liang LLM calls")
@@ -134,13 +134,8 @@ func TestOrchestrator_TurnConfig_ReachesAllAgents(t *testing.T) {
 		assert.Equal(t, "sel-x", s.model, "call %d model", i)
 		assert.True(t, s.think, "call %d wire family", i)
 		assert.Equal(t, "xhigh", s.effort, "call %d effort", i)
+		assert.Equal(t, 1024, s.maxTokens, "call %d quota (turn-resolved entry)", i)
 	}
-	// Per-agent quotas are config-owned and must NOT follow the turn config.
-	// The two sub-agents run in parallel, so their relative order is
-	// nondeterministic — assert on the multiset.
-	assert.Equal(t, 256, sigs[0].maxTokens, "Confucius round 1 quota")
-	assert.ElementsMatch(t, []int{257, 258}, []int{sigs[1].maxTokens, sigs[2].maxTokens}, "sub-agent quotas")
-	assert.Equal(t, 256, sigs[3].maxTokens, "Confucius final round quota")
 }
 
 // TestOrchestrator_TurnConfig_NoneEffortStaysLiteral verifies the B2 wire

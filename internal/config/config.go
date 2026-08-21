@@ -359,33 +359,34 @@ type OpenAIConfig struct {
 	// source of per-turn models — agents no longer carry model fields. All
 	// entries share this single gateway's base_url/api_key. An empty catalog
 	// fails config load (no implicit single-entry synthesis anymore). Catalog
-	// entries must have unique, non-empty names and a positive-integer
+	// entries must have unique, non-empty names, a positive-integer
 	// max_context_tokens (the context-compaction threshold for turns that
-	// resolve to that entry).
+	// resolve to that entry), and a positive-integer max_completion_tokens
+	// (the output-token quota, per-model since per-model-completion-budget);
+	// the finish_reason=length continuation is configured per entry via the
+	// length_continue sub-block (a residual global openai.length_continue
+	// block is rejected at load).
 	Models []ModelCatalogEntry `yaml:"models"`
 	// DefaultModel names the catalog entry used when a request omits `model`
 	// (and the entry whose window bounds compaction for parameter-less
 	// turns). Empty (the default) selects the FIRST catalog entry. Setting it
 	// to a name outside the catalog fails validation.
 	DefaultModel string `yaml:"default_model"`
-	// LengthContinue is the finish_reason=length auto-continuation policy
-	// (llm-length-continuation capability): a zero block disables the feature
-	// (length keeps terminating the round silently, the pre-capability
-	// behavior); any non-zero field enables it with missing siblings
-	// defaulted. See LengthContinueConfig.
-	LengthContinue LengthContinueConfig `yaml:"length_continue"`
 }
 
 // LengthContinueConfig configures the finish_reason=length continuation
-// (llm-length-continuation capability). When enabled, a round whose LLM
-// response ends length is continued — partial output kept, budget expanded by
-// ExpandStep per attempt — up to MaxRetries continuations before the turn
-// fails with agent_error length_exhausted. A zero block (unset or all-zero
-// fields) disables the feature entirely; negatives are rejected at load.
+// (llm-length-continuation capability, per-entry since
+// per-model-completion-budget: the block lives inside an openai.models[]
+// catalog entry). When enabled, a round whose LLM response ends length is
+// continued — partial output kept, budget expanded by ExpandStep per attempt —
+// up to MaxRetries continuations before the turn fails with agent_error
+// length_exhausted. A zero block (unset or all-zero fields) disables the
+// feature for that entry; negatives are rejected at load.
 type LengthContinueConfig struct {
-	// ExpandStep is the additive max_tokens increment per continuation
-	// attempt: attempt N (0-based) sends cfg.max_tokens + N*ExpandStep.
-	// Zero defaults to DefaultLengthContinueStep() once the block is enabled.
+	// ExpandStep is the additive output-quota increment per continuation
+	// attempt: attempt N (0-based) sends entry.max_completion_tokens +
+	// N*ExpandStep. Zero defaults to DefaultLengthContinueStep() once the
+	// block is enabled.
 	ExpandStep int `yaml:"expand_step"`
 	// MaxRetries is the number of CONTINUATIONS allowed per round (3 → 4
 	// total attempts). Zero defaults to DefaultLengthContinueRetries() once
@@ -416,8 +417,9 @@ func (l LengthContinueConfig) Resolve() (expandStep, maxRetries int) {
 	return step, retries
 }
 
-// Default continuation parameters (design D9): a step matching the common
-// agents.*.max_tokens (8192) and the explored retry bound of 3 continuations.
+// Default continuation parameters: a step matching the common catalog
+// max_completion_tokens (8192) and the explored retry bound of 3
+// continuations.
 func DefaultLengthContinueStep() int    { return 8192 }
 func DefaultLengthContinueRetries() int { return 3 }
 
@@ -425,16 +427,33 @@ func DefaultLengthContinueRetries() int { return 3 }
 // (per-request-model-selection). The entry carries only the per-model
 // dimensions a request can select on: the model name (what the request sends
 // and what the agents run), its context window in tokens (drives the
-// context-compaction threshold for turns that resolve to this model), and
-// whether the model supports reasoning — a capability marker that decides the
-// entry's wire family (thinking entries always send reasoning_effort, literal
-// none included, plus max_completion_tokens) and gates request
-// reasoning_effort values (a non-thinking entry only accepts none, with the
-// deployment default clamped to none + WARN).
+// context-compaction threshold for turns that resolve to this model), its
+// output-token quota (max_completion_tokens — shared by every agent of a turn
+// that resolves to this entry since per-model-completion-budget), and whether
+// the model supports reasoning — a capability marker that decides the entry's
+// wire family (thinking entries always send reasoning_effort, literal none
+// included, plus max_completion_tokens) and gates request reasoning_effort
+// values (a non-thinking entry only accepts none, with the deployment default
+// clamped to none + WARN). The optional LengthContinue sub-block is the
+// per-entry finish_reason=length continuation switch.
 type ModelCatalogEntry struct {
-	Name             string `yaml:"name"`
-	MaxContextTokens int    `yaml:"max_context_tokens"`
-	Thinking         bool   `yaml:"thinking"`
+	Name             string              `yaml:"name"`
+	MaxContextTokens int                 `yaml:"max_context_tokens"`
+	Thinking         bool                `yaml:"thinking"`
+	// MaxCompletionTokens is the model's output-token quota — the field
+	// semantic is "output quota" and the wire family translates it: a
+	// thinking:true entry sends it as max_completion_tokens, a thinking:false
+	// entry as the legacy max_tokens parameter (an acknowledged naming
+	// awkwardness the wire family owns; see per-model-completion-budget
+	// design D1). Required positive integer; quota migrated here from the
+	// removed agents.<name>.max_tokens.
+	MaxCompletionTokens int `yaml:"max_completion_tokens"`
+	// LengthContinue is the per-entry finish_reason=length continuation
+	// policy (llm-length-continuation): zero/unset disables continuation for
+	// this entry (length keeps terminating the round silently); any non-zero
+	// field enables it with missing siblings defaulted. Migrated here from
+	// the removed global openai.length_continue block.
+	LengthContinue LengthContinueConfig `yaml:"length_continue"`
 }
 
 // reasoningEfforts is the closed set of legal openai.default_reasoning_effort
@@ -465,24 +484,24 @@ func (o OpenAIConfig) FindModelCatalogEntry(name string) (ModelCatalogEntry, boo
 
 // validate enforces the model-effort-v2 config shape. The openai.models
 // catalog is MANDATORY (≥1 entry — an empty catalog fails load instead of
-// synthesizing an implicit one). Entries must have unique, non-empty names
-// and a positive-integer max_context_tokens (the compaction threshold;
-// fractional values are caught by the raw-value shadow check in Load —
-// yaml.v3 silently truncates them — negatives decode exactly and are
-// rejected here). default_model (when set) must name a catalog entry, and
-// default_reasoning_effort must be inside the closed set
-// none|low|medium|high|xhigh|max (applyDefaults already normalized an empty
-// value to none). A negative StreamIdleTimeout is a typo: zero is the
-// documented off switch, so nothing legitimate decodes negative.
+// synthesizing an implicit one). Entries must have unique, non-empty names,
+// a positive-integer max_context_tokens (the compaction threshold) and a
+// positive-integer max_completion_tokens (the output quota,
+// per-model-completion-budget; fractional values of both are caught by the
+// raw-value shadow check in Load — yaml.v3 silently truncates them —
+// negatives decode exactly and are rejected here). Each entry's
+// length_continue sub-block rejects negatives. default_model (when set) must
+// name a catalog entry, and default_reasoning_effort must be inside the
+// closed set none|low|medium|high|xhigh|max (applyDefaults already
+// normalized an empty value to none). A negative StreamIdleTimeout is a
+// typo: zero is the documented off switch, so nothing legitimate decodes
+// negative.
 func (o OpenAIConfig) validate() error {
 	if o.StreamIdleTimeout < 0 {
 		return fmt.Errorf("openai.stream_idle_timeout: must be a positive duration or 0 (0 disables the stream idle watchdog; got %s)", o.StreamIdleTimeout)
 	}
-	if o.LengthContinue.ExpandStep < 0 || o.LengthContinue.MaxRetries < 0 {
-		return fmt.Errorf("openai.length_continue: expand_step and max_retries must be positive integers or 0 (0/unset disables length continuation; got expand_step=%d, max_retries=%d)", o.LengthContinue.ExpandStep, o.LengthContinue.MaxRetries)
-	}
 	if len(o.Models) == 0 {
-		return fmt.Errorf("openai.models: the model catalog is required (model-effort-v2): configure at least one {name, max_context_tokens, thinking} entry")
+		return fmt.Errorf("openai.models: the model catalog is required (model-effort-v2): configure at least one {name, max_context_tokens, thinking, max_completion_tokens} entry")
 	}
 	seen := make(map[string]struct{}, len(o.Models))
 	for i, m := range o.Models {
@@ -495,6 +514,12 @@ func (o OpenAIConfig) validate() error {
 		seen[m.Name] = struct{}{}
 		if m.MaxContextTokens <= 0 {
 			return fmt.Errorf("openai.models[%d].max_context_tokens: must be a positive integer (got %d)", i, m.MaxContextTokens)
+		}
+		if m.MaxCompletionTokens <= 0 {
+			return fmt.Errorf("openai.models[%d].max_completion_tokens: must be a positive integer (entry %q; got %d) — migrate the removed agents.<name>.max_tokens quota here (per-model-completion-budget)", i, m.Name, m.MaxCompletionTokens)
+		}
+		if m.LengthContinue.ExpandStep < 0 || m.LengthContinue.MaxRetries < 0 {
+			return fmt.Errorf("openai.models[%d].length_continue (entry %q): expand_step and max_retries must be positive integers or 0 (0/unset disables length continuation for this entry; got expand_step=%d, max_retries=%d)", i, m.Name, m.LengthContinue.ExpandStep, m.LengthContinue.MaxRetries)
 		}
 	}
 	if o.DefaultModel != "" {
@@ -618,15 +643,16 @@ const defaultAgentMaxRounds = 100
 func DefaultAgentMaxRounds() int { return defaultAgentMaxRounds }
 
 // AgentConfig describes a single agent's runtime settings. It carries ONLY
-// the agent's capability surface — prompt, quotas, tools, skills, round cap,
+// the agent's capability surface — prompt, tools, skills, round cap,
 // structured output, retry (model-effort-v2 removed the model/thinking/
-// reasoning_effort fields: the model and effort are turn-level attributes
-// resolved from the openai.models catalog + openai.default_reasoning_effort +
-// request parameters, and load rejects the removed fields as residuals).
+// reasoning_effort fields, and per-model-completion-budget removed max_tokens:
+// the model, effort, output quota, and continuation policy are turn-level
+// attributes resolved from the openai.models catalog +
+// openai.default_reasoning_effort + request parameters, and load rejects the
+// removed fields as residuals).
 type AgentConfig struct {
 	Name         string         `yaml:"name"`
 	SystemPrompt string         `yaml:"system_prompt"`
-	MaxTokens    int            `yaml:"max_tokens"`
 	Tools        []string       `yaml:"tools"`
 	MCP          AgentMCPConfig `yaml:"mcp"`
 	Skills       []string       `yaml:"skills"`
@@ -1110,11 +1136,14 @@ func Load(path string) (*Config, error) {
 	// openai.max_context_tokens, agents.<name>.model|thinking|reasoning_effort)
 	// would otherwise be silently ignored by the typed decode, and a silently
 	// dropped `thinking: true` in particular would turn reasoning off without
-	// a trace; (2) every openai.models[].max_context_tokens MUST be an integer
-	// — yaml.v3 silently truncates a fractional value into the int field
-	// (12.5 → 12), so integer-ness is checked on the raw value (a float that
-	// is not whole, or any non-numeric value, fails fast; context-compaction
-	// spec: "a configured value MUST be a positive integer").
+	// a trace; per-model-completion-budget adds agents.<name>.max_tokens and
+	// the global openai.length_continue to that list; (2) every
+	// openai.models[].max_context_tokens and max_completion_tokens MUST be an
+	// integer — yaml.v3 silently truncates a fractional value into the int
+	// field (12.5 → 12), so integer-ness is checked on the raw value (a float
+	// that is not whole, or any non-numeric value, fails fast;
+	// context-compaction spec: "a configured value MUST be a positive
+	// integer").
 	var shadow struct {
 		OpenAI map[string]any `yaml:"openai"`
 	}
@@ -1127,6 +1156,9 @@ func Load(path string) (*Config, error) {
 	if _, ok := shadow.OpenAI["max_context_tokens"]; ok {
 		return nil, fmt.Errorf("config validation error: openai.max_context_tokens was removed (model-effort-v2): set max_context_tokens on each openai.models catalog entry instead")
 	}
+	if _, ok := shadow.OpenAI["length_continue"]; ok {
+		return nil, fmt.Errorf("config validation error: openai.length_continue was removed (per-model-completion-budget): configure the length_continue sub-block on the openai.models catalog entries that need finish_reason=length continuation instead")
+	}
 	var residualAgentFields struct {
 		Agents map[string]map[string]any `yaml:"agents"`
 	}
@@ -1134,7 +1166,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
 	for agentName, fields := range residualAgentFields.Agents {
-		for _, removed := range []string{"model", "thinking", "reasoning_effort"} {
+		for _, removed := range []string{"model", "thinking", "reasoning_effort", "max_tokens"} {
 			if _, ok := fields[removed]; !ok {
 				continue
 			}
@@ -1145,6 +1177,8 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("config validation error: agents.%s.thinking was removed (model-effort-v2): thinking is a catalog-entry capability (openai.models[].thinking) plus openai.default_reasoning_effort", agentName)
 			case "reasoning_effort":
 				return nil, fmt.Errorf("config validation error: agents.%s.reasoning_effort was removed (model-effort-v2): promote the level to openai.default_reasoning_effort if it was uniform across agents", agentName)
+			case "max_tokens":
+				return nil, fmt.Errorf("config validation error: agents.%s.max_tokens was removed (per-model-completion-budget): the output quota is a per-model attribute — set max_completion_tokens on the openai.models catalog entry instead", agentName)
 			}
 		}
 	}
@@ -1154,14 +1188,16 @@ func Load(path string) (*Config, error) {
 			if entry == nil {
 				continue
 			}
-			switch v := entry["max_context_tokens"].(type) {
-			case nil, int, uint, int64:
-			case float64:
-				if v != float64(int64(v)) {
-					return nil, fmt.Errorf("config validation error: openai.models[%d].max_context_tokens: must be a positive integer (got %v)", i, v)
+			for _, field := range []string{"max_context_tokens", "max_completion_tokens"} {
+				switch v := entry[field].(type) {
+				case nil, int, uint, int64:
+				case float64:
+					if v != float64(int64(v)) {
+						return nil, fmt.Errorf("config validation error: openai.models[%d].%s: must be a positive integer (got %v)", i, field, v)
+					}
+				default:
+					return nil, fmt.Errorf("config validation error: openai.models[%d].%s: must be a positive integer (got %T)", i, field, v)
 				}
-			default:
-				return nil, fmt.Errorf("config validation error: openai.models[%d].max_context_tokens: must be a positive integer (got %T)", i, v)
 			}
 		}
 	}

@@ -11,12 +11,16 @@ import (
 // selectionTestCatalog is a two-entry catalog — a thinking model (the
 // default) and a non-thinking one — with the deployment default effort unset
 // (normalizing to none inside NewModelSelectionConfig; hand-built configs
-// normalize the same way inside resolveModelSelection).
+// normalize the same way inside resolveModelSelection). The entries carry
+// distinct output quotas and only the default entry configures
+// length_continue, so per-entry quota/continuation flow is observable
+// (per-model-completion-budget).
 func selectionTestCatalog() ModelSelectionConfig {
 	return ModelSelectionConfig{
 		Catalog: []config.ModelCatalogEntry{
-			{Name: "gpt-5", MaxContextTokens: 400000, Thinking: true},
-			{Name: "glm-4.7", MaxContextTokens: 200000, Thinking: false},
+			{Name: "gpt-5", MaxContextTokens: 400000, MaxCompletionTokens: 16384, Thinking: true,
+				LengthContinue: config.LengthContinueConfig{ExpandStep: 8192, MaxRetries: 2}},
+			{Name: "glm-4.7", MaxContextTokens: 200000, MaxCompletionTokens: 8192, Thinking: false},
 		},
 		Default:       "gpt-5",
 		DefaultEffort: "none",
@@ -109,6 +113,31 @@ func TestResolveModelSelection_ModelOnly(t *testing.T) {
 	hi.DefaultEffort = "xhigh"
 	sel = requireResolve(t, hi, "", "")
 	assert.Equal(t, "xhigh", sel.Effort)
+}
+
+// TestResolveModelSelection_PerEntryQuotaAndContinuation: the resolved
+// entry's output quota and length_continue policy ride the selection and its
+// override verbatim — one deployment, two entries, each turn gets its own
+// pair (per-model-completion-budget).
+func TestResolveModelSelection_PerEntryQuotaAndContinuation(t *testing.T) {
+	msc := selectionTestCatalog()
+
+	sel := requireResolve(t, msc, "gpt-5", "")
+	assert.Equal(t, 16384, sel.MaxCompletionTokens)
+	assert.True(t, sel.LengthContinue.Enabled(), "entry-configured continuation must ride the selection")
+	step, retries := sel.LengthContinue.Resolve()
+	assert.Equal(t, 8192, step)
+	assert.Equal(t, 2, retries)
+	ov := sel.override()
+	assert.Equal(t, 16384, ov.MaxCompletionTokens, "override carries the entry quota")
+	assert.Equal(t, sel.LengthContinue, ov.LengthContinue, "override carries the entry continuation policy")
+
+	sel = requireResolve(t, msc, "glm-4.7", "")
+	assert.Equal(t, 8192, sel.MaxCompletionTokens)
+	assert.False(t, sel.LengthContinue.Enabled(), "an entry without length_continue resolves disabled")
+	ov = sel.override()
+	assert.Equal(t, 8192, ov.MaxCompletionTokens)
+	assert.False(t, ov.LengthContinue.Enabled())
 }
 
 // TestResolveModelSelection_ModelAndEffort: model + effort — both axes apply

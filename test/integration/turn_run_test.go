@@ -33,14 +33,19 @@ func newGatedLLM(inner agent.LLMClient) *gatedLLM {
 }
 
 // release opens the gate (idempotent). Tests call it when they want the held
-// calls to proceed; the testEnv cleanup also calls it so a parked call (e.g.
-// the async first-turn title generation, which runs on a detached context)
-// cannot outlive the harness's goroutine-leak check.
+// calls to proceed; the testEnv cleanup also calls it so a parked call cannot
+// outlive the harness's goroutine-leak check.
 func (g *gatedLLM) release() {
 	g.releaseOnce.Do(func() { close(g.gate) })
 }
 
 func (g *gatedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
+	// The send-time title generation (title-generation-cadence) runs in
+	// parallel with the turn and must NOT be held by the turn's gate — tests
+	// gate the turn; title calls pass straight through to the inner client.
+	if req.Model == scriptedTitleModel {
+		return g.inner.StreamChat(ctx, req, onToken, onReasoning)
+	}
 	g.once.Do(func() { close(g.entered) })
 	select {
 	case <-g.gate:
@@ -111,13 +116,14 @@ func TestTurnRun_DisconnectDoesNotCancelThenResumeReplay(t *testing.T) {
 			finishReason: "stop",
 			usage:        agent.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
 		},
-		scriptedLLMResponse{ // title round
-			content: "Greeting", finishReason: "stop",
-			usage: agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
-		},
 		scriptedLLMResponse{ // the follow-up turn's assistant round
 			tokens: []string{"Hi"}, content: "Hi", finishReason: "stop",
 			usage: agent.Usage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
+		},
+	).withTitleResponses(
+		scriptedLLMResponse{ // title round (send-time, races the gated turn call)
+			content: "Greeting", finishReason: "stop",
+			usage: agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 		},
 	)
 	gated := newScriptedGated(t, scripted)
@@ -196,13 +202,15 @@ func TestTurnRun_CancelEndpointCancelsRunningTurn(t *testing.T) {
 			finishReason: "stop",
 			usage:        agent.Usage{PromptTokens: 5, CompletionTokens: 1, TotalTokens: 6},
 		},
-		scriptedLLMResponse{ // title round (first turn fires title generation even when cancelled)
-			content: "T", finishReason: "stop",
-			usage: agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
-		},
 		scriptedLLMResponse{ // the follow-up turn's assistant round
 			tokens: []string{"Hi"}, content: "Hi", finishReason: "stop",
 			usage: agent.Usage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
+		},
+	).withTitleResponses(
+		// Title round: fired at send time (before the turn started), so it
+		// completes even though the turn itself is cancelled mid-call.
+		scriptedLLMResponse{content: "T", finishReason: "stop",
+			usage: agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 		},
 	)
 	gated := newScriptedGated(t, scripted)
@@ -248,11 +256,17 @@ func TestTurnRun_CancelEndpointCancelsRunningTurn(t *testing.T) {
 	// The claim key being gone IS the unlock proof; driving a full follow-up
 	// turn here would need another gated script round for no extra coverage.
 
-	// Release the gate and let the parked async title round (running on the
-	// detached save context) drain before the harness's goroutine-leak check
-	// snapshots the process.
+	// Release the gate so any in-flight residue can drain before the
+	// harness's goroutine-leak check snapshots the process.
 	gated.release()
 	time.Sleep(250 * time.Millisecond)
+
+	// The send-time title generation completed on its detached context even
+	// though the turn itself was cancelled mid-call — the session keeps its
+	// title (title-generation-cadence: a cancelled turn still has a title).
+	env.mysqlFake.mu.Lock()
+	assert.Equal(t, "T", env.mysqlFake.titles[defaultSessionID].Title, "cancelled turn must keep its send-time title")
+	env.mysqlFake.mu.Unlock()
 }
 
 // TestTurnRun_SessionListGeneratingFlag asserts the list endpoint reflects
@@ -264,6 +278,7 @@ func TestTurnRun_SessionListGeneratingFlag(t *testing.T) {
 			tokens: []string{"hi"}, content: "hi", finishReason: "stop",
 			usage: agent.Usage{PromptTokens: 3, CompletionTokens: 1, TotalTokens: 4},
 		},
+	).withTitleResponses(
 		scriptedLLMResponse{ // title round
 			content: "T", finishReason: "stop",
 			usage: agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
@@ -328,8 +343,8 @@ func TestTurnRun_SessionListGeneratingFlag(t *testing.T) {
 }
 
 // newScriptedGated wraps a scripted client in a gatedLLM and releases the gate
-// at cleanup so a parked call (e.g. the async title round on its detached
-// context) cannot outlive the harness's goroutine-leak check.
+// at cleanup so a parked call cannot outlive the harness's goroutine-leak
+// check. Title-generation calls bypass the gate entirely (see StreamChat).
 func newScriptedGated(t *testing.T, inner agent.LLMClient) *gatedLLM {
 	t.Helper()
 	g := newGatedLLM(inner)

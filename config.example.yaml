@@ -17,7 +17,7 @@ openai:
   # have to appear in the models catalog below; unset → the default catalog
   # entry. Title calls always run on the non-thinking wire family (plain
   # max_tokens, no reasoning_effort).
-  # title_model: gpt-4o-mini
+  title_model: gpt-4o-mini
   # Deployment-level default thinking effort (model-effort-v2): the single
   # configuration source for the effort axis, overridden per request by the
   # POST /messages `reasoning_effort` parameter. Closed set
@@ -25,7 +25,7 @@ openai:
   # thinking:false catalog entry a non-none default is clamped to none (WARN)
   # and the turn proceeds; a non-none default also fails config load when any
   # agent configures output_schema (structured output × reasoning conflict).
-  # default_reasoning_effort: none
+  default_reasoning_effort: none
   # Stream idle watchdog (llm-stream-watchdog capability): the maximum allowed
   # gap between consecutive SSE frames of a streaming chat call. The first gap
   # starts when the call is issued, so time-to-first-frame is covered too — a
@@ -39,26 +39,7 @@ openai:
   # gateways stream deltas at millisecond cadence, so multi-minute silence
   # means the stream broke. Zero/unset (the default) disables the watchdog —
   # prior behavior exactly (a negative value fails config load).
-  # stream_idle_timeout: 2m
-  # finish_reason=length auto-continuation (llm-length-continuation
-  # capability): when a round's LLM response is cut by the output token limit,
-  # keep the partial output and continue with an expanded budget instead of
-  # silently ending the turn. Attempt N (0-based) sends
-  # agents.<name>.max_tokens + N × expand_step; up to max_retries
-  # CONTINUATIONS per round (3 → 4 total attempts; continuation attempts do
-  # not consume max_rounds). A truncated tool_call is not executed — it gets a
-  # synthetic not-executed result instructing the model to re-issue in smaller
-  # chunks, while calls whose arguments are complete dispatch normally. If
-  # every attempt still ends length, the turn fails with agent_error
-  # length_exhausted (finalContent keeps the accumulated partial output).
-  # Applies to the three agent loops and round-cap wrap-up rounds; title
-  # generation and compaction summaries are not covered. Zero/unset (the
-  # default) disables the feature — length keeps terminating the round
-  # silently (negative values fail config load). Any non-zero field enables it
-  # with missing siblings defaulted (expand_step 8192, max_retries 3).
-  # length_continue:
-  #   expand_step: 8192
-  #   max_retries: 3
+  stream_idle_timeout: 2m
   # Model catalog (per-request-model-selection; MANDATORY since
   # model-effort-v2 — the config no longer loads without it): the list of
   # models a chat request may select via the POST /messages body parameters
@@ -70,20 +51,61 @@ openai:
   # max_context_tokens is that model's context window — the
   # context-compaction threshold follows the request-selected model (0.8 ×
   # its window), and turn_usage.model records the resolved name per turn.
-  # Entries need unique non-empty names and positive-integer windows;
-  # default_model (unset → the first entry) must name a catalog entry.
+  # max_completion_tokens is that model's OUTPUT-token quota
+  # (per-model-completion-budget) — one turn, one model, one quota shared by
+  # Confucius/Chongzhi/Liang (wrap-up rounds included). The field's semantic
+  # is "output quota" and the wire family translates it: a thinking:true
+  # entry sends it as max_completion_tokens, a thinking:false entry sends it
+  # as the legacy max_tokens parameter (an acknowledged naming awkwardness —
+  # the wire family owns the translation).
+  # Entries need unique non-empty names, positive-integer windows and
+  # positive-integer quotas; default_model (unset → the first entry) must
+  # name a catalog entry. The optional per-entry length_continue sub-block
+  # (see below) enables finish_reason=length continuation for that entry
+  # only.
   # Migration from the pre-model-effort-v2 layout (load now REJECTS the old
   # keys with a pointed error): openai.model → openai.title_model (if it only
   # served titles); top-level openai.max_context_tokens → the per-entry
   # max_context_tokens; agents.<name>.model|thinking|reasoning_effort →
   # deleted (a uniform effort level moves to default_reasoning_effort).
+  # Migration from the pre-per-model-completion-budget layout (same
+  # fail-fast): agents.<name>.max_tokens → the per-entry
+  # max_completion_tokens (the three agents usually shared one value — move
+  # it to every entry); the global openai.length_continue block → the
+  # per-entry length_continue sub-block on ONLY the models that need it.
   models:
     - name: gpt-5
       max_context_tokens: 400000
+      max_completion_tokens: 16384
       thinking: true
+      # finish_reason=length auto-continuation (llm-length-continuation
+      # capability, per-entry since per-model-completion-budget): when a
+      # round's LLM response is cut by the output token limit, keep the
+      # partial output and continue with an expanded budget instead of
+      # silently ending the turn. Attempt N (0-based) sends this entry's
+      # max_completion_tokens + N × expand_step; up to max_retries
+      # CONTINUATIONS per round (3 → 4 total attempts; continuation attempts
+      # do not consume max_rounds). A truncated tool_call is not executed —
+      # it gets a synthetic not-executed result instructing the model to
+      # re-issue in smaller chunks, while calls whose arguments are complete
+      # dispatch normally. If every attempt still ends length, the turn fails
+      # with agent_error length_exhausted (finalContent keeps the accumulated
+      # partial output). Applies to the three agent loops and round-cap
+      # wrap-up rounds of turns that resolve to THIS entry; title generation
+      # and compaction summaries are not covered. Zero/unset (the default)
+      # disables the feature for this entry — length keeps terminating the
+      # round silently (negative values fail config load). Any non-zero field
+      # enables it with missing siblings defaulted (expand_step 8192,
+      # max_retries 3).
+      length_continue:
+        expand_step: 8192
+        max_retries: 3
     - name: glm-4.7
       max_context_tokens: 200000
+      max_completion_tokens: 8192
       thinking: false
+      # This entry configures no length_continue → continuation is off for
+      # turns that select glm-4.7 (a length round terminates the turn).
   default_model: gpt-5
 
 mysql:
@@ -268,8 +290,10 @@ agents:
       # DEPEND on a predecessor's output. Aim for 2-3 parallel invokes (avoid >5),
       # never issue overlapping tasks to the same sub-agent, and serialize
       # dependent work across turns.
-    max_tokens: 8192
-    tools: 
+    # (max_tokens was removed by per-model-completion-budget: the output
+    # quota now lives on each openai.models catalog entry as
+    # max_completion_tokens.)
+    tools:
       - luban_list_skills
       - luban_read_skill
       - luban_install_skill
@@ -331,7 +355,6 @@ agents:
       - Tools first, coding is the last resort. If you can assemble existing skills to solve the problem, never reinvent the wheel.
       - Parallel environment: multiple Chongzhi instances may be processing different subtasks simultaneously. Focus only on your own task; do not consider other instances.
       - Deliverables must be accompanied by reproducible evidence (tool name, parameters, outputs). Never provide conclusions alone.
-    max_tokens: 8192
     # max_rounds: 100  # tool-calling loop cap (unset → default 100). On a cap
     #                   # hit the agent runs one tool-disabled wrap-up round,
     #                   # emits a WARN log + usage.meta.round_capped, and only
@@ -393,7 +416,6 @@ agents:
       - Audit both process and outcome. Valuing outcome over process reduces system reliability.
       - Never modify Chongzhi’s deliverable. Only point out issues and let the executor correct them.
       - For parallel scenarios, pay special attention to interface consistency between subtasks, ensuring no conflicts after assembly.
-    max_tokens: 8192
     tools:
       - webfetch
       - luban_list_skills

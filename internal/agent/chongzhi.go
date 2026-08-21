@@ -45,18 +45,15 @@ type Chongzhi struct {
 	// path; exposed via LastRunHitCap so Confucius can propagate a sub-agent
 	// cap into usage.meta.round_capped.
 	hitCapThisRun bool
-	// lengthContinue is the finish_reason=length continuation policy
-	// (llm-length-continuation capability); zero = disabled = the loop
-	// treats a length round as terminal exactly as before.
-	lengthContinue config.LengthContinueConfig
 }
 
 // NewChongzhi builds a Chongzhi agent. turn is the turn-resolved
-// model/effort configuration applied to every LLM call this agent makes
-// (model-effort-v2). lc is the global finish_reason=length continuation
-// policy (llm-length-continuation); zero disables it.
-func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride, lc config.LengthContinueConfig) (*Chongzhi, error) {
-	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools, cfg.MaxTokens)
+// model/effort/quota/continuation configuration applied to every LLM call
+// this agent makes (model-effort-v2, per-model-completion-budget) — including
+// the write-budget number injected into the tools[] descriptions and the
+// turn's finish_reason=length continuation policy.
+func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride) (*Chongzhi, error) {
+	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools, turn.MaxCompletionTokens)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build chongzhi tools: %w", err)
 	}
@@ -65,14 +62,13 @@ func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, t
 		maxRounds = config.DefaultAgentMaxRounds()
 	}
 	return &Chongzhi{
-		cfg:            cfg,
-		client:         client,
-		toolRegistry:   reg,
-		turn:           turn,
-		toolsJSON:      toolsJSON,
-		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
-		maxRounds:      maxRounds,
-		lengthContinue: lc,
+		cfg:           cfg,
+		client:        client,
+		toolRegistry:  reg,
+		turn:          turn,
+		toolsJSON:     toolsJSON,
+		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:     maxRounds,
 	}, nil
 }
 
@@ -118,18 +114,18 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		}
 
 		req := LLMRequest{
-			Model:           c.turn.Model,
-			Messages:        withSystem(c.cfg.SystemPrompt, round),
-			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.turn.Thinking,
-			ReasoningEffort: c.turn.ReasoningEffort,
+			Model:               c.turn.Model,
+			Messages:            withSystem(c.cfg.SystemPrompt, round),
+			MaxCompletionTokens: c.turn.MaxCompletionTokens,
+			Thinking:            c.turn.Thinking,
+			ReasoningEffort:     c.turn.ReasoningEffort,
 		}
 		if c.toolsIsNotNil {
 			req.Tools = c.toolsJSON
 		}
 
 		var assistantText string
-		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.lengthContinue,
+		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.turn.LengthContinue,
 			func(r []Message) []Message { return withSystem(c.cfg.SystemPrompt, r) },
 			// Parseable tool_calls of an intermediate length response dispatch
 			// through the same record path as the main loop (including the
@@ -165,9 +161,9 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		// the accumulated partial content. The error text deliberately avoids
 		// transient-error substrings so the sub-agent retry pipeline (which
 		// Chongzhi runs under when dispatched by Confucius) never retries it.
-		if c.lengthContinue.Enabled() && result.LengthHit {
-			step, retries := c.lengthContinue.Resolve()
-			msg := lengthExhaustedMessage(c.Name(), retries, c.cfg.MaxTokens+retries*step)
+		if c.turn.LengthContinue.Enabled() && result.LengthHit {
+			step, retries := c.turn.LengthContinue.Resolve()
+			msg := lengthExhaustedMessage(c.Name(), retries, c.turn.MaxCompletionTokens+retries*step)
 			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), msg, "length_exhausted"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
 			return result.Content, total, nil, fmt.Errorf("chongzhi: %s", msg)
@@ -205,14 +201,14 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		c.runMu.Unlock()
 		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
 		wrapReq := LLMRequest{
-			Model:           c.turn.Model,
-			Messages:        withSystem(c.cfg.SystemPrompt, round),
-			MaxTokens:       c.cfg.MaxTokens,
-			Thinking:        c.turn.Thinking,
-			ReasoningEffort: c.turn.ReasoningEffort,
+			Model:               c.turn.Model,
+			Messages:            withSystem(c.cfg.SystemPrompt, round),
+			MaxCompletionTokens: c.turn.MaxCompletionTokens,
+			Thinking:            c.turn.Thinking,
+			ReasoningEffort:     c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.lengthContinue,
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue,
 			func(r []Message) []Message {
 				return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
 			})

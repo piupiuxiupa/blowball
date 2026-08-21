@@ -3,18 +3,28 @@
 ## Purpose
 
 定义消息的 Redis-first write-behind 持久化能力：Redis 入库队列（`msgs:buffer`/`msgs:processing` 双列表可靠队列语义）与后台 flusher 的分批幂等入库——LMOVE 认领、LREM 确认、失败重试不丢弃、FK 死信例外、启动回收、批量刷新 `sessions.update_time`、同步 drain 原语、配置参数与角色归属（agent/all），以及 Redis AOF 持久化的部署前置。
-
 ## Requirements
-
 ### Requirement: Redis 入库队列与读缓存双写
 
-每轮 turn 的消息批次 SHALL 在单个 Redis pipeline 中双写：`RPUSH msgs:{session_id}`（读热层，保留 24h TTL）与 `RPUSH msgs:buffer`（全局 FIFO 入库队列）。`msgs:buffer` SHALL NOT 设置 TTL——队列未清空前过期即意味着消息丢失。两处写入的元素为同一份消息规范 JSON。该批次 SHALL NOT 同步写入 MySQL，也 SHALL NOT 写任何文件系统会话文件。
+一个 turn 的消息 SHALL 拆分为至多三批双写，每批在单个 Redis pipeline 中完成：①**发送时批次**（session-run claim 成功后、orchestrator 启动前）仅含用户消息行（`client_msg_id = {trace_id}:0`，msg_index=0）；②**mid-turn 批次**（上下文压缩触发时，见 context-compaction 能力）含截至触发点的 assistant 事件；③**终局批次**（orchestrator 结束后，成功/失败/取消路径均执行）含剩余 assistant 事件。每批双写 `RPUSH msgs:{session_id}`（读热层，保留 24h TTL）与 `RPUSH msgs:buffer`（全局 FIFO 入库队列），两处写入的元素为同一份消息规范 JSON。**不变量：该 turn 的用户消息行在两个 key 中各恰好出现一次**——后续批次 SHALL NOT 重复包含已持久化的用户消息行（确定性 `client_msg_id` 仅作为 MySQL 幂等兜底，不作为 list 去重依据）。`msgs:buffer` SHALL NOT 设置 TTL——队列未清空前过期即意味着消息丢失。批次 SHALL NOT 同步写入 MySQL，也 SHALL NOT 写任何文件系统会话文件。
 
-#### Scenario: turn 成功后双写两个 key
+#### Scenario: 发送时批次先入队
 
-- **WHEN** 一轮 turn 的消息批次（用户消息 + assistant 事件）完成持久化
-- **THEN** 系统通过一个 Redis pipeline 同时 `RPUSH msgs:{session_id}`（刷新 TTL）与 `RPUSH msgs:buffer`，元素为同一份消息 JSON
-- **AND THEN** 该批次不触发任何同步 MySQL 写入
+- **WHEN** 一条用户消息请求通过 session-run claim，turn 尚未启动
+- **THEN** 用户消息行作为独立批次在同一 Redis pipeline 中双写两个 key，元素为该消息 JSON
+- **AND** 该批次不触发任何同步 MySQL 写入
+
+#### Scenario: 终局批次为事件后缀
+
+- **WHEN** turn 结束（成功、失败或取消），终局批次持久化
+- **THEN** 批次仅含 assistant 事件，按 merged 事件序以 msg_index 从上次已持久化位置续接
+- **AND** `msgs:{session_id}` 与 `msgs:buffer` 中该 turn 的用户消息行各自仍恰好出现一次
+
+#### Scenario: 发送时批次失败由终局批次兜底
+
+- **WHEN** 发送时批次因错误未能写入
+- **THEN** 终局批次 SHALL 包含用户消息行与全部 assistant 事件
+- **AND** flusher 的幂等 INSERT（`uk_messages_client_msg_id`）使 MySQL 不产生重复行
 
 #### Scenario: 入库队列无 TTL
 
@@ -146,3 +156,4 @@ Redis 启用 AOF（`appendonly yes`）SHALL 作为部署要求。进程启动时
 
 - **WHEN** 启动时探测到 Redis `appendonly` 为 `no`
 - **THEN** 记录一条 WARN 日志说明 flush 间隔内的消息可能因 Redis 重启丢失，进程正常启动
+

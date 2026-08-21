@@ -30,13 +30,17 @@ func driveModelsList(t *testing.T, h *ModelListHandler) *httptest.ResponseRecord
 }
 
 // TestModelListHandler_CatalogEcho verifies the catalog echo: every entry
-// (name / max_context_tokens / thinking), the default name, and the
-// deployment default reasoning effort (model-effort-v2's additive field the
-// frontend uses to preselect the effort picker).
+// (name / max_context_tokens / max_completion_tokens / thinking), the default
+// name, and the deployment default reasoning effort (model-effort-v2's
+// additive field the frontend uses to preselect the effort picker). The
+// per-entry length_continue block must NOT leak into the response
+// (per-model-completion-budget D5: an operator-side switch, not a selection
+// axis).
 func TestModelListHandler_CatalogEcho(t *testing.T) {
 	h := NewModelListHandler([]config.ModelCatalogEntry{
-		{Name: "gpt-5", MaxContextTokens: 400000, Thinking: true},
-		{Name: "glm-4.7", MaxContextTokens: 200000, Thinking: false},
+		{Name: "gpt-5", MaxContextTokens: 400000, MaxCompletionTokens: 16384, Thinking: true,
+			LengthContinue: config.LengthContinueConfig{ExpandStep: 8192, MaxRetries: 2}},
+		{Name: "glm-4.7", MaxContextTokens: 200000, MaxCompletionTokens: 8192, Thinking: false},
 	}, "gpt-5", "high")
 
 	w := driveModelsList(t, h)
@@ -49,10 +53,12 @@ func TestModelListHandler_CatalogEcho(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	require.Len(t, body.Models, 2)
-	assert.Equal(t, modelEntry{Name: "gpt-5", MaxContextTokens: 400000, Thinking: true}, body.Models[0])
-	assert.Equal(t, modelEntry{Name: "glm-4.7", MaxContextTokens: 200000, Thinking: false}, body.Models[1])
+	assert.Equal(t, modelEntry{Name: "gpt-5", MaxContextTokens: 400000, MaxCompletionTokens: 16384, Thinking: true}, body.Models[0])
+	assert.Equal(t, modelEntry{Name: "glm-4.7", MaxContextTokens: 200000, MaxCompletionTokens: 8192, Thinking: false}, body.Models[1])
 	assert.Equal(t, "gpt-5", body.Default)
 	assert.Equal(t, "high", body.DefaultReasoningEfft)
+	assert.NotContains(t, w.Body.String(), "length_continue", "the per-entry continuation switch is operator-only and must not be exposed")
+	assert.NotContains(t, w.Body.String(), "expand_step")
 }
 
 // TestModelListHandler_DefaultEffortNone: the normalized unset default

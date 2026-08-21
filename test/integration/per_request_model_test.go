@@ -67,7 +67,7 @@ func TestPerRequestModel_NonThinkingSelectionDrivesAllAgents(t *testing.T) {
 	w := env.postMessage(`{"content":"hi","model":"glm-4.7"}`, authToken(t, defaultUserID))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	reqs := llm.requests()
+	reqs := llm.turnRequests()
 	require.Len(t, reqs, 4, "want Confucius×2 + Chongzhi + Liang LLM calls")
 	for i, r := range reqs {
 		assert.Equal(t, "glm-4.7", r.Model, "call %d model", i)
@@ -93,7 +93,7 @@ func TestPerRequestModel_NoParamsResolveToDeploymentDefaults(t *testing.T) {
 	w := env.postMessage(`{"content":"hi"}`, authToken(t, defaultUserID))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	reqs := llm.requests()
+	reqs := llm.turnRequests()
 	require.Len(t, reqs, 4)
 	for i, r := range reqs {
 		assert.Equal(t, "gpt-5", r.Model, "call %d model (default entry)", i)
@@ -114,7 +114,7 @@ func TestPerRequestModel_NoneEffortSentLiterallyOnThinkingEntry(t *testing.T) {
 	w := env.postMessage(`{"content":"hi","reasoning_effort":"none"}`, authToken(t, defaultUserID))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	reqs := llm.requests()
+	reqs := llm.turnRequests()
 	require.Len(t, reqs, 4)
 	for i, r := range reqs {
 		assert.Equal(t, "gpt-5", r.Model, "call %d model", i)
@@ -133,7 +133,7 @@ func TestPerRequestModel_DeploymentDefaultClampedOnNonThinkingEntry(t *testing.T
 	w := env.postMessage(`{"content":"hi","model":"glm-4.7"}`, authToken(t, defaultUserID))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	reqs := llm.requests()
+	reqs := llm.turnRequests()
 	require.Len(t, reqs, 4)
 	for i, r := range reqs {
 		assert.Equal(t, "glm-4.7", r.Model, "call %d model", i)
@@ -151,7 +151,7 @@ func TestPerRequestModel_ThinkingSelectionWithEffort(t *testing.T) {
 	w := env.postMessage(`{"content":"hi","model":"gpt-5","reasoning_effort":"high"}`, authToken(t, defaultUserID))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	reqs := llm.requests()
+	reqs := llm.turnRequests()
 	require.Len(t, reqs, 4)
 	for i, r := range reqs {
 		assert.Equal(t, "gpt-5", r.Model, "call %d model", i)

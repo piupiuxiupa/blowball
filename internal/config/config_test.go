@@ -30,6 +30,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
   host: 127.0.0.1
@@ -48,17 +49,14 @@ agents:
   confucius:
     name: Confucius
     system_prompt: "you are confucius"
-    max_tokens: 2048
     tools: [chongzhi, liang]
   chongzhi:
     name: Chongzhi
     system_prompt: "you are chongzhi"
-    max_tokens: 4096
     tools: [read_file, write_file]
   liang:
     name: Liang
     system_prompt: "you are liang"
-    max_tokens: 2048
     tools: []
 tools:
   xizhi:
@@ -112,6 +110,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: ${MYSQL_DSN}
 jwt:
@@ -146,6 +145,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "${TEST_MISSING_VAR:fallback-dsn}"
 jwt:
@@ -175,6 +175,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -194,6 +195,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: ""
 jwt:
@@ -213,6 +215,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -274,6 +277,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -323,6 +327,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -341,6 +346,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -359,6 +365,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -377,6 +384,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -395,6 +403,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -413,6 +422,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -431,6 +441,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -465,6 +476,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -497,6 +509,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -576,6 +589,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -637,6 +651,7 @@ openai:
 %s  models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -675,6 +690,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -716,6 +732,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -765,6 +782,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -874,6 +892,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -917,6 +936,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -971,6 +991,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1007,6 +1028,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1031,6 +1053,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1055,6 +1078,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1119,6 +1143,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 redis:
@@ -1147,6 +1172,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 redis:
@@ -1173,6 +1199,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1197,6 +1224,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1226,6 +1254,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1253,6 +1282,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1279,6 +1309,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1305,6 +1336,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1564,6 +1596,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1596,6 +1629,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1634,6 +1668,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1652,6 +1687,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1693,6 +1729,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1709,6 +1746,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
@@ -1725,6 +1763,7 @@ openai:
   models:
     - name: gpt-4o-mini
       max_context_tokens: 128000
+      max_completion_tokens: 8192
 mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:

@@ -20,16 +20,18 @@ func testConfuciusConfig() config.AgentConfig {
 	return config.AgentConfig{
 		Name:         "Confucius",
 		SystemPrompt: "you are confucius",
-		MaxTokens:    512,
 		Tools:        []string{},
 	}
 }
 
 // testTurn is the turn-level model config the direct-constructor tests inject
 // (model-effort-v2): the non-thinking wire family on the shared fake model
-// name that used to ride AgentConfig.Model. Thinking variants construct their
-// own ModelOverride inline.
-func testTurn() ModelOverride { return ModelOverride{Model: "gpt-test"} }
+// name that used to ride AgentConfig.Model, plus the turn-resolved output
+// quota (per-model-completion-budget). Thinking variants construct their own
+// ModelOverride inline.
+func testTurn() ModelOverride {
+	return ModelOverride{Model: "gpt-test", MaxCompletionTokens: 512}
+}
 
 // newTestConfucius builds a Confucius with a registry holding no real tools and
 // per-invocation factories returning the provided sub-agent implementations
@@ -39,7 +41,7 @@ func testTurn() ModelOverride { return ModelOverride{Model: "gpt-test"} }
 func newTestConfucius(t *testing.T, client LLMClient, subAgents map[string]Agent) *Confucius {
 	t.Helper()
 	reg := tool.NewRegistry()
-	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents), testTurn(), config.LengthContinueConfig{})
+	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents), testTurn())
 	require.NoError(t, err)
 	return c
 }
@@ -619,11 +621,13 @@ func TestConfucius_ReasoningRequest(t *testing.T) {
 	cfg := testConfuciusConfig()
 	// The thinking wire family rides the turn config (model-effort-v2), not
 	// the agent config.
+	turn := testTurn()
+	turn.Thinking, turn.ReasoningEffort = true, "medium"
 	reg := tool.NewRegistry()
 	c, err := NewConfucius(cfg, client, reg, staticFactories(map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
-	}), ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "medium"}, config.LengthContinueConfig{})
+	}), turn)
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -636,7 +640,7 @@ func TestConfucius_ReasoningRequest(t *testing.T) {
 	req := client.lastRequest()
 	assert.True(t, req.Thinking, "Thinking must be true")
 	assert.Equal(t, "medium", req.ReasoningEffort)
-	assert.Equal(t, 512, req.MaxTokens)
+	assert.Equal(t, 512, req.MaxCompletionTokens)
 }
 
 // blockingClient blocks StreamChat until unblock is closed (so the test can

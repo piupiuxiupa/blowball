@@ -20,7 +20,6 @@ func testChongzhiConfig(tools ...string) config.AgentConfig {
 	return config.AgentConfig{
 		Name:         "Chongzhi",
 		SystemPrompt: "you are chongzhi",
-		MaxTokens:    1024,
 		Tools:        tools,
 	}
 }
@@ -62,7 +61,7 @@ func newTestChongzhi(t *testing.T, client LLMClient, reg *tool.Registry) *Chongz
 	for _, s := range reg.List() {
 		names = append(names, s.Name)
 	}
-	c, err := NewChongzhi(testChongzhiConfig(names...), client, reg, testTurn(), config.LengthContinueConfig{})
+	c, err := NewChongzhi(testChongzhiConfig(names...), client, reg, testTurn())
 	require.NoError(t, err)
 	return c
 }
@@ -369,9 +368,11 @@ func TestChongzhi_ReasoningRequest(t *testing.T) {
 	)
 	reg := tool.NewRegistry()
 	cfg := testChongzhiConfig()
-	// The thinking wire family rides the turn config (model-effort-v2), not
-	// the agent config.
-	c, err := NewChongzhi(cfg, client, reg, ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "high"}, config.LengthContinueConfig{})
+	// The thinking wire family and output quota both ride the turn config
+	// (model-effort-v2, per-model-completion-budget), not the agent config.
+	turn := testTurn()
+	turn.Thinking, turn.ReasoningEffort, turn.MaxCompletionTokens = true, "high", 1024
+	c, err := NewChongzhi(cfg, client, reg, turn)
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -384,5 +385,5 @@ func TestChongzhi_ReasoningRequest(t *testing.T) {
 	req := client.lastRequest()
 	assert.True(t, req.Thinking, "Thinking must be true")
 	assert.Equal(t, "high", req.ReasoningEffort)
-	assert.Equal(t, 1024, req.MaxTokens)
+	assert.Equal(t, 1024, req.MaxCompletionTokens)
 }

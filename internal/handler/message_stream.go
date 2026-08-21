@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -28,7 +27,7 @@ import (
 // POST /api/v1/sessions/:session_id/messages. It is the only handler that
 // couples the lightweight CRUD data plane to the heavy agent-execution path:
 // session lookup + history recovery, an orchestrator run while writing SSE,
-// three-layer turn persistence, and first-turn title generation.
+// three-layer turn persistence, and send-time title generation.
 //
 // It is wired exclusively by the agent role (and the all role). The api role
 // constructs SessionHandler only, so it never depends on the orchestrator or
@@ -140,29 +139,37 @@ const maxMessageBodyBytes = 1 << 20
 //  3. Resolve user_id + session_id + workspace_root.
 //  4. Validate that the session exists and belongs to the caller. Missing or
 //     mismatched ownership -> 404.
-//  5. Recover prior messages so we know whether this is the FIRST user turn
-//     (title generation only fires on the first exchange).
-//  6. Capture the user message timestamp; the actual persistence happens later,
-//     after the orchestrator succeeds, so the first token is not delayed by a
-//     three-layer storage round-trip.
+//  5. Recover prior messages to build the agent context (and count prior user
+//     rows for the title-generation cadence).
+//  6. Capture the user message timestamp; the user row itself is persisted at
+//     send time (step 8) so it is durable and visible for the whole turn,
+//     while the assistant events stay deferred to the turn end so the first
+//     token is not delayed by a storage round-trip.
 //  7. Claim the session's single active-run slot (Redis SET NX). A running
-//     turn -> 409 SESSION_BUSY carrying the active run id.
-//  8. Run the orchestrator on a TURN-scoped context held by the run registry
+//     turn -> 409 SESSION_BUSY carrying the active run id. Once claimed,
+//     fire-and-forget title generation when the user-message ordinal hits the
+//     cadence (n % 3 == 1) — in parallel with the turn, before it starts.
+//  8. Persist the user message row synchronously through SaveMessagesBatch
+//     (send-time-user-message-persistence): one Redis dual-write pipeline on
+//     the handler goroutine, strictly after the claim and after every history
+//     read of this turn (see the placement invariants at the write site). The
+//     turn is durable from here on; a later batch re-including the row is
+//     prevented by the turn's userPersisted flag.
+//  9. Run the orchestrator on a TURN-scoped context held by the run registry
 //     (turn-detach-resume): a client disconnect does NOT cancel the agent
 //     loop; only the cancel endpoint, an error, or process shutdown does. The
 //     runner streams events into a fresh hub whose single consumer (the
 //     drainer) appends every event to the Redis run event log.
-//  9. Concurrently, the SSE response subscribes to the run event log (the same
+//  10. Concurrently, the SSE response subscribes to the run event log (the same
 //     reader the resume endpoint uses), replaying from the beginning — so a
 //     slow start never misses events and a disconnect only drops the
 //     subscription, never the turn.
-//  10. After the orchestrator returns (whenever that is — possibly long after
-//     the client disconnected), persist the user message and the assistant
-//     reply together in a single batch using a detached (background-derived,
-//     trace_id-preserving) context, then finalize the run (terminal status,
-//     session release, retain-window expiry).
-//  11. If this was the first exchange, fire titleSvc.GenerateTitle in a
-//     goroutine (fire-and-forget; never blocks the response).
+//  11. After the orchestrator returns (whenever that is — possibly long after
+//     the client disconnected), persist the assistant reply as an event-suffix
+//     batch using a detached (background-derived, trace_id-preserving)
+//     context, then finalize the run (terminal status, session release,
+//     retain-window expiry). Title generation does NOT fire here — it already
+//     fired at send time (step 7).
 func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// Cap the request body BEFORE JSON parsing so an oversized payload is
 	// rejected as it arrives rather than buffered in full (same pattern as
@@ -339,11 +346,13 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// the orchestrator succeeds.
 	userMsgTime := time.Now().UTC()
 
-	// Turn-scoped persistence bookkeeping shared by the mid-turn flush and the
-	// turn-end save (context-compaction capability): how many merged events
-	// have already been persisted determines the suffix the turn-end save
-	// pushes, keeping both the MySQL rows (deterministic client_msg_ids) and
-	// the Redis msgs:{sid} list free of duplicates.
+	// Turn-scoped persistence bookkeeping shared by the send-time user-row
+	// write, the mid-turn flush, and the turn-end save (context-compaction +
+	// send-time-user-message-persistence): how many merged events have already
+	// been persisted determines the suffix the turn-end save pushes, and
+	// whether the user row was persisted at send time gates its inclusion in
+	// every later batch — keeping both the MySQL rows (deterministic
+	// client_msg_ids) and the Redis msgs:{sid} list free of duplicates.
 	persist := turnPersistInfo{
 		sessionID:   sessionID,
 		userID:      userID,
@@ -391,6 +400,38 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		return
 	}
 
+	// Title generation cadence (title-generation-cadence): fire-and-forget at
+	// message-SEND time, in parallel with the turn. Placement — after the
+	// session-run claim succeeded (a 409 SESSION_BUSY request returned above
+	// and never reaches here; a claim transport failure degraded to unguarded
+	// execution and still triggers, matching the persistence fallback
+	// convention) and before the orchestrator starts — means the title lands
+	// within seconds and survives turn errors/cancellation (GenerateTitle
+	// derives its own detached context). Throttled by user-message ordinal:
+	// n = prior persisted user rows + 1 (this message), trigger iff n % 3 == 1
+	// — the 1st message always, then every 3rd (4th, 7th, ...). The
+	// turn-serializing claim keeps the count deterministic: prior holds
+	// exactly messages 1..n-1. Input is the session's first user message plus
+	// the triggering message (both user-side anchors; on n=1 they coincide).
+	if h.titleSvc != nil {
+		userCount, firstUserMsg := 0, ""
+		for _, m := range prior {
+			if m.Role == model.RoleUser {
+				if userCount == 0 {
+					firstUserMsg = m.Content
+				}
+				userCount++
+			}
+		}
+		if (userCount+1)%3 == 1 {
+			if firstUserMsg == "" {
+				firstUserMsg = req.Content
+			}
+			// Fire-and-forget; GenerateTitle has its own recover().
+			go h.titleSvc.GenerateTitle(ctx, sessionID, firstUserMsg, req.Content)
+		}
+	}
+
 	// Run meta (ownership + status + the turn's resolved model) in Redis.
 	// Best-effort: a failed write costs cancel/resume for this run, never the
 	// turn itself.
@@ -405,6 +446,39 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			zap.String("op", "handler.send_message"),
 			zap.String("run_id", tid),
 			zap.Error(err))
+	}
+
+	// Send-time user-row persistence (send-time-user-message-persistence):
+	// persist this turn's user message NOW — after the claim succeeded and
+	// before the turn goroutine spawns — so the row is durable and visible to
+	// history reads for the whole turn (a process crash can no longer lose it,
+	// and a mid-turn refresh sees the question alongside the agent replay).
+	// Placement invariants (design decision 1): the write MUST stay after
+	// every history read of THIS turn — RecoverMessages and the turn-start
+	// stitching/compaction block above captured `prior`/durable history before
+	// the claim, and the LLM context appends the user message explicitly
+	// (`messages`), so an earlier write would put the same message into the
+	// recovered history AND the appended context — twice. It also stays after
+	// the claim itself: 400/404/409 rejections above write nothing.
+	//
+	// The call is synchronous on the handler goroutine; the goroutine-spawn
+	// happens-before edge below hands the set flag to the round hook and the
+	// turn-end save without extra synchronization. On error the flag is NOT
+	// set and the turn-end batch includes the user row as before
+	// (at-least-once; the deterministic client_msg_id {trace_id}:0 collapses
+	// the duplicate in MySQL). A Redis-pipeline failure never surfaces here —
+	// SaveMessagesBatch degrades internally to a synchronous MySQL direct
+	// write and returns nil.
+	if err := h.sessSvc.SaveMessagesBatch(ctx, userID, []model.Message{
+		UserMessage(persist.sessionID, persist.traceID, persist.userContent, persist.userMsgTime),
+	}); err != nil {
+		logger.L().Warn("send-time user message persist failed; deferring the user row to the turn-end batch",
+			zap.String("op", "handler.send_message"),
+			zap.String("session_id", sessionID),
+			zap.String("run_id", tid),
+			zap.Error(err))
+	} else {
+		flushed.markUserPersisted()
 	}
 
 	// The turn context: detached, but carrying the same trace/session
@@ -484,14 +558,18 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// three-tier persistence goroutine is not killed by a client disconnect.
 	saveCtx := trace.WithContext(context.Background(), tid)
 
-	// persistEvents writes the user message and the supplied assistant event
-	// stream using the existing SaveMessagesBatch path, persists the turn's
-	// per-agent cost into turn_usage, then triggers title generation for a first
-	// turn. It is used for both successful and interrupted (client-canceled)
-	// turns. turn_usage write failure is logged but does NOT roll back the
-	// message batch (usage is observability data, messages are business data —
-	// see the turn-cost-tracking spec's "Usage write failure does not roll back
-	// messages" scenario).
+	// persistEvents writes the supplied assistant event stream as the turn-end
+	// batch through the existing SaveMessagesBatch path and persists the turn's
+	// per-agent cost into turn_usage. It is used for both successful and
+	// interrupted (client-canceled) turns. The user row is included only when
+	// the send-time write failed to land it (the userPersisted flag gates the
+	// render — see send-time-user-message-persistence); on the ordinary path
+	// this batch is a pure event suffix. turn_usage write failure is logged
+	// but does NOT roll back the message batch (usage is observability data,
+	// messages are business data — see the turn-cost-tracking spec's "Usage
+	// write failure does not roll back messages" scenario). Title generation
+	// is NOT triggered here — it fired at send time, before the turn started
+	// (title-generation-cadence).
 	//
 	// Mid-turn flush interaction (context-compaction capability): when a
 	// mid-turn compaction flushed part of this turn already, only the
@@ -499,16 +577,6 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// collapse the rows in MySQL, but the Redis msgs:{sid} read cache has no
 	// such dedup, so the suffix split keeps the cache list exact.
 	persistEvents := func(events []stream.StreamEvent, usage map[string]any) {
-		// Title generation still needs a single assistant content string. We
-		// derive it from the token events emitted by Confucius so the title
-		// service contract remains unchanged.
-		var assistantContent strings.Builder
-		for _, e := range events {
-			if e.Type == stream.EventToken && e.Agent == stream.AgentConfucius {
-				assistantContent.WriteString(e.Content)
-			}
-		}
-
 		go func(events []stream.StreamEvent, usage map[string]any) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -521,7 +589,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 			now := time.Now().UTC()
 			merged := MergeEvents(events)
-			msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), now)
+			msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), now)
 			if mErr != nil {
 				logger.L().Error("map event to message failed",
 					zap.String("op", "handler.send_message"),
@@ -550,11 +618,6 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				}
 			}
 		}(events, usage)
-
-		if isFirstTurn && h.titleSvc != nil {
-			// Fire-and-forget; TitleService.GenerateTitle has its own recover().
-			go h.titleSvc.GenerateTitle(saveCtx, sessionID, req.Content, assistantContent.String())
-		}
 	}
 
 	if res.err != nil {
@@ -568,9 +631,10 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// persist the partial event stream so the reloaded session history
 		// matches what the user saw and the user's own message is never
 		// silently lost. The persistEvents closure records the user message,
-		// the merged assistant events, the turn's token cost into turn_usage
-		// (the done event carries usage on the error path too), and fires
-		// first-turn title generation from the partial assistant content.
+		// the merged assistant events and the turn's token cost into
+		// turn_usage (the done event carries usage on the error path too).
+		// Title generation is unaffected either way — it fired at send time,
+		// before the turn started (title-generation-cadence).
 		if errors.Is(res.err, context.Canceled) {
 			logger.L().Warn("turn cancelled; persisting partial interrupted turn",
 				zap.String("op", "handler.send_message"),
@@ -687,16 +751,19 @@ type turnPersistInfo struct {
 }
 
 // buildTurnMessages renders the persistence batch for merged events
-// [from:len(merged)] plus the user message when from == 0. Message ordinals
-// are the merged-stream positions (user = 0, events 1..N), so an overlapping
-// re-render produces the SAME deterministic client_msg_ids and the MySQL
-// UNIQUE index collapses any redelivery.
-func (p turnPersistInfo) buildTurnMessages(merged []stream.StreamEvent, from int, now time.Time) ([]model.Message, error) {
+// [from:len(merged)] plus the user message when from == 0 AND the user row was
+// not already persisted at send time (send-time-user-message-persistence:
+// callers pass the turn's userPersisted flag — the Redis msgs:{sid} list has
+// no dedup, so a re-included user row would read back duplicated). Message
+// ordinals are the merged-stream positions (user = 0, events 1..N), so an
+// overlapping re-render produces the SAME deterministic client_msg_ids and the
+// MySQL UNIQUE index collapses any redelivery.
+func (p turnPersistInfo) buildTurnMessages(merged []stream.StreamEvent, from int, userPersisted bool, now time.Time) ([]model.Message, error) {
 	if from > len(merged) {
 		from = len(merged)
 	}
 	var msgs []model.Message
-	if from == 0 {
+	if from == 0 && !userPersisted {
 		msgs = append(msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime))
 	}
 	for i := from; i < len(merged); i++ {
@@ -710,12 +777,16 @@ func (p turnPersistInfo) buildTurnMessages(merged []stream.StreamEvent, from int
 }
 
 // turnFlushState tracks how much of the turn's merged event stream a mid-turn
-// flush has already persisted. It is written by the flush (running on the
-// orchestrator goroutine inside the round hook) and read by the turn-end save
-// (running on the detached persistence goroutine), hence the mutex.
+// flush has already persisted, plus whether the turn's user row was already
+// persisted at send time (send-time-user-message-persistence). It is written
+// by the send-time write (handler goroutine, strictly before the turn
+// goroutine spawns) and the flush (orchestrator goroutine inside the round
+// hook), and read by the turn-end save (detached persistence goroutine),
+// hence the mutex.
 type turnFlushState struct {
 	mu      sync.Mutex
-	flushed int // number of merged events already persisted (0 = nothing flushed)
+	flushed int  // number of merged events already persisted (0 = nothing flushed)
+	userRow bool // the turn's user row was persisted at send time
 }
 
 // mark records that the first n merged events are persisted. Monotonic: a
@@ -733,6 +804,24 @@ func (f *turnFlushState) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.flushed
+}
+
+// markUserPersisted records that the turn's user message row was persisted at
+// send time, so every later batch (mid-turn flush, turn-end save) must exclude
+// it — the Redis msgs:{sid} list has no dedup, and the turn's user row must
+// appear exactly once. Monotonic like mark: once set it never clears (a failed
+// send-time write simply never sets it and the turn-end batch carries the row).
+func (f *turnFlushState) markUserPersisted() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.userRow = true
+}
+
+// userPersisted reports whether the user row was already persisted.
+func (f *turnFlushState) userPersisted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.userRow
 }
 
 // newRoundHook builds the mid-turn compaction hook (context-compaction
@@ -768,7 +857,7 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 			return nil
 		}
 		merged := MergeEvents(events)
-		msgs, err := persist.buildTurnMessages(merged, flushed.count(), time.Now().UTC())
+		msgs, err := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC())
 		if err != nil {
 			log.Warn("mid-turn flush batch build failed; compaction skipped", zap.Error(err))
 			return nil
