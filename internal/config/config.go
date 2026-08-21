@@ -98,25 +98,35 @@ func (w WorkspaceStorageConfig) validate() error {
 const (
 	defaultMessageFlushInterval  = time.Second
 	defaultMessageFlushBatchSize = 100
+	// defaultMaxInputTokens is the effective user-input token cap for the
+	// streaming message endpoint when messages.max_input_tokens is unset
+	// (add-input-token-limit): detection is on by default.
+	defaultMaxInputTokens = 5000
 )
 
 // MessagesConfig holds the Redis-first write-behind message persistence knobs
-// (the top-level `messages:` block; see the message-write-behind capability).
+// plus the user-input limit (the top-level `messages:` block; see the
+// message-write-behind and add-input-token-limit capabilities).
 // FlushInterval is the background flusher's ticker — the upper bound on how
 // long a persisted message can sit in the Redis ingest queue before it lands
 // in MySQL (and therefore the read-your-writes window of the history
 // endpoint). FlushBatchSize caps the records claimed per flush round and
 // doubles as the queue-length threshold that triggers an early flush.
+// MaxInputTokens caps the estimated token count of a user message on
+// POST /sessions/:id/messages — a pointer so "unset → default 5000" and
+// "explicit 0 → disable" coexist (a plain int cannot distinguish them).
 // Omitted/zero fields fall back to the defaults; explicit negative values are
 // rejected at load time.
 type MessagesConfig struct {
 	FlushInterval  time.Duration `yaml:"flush_interval"`
 	FlushBatchSize int           `yaml:"flush_batch_size"`
+	MaxInputTokens *int          `yaml:"max_input_tokens"`
 }
 
 // applyDefaults fills zero-valued fields with the documented defaults. It is
 // idempotent and leaves explicit values (including negatives, which validate
-// rejects) untouched.
+// rejects) untouched. MaxInputTokens is deliberately NOT defaulted here: the
+// pointer's nil-ness is the "unset" signal resolved by MaxInputTokensLimit.
 func (m *MessagesConfig) applyDefaults() {
 	if m.FlushInterval == 0 {
 		m.FlushInterval = defaultMessageFlushInterval
@@ -124,6 +134,17 @@ func (m *MessagesConfig) applyDefaults() {
 	if m.FlushBatchSize == 0 {
 		m.FlushBatchSize = defaultMessageFlushBatchSize
 	}
+}
+
+// MaxInputTokensLimit resolves the effective user-input token cap: an explicit
+// value wins (0 = token detection disabled), unset falls back to the default
+// 5000. Handlers treat a non-positive result as "skip the token check" (the
+// request-body byte cap is a separate constant and stays in force).
+func (m MessagesConfig) MaxInputTokensLimit() int {
+	if m.MaxInputTokens != nil {
+		return *m.MaxInputTokens
+	}
+	return defaultMaxInputTokens
 }
 
 // validate rejects explicit non-positive values. After applyDefaults a zero
@@ -135,6 +156,9 @@ func (m MessagesConfig) validate() error {
 	}
 	if m.FlushBatchSize < 0 {
 		return fmt.Errorf("messages.flush_batch_size: must be positive (got %d)", m.FlushBatchSize)
+	}
+	if m.MaxInputTokens != nil && *m.MaxInputTokens < 0 {
+		return fmt.Errorf("messages.max_input_tokens: must be zero (disable) or positive (got %d)", *m.MaxInputTokens)
 	}
 	return nil
 }

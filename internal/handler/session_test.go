@@ -471,7 +471,7 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	// SessionHandler owns CRUD only; MessageStreamHandler owns the streaming
 	// endpoint and the orchestrator dependency. Both share the same services.
 	h := NewSessionHandler(sessSvc, titleSvc, nil)
-	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfig())
+	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfig(), 0)
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -621,6 +621,173 @@ func TestSendMessage_BadRequest_NoBody(t *testing.T) {
 			assert.NotEmpty(t, env2.Error.Message)
 		})
 	}
+}
+
+// newLimitTestEngine builds a scratch engine mounting a SendMessage handler
+// with a caller-chosen maxInputTokens over the shared test fakes — the env's
+// own streaming handler is constructed with the limit disabled (0), so the
+// token-cap tests need their own wiring.
+func newLimitTestEngine(t *testing.T, env *sessionHandlerTestEnv, stub *stubOrchestrator, maxInputTokens int) *gin.Engine {
+	t.Helper()
+	deps := sessionDeps(env.mysql, env.redis, env.fs)
+	stream := NewMessageStreamHandler(
+		newSessionSvc(deps), newMessageSvc(deps),
+		service.NewTitleService(nil, env.mysql, config.OpenAIConfig{TitleModel: "title-model"}),
+		nil, stub, "/tmp/blowball-test-data",
+		run.NewManager(run.NewMemStore(), run.NewRegistry()),
+		testSelectionConfig(), maxInputTokens)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Set(middleware.TraceIDKey, "trace-1")
+		c.Next()
+	})
+	r.POST("/api/v1/sessions/:session_id/messages", stream.SendMessage)
+	return r
+}
+
+// TestSendMessage_ContentTooLong_RejectedBeforeClaim verifies over-limit
+// content is rejected with 400 CONTENT_TOO_LONG carrying the limit and the
+// estimate, and that the rejection never reaches storage or the orchestrator
+// nor claims the session's run slot (a rejected input must not produce a
+// SESSION_BUSY interplay).
+func TestSendMessage_ContentTooLong_RejectedBeforeClaim(t *testing.T) {
+	env := newSessionHandlerEnv(t, &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "must not run")},
+	})
+	r := newLimitTestEngine(t, env, env.stub, 10)
+
+	// 50 CJK runes → estimate 50 > limit 10.
+	body := `{"content":"` + strings.Repeat("汉", 50) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "CONTENT_TOO_LONG", resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "10-token")
+	assert.Contains(t, resp.Error.Message, "estimated 50")
+
+	// No store I/O and no orchestrator invocation.
+	env.mysql.mu.Lock()
+	assert.Zero(t, env.mysql.appendMessagesCalls, "rejected input must not persist")
+	env.mysql.mu.Unlock()
+	env.stub.mu.Lock()
+	assert.Empty(t, env.stub.gotMessages, "orchestrator must not run for rejected input")
+	env.stub.mu.Unlock()
+}
+
+// TestSendMessage_ContentWithinLimit_Proceeds verifies an under-limit content
+// flows through the ordinary path (SSE 200), i.e. the check does not disturb
+// normal input.
+func TestSendMessage_ContentWithinLimit_Proceeds(t *testing.T) {
+	stub := &stubOrchestrator{eventsToEmit: []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "ok"),
+		stream.AgentEndEvent(stream.AgentConfucius),
+	}}
+	env := newSessionHandlerEnv(t, stub)
+	r := newLimitTestEngine(t, env, stub, 100)
+
+	// 50 CJK runes → estimate 50 ≤ limit 100.
+	body := `{"content":"` + strings.Repeat("汉", 50) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+}
+
+// TestSendMessage_TokenLimitDisabled_PassesOverlong verifies a non-positive
+// maxInputTokens (explicit config 0) skips the token check: over-limit content
+// proceeds to the ordinary SSE path. The 1MB body cap is exercised separately
+// below and is NOT disabled by this setting.
+func TestSendMessage_TokenLimitDisabled_PassesOverlong(t *testing.T) {
+	stub := &stubOrchestrator{eventsToEmit: []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "ok"),
+		stream.AgentEndEvent(stream.AgentConfucius),
+	}}
+	env := newSessionHandlerEnv(t, stub)
+	r := newLimitTestEngine(t, env, stub, 0)
+
+	// Would estimate ~50 against a 10-token limit — but the limit is off.
+	body := `{"content":"` + strings.Repeat("汉", 50) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+}
+
+// TestSendMessage_DefaultLimitFromConfig_RejectsOversized closes the loop
+// config resolution → handler behavior: a config with no messages block
+// resolves the default 5000 via MaxInputTokensLimit, and a handler wired with
+// that value rejects a >5000-token input.
+func TestSendMessage_DefaultLimitFromConfig_RejectsOversized(t *testing.T) {
+	env := newSessionHandlerEnv(t, &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "must not run")},
+	})
+	// The zero-value config carries no messages block — the production shape
+	// when the operator omits it.
+	cfg := &config.Config{}
+	r := newLimitTestEngine(t, env, env.stub, cfg.Messages.MaxInputTokensLimit())
+
+	// 5001 CJK runes → estimate 5001 > default 5000.
+	body := `{"content":"` + strings.Repeat("汉", 5001) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "CONTENT_TOO_LONG")
+	assert.Contains(t, w.Body.String(), "5000-token")
+}
+
+// TestSendMessage_OversizedBody_413 verifies the 1MB request-body backstop:
+// an oversized body is rejected 413 REQUEST_TOO_LARGE during parsing, before
+// any storage or orchestrator work.
+func TestSendMessage_OversizedBody_413(t *testing.T) {
+	env := newSessionHandlerEnv(t, &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "must not run")},
+	})
+	// The byte cap is independent of the token limit — keep the token limit
+	// high so the ONLY trigger here is body size.
+	r := newLimitTestEngine(t, env, env.stub, 10_000_000)
+
+	// ASCII filler well past 1MB (token limit raised so it cannot fire first).
+	body := `{"content":"` + strings.Repeat("a", maxMessageBodyBytes+2048) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "REQUEST_TOO_LARGE", resp.Error.Code)
+
+	env.mysql.mu.Lock()
+	assert.Zero(t, env.mysql.appendMessagesCalls, "oversized body must not persist")
+	env.mysql.mu.Unlock()
+	env.stub.mu.Lock()
+	assert.Empty(t, env.stub.gotMessages, "orchestrator must not run for an oversized body")
+	env.stub.mu.Unlock()
 }
 
 // TestSendMessage_SessionNotFound_404 verifies that posting a message to a

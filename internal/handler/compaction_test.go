@@ -77,7 +77,7 @@ func newCompactionHandlerEnv(t *testing.T, stub *stubOrchestrator, llm agent.LLM
 	compSvc := service.NewCompactionService(deps, llm, "gpt-test", maxContextTokens)
 
 	h := NewSessionHandler(sessSvc, titleSvc, nil)
-	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfigWindow(maxContextTokens))
+	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfigWindow(maxContextTokens), 0)
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {

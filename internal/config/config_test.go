@@ -1579,6 +1579,14 @@ jwt:
 	if cfg.Messages.FlushBatchSize != 100 {
 		t.Errorf("Messages.FlushBatchSize = %d, want 100", cfg.Messages.FlushBatchSize)
 	}
+	// An unset max_input_tokens resolves to the default 5000 (detection on)
+	// while the raw pointer stays nil (the "unset" signal).
+	if got := cfg.Messages.MaxInputTokensLimit(); got != 5000 {
+		t.Errorf("Messages.MaxInputTokensLimit() = %d, want 5000 (default)", got)
+	}
+	if cfg.Messages.MaxInputTokens != nil {
+		t.Errorf("Messages.MaxInputTokens = %v, want nil when unset", *cfg.Messages.MaxInputTokens)
+	}
 }
 
 func TestLoad_MessagesExplicitValues(t *testing.T) {
@@ -1605,6 +1613,70 @@ messages:
 	}
 	if cfg.Messages.FlushBatchSize != 25 {
 		t.Errorf("Messages.FlushBatchSize = %d, want 25", cfg.Messages.FlushBatchSize)
+	}
+}
+
+// TestLoad_MessagesMaxInputTokens covers the explicit max_input_tokens forms:
+// a positive value wins verbatim and an explicit 0 means detection disabled
+// (both distinct from unset → default 5000).
+func TestLoad_MessagesMaxInputTokens(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantLim int
+		wantSet bool
+	}{
+		{
+			name: "explicit positive wins",
+			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  max_input_tokens: 20000
+`,
+			wantLim: 20000,
+			wantSet: true,
+		},
+		{
+			name: "explicit zero disables",
+			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  max_input_tokens: 0
+`,
+			wantLim: 0,
+			wantSet: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.yaml)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if got := cfg.Messages.MaxInputTokensLimit(); got != tc.wantLim {
+				t.Errorf("MaxInputTokensLimit() = %d, want %d", got, tc.wantLim)
+			}
+			if (cfg.Messages.MaxInputTokens != nil) != tc.wantSet {
+				t.Errorf("MaxInputTokens set = %v, want %v", cfg.Messages.MaxInputTokens != nil, tc.wantSet)
+			}
+		})
 	}
 }
 
@@ -1643,6 +1715,22 @@ jwt:
   secret: "ok"
 messages:
   flush_batch_size: -5
+`,
+		},
+		{
+			name: "negative max_input_tokens",
+			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  max_input_tokens: -1
 `,
 		},
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -50,7 +51,13 @@ type MessageStreamHandler struct {
 	// of running turns.
 	runs    *run.Manager
 	dataDir string
-	newHub  func() *stream.Hub
+	// maxInputTokens caps the estimated token count of a user message
+	// (add-input-token-limit), the config-resolved value of
+	// messages.max_input_tokens. The estimate uses the CJK-aware heuristic in
+	// tokens.go; a non-positive value skips the token check (the 1MB
+	// request-body cap below stays in force regardless).
+	maxInputTokens int
+	newHub         func() *stream.Hub
 	// writeRunEvents is the SSE subscription seam over the run event log —
 	// the same implementation the resume endpoint uses. Tests may stub it.
 	// turnDone is the owning turn's completion channel (the degraded-path
@@ -65,8 +72,10 @@ type MessageStreamHandler struct {
 // max_context_tokens 0), in which case every compaction check is skipped and
 // turns behave exactly as before the capability. selection is the
 // per-request-model-selection state (see ModelSelectionConfig); build it with
-// NewModelSelectionConfig from the loaded config. The agent role (and the all
-// role) constructs this; the api role does not.
+// NewModelSelectionConfig from the loaded config. maxInputTokens is the
+// config-resolved user-input token cap (cfg.Messages.MaxInputTokensLimit();
+// non-positive skips the check — pass 0 in tests that don't care). The agent
+// role (and the all role) constructs this; the api role does not.
 func NewMessageStreamHandler(
 	sessSvc *service.SessionService,
 	msgSvc *service.MessageService,
@@ -76,16 +85,18 @@ func NewMessageStreamHandler(
 	dataDir string,
 	runs *run.Manager,
 	selection ModelSelectionConfig,
+	maxInputTokens int,
 ) *MessageStreamHandler {
 	h := &MessageStreamHandler{
-		sessSvc:   sessSvc,
-		msgSvc:    msgSvc,
-		titleSvc:  titleSvc,
-		compSvc:   compSvc,
-		orch:      orch,
-		runs:      runs,
-		dataDir:   dataDir,
-		selection: selection,
+		sessSvc:        sessSvc,
+		msgSvc:         msgSvc,
+		titleSvc:       titleSvc,
+		compSvc:        compSvc,
+		orch:           orch,
+		runs:           runs,
+		dataDir:        dataDir,
+		selection:      selection,
+		maxInputTokens: maxInputTokens,
 	}
 	h.newHub = func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) }
 	h.writeRunEvents = writeRunEventStream
@@ -109,45 +120,83 @@ type sendMessageRequest struct {
 	ReasoningEffort string `json:"reasoning_effort"`
 }
 
+// maxMessageBodyBytes caps the raw request body of the streaming message
+// endpoint (add-input-token-limit, DoS backstop layer). 1MB leaves ~65×
+// headroom over the worst-case 5000-token content (pure CJK ≈ 15KB), so a
+// legitimate request can never hit it; it exists solely so a hostile body is
+// rejected as it arrives instead of being buffered in full before parsing. It
+// is deliberately a constant, not config — a backstop nobody should tune (the
+// semantic cap lives in messages.max_input_tokens).
+const maxMessageBodyBytes = 1 << 20
+
 // SendMessage handles POST /api/v1/sessions/:session_id/messages.
 //
 // Flow:
-//  1. Parse body. Bad JSON / missing content -> 400.
-//  2. Resolve user_id + session_id + workspace_root.
-//  3. Validate that the session exists and belongs to the caller. Missing or
+//  1. Bound the request body (1MB DoS backstop), then parse it. An oversized
+//     body -> 413; bad JSON / missing content -> 400.
+//  2. Reject over-limit user input: content whose estimated token count
+//     exceeds messages.max_input_tokens -> 400 CONTENT_TOO_LONG (add-input-
+//     token-limit). Pure in-memory check, before any storage I/O.
+//  3. Resolve user_id + session_id + workspace_root.
+//  4. Validate that the session exists and belongs to the caller. Missing or
 //     mismatched ownership -> 404.
-//  4. Recover prior messages so we know whether this is the FIRST user turn
+//  5. Recover prior messages so we know whether this is the FIRST user turn
 //     (title generation only fires on the first exchange).
-//  5. Capture the user message timestamp; the actual persistence happens later,
+//  6. Capture the user message timestamp; the actual persistence happens later,
 //     after the orchestrator succeeds, so the first token is not delayed by a
 //     three-layer storage round-trip.
-//  6. Claim the session's single active-run slot (Redis SET NX). A running
+//  7. Claim the session's single active-run slot (Redis SET NX). A running
 //     turn -> 409 SESSION_BUSY carrying the active run id.
-//  7. Run the orchestrator on a TURN-scoped context held by the run registry
+//  8. Run the orchestrator on a TURN-scoped context held by the run registry
 //     (turn-detach-resume): a client disconnect does NOT cancel the agent
 //     loop; only the cancel endpoint, an error, or process shutdown does. The
 //     runner streams events into a fresh hub whose single consumer (the
 //     drainer) appends every event to the Redis run event log.
-//  8. Concurrently, the SSE response subscribes to the run event log (the same
+//  9. Concurrently, the SSE response subscribes to the run event log (the same
 //     reader the resume endpoint uses), replaying from the beginning — so a
 //     slow start never misses events and a disconnect only drops the
 //     subscription, never the turn.
-//  9. After the orchestrator returns (whenever that is — possibly long after
+//  10. After the orchestrator returns (whenever that is — possibly long after
 //     the client disconnected), persist the user message and the assistant
 //     reply together in a single batch using a detached (background-derived,
 //     trace_id-preserving) context, then finalize the run (terminal status,
 //     session release, retain-window expiry).
-//  10. If this was the first exchange, fire titleSvc.GenerateTitle in a
+//  11. If this was the first exchange, fire titleSvc.GenerateTitle in a
 //     goroutine (fire-and-forget; never blocks the response).
 func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
+	// Cap the request body BEFORE JSON parsing so an oversized payload is
+	// rejected as it arrives rather than buffered in full (same pattern as
+	// the upload endpoint).
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxMessageBodyBytes)
+
 	var req sendMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, errorBody("REQUEST_TOO_LARGE",
+				"request body exceeds the 1MB limit"))
+			return
+		}
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
 		return
 	}
 	if req.Content == "" {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "content is required"))
 		return
+	}
+	// User-input token cap (add-input-token-limit, semantic anti-abuse
+	// layer). Conservative CJK-aware estimate — see estimateTokens. Rejected
+	// here, before any store read or the session-run claim, so an abusive
+	// input never occupies the turn slot or reaches the LLM. Non-positive
+	// maxInputTokens (explicit config 0) skips the check; the byte cap above
+	// stays in force regardless.
+	if h.maxInputTokens > 0 {
+		if est := estimateTokens(req.Content); est > h.maxInputTokens {
+			c.JSON(http.StatusBadRequest, errorBody("CONTENT_TOO_LONG",
+				fmt.Sprintf("content exceeds the %d-token limit (estimated %d tokens)",
+					h.maxInputTokens, est)))
+			return
+		}
 	}
 
 	// Per-request model selection (model-effort-v2 dual axes): resolve

@@ -1044,11 +1044,16 @@ paths:
                   - $ref: '#/components/schemas/SSEDone'
         '400':
           description: |
-            Malformed body, or a rejected per-request model selection
+            Malformed body, a rejected per-request model selection
             (per-request-model-selection): `INVALID_MODEL` (unknown catalog
             name) or `INVALID_EFFORT` (invalid effort value, non-`none`
             effort explicitly requested on a `thinking: false` entry, or an
-            effort conflicting with a configured agent `output_schema`).
+            effort conflicting with a configured agent `output_schema`), or
+            `CONTENT_TOO_LONG` (add-input-token-limit): the `content`'s
+            estimated token count exceeds `messages.max_input_tokens`
+            (default 5000; CJK-aware heuristic estimate, message carries the
+            limit and the estimate). Rejected before any storage I/O, the
+            session-run claim, or an LLM call.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -1056,6 +1061,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '413':
+          description: |
+            `REQUEST_TOO_LARGE` (add-input-token-limit): the request body
+            exceeds the 1MB backstop cap and is rejected during parsing,
+            before any storage I/O. Independent of
+            `messages.max_input_tokens` (an explicit 0 disables the token
+            check, never this cap).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         '409':
           description: |
             The session already has a running turn (single active run per

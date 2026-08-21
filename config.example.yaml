@@ -142,9 +142,19 @@ storage:
 #   flush_batch_size - optional; records claimed per flush round, and the
 #                     queue-length threshold that triggers an early flush
 #                     between ticks (default 100).
+#   max_input_tokens - optional; caps the ESTIMATED token count of a user
+#                     message on POST /sessions/:id/messages
+#                     (add-input-token-limit; CJK-aware heuristic, NOT exact
+#                     tokenizer accounting). Over-limit requests get 400
+#                     CONTENT_TOO_LONG before any storage or LLM work. Unset
+#                     → default 5000; explicit 0 disables the token check (the
+#                     1MB request-body cap stays in force); negative fails
+#                     config load. Raise it if users legitimately paste large
+#                     documents/code.
 messages:
   flush_interval: 1s
   flush_batch_size: 100
+  # max_input_tokens: 5000
 
 # Process-level Landlock sandbox (Linux only; no-op on macOS/Windows). Applied
 # once at startup over the server process. The process RW application dirs
