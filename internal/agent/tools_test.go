@@ -23,7 +23,7 @@ func TestInvokeToolDescription_KnownAndUnknown(t *testing.T) {
 // buildConfuciusToolsJSON renders the descriptions produced by
 // InvokeToolDescription rather than a second hardcoded copy.
 func TestBuildConfuciusToolsJSON_InvokeDescriptionsFromSingleSource(t *testing.T) {
-	data, err := buildConfuciusToolsJSON(nil, nil)
+	data, err := buildConfuciusToolsJSON(nil, nil, 0)
 	require.NoError(t, err)
 
 	var tools []struct {

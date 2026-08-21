@@ -39,14 +39,20 @@ type Liang struct {
 	// attached to the terminal round's LLMRequest to enable structured output
 	// (capability A).
 	responseFormat json.RawMessage
+	// lengthContinue is the finish_reason=length continuation policy
+	// (llm-length-continuation capability); zero = disabled = the loop
+	// treats a length round as terminal exactly as before.
+	lengthContinue config.LengthContinueConfig
 }
 
 // NewLiang builds a Liang agent. reg contains the tools this Liang instance is
 // allowed to call, filtered by the orchestrator from the process-wide registry.
 // turn is the turn-resolved model/effort configuration applied to every LLM
-// call this agent makes (model-effort-v2).
-func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride) (*Liang, error) {
-	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools)
+// call this agent makes (model-effort-v2). lc is the global
+// finish_reason=length continuation policy (llm-length-continuation); zero
+// disables it.
+func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride, lc config.LengthContinueConfig) (*Liang, error) {
+	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools, cfg.MaxTokens)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build liang tools: %w", err)
 	}
@@ -63,6 +69,7 @@ func NewLiang(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn
 		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
 		maxRounds:      maxRounds,
 		responseFormat: buildResponseFormatPayload(cfg.OutputSchema, cfg.Name),
+		lengthContinue: lc,
 	}, nil
 }
 
@@ -138,18 +145,25 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		}
 
 		var assistantText string
-		resp, err := l.client.StreamChat(ctx, req, func(delta string) error {
-			assistantText += delta
-			if !hub.SendCtx(ctx, stream.TokenEvent(l.Name(), delta)) {
-				return ctx.Err()
-			}
-			return nil
-		}, func(delta string) error {
-			if !hub.SendCtx(ctx, stream.ReasoningEvent(l.Name(), delta)) {
-				return ctx.Err()
-			}
-			return nil
-		})
+		result, err := runLLMRound(ctx, l.client, hub, l.Name(), req, &round, l.lengthContinue,
+			func(r []Message) []Message { return withSystem(l.cfg.SystemPrompt, r) },
+			// Parseable tool_calls of an intermediate length response dispatch
+			// through the same record path as the main loop.
+			func(gctx context.Context, calls []ToolCall) {
+				l.executeAndRecordToolCalls(gctx, calls, hub, &round)
+			},
+			func(delta string) error {
+				assistantText += delta
+				if !hub.SendCtx(ctx, stream.TokenEvent(l.Name(), delta)) {
+					return ctx.Err()
+				}
+				return nil
+			}, func(delta string) error {
+				if !hub.SendCtx(ctx, stream.ReasoningEvent(l.Name(), delta)) {
+					return ctx.Err()
+				}
+				return nil
+			})
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return finalContent, total, nil, ctxErr
@@ -159,8 +173,21 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 			return finalContent, total, nil, fmt.Errorf("liang: stream chat: %w", err)
 		}
 
-		total.Add(resp.Usage)
+		total.Add(result.Usage)
 
+		// llm-length-continuation exhaustion (design D7): fail loudly, keep
+		// the accumulated partial content. The error text deliberately avoids
+		// transient-error substrings so the sub-agent retry pipeline (which
+		// Liang runs under when dispatched by Confucius) never retries it.
+		if l.lengthContinue.Enabled() && result.LengthHit {
+			step, retries := l.lengthContinue.Resolve()
+			msg := lengthExhaustedMessage(l.Name(), retries, l.cfg.MaxTokens+retries*step)
+			hub.SendCtx(ctx, stream.AgentErrorEvent(l.Name(), msg, "length_exhausted"))
+			hub.SendCtx(ctx, stream.AgentEndEvent(l.Name()))
+			return result.Content, total, nil, fmt.Errorf("liang: %s", msg)
+		}
+
+		resp := result.Resp
 		assistantMsg := Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
 		if assistantMsg.Content == "" && assistantMsg.ReasoningContent == "" && len(resp.ToolCalls) == 0 {
 			finalContent = assistantText
@@ -169,27 +196,14 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		round = append(round, assistantMsg)
 
 		if !shouldDispatchToolCalls(resp) {
-			finalContent = resp.Content
+			finalContent = result.Content
 			if finalContent == "" {
 				finalContent = assistantText
 			}
 			break
 		}
 
-		results := l.dispatchToolCalls(ctx, resp.ToolCalls, hub)
-		for _, tc := range resp.ToolCalls {
-			result, ok := results[tc.ID]
-			if !ok {
-				result = toolResult{content: "", isError: true}
-			}
-			hub.SendCtx(ctx, stream.ToolResultEvent(l.Name(), tc.ID, result.content))
-			round = append(round, Message{
-				Role:       "tool",
-				Content:    result.content,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-			})
-		}
+		l.executeAndRecordToolCalls(ctx, resp.ToolCalls, hub, &round)
 		// This iteration dispatched tools and did not break; flag a cap exit
 		// when it was the last allowed round so the post-loop wrap-up runs.
 		capped = i+1 == l.maxRounds
@@ -218,7 +232,10 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		if rf, ok := l.terminalResponseFormat(round); ok {
 			wrapReq.ResponseFormat = rf
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, l.client, l.Name(), hub, wrapReq)
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, l.client, l.Name(), hub, wrapReq, &round, l.lengthContinue,
+			func(r []Message) []Message {
+				return append(withSystem(l.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
+			})
 		if wrapErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return finalContent, total, nil, ctxErr
@@ -239,6 +256,27 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		return finalContent, total, nil, ctx.Err()
 	}
 	return finalContent, total, nil, nil
+}
+
+// executeAndRecordToolCalls dispatches calls in parallel and records every
+// result: one ToolResultEvent per call plus one role="tool" message appended
+// to *round. Shared by the main loop and the length-continuation path
+// (llm-length-continuation, D5).
+func (l *Liang) executeAndRecordToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub, round *[]Message) {
+	results := l.dispatchToolCalls(ctx, calls, hub)
+	for _, tc := range calls {
+		result, ok := results[tc.ID]
+		if !ok {
+			result = toolResult{content: "", isError: true}
+		}
+		hub.SendCtx(ctx, stream.ToolResultEvent(l.Name(), tc.ID, result.content))
+		*round = append(*round, Message{
+			Role:       "tool",
+			Content:    result.content,
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+		})
+	}
 }
 
 // dispatchToolCalls runs every tool_call in parallel through the tool registry.

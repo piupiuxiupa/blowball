@@ -48,6 +48,11 @@ type Confucius struct {
 	// mid-turn trigger). Nil on leaf-agent-free runs unless the orchestrator
 	// installed one right after the factory built this agent; see roundhook.go.
 	roundHook RoundHook
+	// lengthContinue is the finish_reason=length continuation policy
+	// (llm-length-continuation capability), injected at construction from the
+	// global openai.length_continue block. Zero = disabled = the loop treats
+	// a length round as terminal exactly as before.
+	lengthContinue config.LengthContinueConfig
 }
 
 // SetRoundHook implements RoundHookSetter. The orchestrator calls it on the
@@ -61,15 +66,16 @@ func (c *Confucius) SetRoundHook(hook RoundHook) { c.roundHook = hook }
 // SubAgentFactory). The tools[] JSON is rendered once at construction time
 // from cfg.Tools plus the two synthetic invoke_* tools. turn is the
 // turn-resolved model/effort configuration applied to every LLM call this
-// agent makes (model-effort-v2).
-func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory, turn ModelOverride) (*Confucius, error) {
+// agent makes (model-effort-v2). lc is the global finish_reason=length
+// continuation policy (llm-length-continuation); zero disables it.
+func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory, turn ModelOverride, lc config.LengthContinueConfig) (*Confucius, error) {
 	if _, ok := subAgents[ToolInvokeChongzhi]; !ok {
 		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeChongzhi)
 	}
 	if _, ok := subAgents[ToolInvokeLiang]; !ok {
 		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeLiang)
 	}
-	toolsJSON, err := buildConfuciusToolsJSON(reg, cfg.Tools)
+	toolsJSON, err := buildConfuciusToolsJSON(reg, cfg.Tools, cfg.MaxTokens)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build confucius tools: %w", err)
 	}
@@ -78,14 +84,15 @@ func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, 
 		maxRounds = config.DefaultAgentMaxRounds()
 	}
 	return &Confucius{
-		cfg:           cfg,
-		client:        client,
-		toolRegistry:  reg,
-		turn:          turn,
-		subAgents:     subAgents,
-		toolsJSON:     toolsJSON,
-		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
-		maxRounds:     maxRounds,
+		cfg:            cfg,
+		client:         client,
+		toolRegistry:   reg,
+		turn:           turn,
+		subAgents:      subAgents,
+		toolsJSON:      toolsJSON,
+		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:      maxRounds,
+		lengthContinue: lc,
 	}, nil
 }
 
@@ -170,22 +177,33 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			req.Tools = c.toolsJSON
 		}
 
-		// Capture streamed tokens into assistantText as the model emits them.
+		// Capture streamed tokens into assistantText as the model emits them
+		// (across ALL attempts of the round — the continuation stream is
+		// seamless, so the fallback accumulates too).
 		var assistantText string
-		resp, err := c.client.StreamChat(ctx, req, func(delta string) error {
-			assistantText += delta
-			// SendCtx returns false on ctx cancel or hub close; we surface
-			// the cancel so StreamChat aborts.
-			if !hub.SendCtx(ctx, stream.TokenEvent(c.Name(), delta)) {
-				return ctx.Err()
-			}
-			return nil
-		}, func(delta string) error {
-			if !hub.SendCtx(ctx, stream.ReasoningEvent(c.Name(), delta)) {
-				return ctx.Err()
-			}
-			return nil
-		})
+		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.lengthContinue,
+			func(r []Message) []Message { return withSystem(c.cfg.SystemPrompt, r) },
+			// Dispatch of the parseable tool_calls of an intermediate length
+			// response (design D5): reuses the main loop's
+			// dispatch-and-record block so sub-agent usage folding, cap
+			// propagation, and invoke_* tracking apply unchanged.
+			func(gctx context.Context, calls []ToolCall) {
+				c.executeAndRecordToolCalls(gctx, calls, hub, budget, tmeta, &total, byAgent, &round)
+			},
+			func(delta string) error {
+				assistantText += delta
+				// SendCtx returns false on ctx cancel or hub close; we surface
+				// the cancel so StreamChat aborts.
+				if !hub.SendCtx(ctx, stream.TokenEvent(c.Name(), delta)) {
+					return ctx.Err()
+				}
+				return nil
+			}, func(delta string) error {
+				if !hub.SendCtx(ctx, stream.ReasoningEvent(c.Name(), delta)) {
+					return ctx.Err()
+				}
+				return nil
+			})
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return finalContent, total, buildBreakdown(byAgent, tmeta), ctxErr
@@ -195,13 +213,29 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			return finalContent, total, buildBreakdown(byAgent, tmeta), fmt.Errorf("confucius: stream chat: %w", err)
 		}
 
-		total.Add(resp.Usage)
-		byAgent[c.Name()] = addUsage(byAgent[c.Name()], resp.Usage)
-		// Record the end-of-round context size (this round's authoritative
-		// prompt+completion) so the done event's usage.meta.context_tokens —
-		// and through it turn_usage.context_tokens — carries the turn's LAST
-		// round for the next turn's preventive compaction check.
-		tmeta.observeRoundContext(resp.Usage.PromptTokens + resp.Usage.CompletionTokens)
+		total.Add(result.Usage)
+		byAgent[c.Name()] = addUsage(byAgent[c.Name()], result.Usage)
+		// Record the end-of-round context size (the FINAL attempt's
+		// authoritative prompt+completion — never the cross-attempt sum, which
+		// would inflate the next-request size; design D8) so the done event's
+		// usage.meta.context_tokens — and through it turn_usage.context_tokens —
+		// carries the turn's LAST round for the next turn's preventive
+		// compaction check.
+		tmeta.observeRoundContext(result.Resp.Usage.PromptTokens + result.Resp.Usage.CompletionTokens)
+
+		// llm-length-continuation exhaustion: every attempt ended length. The
+		// turn fails loudly (agent_error + done.error) but keeps the
+		// accumulated partial content as finalContent — continuation never
+		// discards. Mirrors the round_cap_exhausted shape.
+		if c.lengthContinue.Enabled() && result.LengthHit {
+			step, retries := c.lengthContinue.Resolve()
+			msg := lengthExhaustedMessage(c.Name(), retries, c.cfg.MaxTokens+retries*step)
+			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), msg, "length_exhausted"))
+			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
+			return result.Content, total, buildBreakdown(byAgent, tmeta), fmt.Errorf("confucius: %s", msg)
+		}
+
+		resp := result.Resp
 
 		// Append the assistant turn (with any tool_calls) to the conversation
 		// so the next round sees the model's reasoning + planned calls.
@@ -213,9 +247,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		}
 		round = append(round, assistantMsg)
 
-		// Terminal: model finished without tool calls.
+		// Terminal: model finished without tool calls. finalContent is the
+		// content accumulated across the round's attempts (continuation keeps
+		// partial output), falling back to the streamed accumulation when the
+		// client leaves Content empty.
 		if !shouldDispatchToolCalls(resp) {
-			finalContent = resp.Content
+			finalContent = result.Content
 			if finalContent == "" {
 				finalContent = assistantText
 			}
@@ -227,47 +264,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 
 		// Dispatch all tool_calls in parallel. Sub-agent invocations are
 		// intercepted before the registry; regular tools go through it.
-		toolResults := c.dispatchToolCalls(ctx, resp.ToolCalls, hub, budget)
-
-		// Append one role="tool" message per tool_call_id, preserving the
-		// order OpenAI expects (each tool result references a tool_call_id).
-		for _, tc := range resp.ToolCalls {
-			result, ok := toolResults[tc.ID]
-			if !ok {
-				result = toolResult{content: "", isError: true}
-			}
-			// Fold sub-agent token usage into the turn total so the done
-			// event reports the full cost including dispatched sub-agents.
-			// Registry tools incur no LLM usage, so subUsage is nil for them.
-			if result.subUsage != nil {
-				total.Add(*result.subUsage)
-				// Attribute the sub-agent's cost to its own key in the
-				// per-agent breakdown (preserved instead of being folded into
-				// the Confucius total). The sub-agent's display name is
-				// recorded on the result by dispatchSubAgent.
-				if result.subAgentName != "" {
-					byAgent[result.subAgentName] = addUsage(byAgent[result.subAgentName], *result.subUsage)
-				}
-			}
-			// Propagate a sub-agent cap into the turn-level meta: a capped
-			// sub-agent marks usage.meta.round_capped even if Confucius itself
-			// never hit its own cap.
-			if result.subCapped {
-				tmeta.observeRoundCapped()
-			}
-			// Record which invoke_* sub-agents fired this turn (for
-			// usage.meta.sub_agent_invocations), regardless of success.
-			if IsInvokeTool(tc.Function.Name) {
-				tmeta.observeInvoke(tc.Function.Name)
-			}
-			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
-			round = append(round, Message{
-				Role:       "tool",
-				Content:    result.content,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-			})
-		}
+		c.executeAndRecordToolCalls(ctx, resp.ToolCalls, hub, budget, tmeta, &total, byAgent, &round)
 
 		// Between-rounds context-pressure seam (context-compaction, mid-turn
 		// trigger): after this round's tool results are appended and before
@@ -303,7 +300,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			ReasoningEffort: c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq)
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.lengthContinue,
+			func(r []Message) []Message {
+				return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
+			})
 		if wrapErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return finalContent, total, buildBreakdown(byAgent, tmeta), ctxErr
@@ -375,6 +375,55 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 	}
 	_ = g.Wait()
 	return results
+}
+
+// executeAndRecordToolCalls dispatches calls in parallel via dispatchToolCalls
+// and folds every result into the turn accounting and the round: sub-agent
+// token usage into total/byAgent, cap propagation and invoke_* tracking into
+// tmeta, one ToolResultEvent per call, and one role="tool" message per call
+// appended to *round (each tool result references its tool_call_id, in the
+// order OpenAI expects). Shared by the main loop and the length-continuation
+// path — the latter dispatches the parseable calls of an intermediate length
+// response before the continuation request (llm-length-continuation, D5).
+func (c *Confucius) executeAndRecordToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub, budget *retryBudget, tmeta *turnMeta, total *Usage, byAgent map[string]Usage, round *[]Message) {
+	toolResults := c.dispatchToolCalls(ctx, calls, hub, budget)
+	for _, tc := range calls {
+		result, ok := toolResults[tc.ID]
+		if !ok {
+			result = toolResult{content: "", isError: true}
+		}
+		// Fold sub-agent token usage into the turn total so the done
+		// event reports the full cost including dispatched sub-agents.
+		// Registry tools incur no LLM usage, so subUsage is nil for them.
+		if result.subUsage != nil {
+			total.Add(*result.subUsage)
+			// Attribute the sub-agent's cost to its own key in the
+			// per-agent breakdown (preserved instead of being folded into
+			// the Confucius total). The sub-agent's display name is
+			// recorded on the result by dispatchSubAgent.
+			if result.subAgentName != "" {
+				byAgent[result.subAgentName] = addUsage(byAgent[result.subAgentName], *result.subUsage)
+			}
+		}
+		// Propagate a sub-agent cap into the turn-level meta: a capped
+		// sub-agent marks usage.meta.round_capped even if Confucius itself
+		// never hit its own cap.
+		if result.subCapped {
+			tmeta.observeRoundCapped()
+		}
+		// Record which invoke_* sub-agents fired this turn (for
+		// usage.meta.sub_agent_invocations), regardless of success.
+		if IsInvokeTool(tc.Function.Name) {
+			tmeta.observeInvoke(tc.Function.Name)
+		}
+		hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
+		*round = append(*round, Message{
+			Role:       "tool",
+			Content:    result.content,
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+		})
+	}
 }
 
 // dispatchOne resolves a single tool_call. The agent name used for error

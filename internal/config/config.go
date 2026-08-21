@@ -344,7 +344,58 @@ type OpenAIConfig struct {
 	// turns). Empty (the default) selects the FIRST catalog entry. Setting it
 	// to a name outside the catalog fails validation.
 	DefaultModel string `yaml:"default_model"`
+	// LengthContinue is the finish_reason=length auto-continuation policy
+	// (llm-length-continuation capability): a zero block disables the feature
+	// (length keeps terminating the round silently, the pre-capability
+	// behavior); any non-zero field enables it with missing siblings
+	// defaulted. See LengthContinueConfig.
+	LengthContinue LengthContinueConfig `yaml:"length_continue"`
 }
+
+// LengthContinueConfig configures the finish_reason=length continuation
+// (llm-length-continuation capability). When enabled, a round whose LLM
+// response ends length is continued — partial output kept, budget expanded by
+// ExpandStep per attempt — up to MaxRetries continuations before the turn
+// fails with agent_error length_exhausted. A zero block (unset or all-zero
+// fields) disables the feature entirely; negatives are rejected at load.
+type LengthContinueConfig struct {
+	// ExpandStep is the additive max_tokens increment per continuation
+	// attempt: attempt N (0-based) sends cfg.max_tokens + N*ExpandStep.
+	// Zero defaults to DefaultLengthContinueStep() once the block is enabled.
+	ExpandStep int `yaml:"expand_step"`
+	// MaxRetries is the number of CONTINUATIONS allowed per round (3 → 4
+	// total attempts). Zero defaults to DefaultLengthContinueRetries() once
+	// the block is enabled. Continuation attempts do not consume max_rounds.
+	MaxRetries int `yaml:"max_retries"`
+}
+
+// Enabled reports whether the continuation feature is on: any non-zero field.
+// A zero block means byte-for-byte pre-capability behavior.
+func (l LengthContinueConfig) Enabled() bool {
+	return l.ExpandStep > 0 || l.MaxRetries > 0
+}
+
+// Resolve returns the normalized (expandStep, maxRetries) pair for an enabled
+// block, substituting defaults for zero siblings. Callers must consult
+// Enabled() first; a disabled block resolves to (0, 0).
+func (l LengthContinueConfig) Resolve() (expandStep, maxRetries int) {
+	if !l.Enabled() {
+		return 0, 0
+	}
+	step, retries := l.ExpandStep, l.MaxRetries
+	if step <= 0 {
+		step = DefaultLengthContinueStep()
+	}
+	if retries <= 0 {
+		retries = DefaultLengthContinueRetries()
+	}
+	return step, retries
+}
+
+// Default continuation parameters (design D9): a step matching the common
+// agents.*.max_tokens (8192) and the explored retry bound of 3 continuations.
+func DefaultLengthContinueStep() int    { return 8192 }
+func DefaultLengthContinueRetries() int { return 3 }
 
 // ModelCatalogEntry is one selectable model in the openai.models catalog
 // (per-request-model-selection). The entry carries only the per-model
@@ -402,6 +453,9 @@ func (o OpenAIConfig) FindModelCatalogEntry(name string) (ModelCatalogEntry, boo
 func (o OpenAIConfig) validate() error {
 	if o.StreamIdleTimeout < 0 {
 		return fmt.Errorf("openai.stream_idle_timeout: must be a positive duration or 0 (0 disables the stream idle watchdog; got %s)", o.StreamIdleTimeout)
+	}
+	if o.LengthContinue.ExpandStep < 0 || o.LengthContinue.MaxRetries < 0 {
+		return fmt.Errorf("openai.length_continue: expand_step and max_retries must be positive integers or 0 (0/unset disables length continuation; got expand_step=%d, max_retries=%d)", o.LengthContinue.ExpandStep, o.LengthContinue.MaxRetries)
 	}
 	if len(o.Models) == 0 {
 		return fmt.Errorf("openai.models: the model catalog is required (model-effort-v2): configure at least one {name, max_context_tokens, thinking} entry")

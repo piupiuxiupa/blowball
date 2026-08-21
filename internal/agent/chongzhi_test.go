@@ -62,7 +62,7 @@ func newTestChongzhi(t *testing.T, client LLMClient, reg *tool.Registry) *Chongz
 	for _, s := range reg.List() {
 		names = append(names, s.Name)
 	}
-	c, err := NewChongzhi(testChongzhiConfig(names...), client, reg, testTurn())
+	c, err := NewChongzhi(testChongzhiConfig(names...), client, reg, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 	return c
 }
@@ -371,7 +371,7 @@ func TestChongzhi_ReasoningRequest(t *testing.T) {
 	cfg := testChongzhiConfig()
 	// The thinking wire family rides the turn config (model-effort-v2), not
 	// the agent config.
-	c, err := NewChongzhi(cfg, client, reg, ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "high"})
+	c, err := NewChongzhi(cfg, client, reg, ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "high"}, config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)

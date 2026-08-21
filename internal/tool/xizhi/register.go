@@ -54,7 +54,12 @@ var (
     },
     "content": {
       "type": "string",
-      "description": "Full text content to write. Overwrites any existing file at this path."
+      "description": "Text content to write. Default (mode \"write\"): full content, overwrites any existing file. mode \"append\": content is appended to the end of the file (created when missing)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["write", "append"],
+      "description": "\"write\" (default): create or overwrite the file with content. \"append\": append content to the file, creating it when missing — use for chunked multi-part writes of large content."
     }
   },
   "required": ["path", "content"],
@@ -208,6 +213,11 @@ type readArgs struct {
 type writeArgs struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	// Mode selects write semantics (llm-length-continuation prevention
+	// side): "" / "write" = create-or-overwrite (the pre-mode behavior,
+	// byte-for-byte); "append" = create-if-missing / append-to-end. Any
+	// other value is rejected at parse time.
+	Mode string `json:"mode"`
 }
 type modifyArgs struct {
 	Path       string `json:"path"`
@@ -281,8 +291,10 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 
 	tools = append(tools, &tool.ToolSpec{
 		Name: NameWriteFile,
-		Description: "Creates or overwrites a workspace file with the given text content and returns `{path, size, absolute}`. " +
-			"Parent directories are created automatically. **IMPORTANT: an existing file at `path` is overwritten.** " +
+		Description: "Creates or overwrites a workspace file with the given text content and returns `{path, size, absolute, appended}`. " +
+			"Parent directories are created automatically. **IMPORTANT: by default (mode \"write\" or omitted) an existing file at `path` is overwritten.** " +
+			"Use `mode: \"append\"` to append to an existing file (created when missing) — the intended shape for writing large content in multiple smaller chunks: " +
+			"write the first part, then append the rest, keeping EACH call's content small rather than emitting one huge output. " +
 			"**DO NOT write files with `bash`/`python` (`echo`/redirects) — use this tool.**",
 		ParametersJSON: schemaWrite,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -290,7 +302,12 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("xizhi_write_file: parse args: %w", err)
 			}
-			return WriteFile(workspaceRoot, a.Path, a.Content)
+			switch a.Mode {
+			case "", "write", "append":
+			default:
+				return nil, fmt.Errorf("xizhi_write_file: invalid mode %q (must be \"write\" or \"append\")", a.Mode)
+			}
+			return WriteFile(workspaceRoot, a.Path, a.Content, a.Mode == "append")
 		},
 	})
 

@@ -96,7 +96,7 @@ func TestChongzhi_RoundCap_SuccessfulWrapUp(t *testing.T) {
 	c, err := NewChongzhi(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		MaxTokens: 256, Tools: []string{"ping"}, MaxRounds: 2,
-	}, client, reg, testTurn())
+	}, client, reg, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -132,7 +132,7 @@ func TestChongzhi_RoundCap_EmptyWrapUp_SurfacesError(t *testing.T) {
 	c, err := NewChongzhi(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		MaxTokens: 256, Tools: []string{"ping"}, MaxRounds: 2,
-	}, client, reg, testTurn())
+	}, client, reg, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -159,7 +159,7 @@ func TestChongzhi_NaturalStop_NoCapSignal(t *testing.T) {
 	c, err := NewChongzhi(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		MaxTokens: 256, Tools: []string{"ping"}, MaxRounds: 5, // generous cap, not hit
-	}, client, reg, testTurn())
+	}, client, reg, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -205,7 +205,7 @@ func TestChongzhi_RoundCap_WrapUpReturnsToolCalls_SurfacesError(t *testing.T) {
 	c, err := NewChongzhi(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		MaxTokens: 256, Tools: []string{"ping"}, MaxRounds: 2,
-	}, client, reg, testTurn())
+	}, client, reg, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -241,7 +241,7 @@ func TestConfucius_RoundCap_SuccessfulWrapUp(t *testing.T) {
 	c, err := NewConfucius(config.AgentConfig{
 		Name: "Confucius", SystemPrompt: "you orchestrate",
 		MaxTokens: 256, Tools: []string{"ping"}, MaxRounds: 2,
-	}, client, reg, subAgents, testTurn())
+	}, client, reg, subAgents, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -274,7 +274,7 @@ func TestLiang_RoundCap_WrapUpAppliesResponseFormat(t *testing.T) {
 		Name: "Liang", SystemPrompt: "you analyze",
 		MaxTokens: 256, Tools: []string{"ping"}, MaxRounds: 2,
 		OutputSchema: `{"type":"object","properties":{"answer":{"type":"string"}}}`,
-	}, client, reg, testTurn())
+	}, client, reg, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -312,7 +312,7 @@ func TestConfucius_SubAgentCapPropagatesToMeta(t *testing.T) {
 	c, err := NewConfucius(config.AgentConfig{
 		Name: "Confucius", SystemPrompt: "you orchestrate",
 		MaxTokens: 256, MaxRounds: 10,
-	}, client, tool.NewRegistry(), subAgents, testTurn())
+	}, client, tool.NewRegistry(), subAgents, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)
@@ -343,7 +343,7 @@ func TestConfucius_NoCap_OmitsRoundCappedMeta(t *testing.T) {
 	c, err := NewConfucius(config.AgentConfig{
 		Name: "Confucius", SystemPrompt: "you orchestrate",
 		MaxTokens: 256, MaxRounds: 10,
-	}, client, tool.NewRegistry(), subAgents, testTurn())
+	}, client, tool.NewRegistry(), subAgents, testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)

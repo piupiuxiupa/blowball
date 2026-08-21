@@ -39,7 +39,7 @@ func testTurn() ModelOverride { return ModelOverride{Model: "gpt-test"} }
 func newTestConfucius(t *testing.T, client LLMClient, subAgents map[string]Agent) *Confucius {
 	t.Helper()
 	reg := tool.NewRegistry()
-	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents), testTurn())
+	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents), testTurn(), config.LengthContinueConfig{})
 	require.NoError(t, err)
 	return c
 }
@@ -623,7 +623,7 @@ func TestConfucius_ReasoningRequest(t *testing.T) {
 	c, err := NewConfucius(cfg, client, reg, staticFactories(map[string]Agent{
 		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
 		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
-	}), ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "medium"})
+	}), ModelOverride{Model: "gpt-test", Thinking: true, ReasoningEffort: "medium"}, config.LengthContinueConfig{})
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)

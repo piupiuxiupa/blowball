@@ -285,3 +285,22 @@ func TestMessageFromEvent_RunIDCopiedFromMeta(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, m.RunID, "top-level events persist no run identity")
 }
+
+// TestMergeEvents_LengthContinuationSingleRow pins the llm-length-continuation
+// persistence invariant: the token runs of a round's continuation attempts
+// carry the same (type, agent, run_id) and have NO event between them (the
+// helper emits nothing for a content-only continuation), so they merge into a
+// single message row whose content is the seamless concatenation — the
+// reloaded history shows one answer, not one row per attempt.
+func TestMergeEvents_LengthContinuationSingleRow(t *testing.T) {
+	attempt1 := []stream.StreamEvent{
+		stream.TokenEvent(stream.AgentConfucius, "first half "),
+		stream.TokenEvent(stream.AgentConfucius, "still first "),
+	}
+	attempt2 := []stream.StreamEvent{
+		stream.TokenEvent(stream.AgentConfucius, "second half"),
+	}
+	merged := MergeEvents(append(append([]stream.StreamEvent{}, attempt1...), attempt2...))
+	require.Len(t, merged, 1, "continuation token runs must persist as one row")
+	assert.Equal(t, "first half still first second half", merged[0].Content)
+}

@@ -45,13 +45,18 @@ type Chongzhi struct {
 	// path; exposed via LastRunHitCap so Confucius can propagate a sub-agent
 	// cap into usage.meta.round_capped.
 	hitCapThisRun bool
+	// lengthContinue is the finish_reason=length continuation policy
+	// (llm-length-continuation capability); zero = disabled = the loop
+	// treats a length round as terminal exactly as before.
+	lengthContinue config.LengthContinueConfig
 }
 
 // NewChongzhi builds a Chongzhi agent. turn is the turn-resolved
 // model/effort configuration applied to every LLM call this agent makes
-// (model-effort-v2).
-func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride) (*Chongzhi, error) {
-	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools)
+// (model-effort-v2). lc is the global finish_reason=length continuation
+// policy (llm-length-continuation); zero disables it.
+func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, turn ModelOverride, lc config.LengthContinueConfig) (*Chongzhi, error) {
+	toolsJSON, err := buildRegularToolsJSON(reg, cfg.Tools, cfg.MaxTokens)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build chongzhi tools: %w", err)
 	}
@@ -60,13 +65,14 @@ func NewChongzhi(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, t
 		maxRounds = config.DefaultAgentMaxRounds()
 	}
 	return &Chongzhi{
-		cfg:           cfg,
-		client:        client,
-		toolRegistry:  reg,
-		turn:          turn,
-		toolsJSON:     toolsJSON,
-		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
-		maxRounds:     maxRounds,
+		cfg:            cfg,
+		client:         client,
+		toolRegistry:   reg,
+		turn:           turn,
+		toolsJSON:      toolsJSON,
+		toolsIsNotNil:  len(toolsJSON) > 0 && string(toolsJSON) != "null",
+		maxRounds:      maxRounds,
+		lengthContinue: lc,
 	}, nil
 }
 
@@ -123,18 +129,27 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		}
 
 		var assistantText string
-		resp, err := c.client.StreamChat(ctx, req, func(delta string) error {
-			assistantText += delta
-			if !hub.SendCtx(ctx, stream.TokenEvent(c.Name(), delta)) {
-				return ctx.Err()
-			}
-			return nil
-		}, func(delta string) error {
-			if !hub.SendCtx(ctx, stream.ReasoningEvent(c.Name(), delta)) {
-				return ctx.Err()
-			}
-			return nil
-		})
+		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.lengthContinue,
+			func(r []Message) []Message { return withSystem(c.cfg.SystemPrompt, r) },
+			// Parseable tool_calls of an intermediate length response dispatch
+			// through the same record path as the main loop (including the
+			// executedToolThisRun side-effect flag — a dispatched call during
+			// continuation IS a side effect).
+			func(gctx context.Context, calls []ToolCall) {
+				c.executeAndRecordToolCalls(gctx, calls, hub, &round)
+			},
+			func(delta string) error {
+				assistantText += delta
+				if !hub.SendCtx(ctx, stream.TokenEvent(c.Name(), delta)) {
+					return ctx.Err()
+				}
+				return nil
+			}, func(delta string) error {
+				if !hub.SendCtx(ctx, stream.ReasoningEvent(c.Name(), delta)) {
+					return ctx.Err()
+				}
+				return nil
+			})
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return finalContent, total, nil, ctxErr
@@ -144,8 +159,21 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 			return finalContent, total, nil, fmt.Errorf("chongzhi: stream chat: %w", err)
 		}
 
-		total.Add(resp.Usage)
+		total.Add(result.Usage)
 
+		// llm-length-continuation exhaustion (design D7): fail loudly, keep
+		// the accumulated partial content. The error text deliberately avoids
+		// transient-error substrings so the sub-agent retry pipeline (which
+		// Chongzhi runs under when dispatched by Confucius) never retries it.
+		if c.lengthContinue.Enabled() && result.LengthHit {
+			step, retries := c.lengthContinue.Resolve()
+			msg := lengthExhaustedMessage(c.Name(), retries, c.cfg.MaxTokens+retries*step)
+			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), msg, "length_exhausted"))
+			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
+			return result.Content, total, nil, fmt.Errorf("chongzhi: %s", msg)
+		}
+
+		resp := result.Resp
 		assistantMsg := Message{Role: "assistant", Content: resp.Content, ReasoningContent: resp.ReasoningContent, ToolCalls: resp.ToolCalls}
 		if assistantMsg.Content == "" && assistantMsg.ReasoningContent == "" && len(resp.ToolCalls) == 0 {
 			finalContent = assistantText
@@ -154,35 +182,14 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		round = append(round, assistantMsg)
 
 		if !shouldDispatchToolCalls(resp) {
-			finalContent = resp.Content
+			finalContent = result.Content
 			if finalContent == "" {
 				finalContent = assistantText
 			}
 			break
 		}
 
-		results := c.dispatchToolCalls(ctx, resp.ToolCalls, hub)
-		for _, tc := range resp.ToolCalls {
-			result, ok := results[tc.ID]
-			if !ok {
-				result = toolResult{content: "", isError: true}
-			}
-			// A non-error tool result means the tool executed successfully; mark
-			// the Run as having produced a side effect so the retry wrapper can
-			// suppress retries after this point (capability C idempotency).
-			if !result.isError {
-				c.runMu.Lock()
-				c.executedToolThisRun = true
-				c.runMu.Unlock()
-			}
-			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
-			round = append(round, Message{
-				Role:       "tool",
-				Content:    result.content,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-			})
-		}
+		c.executeAndRecordToolCalls(ctx, resp.ToolCalls, hub, &round)
 		// This iteration dispatched tools and did not break; flag a cap exit
 		// when it was the last allowed round so the post-loop wrap-up runs.
 		capped = i+1 == c.maxRounds
@@ -205,7 +212,10 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 			ReasoningEffort: c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq)
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.lengthContinue,
+			func(r []Message) []Message {
+				return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
+			})
 		if wrapErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return finalContent, total, nil, ctxErr
@@ -245,6 +255,36 @@ func (c *Chongzhi) LastRunHitCap() bool {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	return c.hitCapThisRun
+}
+
+// executeAndRecordToolCalls dispatches calls in parallel and records every
+// result: one ToolResultEvent per call plus one role="tool" message appended
+// to *round, and the executedToolThisRun side-effect flag when any call
+// succeeded (capability C idempotency). Shared by the main loop and the
+// length-continuation path (llm-length-continuation, D5).
+func (c *Chongzhi) executeAndRecordToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub, round *[]Message) {
+	results := c.dispatchToolCalls(ctx, calls, hub)
+	for _, tc := range calls {
+		result, ok := results[tc.ID]
+		if !ok {
+			result = toolResult{content: "", isError: true}
+		}
+		// A non-error tool result means the tool executed successfully; mark
+		// the Run as having produced a side effect so the retry wrapper can
+		// suppress retries after this point (capability C idempotency).
+		if !result.isError {
+			c.runMu.Lock()
+			c.executedToolThisRun = true
+			c.runMu.Unlock()
+		}
+		hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
+		*round = append(*round, Message{
+			Role:       "tool",
+			Content:    result.content,
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+		})
+	}
 }
 
 // dispatchToolCalls runs every tool_call in parallel. Unlike Confucius, there

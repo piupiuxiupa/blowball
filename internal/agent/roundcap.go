@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/stream"
 	"go.uber.org/zap"
@@ -20,50 +22,65 @@ const wrapUpInstruction = "The tool-call round limit for this task has been reac
 // runWrapUpRound runs a single tool-disabled LLM round that lets the model
 // synthesize a final answer after its tool-calling loop hit the max_rounds
 // cap. req MUST already have Tools cleared (and, for a structured-output agent,
-// ResponseFormat set). runWrapUpRound appends wrapUpInstruction to the
-// messages. Content and reasoning chunks are streamed to hub exactly like a
+// ResponseFormat set). rebuild maps the caller's round to the wrap attempt's
+// full messages array — the caller appends wrapUpInstruction on top of its
+// system prompt, and runWrapUpRound applies rebuild at entry and again after
+// every length continuation (llm-length-continuation covers the wrap-up round;
+// continuation attempts keep the steering instruction as the trailing
+// message). Content and reasoning chunks are streamed to hub exactly like a
 // normal round. It performs no tool dispatch and runs exactly one round.
 //
 // Returns the synthesized content, the round's usage, and any error. If the
-// model emits tool_calls (some OpenAI-compatible gateways do even with tools
-// stripped), they cannot be honored and the prose is a preamble, not an answer
-// — so the empty string is returned to route the caller onto its empty-end
-// (round_cap_exhausted) path instead of silently returning a useless non-answer.
-func runWrapUpRound(ctx context.Context, client LLMClient, agentName string, hub stream.EventHub, req LLMRequest) (string, Usage, error) {
-	// Append the steering instruction on a fresh slice so the caller's backing
-	// array is never mutated.
-	req.Messages = append(append([]Message{}, req.Messages...), Message{Role: "user", Content: wrapUpInstruction})
+// FINAL attempt emits tool_calls (some OpenAI-compatible gateways do even
+// with tools stripped), they cannot be honored and the prose is a preamble,
+// not an answer — so the empty string is returned to route the caller onto
+// its empty-end (round_cap_exhausted) path instead of silently returning a
+// useless non-answer. Length exhaustion likewise surfaces as an error so the
+// caller's round_cap_exhausted path applies (the length_exhausted code belongs
+// to the main loops, which own their agent_error emission).
+func runWrapUpRound(ctx context.Context, client LLMClient, agentName string, hub stream.EventHub,
+	req LLMRequest, round *[]Message, lc config.LengthContinueConfig,
+	rebuild func([]Message) []Message) (string, Usage, error) {
+	req.Messages = rebuild(*round)
 
 	var streamed string
-	resp, err := client.StreamChat(ctx, req, func(delta string) error {
-		streamed += delta
-		if !hub.SendCtx(ctx, stream.TokenEvent(agentName, delta)) {
-			return ctx.Err()
-		}
-		return nil
-	}, func(delta string) error {
-		if !hub.SendCtx(ctx, stream.ReasoningEvent(agentName, delta)) {
-			return ctx.Err()
-		}
-		return nil
-	})
+	result, err := runLLMRound(ctx, client, hub, agentName, req, round, lc, rebuild, nil,
+		func(delta string) error {
+			streamed += delta
+			if !hub.SendCtx(ctx, stream.TokenEvent(agentName, delta)) {
+				return ctx.Err()
+			}
+			return nil
+		}, func(delta string) error {
+			if !hub.SendCtx(ctx, stream.ReasoningEvent(agentName, delta)) {
+				return ctx.Err()
+			}
+			return nil
+		})
 	if err != nil {
-		return streamed, resp.Usage, err
+		return streamed, result.Usage, err
 	}
+	resp := result.Resp
 	// tool_calls here cannot be honored (tools were stripped); treat as no
 	// usable synthesized content so the caller fails loudly rather than
 	// returning the preamble as the final answer.
 	if len(resp.ToolCalls) > 0 {
-		return "", resp.Usage, nil
+		return "", result.Usage, nil
 	}
-	// Match the main loop's precedence: prefer the aggregated resp.Content,
-	// falling back to the streamed-token accumulation only when the client did
-	// not populate Content (some OpenAI-compatible endpoints leave it empty).
-	content := resp.Content
+	if lc.Enabled() && result.LengthHit {
+		return "", result.Usage, fmt.Errorf("length exhausted after continuation (final budget %d tokens)", req.MaxTokens)
+	}
+	// Match the main loop's precedence: prefer the content accumulated across
+	// the round's attempts (continuation keeps partial output — the final
+	// attempt's Content is only its suffix), falling back to the
+	// streamed-token accumulation only when the client did not populate
+	// Content on any attempt (some OpenAI-compatible endpoints leave it
+	// empty).
+	content := result.Content
 	if content == "" {
 		content = streamed
 	}
-	return content, resp.Usage, nil
+	return content, result.Usage, nil
 }
 
 // emitCapHitWarn logs (operator-side) that an agent hit its round cap and is

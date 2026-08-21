@@ -40,6 +40,25 @@ openai:
   # means the stream broke. Zero/unset (the default) disables the watchdog —
   # prior behavior exactly (a negative value fails config load).
   # stream_idle_timeout: 2m
+  # finish_reason=length auto-continuation (llm-length-continuation
+  # capability): when a round's LLM response is cut by the output token limit,
+  # keep the partial output and continue with an expanded budget instead of
+  # silently ending the turn. Attempt N (0-based) sends
+  # agents.<name>.max_tokens + N × expand_step; up to max_retries
+  # CONTINUATIONS per round (3 → 4 total attempts; continuation attempts do
+  # not consume max_rounds). A truncated tool_call is not executed — it gets a
+  # synthetic not-executed result instructing the model to re-issue in smaller
+  # chunks, while calls whose arguments are complete dispatch normally. If
+  # every attempt still ends length, the turn fails with agent_error
+  # length_exhausted (finalContent keeps the accumulated partial output).
+  # Applies to the three agent loops and round-cap wrap-up rounds; title
+  # generation and compaction summaries are not covered. Zero/unset (the
+  # default) disables the feature — length keeps terminating the round
+  # silently (negative values fail config load). Any non-zero field enables it
+  # with missing siblings defaulted (expand_step 8192, max_retries 3).
+  # length_continue:
+  #   expand_step: 8192
+  #   max_retries: 3
   # Model catalog (per-request-model-selection; MANDATORY since
   # model-effort-v2 — the config no longer loads without it): the list of
   # models a chat request may select via the POST /messages body parameters
