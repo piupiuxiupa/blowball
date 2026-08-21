@@ -72,6 +72,9 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 	b.WriteString(renderDocumentPrompt())
 	b.WriteString("\n\n")
 
+	b.WriteString(renderGetTimePrompt())
+	b.WriteString("\n\n")
+
 	builtIn, mcpByServer := classifyTools(input.Tools)
 
 	if len(builtIn) > 0 {
@@ -132,6 +135,7 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 			fmt.Fprintf(&b, "  </skill>\n")
 		}
 		b.WriteString("</skills>\n\n")
+		b.WriteString("> **RULE:** For any script files (`.py`, `.js`, etc.) inside a Skill, **DO NOT read or rewrite** them. You **MUST** use the Bash tool to execute the ORIGINAL script with the appropriate interpreter and arguments, strictly following the Skill’s Markdown instructions. If execution fails, only report the error—DO NOT change the script.")
 		b.WriteString("- **MUST USE** `luban_*` for skill operations. **NEVER USE** `xizhi_*` tools to access the skills directory.\n")
 		b.WriteString("- luban_install_skill supports several install shapes: a whole git repository is cloned as one entry; a git collection combined with the optional `skill` parameter installs only the selected sub-skill (matched by frontmatter name, else by repo-relative subpath) and discards the rest; and a single SKILL.md URL ending in .md is downloaded and installed directly.\n")
 		b.WriteString("- If a .md URL is not itself a valid skill, luban_install_skill returns the fetched content as an install document (result kind \"install-doc\") instead of installing. When a user asks to install a skill from an instruction or landing page, read the returned install-document content, follow it to the real skill source URL it points at, and call luban_install_skill again with that source - do not treat the instruction page itself as the skill.\n")
@@ -217,5 +221,36 @@ func renderDocumentPrompt() string {
 
 	Counterexamples (do NOT generate a document for): short Q&A, clarifications, casual chat, simple calculations.
 	If you are UNSURE whether to generate a document, PREFER generating a Markdown document.
+	`
+}
+
+func renderGetTimePrompt() string {
+	return `
+	## Time and Timeliness Confirmation Rule
+
+	When the user's query involves any of the following, you **MUST** obtain the current system time by executing a ` + "`bash`" + `command—**never** rely on your internal knowledge or guesswork:
+
+	- Current time (e.g., "What time is it now?")
+	- Current date (e.g., "What's the date today?", "What day is it?")
+	- Timezone information (e.g., "What's the UTC time?")
+	- Timeliness checks (e.g., "Is this task overdue?", "How much time is left?")
+	- Any relative time calculation that requires "now" as a reference (e.g., "yesterday", "tomorrow", "in 3 hours")
+
+	### Execution Method
+	- Use the ` + "**`bash`**" + ` tool to run the "date" command.
+	- Choose appropriate formatting, for example:
+	- Default: "date"
+	- Custom format: ` + "`date \"+%Y-%m-%d %H:%M:%S\"`" + `
+	- Unix timestamp: ` + "`date +%s`" + `
+	- Day of week: ` + "`date \"+%A\"`" + `
+	- If the user does not specify a format, return a human‑readable full date‑time with timezone.
+
+	### Using the Result
+	- Parse the output of ` + "`date`" + ` as the actual current time, and use it to answer any timeliness questions.
+	- If the command fails (e.g., system time unavailable), report the error to the user—**DO NOT** fabricate a time.
+
+	### Examples
+	- User: "How long until I get off work?" → First run ` + "`date`" + ` to get current time, then calculate the difference.
+	- User: "What day is today?" → Run ` + "`date \"+%A\"`" + ` and return the weekday.
 	`
 }
