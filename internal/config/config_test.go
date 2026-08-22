@@ -609,6 +609,66 @@ agents:
 	}
 }
 
+// TestLoad_RemovedXizhiGlobFilesKey pins the migration signal for the removed
+// tools.xizhi.glob_files key (replaced by tools.xizhi.find / xizhi_find): a
+// stale config must fail fast instead of being silently ignored.
+func TestLoad_RemovedXizhiGlobFilesKey(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+tools:
+  xizhi:
+    glob_files:
+      enabled: true
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load expected removed-key error for tools.xizhi.glob_files, got nil")
+	}
+	for _, want := range []string{"tools.xizhi.glob_files was removed", "tools.xizhi.find", "xizhi_find"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+// TestLoad_XizhiFindToggle pins the tools.xizhi.find switch decode.
+func TestLoad_XizhiFindToggle(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+tools:
+  xizhi:
+    find:
+      enabled: true
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Tools.Xizhi.Find.Enabled {
+		t.Error("Tools.Xizhi.Find.Enabled = false, want true")
+	}
+}
+
 func TestLoad_OutputSchemaConfig(t *testing.T) {
 	cases := []struct {
 		name        string

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -63,6 +64,15 @@ type Manager struct {
 	connectTimeout   time.Duration
 	callTimeout      time.Duration
 	transportFactory TransportFactory
+	// maxInlineResultTokens is the RESOLVED mcp_call inline-result cap
+	// (mcp-call-result-spill): 0 means disabled (no automatic spill), so —
+	// unlike the timeouts — it gets NO zero-value fallback here; the config
+	// layer resolves unset → default before it reaches ManagerOptions.
+	maxInlineResultTokens int
+
+	// spillSeq numbers automatic spill files within the turn so parallel
+	// mcp_call dispatches never collide on a file name.
+	spillSeq atomic.Int64
 
 	mu     sync.Mutex
 	conns  map[string]*conn // serverName -> connection
@@ -70,12 +80,15 @@ type Manager struct {
 }
 
 // ManagerOptions configures a Manager. Zero values fall back to the package
-// defaults.
+// defaults, EXCEPT MaxInlineResultTokens which is carried verbatim (0 =
+// automatic spill disabled; the unset-config default is resolved earlier, by
+// config.UserMCPConfig.MaxInlineResultTokensOrDefault).
 type ManagerOptions struct {
-	WorkspaceRoot    string
-	ConnectTimeout   time.Duration
-	CallTimeout      time.Duration
-	TransportFactory TransportFactory
+	WorkspaceRoot         string
+	ConnectTimeout        time.Duration
+	CallTimeout           time.Duration
+	MaxInlineResultTokens int
+	TransportFactory      TransportFactory
 }
 
 // NewManager builds a turn-scoped manager bound to workspaceRoot (the caller's
@@ -93,13 +106,18 @@ func NewManager(opts ManagerOptions) *Manager {
 		tf = DefaultTransportFactory
 	}
 	return &Manager{
-		workspaceRoot:    opts.WorkspaceRoot,
-		connectTimeout:   opts.ConnectTimeout,
-		callTimeout:      opts.CallTimeout,
-		transportFactory: tf,
-		conns:            make(map[string]*conn),
+		workspaceRoot:         opts.WorkspaceRoot,
+		connectTimeout:        opts.ConnectTimeout,
+		callTimeout:           opts.CallTimeout,
+		maxInlineResultTokens: opts.MaxInlineResultTokens,
+		transportFactory:      tf,
+		conns:                 make(map[string]*conn),
 	}
 }
+
+// nextSpillSeq allocates the next automatic-spill sequence number (per turn,
+// per manager instance).
+func (m *Manager) nextSpillSeq() int64 { return m.spillSeq.Add(1) }
 
 // WorkspaceRoot returns the workspace this manager is scoped to.
 func (m *Manager) WorkspaceRoot() string { return m.workspaceRoot }

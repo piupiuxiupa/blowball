@@ -476,7 +476,7 @@ func TestManager_TotalCallTimeout(t *testing.T) {
 
 	// callTool wraps the whole op in the total-call timeout; a slow call must
 	// surface a deadline error.
-	_, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`))
+	_, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`), "")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.DeadlineExceeded), "want DeadlineExceeded, got %v", err)
 }
@@ -648,7 +648,7 @@ func TestCallTool_RejectsUnknownToolBeforeCall(t *testing.T) {
 		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 	})
 
-	_, err := callTool(context.Background(), m, "calc", "nope", json.RawMessage(`{}`))
+	_, err := callTool(context.Background(), m, "calc", "nope", json.RawMessage(`{}`), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not advertised")
 	_, _, calls := ft.snapshot()
@@ -664,7 +664,7 @@ func TestCallTool_RejectsBadArgsBeforeCall(t *testing.T) {
 		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object","required":["a"],"properties":{"a":{"type":"integer"}}}`)}},
 	})
 
-	_, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`))
+	_, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required field")
 	_, _, calls := ft.snapshot()
@@ -683,10 +683,12 @@ func TestCallTool_Success(t *testing.T) {
 		Tools: []ToolCache{{Name: "add", InputSchema: json.RawMessage(`{"type":"object","required":["a","b"]}`)}},
 	})
 
-	out, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{"a":1,"b":2}`))
+	out, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{"a":1,"b":2}`), "")
 	require.NoError(t, err)
-	require.Len(t, out.Content, 1)
-	assert.Equal(t, "42", out.Content[0].Text)
+	res, ok := out.(callResult)
+	require.True(t, ok, "small result must stay inline as a callResult")
+	require.Len(t, res.Content, 1)
+	assert.Equal(t, "42", res.Content[0].Text)
 }
 
 func TestCallTool_RemoteError(t *testing.T) {
@@ -701,7 +703,7 @@ func TestCallTool_RemoteError(t *testing.T) {
 		Tools: []ToolCache{{Name: "boom", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 	})
 
-	_, err := callTool(context.Background(), m, "calc", "boom", json.RawMessage(`{}`))
+	_, err := callTool(context.Background(), m, "calc", "boom", json.RawMessage(`{}`), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "remote tool error")
 }
@@ -714,9 +716,11 @@ func TestCallTool_RefreshOnMiss(t *testing.T) {
 	defer m.Close()
 	writeServers(t, ws, Server{Name: "calc", URL: "http://x", Transport: "http"})
 
-	out, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`))
+	out, err := callTool(context.Background(), m, "calc", "add", json.RawMessage(`{}`), "")
 	require.NoError(t, err)
-	require.Len(t, out.Content, 1)
+	res, ok := out.(callResult)
+	require.True(t, ok, "small result must stay inline as a callResult")
+	require.Len(t, res.Content, 1)
 
 	// The refreshed cache is persisted to the server's own file.
 	cfg, err := LoadConfig(ws)
@@ -746,7 +750,7 @@ func TestLog_NoPlaintextAuth(t *testing.T) {
 
 	_, err := addServer(context.Background(), m, "calc", "http://x", "", "http", Auth{Type: AuthBearer, Value: secret}, nil)
 	require.NoError(t, err)
-	_, _ = callTool(context.Background(), m, "calc", "missing", json.RawMessage(`{}`))
+	_, _ = callTool(context.Background(), m, "calc", "missing", json.RawMessage(`{}`), "")
 
 	for _, entry := range recorded.All() {
 		line := entry.Message

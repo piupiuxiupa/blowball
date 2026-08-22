@@ -26,6 +26,9 @@ import (
 //   - glob is filtered post-hoc by doublestar.Match against the file's base
 //     name, identical to the Go walk (so the two engines agree on glob
 //     semantics; rg's own --glob is not used).
+//   - In single-file mode the target is passed as an explicit path argument,
+//     which rg searches even when hidden (no --hidden) — matching the Go
+//     engine's exemption of the explicitly targeted root file.
 //
 // Context lines in content mode are sliced from the file via the shared
 // contextAround helper (the single source of truth), guaranteeing parity even
@@ -60,6 +63,22 @@ type rawLocation struct {
 }
 
 func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, error) {
+	// Directory mode runs rg with cwd at the search root scanning "." (the
+	// historical shape); single-file mode runs it with cwd at the file's parent
+	// scanning the bare file name, so --json path output stays a plain basename
+	// and the "./" trim below needs no mode-specific mapping.
+	searchDir := in.absPath
+	target := "."
+	if in.searchFile != "" {
+		// ripgrep skips binary files during directory traversal but searches an
+		// explicitly given file quit-on-NUL; pre-sniff so a binary target skips
+		// entirely, matching the Go engine and directory mode.
+		if binarySniffFile(in.absPath) {
+			return engineResult{}, nil
+		}
+		searchDir = filepath.Dir(in.absPath)
+		target = in.searchFile
+	}
 	// Build args linearly: output format, alignment flags, the pattern (via -e
 	// so patterns starting with '-' are not mistaken for flags), then the path.
 	args := []string{"--json", "--no-ignore"}
@@ -69,10 +88,10 @@ func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, e
 	if in.ignoreCase {
 		args = append(args, "-i")
 	}
-	args = append(args, "-e", in.pattern, ".")
+	args = append(args, "-e", in.pattern, target)
 
 	cmd := exec.CommandContext(ctx, e.rgPath, args...)
-	cmd.Dir = in.absPath
+	cmd.Dir = searchDir
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return engineResult{}, fmt.Errorf("xizhi grep: rg pipe: %w", err)
@@ -157,6 +176,14 @@ func attachContext(in grepInput, locs []rawLocation) []rawMatch {
 		return out
 	}
 
+	// Match files are relative to the search root; in single-file mode the root
+	// is the file itself, so they resolve against its containing directory
+	// instead (Dir(absPath) + basename == absPath).
+	base := in.absPath
+	if in.searchFile != "" {
+		base = filepath.Dir(in.absPath)
+	}
+
 	byFile := make(map[string][]rawLocation, len(locs))
 	for _, l := range locs {
 		byFile[l.file] = append(byFile[l.file], l)
@@ -164,7 +191,7 @@ func attachContext(in grepInput, locs []rawLocation) []rawMatch {
 
 	var out []rawMatch
 	for file, ls := range byFile {
-		lines, ok := readTextLines(filepath.Join(in.absPath, filepath.FromSlash(file)))
+		lines, ok := readTextLines(filepath.Join(base, filepath.FromSlash(file)))
 		if !ok {
 			continue
 		}

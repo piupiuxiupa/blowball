@@ -23,7 +23,7 @@ func testXizhiConfig() config.XizhiConfig {
 		Modify:    config.XizhiToolConfig{Enabled: true},
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: true},
-		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Find:      config.XizhiToolConfig{Enabled: true},
 		Grep:      config.XizhiToolConfig{Enabled: true},
 		Delete:    config.XizhiToolConfig{Enabled: true},
 	}

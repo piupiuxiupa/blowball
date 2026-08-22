@@ -37,7 +37,7 @@ func TestRegister_DescriptionDeclaresResultShapeAndAntiPattern(t *testing.T) {
 	assert.Contains(t, spec.Description, "xizhi_read_file")
 	assert.Contains(t, spec.Description, "xizhi_list_files")
 	assert.Contains(t, spec.Description, "xizhi_tree")
-	assert.Contains(t, spec.Description, "xizhi_glob_files")
+	assert.Contains(t, spec.Description, "xizhi_find")
 	assert.Contains(t, spec.Description, "xizhi_grep")
 	assert.Contains(t, spec.Description, "xizhi_modify_file")
 	assert.Contains(t, spec.Description, "xizhi_delete")

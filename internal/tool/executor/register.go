@@ -29,7 +29,7 @@ func registerBash(r *tool.Registry, tools *Tools) error {
 			".pip <pkg>`; installed packages are importable in later runs via the injected `PYTHONPATH` bridge.\n" +
 			"- **DO NOT use `cat`, `rm`, `ls`, `find`, `sed`, `awk` or `grep` for workspace file work — use the dedicated " +
 			"`xizhi_*` tools instead** (`cat`→`xizhi_read_file`; `ls`→`xizhi_list_files`/`xizhi_tree`; " +
-			"`find`→`xizhi_glob_files`; `grep`→`xizhi_grep`; `sed`/`awk`→`xizhi_modify_file`; `rm`→`xizhi_delete`), " +
+			"`find`→`xizhi_find`; `grep`→`xizhi_grep`; `sed`/`awk`→`xizhi_modify_file`; `rm`→`xizhi_delete`), " +
 			"unless a dedicated tool genuinely cannot do the job.",
 		ParametersJSON: schemaBash,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,7 +35,8 @@ const maxGrepCollect = 10000
 // grepInput is the validated input shared by every grep engine.
 type grepInput struct {
 	relPath       string // workspace-relative search path (for the result Path field)
-	absPath       string // resolved absolute search root
+	absPath       string // resolved absolute search root (the target file itself in single-file mode)
+	searchFile    string // single-file mode: basename of the target file; empty = directory mode
 	pattern       string
 	glob          string
 	ignoreCase    bool
@@ -139,8 +141,15 @@ func grepRun(
 		}
 		return nil, fmt.Errorf("xizhi grep: stat %q: %w", absPath, err)
 	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("xizhi grep: %q is not a directory", relPath)
+	// The search target may be a directory (recursive search, the historical
+	// behavior) or a regular file (search just that file — e.g. a large spilled
+	// MCP result). Anything else (fifo/socket/device — symlinks are resolved by
+	// validatePath) is rejected.
+	var searchFile string
+	if info.Mode().IsRegular() {
+		searchFile = filepath.Base(absPath)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("xizhi grep: %q must be a file or directory", relPath)
 	}
 
 	// Normalize output mode: empty -> content. The schema enumerates the valid
@@ -165,6 +174,7 @@ func grepRun(
 	in := grepInput{
 		relPath:       relPath,
 		absPath:       absPath,
+		searchFile:    searchFile,
 		pattern:       pattern,
 		glob:          glob,
 		ignoreCase:    ignoreCase,

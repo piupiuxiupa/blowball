@@ -67,7 +67,7 @@ func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
 		Modify:    config.XizhiToolConfig{Enabled: true},
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: true},
-		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Find:      config.XizhiToolConfig{Enabled: true},
 		Delete:    config.XizhiToolConfig{Enabled: true},
 	}
 	// Mirror startup: the base registry is populated with ALL enabled xizhi tools.

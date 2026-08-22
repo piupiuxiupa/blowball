@@ -88,11 +88,15 @@ func (goGrepEngine) search(ctx context.Context, in grepInput) (engineResult, err
 			}
 			return nil
 		}
-		// Do not follow symlinks (mirrors xizhi_glob_files' WithNoFollow).
+		// Do not follow symlinks (skipped entirely, like the find engines).
 		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		if !in.includeHidden && isHiddenName(d.Name()) {
+		// Hidden filtering applies to entries discovered by the walk, never to
+		// an explicitly targeted single-file root (rg searches explicit hidden
+		// path arguments too). In directory mode the root is a directory, so
+		// the guard never fires there.
+		if p != in.absPath && !in.includeHidden && isHiddenName(d.Name()) {
 			return nil
 		}
 		if in.glob != "" {
@@ -102,6 +106,11 @@ func (goGrepEngine) search(ctx context.Context, in grepInput) (engineResult, err
 		}
 
 		fileRel, _ := filepath.Rel(in.absPath, p)
+		if in.searchFile != "" {
+			// Single-file mode: the walk visits exactly the target file; its
+			// match file is the basename (Rel of a path against itself is ".").
+			fileRel = in.searchFile
+		}
 		er.matches = append(er.matches, scanGrepFileRaw(p, filepath.ToSlash(fileRel), in.re, in.contextBefore, in.contextAfter)...)
 		if len(er.matches) >= maxGrepCollect {
 			er.collectCapped = true

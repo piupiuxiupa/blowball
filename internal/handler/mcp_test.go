@@ -33,7 +33,7 @@ func allXizhiReg(t *testing.T) *tool.Registry {
 		Modify:    config.XizhiToolConfig{Enabled: true},
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: true},
-		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Find:      config.XizhiToolConfig{Enabled: true},
 	})
 	return reg
 }

@@ -760,7 +760,7 @@ type XizhiConfig struct {
 	Modify    XizhiToolConfig `yaml:"modify"`
 	ListFiles XizhiToolConfig `yaml:"list_files"`
 	Tree      XizhiToolConfig `yaml:"tree"`
-	GlobFiles XizhiToolConfig `yaml:"glob_files"`
+	Find      XizhiToolConfig `yaml:"find"`
 	Grep      XizhiToolConfig `yaml:"grep"`
 	Delete    XizhiToolConfig `yaml:"delete"`
 }
@@ -779,6 +779,39 @@ type WebfetchConfig struct {
 type UserMCPConfig struct {
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
 	CallTimeout    time.Duration `yaml:"call_timeout"`
+	// MaxInlineResultTokens caps the estimated token count of an mcp_call
+	// result returned inline to the model (mcp-call-result-spill). Over the
+	// cap the full result is spilled to a workspace file under
+	// tmp/mcp-outputs/ and the model receives a small path+preview envelope.
+	// A *int distinguishes unset (default 20000) from an explicit 0, which
+	// DISABLES the automatic spill (byte-for-byte prior behavior); negative
+	// values fail config load. The model's explicit output_path parameter
+	// still spills unconditionally when set.
+	MaxInlineResultTokens *int `yaml:"max_inline_result_tokens"`
+}
+
+// defaultMaxInlineResultTokens is the per-user-MCP inline-result cap applied
+// when max_inline_result_tokens is omitted (~15% of a 128K-token window — the
+// sensible ceiling for a single tool result's share of the context).
+const defaultMaxInlineResultTokens = 20000
+
+// MaxInlineResultTokensOrDefault resolves the effective inline-result cap:
+// unset → the 20000 default, explicit values verbatim (0 = disabled).
+func (u UserMCPConfig) MaxInlineResultTokensOrDefault() int {
+	if u.MaxInlineResultTokens == nil {
+		return defaultMaxInlineResultTokens
+	}
+	return *u.MaxInlineResultTokens
+}
+
+// validate rejects a negative inline-result cap (an explicit negative can
+// only be a config mistake; unset and explicit 0 are both meaningful).
+func (u UserMCPConfig) validate() error {
+	if u.MaxInlineResultTokens != nil && *u.MaxInlineResultTokens < 0 {
+		return fmt.Errorf("tools.user_mcp.max_inline_result_tokens must be >= 0 (got %d); unset applies the %d default, 0 disables the automatic spill",
+			*u.MaxInlineResultTokens, defaultMaxInlineResultTokens)
+	}
+	return nil
 }
 
 // ExecutorToolConfig holds the per-tool settings for the bash executor. Network
@@ -1182,6 +1215,20 @@ func Load(path string) (*Config, error) {
 			}
 		}
 	}
+	// The removed tools.xizhi.glob_files key (replaced by tools.xizhi.find,
+	// tool xizhi_find) would be silently ignored by the typed decode; probe the
+	// raw map so a stale config fails fast with a migration pointer.
+	var shadowTools struct {
+		Tools struct {
+			Xizhi map[string]any `yaml:"xizhi"`
+		} `yaml:"tools"`
+	}
+	if err := yaml.Unmarshal([]byte(expanded), &shadowTools); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	if _, ok := shadowTools.Tools.Xizhi["glob_files"]; ok {
+		return nil, fmt.Errorf("config validation error: tools.xizhi.glob_files was removed; use tools.xizhi.find (tool xizhi_find)")
+	}
 	if rawModels, ok := shadow.OpenAI["models"].([]any); ok {
 		for i, raw := range rawModels {
 			entry, _ := raw.(map[string]any)
@@ -1254,6 +1301,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Tools.Executor.Bash.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Tools.UserMCP.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.OpenAI.validate(); err != nil {

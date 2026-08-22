@@ -15,7 +15,7 @@ func TestRegisterAll_RegistersEnabledTools(t *testing.T) {
 	r := newTestRegistry(t)
 	RegisterAll(r, t.TempDir(), testXizhiConfig())
 
-	for _, name := range []string{NameReadFile, NameWriteFile, NameModifyFile, NameListFiles, NameTree, NameGlobFiles, NameGrep, NameDeleteFile} {
+	for _, name := range []string{NameReadFile, NameWriteFile, NameModifyFile, NameListFiles, NameTree, NameFind, NameGrep, NameDeleteFile} {
 		spec, ok := r.Get(name)
 		require.True(t, ok, "tool %q missing", name)
 		assert.NotEmpty(t, spec.Description)
@@ -42,7 +42,7 @@ func TestRegisterAll_SchemasAreValidJSON(t *testing.T) {
 		"modify": schemaModify,
 		"list":   schemaList,
 		"tree":   schemaTree,
-		"glob":   schemaGlob,
+		"find":   schemaFind,
 		"grep":   schemaGrep,
 		"delete": schemaDelete,
 	} {
@@ -80,7 +80,7 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 		Modify:    config.XizhiToolConfig{Enabled: false},
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: false},
-		GlobFiles: config.XizhiToolConfig{Enabled: true},
+		Find:      config.XizhiToolConfig{Enabled: true},
 		Grep:      config.XizhiToolConfig{Enabled: false},
 		Delete:    config.XizhiToolConfig{Enabled: false},
 	}
@@ -99,8 +99,8 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 	assert.True(t, ok, "list_files should be registered")
 	_, ok = r.Get(NameTree)
 	assert.False(t, ok, "tree should not be registered")
-	_, ok = r.Get(NameGlobFiles)
-	assert.True(t, ok, "glob_files should be registered")
+	_, ok = r.Get(NameFind)
+	assert.True(t, ok, "find should be registered")
 	_, ok = r.Get(NameGrep)
 	assert.False(t, ok, "grep should not be registered when disabled")
 	_, ok = r.Get(NameDeleteFile)
@@ -138,4 +138,44 @@ func TestRegisterAll_DescriptionDeclaresResultShape(t *testing.T) {
 	assert.Contains(t, del.Description, "type")
 	assert.Contains(t, del.Description, "recursively")
 	assert.Contains(t, del.Description, "tmp/")
+
+	// xizhi_find declares its regex-not-glob contract, result shape, type
+	// filter and pagination window.
+	fnd, ok := r.Get(NameFind)
+	require.True(t, ok)
+	assert.Contains(t, fnd.Description, "RE2 regex")
+	assert.Contains(t, fnd.Description, "NAME")
+	assert.Contains(t, fnd.Description, "NOT a glob")
+	assert.Contains(t, fnd.Description, `\.go$`)
+	assert.Contains(t, fnd.Description, "file`/`directory")
+	assert.Contains(t, fnd.Description, "max_depth")
+	assert.Contains(t, fnd.Description, "offset = offset + head_limit")
+}
+
+// TestRegisterAll_FindDisabled pins the tools.xizhi.find registration switch.
+func TestRegisterAll_FindDisabled(t *testing.T) {
+	r := newTestRegistry(t)
+	cfg := testXizhiConfig()
+	cfg.Find = config.XizhiToolConfig{Enabled: false}
+	RegisterAll(r, t.TempDir(), cfg)
+
+	_, ok := r.Get(NameFind)
+	assert.False(t, ok, "find should not be registered when disabled")
+}
+
+// TestRegisterAll_LegacyGlobNameUnknown pins the startup migration signal for
+// configs still listing the removed xizhi_glob_files tool: ToolsFor rejects it
+// as unknown, so agents fail loudly at wiring time.
+func TestRegisterAll_LegacyGlobNameUnknown(t *testing.T) {
+	r := newTestRegistry(t)
+	RegisterAll(r, t.TempDir(), testXizhiConfig())
+
+	_, err := r.ToolsFor([]string{"xizhi_glob_files"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown tools")
+	assert.Contains(t, err.Error(), "xizhi_glob_files")
+
+	specs, err := r.ToolsFor([]string{NameFind})
+	require.NoError(t, err)
+	require.Len(t, specs, 1)
 }

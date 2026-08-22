@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/mcpclient"
 	"github.com/lush/blowball/internal/tool/skill"
@@ -241,7 +242,14 @@ func registerCall(r *tool.Registry, tools *Tools) error {
 			"output**. If you are unsure which tools a server offers, call " +
 			"`mcp_list_servers` first (tool counts are shown), then `mcp_list_tools` to " +
 			"discover exact tool names and argument schemas. A single call is bounded by " +
-			"the total-call timeout (default 10s).",
+			"the total-call timeout (default 10s). " +
+			"**Oversized results never come back inline**: when a result exceeds the " +
+			"inline token cap it is saved automatically to a file under " +
+			"`tmp/mcp-outputs/` and you receive `{spilled, path, preview, hint}` — read " +
+			"the file selectively with `xizhi_read_file` (paginated) or `xizhi_grep`. " +
+			"When you EXPECT a large result (bulk queries, dumps), pass `output_path` " +
+			"to save it to a chosen workspace-relative file up front, skipping the " +
+			"inline round-trip entirely.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -257,6 +265,10 @@ func registerCall(r *tool.Registry, tools *Tools) error {
 					"type": "object",
 					"description": "The arguments object for the remote tool.",
 					"additionalProperties": true
+				},
+				"output_path": {
+					"type": "string",
+					"description": "Optional workspace-relative file path. When set, the FULL result is unconditionally saved to this file (an existing file is overwritten) and you receive only a small envelope with the path and a preview — use it whenever you expect a large result. Must stay inside the workspace; absolute paths, '..' traversal, and the reserved .blowball namespace are rejected before the remote call."
 				}
 			},
 			"required": ["server", "tool"],
@@ -264,9 +276,10 @@ func registerCall(r *tool.Registry, tools *Tools) error {
 		}`),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
-				Server string          `json:"server"`
-				Tool   string          `json:"tool"`
-				Args   json.RawMessage `json:"args"`
+				Server     string          `json:"server"`
+				Tool       string          `json:"tool"`
+				Args       json.RawMessage `json:"args"`
+				OutputPath string          `json:"output_path"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("mcp_call: parse args: %w", err)
@@ -274,7 +287,7 @@ func registerCall(r *tool.Registry, tools *Tools) error {
 			if len(a.Args) == 0 {
 				a.Args = json.RawMessage(`{}`)
 			}
-			return callTool(ctx, tools.manager, a.Server, a.Tool, a.Args)
+			return callTool(ctx, tools.manager, a.Server, a.Tool, a.Args, a.OutputPath)
 		},
 	}
 	return r.Register(spec)
@@ -439,18 +452,28 @@ func removeServer(m *Manager, name string) (removeResult, error) {
 
 // callTool validates the tool/args against the cached schema, then invokes the
 // remote tool on the turn-scoped connection. The whole operation is bounded by
-// the total-call timeout.
-func callTool(ctx context.Context, m *Manager, serverName, toolName string, args json.RawMessage) (callResult, error) {
+// the total-call timeout. A successful result is returned inline when it fits
+// the manager's inline-token cap (and no output_path was given); oversized or
+// forced results are spilled to a workspace file and a small envelope is
+// returned instead (mcp-call-result-spill — see spill.go).
+func callTool(ctx context.Context, m *Manager, serverName, toolName string, args json.RawMessage, outputPath string) (any, error) {
 	totalCtx, cancel := context.WithTimeout(ctx, m.callTimeout)
 	defer cancel()
 
+	// A model-supplied spill path is confined BEFORE any config load or
+	// remote call, mirroring the pre-call schema validation: a bad path has
+	// no side effects at all.
+	if err := validateOutputPath(m.WorkspaceRoot(), outputPath); err != nil {
+		return nil, err
+	}
+
 	cfg, err := LoadConfig(m.WorkspaceRoot())
 	if err != nil {
-		return callResult{}, err
+		return nil, err
 	}
 	server, ok := cfg.Server(serverName)
 	if !ok {
-		return callResult{}, fmt.Errorf("mcp_call: server %q is not configured", serverName)
+		return nil, fmt.Errorf("mcp_call: server %q is not configured", serverName)
 	}
 
 	// Validate the tool name and args against the persisted cache. If the tool
@@ -467,22 +490,23 @@ func callTool(ctx context.Context, m *Manager, serverName, toolName string, args
 			schema, ok = lookupToolSchema(server.Tools, toolName)
 		}
 		if !ok {
-			return callResult{}, fmt.Errorf("mcp_call: tool %q is not advertised by server %q", toolName, serverName)
+			return nil, fmt.Errorf("mcp_call: tool %q is not advertised by server %q", toolName, serverName)
 		}
 	}
 	if err := validateArgs(schema, args); err != nil {
-		return callResult{}, fmt.Errorf("mcp_call: args invalid: %w", err)
+		return nil, fmt.Errorf("mcp_call: args invalid: %w", err)
 	}
 
 	c, err := m.Conn(totalCtx, serverName)
 	if err != nil {
-		return callResult{}, err
+		return nil, err
 	}
 	result, err := c.Call(totalCtx, toolName, args)
 	if err != nil {
-		return callResult{}, err
+		return nil, err
 	}
-	return callResult{Content: result.Content}, nil
+	res := callResult{Content: result.Content}
+	return m.maybeSpill(serverName, toolName, outputPath, trace.FromContext(ctx), res), nil
 }
 
 // lookupToolSchema returns the cached input schema for toolName (ok=false when

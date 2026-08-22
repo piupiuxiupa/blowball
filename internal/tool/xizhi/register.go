@@ -17,7 +17,7 @@ const (
 	NameModifyFile = "xizhi_modify_file"
 	NameListFiles  = "xizhi_list_files"
 	NameTree       = "xizhi_tree"
-	NameGlobFiles  = "xizhi_glob_files"
+	NameFind       = "xizhi_find"
 	NameGrep       = "xizhi_grep"
 	NameDeleteFile = "xizhi_delete"
 )
@@ -122,23 +122,44 @@ var (
   "additionalProperties": false
 }`)
 
-	schemaGlob = json.RawMessage(`{
+	schemaFind = json.RawMessage(`{
   "type": "object",
   "properties": {
     "path": {
       "type": "string",
-      "description": "Directory path relative to the workspace root to search within. Defaults to the workspace root."
+      "description": "Directory path relative to the workspace root to search within. Defaults to the workspace root. Must be a directory."
     },
     "pattern": {
       "type": "string",
-      "description": "doublestar glob pattern such as 'src/**/*.go' or '**/*_test.go'."
+      "description": "RE2 regular expression matched against entry NAMES (the base name, not the full path), e.g. '\\.go$' or 'test_'. NOT a glob: '*.go' is invalid regex — write '\\.go$' instead. Empty or omitted matches every entry."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["file", "directory", "any"],
+      "description": "Restrict matches to files or directories. Defaults to 'any' (both)."
+    },
+    "max_depth": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum recursion depth below the search root (1 = immediate children only). Defaults to unlimited."
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "description": "Whether to match the pattern case-insensitively. Defaults to false."
     },
     "include_hidden": {
       "type": "boolean",
       "description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+    },
+    "head_limit": {
+      "type": "integer",
+      "description": "Maximum entries to return. Defaults to 200; pass a larger value to retrieve more in one call."
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Number of entries to skip before applying head_limit, for paginating large result sets. Defaults to 0. When truncated is true, request the next page with offset = offset + head_limit."
     }
   },
-  "required": ["path", "pattern"],
   "additionalProperties": false
 }`)
 
@@ -147,7 +168,7 @@ var (
   "properties": {
     "path": {
       "type": "string",
-      "description": "Required. Directory path relative to the workspace root to search within. Use \".\" to search the whole workspace root; omitting path or passing an empty/blank string is an error."
+      "description": "Required. Path relative to the workspace root to search: a directory (searched recursively) or a single file (only that file is searched). Use \".\" to search the whole workspace root; omitting path or passing an empty/blank string is an error."
     },
     "pattern": {
       "type": "string",
@@ -225,7 +246,7 @@ type modifyArgs struct {
 	NewContent string `json:"new_content"`
 }
 
-// listArgs / treeArgs / globArgs decode arguments for the discovery tools.
+// listArgs / treeArgs / findArgs decode arguments for the discovery tools.
 type listArgs struct {
 	Path          string `json:"path"`
 	IncludeHidden bool   `json:"include_hidden"`
@@ -235,10 +256,19 @@ type treeArgs struct {
 	Depth         int    `json:"depth"`
 	IncludeHidden bool   `json:"include_hidden"`
 }
-type globArgs struct {
+
+// findArgs decodes arguments for xizhi_find. MaxDepth is a *int so an explicit
+// max_depth: 0 (invalid — it must be a positive integer) is distinguishable
+// from omission (unlimited).
+type findArgs struct {
 	Path          string `json:"path"`
 	Pattern       string `json:"pattern"`
+	Type          string `json:"type"`
+	MaxDepth      *int   `json:"max_depth"`
+	IgnoreCase    bool   `json:"ignore_case"`
 	IncludeHidden bool   `json:"include_hidden"`
+	HeadLimit     int    `json:"head_limit"`
+	Offset        int    `json:"offset"`
 }
 
 // grepArgs decodes arguments for xizhi_grep.
@@ -362,20 +392,34 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 		})
 	}
 
-	if cfg.GlobFiles.Enabled {
+	if cfg.Find.Enabled {
 		tools = append(tools, &tool.ToolSpec{
-			Name: NameGlobFiles,
-			Description: "Searches a workspace directory with a doublestar glob pattern and returns `{path, pattern, " +
-				"matches[]}` of relative paths. **`path` MUST be relative to the workspace root.** **`pattern` MUST be a " +
-				"doublestar pattern** (e.g. `src/**/*.go`, `**/*_test.go`); hidden entries are excluded unless " +
-				"`include_hidden` is true.",
-			ParametersJSON: schemaGlob,
+			Name: NameFind,
+			Description: "Finds files AND directories in the workspace by name and returns `{path, pattern, type, total, " +
+				"truncated, applied_limit, applied_offset, entries[]}` where each entry carries its `path` (relative to the " +
+				"search root) and `type` (`file`/`directory`). **`pattern` is an RE2 regex matched against the entry NAME " +
+				"(basename) only — NOT a glob and NOT the full path**: `\\.go$` finds Go files, `test` finds anything with " +
+				"'test' in its name, but `src/` matches nothing (path fragments are not matched — narrow with `path` " +
+				"instead). Omit `pattern` to match everything. Use `type` to restrict to files or directories, `max_depth` " +
+				"to bound recursion, and paginate large results with `head_limit`/`offset` (defaults 200/0; next page via " +
+				"`offset = offset + head_limit` when `truncated` is true). `path` defaults to the workspace root, MUST be a " +
+				"directory and MUST be relative to the workspace root (absolute paths, `..` and the `.blowball` namespace " +
+				"are rejected). Hidden entries are excluded unless `include_hidden` is true. **DO NOT use `find` or " +
+				"`ls -R` via `bash` — use this tool.**",
+			ParametersJSON: schemaFind,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
-				var a globArgs
+				var a findArgs
 				if err := json.Unmarshal(args, &a); err != nil {
-					return nil, fmt.Errorf("xizhi_glob_files: parse args: %w", err)
+					return nil, fmt.Errorf("xizhi_find: parse args: %w", err)
 				}
-				return GlobFiles(workspaceRoot, a.Path, a.Pattern, a.IncludeHidden)
+				maxDepth := 0
+				if a.MaxDepth != nil {
+					if *a.MaxDepth <= 0 {
+						return nil, fmt.Errorf("xizhi_find: max_depth must be a positive integer (got %d)", *a.MaxDepth)
+					}
+					maxDepth = *a.MaxDepth
+				}
+				return FindEntries(workspaceRoot, a.Path, a.Pattern, a.Type, maxDepth, a.IgnoreCase, a.IncludeHidden, a.HeadLimit, a.Offset)
 			},
 		})
 	}
@@ -390,8 +434,10 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 				"`counts[]`. Every result carries `mode`, `applied_limit`, `applied_offset`, `total_files` and " +
 				"`truncated`, so paginate large results with `head_limit`/`offset` (defaults: 200 / 0; request the " +
 				"next page with `offset = offset + head_limit` when `truncated` is true). **`path` is REQUIRED and " +
-				"MUST be relative to the workspace root** (absolute paths, `..` and the `.blowball` namespace are " +
-				"rejected); use `\".\"` to search the whole workspace root explicitly. **DO NOT grep via `bash` — use " +
+				"MUST be relative to the workspace root** — it may be a directory (searched recursively) or a single " +
+				"file (only that file is searched, e.g. a large result spilled under `tmp/`) (absolute paths, `..` and " +
+				"the `.blowball` namespace are rejected); use `\".\"` to search the whole workspace root explicitly. " +
+				"**DO NOT grep via `bash` — use " +
 				"this tool** (it is cheaper and returns line numbers). Binary files are skipped; long lines are truncated. Use " +
 				"`glob` to filter by file name (e.g. `*.go`).",
 			ParametersJSON: schemaGrep,

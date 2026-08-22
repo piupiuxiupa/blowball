@@ -93,7 +93,7 @@ type getSessionMessagesRequest struct {
 
 const (
 	defaultPageSize = 50
-	maxPageSize     = 200
+	maxPageSize     = 5000
 )
 
 // getSessionMessagesResponse is the body for

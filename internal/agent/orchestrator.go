@@ -93,9 +93,10 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string, ove
 	var closer TurnCloser
 	if mcp.AnyMCPTool(f.cfg.Agents.Confucius.Tools, f.cfg.Agents.Chongzhi.Tools, f.cfg.Agents.Liang.Tools) {
 		mcpMgr = mcp.NewManager(mcp.ManagerOptions{
-			WorkspaceRoot:  workspaceRoot,
-			ConnectTimeout: f.userMCP.ConnectTimeout,
-			CallTimeout:    f.userMCP.CallTimeout,
+			WorkspaceRoot:         workspaceRoot,
+			ConnectTimeout:        f.userMCP.ConnectTimeout,
+			CallTimeout:           f.userMCP.CallTimeout,
+			MaxInlineResultTokens: f.userMCP.MaxInlineResultTokensOrDefault(),
 		})
 		closer = func() { _ = mcpMgr.Close() }
 	}
@@ -235,7 +236,7 @@ func (f *orchestratorFactory) allowedMCPTools(mcp config.AgentMCPConfig) []strin
 func isXizhiTool(name string) bool {
 	switch name {
 	case xizhi.NameReadFile, xizhi.NameWriteFile, xizhi.NameModifyFile,
-		xizhi.NameListFiles, xizhi.NameTree, xizhi.NameGlobFiles, xizhi.NameGrep, xizhi.NameDeleteFile:
+		xizhi.NameListFiles, xizhi.NameTree, xizhi.NameFind, xizhi.NameGrep, xizhi.NameDeleteFile:
 		return true
 	}
 	return false

@@ -365,7 +365,7 @@ agents:
       - xizhi_modify_file
       - xizhi_list_files
       - xizhi_tree
-      - xizhi_glob_files
+      - xizhi_find
       - xizhi_grep
       - xizhi_delete
       - webfetch
@@ -423,7 +423,7 @@ agents:
       - xizhi_read_file
       - xizhi_list_files
       - xizhi_tree
-      - xizhi_glob_files
+      - xizhi_find
       - xizhi_grep
     mcp:
       servers: []
@@ -463,8 +463,8 @@ tools:
       enabled: true
     tree:
       enabled: true
-    glob_files:
-      enabled: true
+    find:
+      enabled: true   # enables xizhi_find (regex name search for files AND directories with type/depth filters and pagination); also add "xizhi_find" to an agent's tools list to use it
     delete:
       enabled: true   # enables xizhi_delete; also add "xizhi_delete" to an agent's tools list to use it
     grep:
@@ -487,7 +487,7 @@ tools:
   #   xizhi_grep: 30s
   #   xizhi_tree: 15s
   #   xizhi_list_files: 10s
-  #   xizhi_glob_files: 15s
+  #   xizhi_find: 15s
   #   webfetch: 30s
   #   bash: 120s
 
@@ -499,6 +499,13 @@ tools:
   user_mcp:
     # connect_timeout: 5s   # MCP handshake timeout (default 5s)
     # call_timeout: 10s     # total per mcp_call budget (default 10s)
+    # Inline cap for mcp_call results (mcp-call-result-spill). Over the cap the
+    # full result is saved to tmp/mcp-outputs/ in the user's workspace and the
+    # model gets a small path+preview envelope (read it back with
+    # xizhi_read_file / xizhi_grep). Tokens are a conservative CJK-aware
+    # estimate, never exact. Unset → 20000; explicit 0 disables the automatic
+    # spill (the model's explicit output_path still spills); negative fails load.
+    # max_inline_result_tokens: 20000
 
   # Sandboxed command execution via bubblewrap (Linux only).
   # Requires bwrap to be installed and unprivileged user namespaces available.

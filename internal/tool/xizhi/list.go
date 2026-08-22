@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // listEntry is one item returned by xizhi_list_files.
@@ -88,15 +86,4 @@ func normalizePath(relPath string) string {
 // hidden (starts with ".").
 func isHiddenName(name string) bool {
 	return name != "" && name[0] == '.'
-}
-
-// isHiddenPath reports whether any component of relPath is hidden.
-func isHiddenPath(relPath string) bool {
-	relPath = filepath.ToSlash(relPath)
-	for _, part := range strings.Split(relPath, "/") {
-		if isHiddenName(part) {
-			return true
-		}
-	}
-	return false
 }

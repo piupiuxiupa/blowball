@@ -94,11 +94,11 @@ per-user MCP 服务的认证 SHALL 限定为静态凭据（bearer token、API ke
 - **THEN** 系统拒绝并返回明确错误，不改写既有配置
 
 ### Requirement: On-demand MCP invocation tool
-系统 SHALL 提供 `mcp_call(server, tool, args)` 元工具，按需调用某 per-user server 的某工具。
+系统 SHALL 提供 `mcp_call(server, tool, args, output_path?)` 元工具，按需调用某 per-user server 的某工具。远端成功结果按 token 估算判定返回形态：估算值在 inline 阈值内且未指定 `output_path` 时原样返回给 agent；超过阈值或指定 `output_path` 时按 mcp-call-result-spill 能力落盘并返回信封（path + preview + hint）。
 
 #### Scenario: Successful remote tool call
 - **WHEN** agent 调用 `mcp_call` 指向已配置 server 的已知工具且 args 合法
-- **THEN** 系统连接该 server、转发 `tools/call`，并将远端成功结果返回给 agent
+- **THEN** 系统连接该 server、转发 `tools/call`，并将远端成功结果返回给 agent（阈值内且未指定 `output_path` 时为原样 inline）
 
 #### Scenario: Unknown tool rejected before call
 - **WHEN** `mcp_call` 的 `tool` 不在该 server 缓存的 `tools/list` 中
@@ -110,7 +110,11 @@ per-user MCP 服务的认证 SHALL 限定为静态凭据（bearer token、API ke
 
 #### Scenario: Remote tool error surfaced
 - **WHEN** 远端 `tools/call` 返回 error 或 `isError=true`
-- **THEN** `mcp_call` 返回错误，agent 层将其作为 tool_error 事件流式输出
+- **THEN** `mcp_call` 返回错误，agent 层将其作为 tool_error 事件流式输出（错误路径不参与 spill 判定）
+
+#### Scenario: Oversized success result returned as spill envelope
+- **WHEN** 远端成功结果的估算 token 数超过 inline 阈值
+- **THEN** 系统将全量结果落盘到请求用户 workspace 的 `tmp/mcp-outputs/` 下，并向 agent 返回含 `path`/`preview`/`hint` 的信封而非全量内容（详见 mcp-call-result-spill 能力）
 
 ### Requirement: On-demand MCP tool discovery tool
 系统 SHALL 提供 `mcp_list_tools(server)` agent 工具，实时连接指定的 per-user server、执行 `tools/list`，并返回该 server 全部工具的 `name`/`description`/`input_schema`。这是 agent 发现 per-user MCP 工具契约（工具名与入参 schema）的权威入口。

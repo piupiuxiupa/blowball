@@ -11,6 +11,73 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGrepFiles_SingleFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "notes"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "notes", "a.txt"), []byte("alpha\nSELECT 1\nbeta\nSELECT 2\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "notes", "b.txt"), []byte("SELECT 3\n"), 0o644))
+
+	// A regular-file path searches just that file; the result shape matches
+	// directory mode (Path echoes the request, file is the basename).
+	res, err := GrepFiles(root, "notes/a.txt", "SELECT", "", false, false, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	assert.Equal(t, "notes/a.txt", got.Path)
+	require.Len(t, got.Matches, 2)
+	assert.Equal(t, "a.txt", got.Matches[0].File)
+	assert.Equal(t, 2, got.Matches[0].LineNumber)
+	assert.Equal(t, "SELECT 1", got.Matches[0].Line)
+	assert.Equal(t, "a.txt", got.Matches[1].File)
+	assert.Equal(t, 4, got.Matches[1].LineNumber)
+	assert.Equal(t, 1, got.TotalFiles)
+}
+
+func TestGrepFiles_SingleFile_HiddenRootStillSearched(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".env"), []byte("secret=1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "other.txt"), []byte("secret=2\n"), 0o644))
+
+	// Hidden filtering applies to entries discovered by traversal, never to
+	// the explicitly targeted file itself.
+	res, err := GrepFiles(root, ".env", "secret", "", false, false, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	require.Len(t, got.Matches, 1)
+	assert.Equal(t, ".env", got.Matches[0].File)
+}
+
+func TestGrepFiles_SingleFile_GlobMismatchIsEmpty(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b.txt"), []byte("hit\n"), 0o644))
+
+	// glob stays a basename post-filter: a non-matching basename yields an
+	// empty result, not an error.
+	res, err := GrepFiles(root, "a/b.txt", "hit", "*.go", false, false, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	assert.Empty(t, got.Matches)
+	assert.Equal(t, 0, got.TotalFiles)
+}
+
+func TestGrepFiles_SingleFile_BinaryIsEmpty(t *testing.T) {
+	root := t.TempDir()
+	bin := append([]byte("func Foo\n"), 0, 0, 0) // NUL bytes -> binary
+	require.NoError(t, os.WriteFile(filepath.Join(root, "bin.dat"), bin, 0o644))
+
+	res, err := GrepFiles(root, "bin.dat", "Foo", "", false, false, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	assert.Empty(t, got.Matches)
+}
+
+func TestGrepFiles_SingleFile_NotFound(t *testing.T) {
+	root := t.TempDir()
+	_, err := GrepFiles(root, "missing.txt", "x", "", false, false, 0, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
 func TestGrepFiles_RegexMatches(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "src"), 0o755))

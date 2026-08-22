@@ -27,6 +27,7 @@ func TestGrep_RgGoParity(t *testing.T) {
 	fixtures := []struct {
 		name          string
 		files         map[string]string
+		target        string // search path relative to root (default "."); may name a single file
 		pattern       string
 		glob          string
 		ignoreCase    bool
@@ -44,6 +45,51 @@ func TestGrep_RgGoParity(t *testing.T) {
 				"b.go": "func Foo() int { return 1 }\n",
 			},
 			pattern: `func Foo\(`, outputMode: outputModeContent,
+		},
+		{
+			name: "single file",
+			files: map[string]string{
+				"notes/a.txt": "alpha\nSELECT 1\nbeta\nSELECT 2\n",
+				"notes/b.txt": "SELECT 3\n",
+			},
+			target: "notes/a.txt", pattern: "SELECT", outputMode: outputModeContent,
+		},
+		{
+			name: "single file with context",
+			files: map[string]string{
+				"notes/a.txt": "line1\nline2\ndef main\nline4\nline5\n",
+			},
+			target: "notes/a.txt", pattern: "def main", ctxBefore: 2, ctxAfter: 2, outputMode: outputModeContent,
+		},
+		{
+			name: "single hidden file",
+			files: map[string]string{
+				".env":        "secret\n",
+				"visible.txt": "secret\n",
+			},
+			target: ".env", pattern: "secret", outputMode: outputModeContent,
+		},
+		{
+			name: "single file glob mismatch",
+			files: map[string]string{
+				"a/b.txt": "hit\n",
+			},
+			target: "a/b.txt", pattern: "hit", glob: "*.go", outputMode: outputModeContent,
+		},
+		{
+			name: "single binary file is skipped",
+			files: map[string]string{
+				"bin.dat": "func Foo\n\x00\x00\x00",
+			},
+			target: "bin.dat", pattern: "Foo", outputMode: outputModeContent,
+		},
+		{
+			name: "single file count mode",
+			files: map[string]string{
+				"notes/a.txt": "Foo\nFoo\n",
+				"notes/b.txt": "Foo\n",
+			},
+			target: "notes/a.txt", pattern: "Foo", outputMode: outputModeCount,
 		},
 		{
 			name: "content with context",
@@ -118,9 +164,21 @@ func TestGrep_RgGoParity(t *testing.T) {
 			if mode == "" {
 				mode = outputModeContent
 			}
+			// Resolve the search target the way grepRun does: "." or a
+			// directory walks it; a regular file switches to single-file mode.
+			target := f.target
+			if target == "" {
+				target = "."
+			}
+			absTarget := filepath.Join(root, filepath.FromSlash(target))
+			var searchFile string
+			if fi, err := os.Stat(absTarget); err == nil && fi.Mode().IsRegular() {
+				searchFile = filepath.Base(absTarget)
+			}
 			in := grepInput{
-				relPath:       ".",
-				absPath:       root,
+				relPath:       target,
+				absPath:       absTarget,
+				searchFile:    searchFile,
 				pattern:       f.pattern,
 				glob:          f.glob,
 				ignoreCase:    f.ignoreCase,
