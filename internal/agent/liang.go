@@ -140,7 +140,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		}
 
 		var assistantText string
-		result, err := runLLMRound(ctx, l.client, hub, l.Name(), req, &round, l.turn.LengthContinue,
+		result, err := runLLMRound(ctx, l.client, hub, l.Name(), req, &round, l.turn.LengthContinue, l.cfg.Retry,
 			func(r []Message) []Message { return withSystem(l.cfg.SystemPrompt, r) },
 			// Parseable tool_calls of an intermediate length response dispatch
 			// through the same record path as the main loop.
@@ -227,7 +227,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		if rf, ok := l.terminalResponseFormat(round); ok {
 			wrapReq.ResponseFormat = rf
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, l.client, l.Name(), hub, wrapReq, &round, l.turn.LengthContinue,
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, l.client, l.Name(), hub, wrapReq, &round, l.turn.LengthContinue, l.cfg.Retry,
 			func(r []Message) []Message {
 				return append(withSystem(l.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
 			})

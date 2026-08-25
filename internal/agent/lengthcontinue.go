@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -86,6 +87,13 @@ type roundResult struct {
 // round, and re-request. With the capability disabled (lc zero) it degenerates
 // to a single StreamChat call — byte-for-byte prior loop behavior.
 //
+// llm-round-retry: every individual StreamChat call of the round (initial and
+// each continuation attempt alike) is wrapped by streamChatWithRetry using the
+// CALLING agent's retry policy — a transient failure re-issues the byte-
+// identical request instead of failing the round. The two mechanisms are
+// orthogonal: a transient retry never consumes continuation budget, and a
+// continuation attempt gets a fresh retry count.
+//
 // req is the caller-built request for the round (Messages = rebuild(round) at
 // entry); the helper owns only req.MaxCompletionTokens and req.Messages across
 // attempts. round is the caller's conversation slice (pointer — scaffolding
@@ -96,7 +104,7 @@ type roundResult struct {
 // caller's streaming closures, invoked for every attempt — the continuation
 // stream is seamless by design (no event between attempts).
 func runLLMRound(ctx context.Context, client LLMClient, hub stream.EventHub, agentName string,
-	req LLMRequest, round *[]Message, lc config.LengthContinueConfig,
+	req LLMRequest, round *[]Message, lc config.LengthContinueConfig, retry config.AgentRetryConfig,
 	rebuild func([]Message) []Message, dispatch lengthRoundDispatch,
 	onToken, onReasoning func(string) error) (roundResult, error) {
 
@@ -104,7 +112,11 @@ func runLLMRound(ctx context.Context, client LLMClient, hub stream.EventHub, age
 	baseTokens := req.MaxCompletionTokens
 	var res roundResult
 	for attempt := 0; ; attempt++ {
-		resp, err := client.StreamChat(ctx, req, onToken, onReasoning)
+		resp, failedUsage, err := streamChatWithRetry(ctx, client, hub, agentName, req, retry, onToken, onReasoning)
+		// Failed attempts' reported usage is real spend — fold it in even on
+		// error (design D5); their partial content is NOT kept (a successful
+		// retry's output replaces it).
+		res.Usage.Add(failedUsage)
 		if err != nil {
 			res.Resp = resp
 			return res, err
@@ -127,6 +139,78 @@ func runLLMRound(ctx context.Context, client LLMClient, hub stream.EventHub, age
 		scaffoldLengthRound(ctx, hub, agentName, round, resp, dispatch)
 		req.MaxCompletionTokens = baseTokens + (attempt+1)*step
 		req.Messages = rebuild(*round)
+	}
+}
+
+// streamChatWithRetry issues ONE StreamChat call with round-level transient
+// retry (llm-round-retry, design D1/D2): on a transient failure (429/5xx/
+// network blip/mid-stream break/idle-watchdog timeout — anything
+// isTransientError matches) it emits retryErrorEvent, backs off per
+// computeBackoff (cancellable — the select mirrors dispatchSubAgent), and
+// re-issues the BYTE-IDENTICAL req: Messages and MaxCompletionTokens are
+// untouched, no tool is re-dispatched, no continuation scaffolding is appended
+// (scaffolding only ever happens on the success path in runLLMRound). With a
+// disabled policy it is a single call — byte-for-byte prior behavior.
+//
+// The retry decision is strictly ordered (design D2): context cancellation
+// wins absolutely (never retried, no event, no backoff), then the attempt cap
+// (max_attempts counts the original call), then isTransientError, then the
+// turn-level shared budget — the failed attempt's reported usage is charged
+// BEFORE the allows() check, and the budget is read from ctx
+// (retryBudgetFromCtx; nil = unlimited).
+//
+// It returns the final LLMResponse (partial on failure — callers may read
+// resp.Usage), the usage reported by every FAILED attempt (folded into the
+// round's real spend; the successful attempt's usage is NOT included), and the
+// error (nil on success).
+func streamChatWithRetry(ctx context.Context, client LLMClient, hub stream.EventHub, agentName string,
+	req LLMRequest, policy config.AgentRetryConfig,
+	onToken, onReasoning func(string) error) (LLMResponse, Usage, error) {
+
+	maxAttempts := 1 // disabled policy: one call, zero behavior change
+	if policy.Enabled {
+		maxAttempts = policy.MaxAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = config.DefaultRetryMaxAttempts()
+		}
+	}
+	budget := retryBudgetFromCtx(ctx)
+	var failedUsage Usage
+	for callAttempt := 0; ; callAttempt++ {
+		resp, err := client.StreamChat(ctx, req, onToken, onReasoning)
+		if err == nil {
+			return resp, failedUsage, nil
+		}
+		// Real-spend accounting (design D5): the failed attempt's reported
+		// usage (often 0 — gateways usually bill at stream end) is folded
+		// into the round's usage; its partial content is dropped.
+		failedUsage.Add(resp.Usage)
+		switch {
+		case ctx.Err() != nil:
+			// Cancellation beats every retry consideration (design D2): user
+			// cancel, graceful shutdown, hub-close — return, never retry.
+			return resp, failedUsage, err
+		case !policy.Enabled, callAttempt+1 >= maxAttempts:
+			return resp, failedUsage, err
+		case !isTransientError(err):
+			// Semantic failures (bad args rejected by the gateway, length
+			// exhaustion text, ...) retry identically — fail fast.
+			return resp, failedUsage, err
+		}
+		// Charge the failed attempt to the turn-wide budget before deciding
+		// whether one more retry fits (design D4).
+		budget.charge(resp.Usage)
+		if !budget.allows() {
+			return resp, failedUsage, err
+		}
+		// Signal the retry to the frontend (same event shape as the
+		// dispatch-level retry), then back off before re-issuing.
+		hub.SendCtx(ctx, retryErrorEvent(agentName, err))
+		select {
+		case <-time.After(computeBackoff(policy, callAttempt+1)):
+		case <-ctx.Done():
+			return resp, failedUsage, ctx.Err()
+		}
 	}
 }
 

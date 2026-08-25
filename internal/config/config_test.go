@@ -740,9 +740,9 @@ agents:
 	}
 }
 
-// TestLoad_RetryDefaults verifies the per-agent retry defaults: Liang defaults
-// to retry-enabled with the standard backoff, Chongzhi defaults to disabled,
-// and an explicit retry block is respected.
+// TestLoad_RetryDefaults verifies the per-agent retry defaults (llm-round-retry):
+// all three agents default to retry-enabled with the standard backoff and
+// max_attempts=3, and an explicit retry block is respected.
 func TestLoad_RetryDefaults(t *testing.T) {
 	path := writeTempYAML(t, `
 openai:
@@ -765,23 +765,79 @@ agents:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	// Liang (read-only) defaults to retry-enabled with standard backoffs.
-	if !cfg.Agents.Liang.Retry.Enabled {
-		t.Error("Liang retry should default to enabled")
+	// All three agents default to retry-enabled with standard backoffs and
+	// max_attempts=3 (1 original + 2 retries). Chongzhi's dispatch-level retry
+	// safety is carried by the ToolCallTracker gate, not the enabled flag.
+	for _, tc := range []struct {
+		name  string
+		retry AgentRetryConfig
+	}{
+		{"Confucius", cfg.Agents.Confucius.Retry},
+		{"Chongzhi", cfg.Agents.Chongzhi.Retry},
+		{"Liang", cfg.Agents.Liang.Retry},
+	} {
+		if !tc.retry.Enabled {
+			t.Errorf("%s retry should default to enabled", tc.name)
+		}
+		if tc.retry.MaxAttempts != defaultRetryMaxAttempts {
+			t.Errorf("%s MaxAttempts = %d, want %d", tc.name, tc.retry.MaxAttempts, defaultRetryMaxAttempts)
+		}
+		if tc.retry.InitialBackoff != defaultRetryInitialBackoff {
+			t.Errorf("%s InitialBackoff = %v, want %v", tc.name, tc.retry.InitialBackoff, defaultRetryInitialBackoff)
+		}
+		if tc.retry.MaxBackoff != defaultRetryMaxBackoff {
+			t.Errorf("%s MaxBackoff = %v, want %v", tc.name, tc.retry.MaxBackoff, defaultRetryMaxBackoff)
+		}
 	}
-	if cfg.Agents.Liang.Retry.MaxAttempts != defaultRetryMaxAttempts {
-		t.Errorf("Liang MaxAttempts = %d, want %d", cfg.Agents.Liang.Retry.MaxAttempts, defaultRetryMaxAttempts)
+	if defaultRetryMaxAttempts != 3 {
+		t.Errorf("defaultRetryMaxAttempts = %d, want 3", defaultRetryMaxAttempts)
 	}
-	if cfg.Agents.Liang.Retry.InitialBackoff != defaultRetryInitialBackoff {
-		t.Errorf("Liang InitialBackoff = %v, want %v", cfg.Agents.Liang.Retry.InitialBackoff, defaultRetryInitialBackoff)
-	}
-	if cfg.Agents.Liang.Retry.MaxBackoff != defaultRetryMaxBackoff {
-		t.Errorf("Liang MaxBackoff = %v, want %v", cfg.Agents.Liang.Retry.MaxBackoff, defaultRetryMaxBackoff)
-	}
+}
 
-	// Chongzhi (side-effecting) defaults to retry-disabled.
-	if cfg.Agents.Chongzhi.Retry.Enabled {
-		t.Error("Chongzhi retry should default to disabled")
+// TestLoad_RetryExplicitDisable verifies an explicit retry: {enabled: false}
+// block survives the defaults for every agent (the zero-value-override rule
+// only fires when the whole block is zero).
+func TestLoad_RetryExplicitDisable(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confucius:
+    name: Confucius
+    retry: {enabled: false}
+  chongzhi:
+    name: Chongzhi
+    retry: {enabled: false}
+  liang:
+    name: Liang
+    retry: {enabled: false}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		retry AgentRetryConfig
+	}{
+		{"Confucius", cfg.Agents.Confucius.Retry},
+		{"Chongzhi", cfg.Agents.Chongzhi.Retry},
+		{"Liang", cfg.Agents.Liang.Retry},
+	} {
+		if tc.retry.Enabled {
+			t.Errorf("%s explicit retry.enabled=false must be preserved", tc.name)
+		}
+		if tc.retry.MaxAttempts != 0 {
+			t.Errorf("%s MaxAttempts = %d, want 0 (defaults only apply when enabled)", tc.name, tc.retry.MaxAttempts)
+		}
 	}
 }
 

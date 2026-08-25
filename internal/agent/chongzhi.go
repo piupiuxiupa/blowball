@@ -125,7 +125,7 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		}
 
 		var assistantText string
-		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.turn.LengthContinue,
+		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.turn.LengthContinue, c.cfg.Retry,
 			func(r []Message) []Message { return withSystem(c.cfg.SystemPrompt, r) },
 			// Parseable tool_calls of an intermediate length response dispatch
 			// through the same record path as the main loop (including the
@@ -208,7 +208,7 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 			ReasoningEffort:     c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue,
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue, c.cfg.Retry,
 			func(r []Message) []Message {
 				return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
 			})

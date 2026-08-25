@@ -139,7 +139,10 @@ func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest
 	c.mu.Unlock()
 
 	if resp.err != nil && !resp.errAfterTokens {
-		return agent.LLMResponse{}, resp.err
+		// Mirror the real client's failure shape: the response carries what
+		// the (partial) stream produced — including usage — so round-retry
+		// tests can assert real-spend accounting on failed attempts.
+		return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, resp.err
 	}
 
 	for _, tok := range resp.reasoningTokens {
@@ -169,7 +172,7 @@ func (c *scriptedLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest
 	// errAfterTokens: the partial stream has been emitted; now surface the
 	// modelled provider failure so the orchestrator takes its error path.
 	if resp.err != nil {
-		return agent.LLMResponse{}, resp.err
+		return agent.LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, resp.err
 	}
 	return agent.LLMResponse{
 		FinishReason:     resp.finishReason,

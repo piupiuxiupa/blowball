@@ -442,14 +442,23 @@ agents:
     #     "required": ["verdict"],
     #     "additionalProperties": false
     #   }
-    # Transient-error retry (capability C). Liang (read-only) defaults to enabled
-    # with the standard backoff; override here. Chongzhi (side-effecting) defaults
-    # to disabled and is only retried before it executes any tool call.
+    # Transient-error retry (capability C + llm-round-retry). One block governs
+    # BOTH retry levels of this agent: the round-level retry of each individual
+    # streaming LLM call (mid-stream break / 429 / idle-watchdog timeout — the
+    # request is re-sent byte-identical) and, for sub-agents, Confucius's
+    # dispatch-level retry of a failed Run (Chongzhi's dispatch retry is safe:
+    # it only fires before that invocation executed any tool call). Defaults to
+    # enabled for all three agents with the standard backoff; override here.
     # retry:
     #   enabled: true
-    #   max_attempts: 2        # total attempts including the first
+    #   max_attempts: 3        # total attempts including the first; default 3
     #   initial_backoff: 500ms
     #   max_backoff: 4s
+    #   # budget_tokens (confucius's value drives the turn): the turn-wide token
+    #   # pool shared by round-level AND dispatch-level retries across every
+    #   # agent of the turn; 0 (default) = unlimited. The tokens a failed
+    #   # attempt reports are charged to it before each retry decision.
+    #   # budget_tokens: 20000
 
 tools:
   xizhi:

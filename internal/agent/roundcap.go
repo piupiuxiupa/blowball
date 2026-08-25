@@ -27,8 +27,11 @@ const wrapUpInstruction = "The tool-call round limit for this task has been reac
 // system prompt, and runWrapUpRound applies rebuild at entry and again after
 // every length continuation (llm-length-continuation covers the wrap-up round;
 // continuation attempts keep the steering instruction as the trailing
-// message). Content and reasoning chunks are streamed to hub exactly like a
-// normal round. It performs no tool dispatch and runs exactly one round.
+// message). retry is the OWNING agent's retry policy — the wrap-up round's
+// StreamChat calls get the same round-level transient retry as the main loop
+// (llm-round-retry). Content and reasoning chunks are streamed to hub exactly
+// like a normal round. It performs no tool dispatch and runs exactly one
+// round.
 //
 // Returns the synthesized content, the round's usage, and any error. If the
 // FINAL attempt emits tool_calls (some OpenAI-compatible gateways do even
@@ -39,12 +42,12 @@ const wrapUpInstruction = "The tool-call round limit for this task has been reac
 // caller's round_cap_exhausted path applies (the length_exhausted code belongs
 // to the main loops, which own their agent_error emission).
 func runWrapUpRound(ctx context.Context, client LLMClient, agentName string, hub stream.EventHub,
-	req LLMRequest, round *[]Message, lc config.LengthContinueConfig,
+	req LLMRequest, round *[]Message, lc config.LengthContinueConfig, retry config.AgentRetryConfig,
 	rebuild func([]Message) []Message) (string, Usage, error) {
 	req.Messages = rebuild(*round)
 
 	var streamed string
-	result, err := runLLMRound(ctx, client, hub, agentName, req, round, lc, rebuild, nil,
+	result, err := runLLMRound(ctx, client, hub, agentName, req, round, lc, retry, rebuild, nil,
 		func(delta string) error {
 			streamed += delta
 			if !hub.SendCtx(ctx, stream.TokenEvent(agentName, delta)) {

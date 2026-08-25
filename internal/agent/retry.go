@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -87,9 +88,11 @@ func computeBackoff(policy config.AgentRetryConfig, attempt int) time.Duration {
 // budget has been consumed; it stops further retries.
 var errRetryBudgetExceeded = errors.New("retry budget exceeded")
 
-// retryBudget bounds the total tokens spent on sub-agent retries within one
-// Confucius turn (capability C). It is concurrency-safe because parallel
-// dispatches share it. A limit of 0 means unlimited (no budget enforced).
+// retryBudget bounds the total tokens spent on retries within one Confucius
+// turn (capability C; llm-round-retry widens the pool from "sub-agent dispatch
+// retries" to every retry of the turn — round-level and dispatch-level alike).
+// It is concurrency-safe because parallel dispatches share it. A limit of 0
+// means unlimited (no budget enforced).
 type retryBudget struct {
 	mu     sync.Mutex
 	limit  int
@@ -135,4 +138,29 @@ func retryErrorEvent(agent string, err error) stream.StreamEvent {
 	}
 	e.Meta["retry"] = true
 	return e
+}
+
+// retryBudgetCtxKey is the unexported context key type for the turn-level
+// retry budget value.
+type retryBudgetCtxKey struct{}
+
+// WithRetryBudget returns a copy of ctx carrying the turn-level retry budget
+// (llm-round-retry), so runLLMRound's round-level retries can charge and gate
+// against the SAME pool as Confucius's dispatch-level retries without
+// threading the budget through the Agent.Run interface. Confucius.Run injects
+// it once per turn; sub-agent dispatch contexts derive from the turn ctx, so
+// sub-agent rounds share the pool transparently. Precedent: WithAgentName.
+func WithRetryBudget(ctx context.Context, budget *retryBudget) context.Context {
+	return context.WithValue(ctx, retryBudgetCtxKey{}, budget)
+}
+
+// retryBudgetFromCtx returns the turn-level retry budget stored in ctx, or nil
+// when none is present. Nil means unlimited — charge/allows are nil-safe, so
+// callers need no special case.
+func retryBudgetFromCtx(ctx context.Context) *retryBudget {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := ctx.Value(retryBudgetCtxKey{}).(*retryBudget)
+	return v
 }

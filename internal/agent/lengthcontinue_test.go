@@ -102,7 +102,7 @@ func TestRunLLMRound_ContentLengthContinues(t *testing.T) {
 	var err error
 	events := collectEvents(t, func(hub *stream.Hub) {
 		res, err = runLLMRound(context.Background(), client, hub, "Liang", req, &round,
-			enabledPolicy(512, 3), func(r []Message) []Message { return withSystem("sys", r) }, nil,
+			enabledPolicy(512, 3), config.AgentRetryConfig{}, func(r []Message) []Message { return withSystem("sys", r) }, nil,
 			func(string) error { return nil }, func(string) error { return nil })
 	})
 	require.NoError(t, err)
@@ -145,7 +145,7 @@ func TestRunLLMRound_EmptyLengthContinues(t *testing.T) {
 	req := LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 800}
 
 	res, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang", req, &round,
-		enabledPolicy(512, 3), func(r []Message) []Message { return r }, nil,
+		enabledPolicy(512, 3), config.AgentRetryConfig{}, func(r []Message) []Message { return r }, nil,
 		func(string) error { return nil }, func(string) error { return nil })
 	require.NoError(t, err)
 	assert.Equal(t, 2, client.requestCount())
@@ -166,7 +166,7 @@ func TestRunLLMRound_DisabledSingleAttempt(t *testing.T) {
 	req := LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 100}
 
 	res, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang", req, &round,
-		config.LengthContinueConfig{}, func(r []Message) []Message { return r }, nil,
+		config.LengthContinueConfig{}, config.AgentRetryConfig{}, func(r []Message) []Message { return r }, nil,
 		func(string) error { return nil }, func(string) error { return nil })
 	require.NoError(t, err)
 	assert.Equal(t, 1, client.requestCount())
@@ -186,7 +186,7 @@ func TestRunLLMRound_Exhaustion(t *testing.T) {
 	req := LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 8192}
 
 	res, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang", req, &round,
-		enabledPolicy(8192, 2), func(r []Message) []Message { return r }, nil,
+		enabledPolicy(8192, 2), config.AgentRetryConfig{}, func(r []Message) []Message { return r }, nil,
 		func(string) error { return nil }, func(string) error { return nil })
 	require.NoError(t, err)
 
@@ -214,7 +214,7 @@ func TestRunLLMRound_ToolCallsTriage(t *testing.T) {
 	var err error
 	events := collectEvents(t, func(hub *stream.Hub) {
 		res, err = runLLMRound(context.Background(), client, hub, "Chongzhi", req, &round,
-			enabledPolicy(512, 3), func(r []Message) []Message { return r },
+			enabledPolicy(512, 3), config.AgentRetryConfig{}, func(r []Message) []Message { return r },
 			// The production closure is executeAndRecordToolCalls; the stub
 			// mirrors its round effect (append each call's answer) so the
 			// wire-protocol assertion below is meaningful.
@@ -302,7 +302,7 @@ func TestRunLLMRound_EmptyArgsRouteToSynthetic(t *testing.T) {
 	events := collectEvents(t, func(hub *stream.Hub) {
 		_, err := runLLMRound(context.Background(), client, hub, "Chongzhi",
 			LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 100}, &round,
-			enabledPolicy(512, 3), func(r []Message) []Message { return r },
+			enabledPolicy(512, 3), config.AgentRetryConfig{}, func(r []Message) []Message { return r },
 			// The production closure is executeAndRecordToolCalls; the stub
 			// mirrors its round effect (append each call's answer) so the
 			// wire-protocol assertion below is meaningful.
@@ -336,7 +336,7 @@ func TestRunLLMRound_ErrorMidContinuation(t *testing.T) {
 	round := []Message{{Role: "user", Content: "q"}}
 	_, err := runLLMRound(context.Background(), client, stream.NewHub(64), "Liang",
 		LLMRequest{Model: "m", Messages: round, MaxCompletionTokens: 100}, &round,
-		enabledPolicy(512, 3), func(r []Message) []Message { return r }, nil,
+		enabledPolicy(512, 3), config.AgentRetryConfig{}, func(r []Message) []Message { return r }, nil,
 		func(string) error { return nil }, func(string) error { return nil })
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }

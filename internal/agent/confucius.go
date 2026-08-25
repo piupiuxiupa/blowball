@@ -97,8 +97,11 @@ func (c *Confucius) Name() string { return c.cfg.Name }
 // SystemPrompt implements Agent.
 func (c *Confucius) SystemPrompt() string { return c.cfg.SystemPrompt }
 
-// RetryPolicy implements Agent. Confucius itself is never retried (it is the
-// dispatcher), so it always returns a disabled policy.
+// RetryPolicy implements Agent. The dispatch-level retry pipeline never
+// consults it (Confucius is the dispatcher and is itself never dispatched), so
+// it stays a disabled policy — its interface semantics are unchanged.
+// Confucius's ROUND-level transient retry (llm-round-retry) instead reads
+// c.cfg.Retry directly in its own loop.
 func (c *Confucius) RetryPolicy() config.AgentRetryConfig { return config.AgentRetryConfig{} }
 
 // LastRunHitCap implements RoundCapTracker (uniformity; Confucius is never
@@ -147,10 +150,15 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	// turnMeta tracks cross-agent turn facts: which invoke_* tools fired and
 	// whether any assistant round dispatched >=2 tool_calls in parallel.
 	tmeta := newTurnMeta()
-	// retryBudget bounds the total tokens spent on sub-agent retries across the
-	// whole turn (capability C). Shared across parallel dispatches; nil-safe
-	// (an unset policy.BudgetTokens means unlimited).
+	// retryBudget bounds the total tokens spent on retries across the whole
+	// turn (capability C; llm-round-retry widens it to cover round-level
+	// retries too — one shared pool per turn). It is injected into ctx so
+	// runLLMRound's round-level retries (this loop's own AND every dispatched
+	// sub-agent's, whose contexts derive from this one) charge the same pool
+	// the dispatch-level retry below reads. Shared across parallel dispatches;
+	// nil-safe (an unset policy.BudgetTokens means unlimited).
 	budget := newRetryBudget(c.cfg.Retry.BudgetTokens)
+	ctx = WithRetryBudget(ctx, budget)
 	c.hitCapThisRun = false
 	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
@@ -176,7 +184,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		// (across ALL attempts of the round — the continuation stream is
 		// seamless, so the fallback accumulates too).
 		var assistantText string
-		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.turn.LengthContinue,
+		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.turn.LengthContinue, c.cfg.Retry,
 			func(r []Message) []Message { return withSystem(c.cfg.SystemPrompt, r) },
 			// Dispatch of the parseable tool_calls of an intermediate length
 			// response (design D5): reuses the main loop's
@@ -295,7 +303,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			ReasoningEffort:     c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
-		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue,
+		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue, c.cfg.Retry,
 			func(r []Message) []Message {
 				return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
 			})

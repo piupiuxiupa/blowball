@@ -599,26 +599,48 @@ type AgentMCPServerConfig struct {
 	Tools []string `yaml:"tools"`
 }
 
-// AgentRetryConfig is the per-agent transient-error retry policy for sub-agent
-// dispatch (capability C). It governs how Confucius retries a sub-agent's LLM
-// call when it fails with a transient error (429/5xx/timeout), subject to a
-// per-turn token budget and per-agent idempotency (Liang default-enabled /
-// Chongzhi default-disabled — a side-effecting agent is only retried before it
-// has executed any tool_call). Zero-value fields are filled by
-// applyRetryDefaults.
+// AgentRetryConfig is the per-agent transient-error retry policy (capability
+// C, extended by llm-round-retry). One block governs BOTH retry levels of the
+// agent: the round-level retry of each individual StreamChat call inside
+// runLLMRound (all three agents' main loops and wrap-up rounds) and — for
+// sub-agents — Confucius's dispatch-level retry of a failed Run. All three
+// agents default to enabled: a side-effecting agent's dispatch retry is made
+// safe by the ToolCallTracker idempotency gate (a dispatch is retried only
+// before that invocation executed any tool call), not by the enabled flag.
+// Zero-value fields are filled by applyRetryDefaults.
 type AgentRetryConfig struct {
 	Enabled        bool          `yaml:"enabled"`
 	MaxAttempts    int           `yaml:"max_attempts"`    // total attempts including the first; 0 -> default
 	InitialBackoff time.Duration `yaml:"initial_backoff"` // first retry delay; 0 -> default
 	MaxBackoff     time.Duration `yaml:"max_backoff"`     // backoff cap; 0 -> default
-	BudgetTokens   int           `yaml:"budget_tokens"`   // per-turn retry token cap; 0 -> no budget
+	BudgetTokens   int           `yaml:"budget_tokens"`   // per-turn retry token cap (round- and dispatch-level shared pool; confucius's value drives the turn); 0 -> no budget
+
+	// present records whether a `retry:` key appeared in the YAML at all (set
+	// by UnmarshalYAML). It disambiguates "no retry block" — where
+	// applyRetryDefaults overrides the zero value with the default-enabled
+	// policy — from an explicitly configured block whose every field is zero
+	// (`retry: {enabled: false}`), whose operator choice survives. It never
+	// round-trips to YAML and is never written by struct literals in code.
+	present bool
 }
 
-// Default retry backoff parameters (design Open Question, task 7.1): a small
-// fixed budget that recovers from a transient blip without amplifying cost on
-// a sustained outage. Confirmed values; tune with real 429 data.
+// UnmarshalYAML marks the block as explicitly present, then decodes the
+// ordinary fields (the `plain` alias sheds this method so the decode does not
+// recurse). Only applyRetryDefaults reads `present`.
+func (r *AgentRetryConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain AgentRetryConfig
+	if err := node.Decode((*plain)(r)); err != nil {
+		return err
+	}
+	r.present = true
+	return nil
+}
+
+// Default retry parameters: a small fixed budget that recovers from a
+// transient blip without amplifying cost on a sustained outage. Tune with
+// real 429 data.
 const (
-	defaultRetryMaxAttempts    = 2
+	defaultRetryMaxAttempts    = 3
 	defaultRetryInitialBackoff = 500 * time.Millisecond
 	defaultRetryMaxBackoff     = 4 * time.Second
 )
@@ -681,9 +703,10 @@ type AgentConfig struct {
 	// single-file readability wins for the small Liang schemas; split to a file
 	// only if a schema grows large.
 	OutputSchema string `yaml:"output_schema"`
-	// Retry is the per-agent transient-error retry policy (capability C).
-	// Defaults are applied per-agent by applyRetryDefaults (Liang retry enabled,
-	// Chongzhi disabled).
+	// Retry is the per-agent transient-error retry policy (capability C,
+	// extended by llm-round-retry): one block governs both the agent's
+	// round-level StreamChat retry and its dispatch-level retry. Defaults are
+	// applied per-agent by applyRetryDefaults (enabled for all three agents).
 	Retry AgentRetryConfig `yaml:"retry"`
 }
 
@@ -1258,10 +1281,10 @@ func Load(path string) (*Config, error) {
 	cfg.Messages.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Sandbox.applyDefaults()
-	// Per-agent retry defaults (capability C): Liang (read-only) defaults to
-	// retry-enabled; Chongzhi (side-effecting) defaults to retry-disabled. The
-	// zero-value Enabled=false is preserved for Chongzhi (the safe default for
-	// a file-writing agent), while Liang's zero value is overridden to enabled.
+	// Per-agent retry defaults (capability C, extended by llm-round-retry): all
+	// three agents default to retry-enabled for both retry levels. The
+	// zero-value Enabled=false is preserved only when the operator explicitly
+	// configures the block (retry: {enabled: false}).
 	cfg.Agents.applyRetryDefaults()
 
 	if err := cfg.validate(); err != nil {
@@ -1416,19 +1439,20 @@ func (m MCPConfig) validate() error {
 	return nil
 }
 
-// applyRetryDefaults fills per-agent retry defaults: Liang (read-only)
-// defaults to retry-enabled; Chongzhi (side-effecting file writes) defaults to
-// retry-disabled. Confucius itself is never retried (it is the dispatcher).
-// Backoff fields use the package defaults when zero. An agent that explicitly
-// sets Retry.Enabled keeps its choice; only the zero value is overridden for
-// Liang/Chongzhi. It is idempotent.
+// applyRetryDefaults fills per-agent retry defaults: all three agents
+// (Confucius/Liang/Chongzhi) default to retry-enabled (llm-round-retry) —
+// Chongzhi's dispatch-level retry safety is carried by the ToolCallTracker
+// idempotency gate, not by the enabled flag. Backoff fields use the package
+// defaults when zero. An agent that explicitly sets Retry.Enabled keeps its
+// choice; only the zero value is overridden. It is idempotent.
 func (a *AgentsConfig) applyRetryDefaults() {
 	applyOne := func(cfg *AgentConfig, defaultEnabled bool) {
-		// Only override Enabled when the agent left the whole Retry block at
-		// zero (MaxAttempts==0 && !Enabled && backoffs==0), i.e. the operator
-		// did not configure retry at all. This lets an operator explicitly
-		// disable Liang retry by setting retry: { enabled: false }.
-		if cfg.Retry == (AgentRetryConfig{}) {
+		// Only override Enabled when no `retry:` key appeared at all. An
+		// explicitly configured block keeps the operator's value — including
+		// `retry: {enabled: false}`, which decodes to the all-zero struct and
+		// is distinguishable from an absent block only through the
+		// UnmarshalYAML-set `present` flag.
+		if !cfg.Retry.present {
 			cfg.Retry.Enabled = defaultEnabled
 		}
 		if cfg.Retry.Enabled {
@@ -1443,8 +1467,9 @@ func (a *AgentsConfig) applyRetryDefaults() {
 			}
 		}
 	}
+	applyOne(&a.Confucius, true) // round-level retry by default
+	applyOne(&a.Chongzhi, true)  // round-level by default; dispatch-level gated by ToolCallTracker
 	applyOne(&a.Liang, true)     // read-only: retry by default
-	applyOne(&a.Chongzhi, false) // side-effecting: do not retry by default
 }
 
 // serverNames returns the set of declared global MCP server names.

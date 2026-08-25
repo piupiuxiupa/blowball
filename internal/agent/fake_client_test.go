@@ -46,7 +46,10 @@ func (f *fakeLLMClient) StreamChat(ctx context.Context, req LLMRequest, onToken 
 	f.mu.Unlock()
 
 	if resp.err != nil {
-		return LLMResponse{}, resp.err
+		// Mirror the real client's failure shape: the response carries
+		// whatever the (partial) stream produced — including usage — so
+		// round-retry tests can assert real-spend folding on failed attempts.
+		return LLMResponse{FinishReason: resp.finishReason, Content: resp.content, ReasoningContent: resp.reasoningContent, ToolCalls: resp.toolCalls, Usage: resp.usage}, resp.err
 	}
 
 	for _, tok := range resp.tokens {
