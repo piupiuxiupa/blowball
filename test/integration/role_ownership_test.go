@@ -105,6 +105,7 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 		SessionUpdateTitle:          sessH.UpdateTitle,
 		WorkspaceList:               wsH.List,
 		WorkspaceUpload:             wsH.Upload,
+		WorkspaceSearch:             wsH.Search,
 		WorkspaceDownload:           wsH.Download,
 		WorkspaceTokenDownload:      wsH.TokenDownload,
 		WorkspaceContent:            wsH.Content,
@@ -157,6 +158,14 @@ func TestAPIRoleEngine_OwnsCRUDRejectsAgentRoutes(t *testing.T) {
 	env.apiEngine.ServeHTTP(detailW, detailReq)
 	assert.Equal(t, http.StatusOK, detailW.Code, "api engine should serve GET /sessions/:id; body: %s", detailW.Body.String())
 
+	// The workspace search endpoint is served by the api engine (an empty or
+	// missing workspace root legitimately returns 200 with zero entries).
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?pattern=x", nil)
+	searchReq.Header.Set("Authorization", "Bearer "+token)
+	searchW := httptest.NewRecorder()
+	env.apiEngine.ServeHTTP(searchW, searchReq)
+	assert.Equal(t, http.StatusOK, searchW.Code, "api engine should serve GET /workspace/search; body: %s", searchW.Body.String())
+
 	// Agent-owned routes are absent from the api engine (404, not 401).
 	for _, tc := range []struct {
 		method, path string
@@ -197,6 +206,7 @@ func TestAgentRoleEngine_OwnsStreamingRejectsCRUD(t *testing.T) {
 		{http.MethodGet, "/api/v1/sessions"},
 		{http.MethodPost, "/api/v1/sessions"},
 		{http.MethodGet, "/api/v1/sessions/" + defaultSessionID},
+		{http.MethodGet, "/api/v1/workspace/search"},
 		{http.MethodGet, "/api/v1/skills"},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)

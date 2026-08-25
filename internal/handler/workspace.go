@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +91,251 @@ type fileEntry struct {
 	Type       string `json:"type"`
 	Size       int64  `json:"size"`
 	UpdateTime string `json:"update_time"`
+}
+
+// searchEntry is one element of the GET /api/v1/workspace/search response
+// array. Path is workspace-relative to the SEARCH ROOT (slash-separated);
+// Name is the basename; Type uses the List endpoint's "file"/"dir" vocabulary.
+// Size/UpdateTime come from a per-entry os.Stat of the returned page only — an
+// entry deleted between the engine walk and the stat (TOCTOU) stays in the
+// page with Size 0 / UpdateTime "" rather than being silently dropped (which
+// would desynchronize the page count from total/truncated).
+type searchEntry struct {
+	Path       string `json:"path"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size"`
+	UpdateTime string `json:"update_time"`
+}
+
+// workspaceSearchTimeout bounds the whole search operation (engine walk +
+// per-entry stat) on the REST path. It is a fixed implementation constant —
+// deliberately not config — see the add-workspace-search design (D8).
+const workspaceSearchTimeout = 10 * time.Second
+
+// Search handles GET /api/v1/workspace/search[?pattern=&type=&path=&max_depth=
+// &ignore_case=&include_hidden=&head_limit=&offset=]. It recursively searches
+// the user's workspace for entries whose BASENAME matches the pattern as a
+// literal substring (regex metacharacters are escaped server-side via
+// regexp.QuoteMeta — this is a human-facing search box, not a regex interface),
+// reusing the xizhi_find dual engine (fd when installed, pure-Go walker
+// otherwise) through its execution half xizhi.RunSearch.
+//
+// Semantics shared with the agent's xizhi_find: basename-only matching, no
+// symlink following, no .gitignore participation, hidden entries excluded by
+// default (include_hidden=true surfaces them, including the .blowball
+// namespace — the search root itself is validated with
+// ValidatePathAllowReserved, so users can search their own application state,
+// while the agent path keeps rejecting it). Intentional divergences for the
+// REST audience: ignore_case defaults to TRUE (humans expect it; the agent
+// default is exact-case), type takes "file"/"dir"/"any" (List's vocabulary,
+// not the engine-internal "directory"), and the pattern is a substring, never
+// a regex.
+//
+// Entries are stat'd for size/update_time ONLY for the returned page (≤
+// head_limit entries) — never for the full match set (a shared-storage stat is
+// a network round-trip). Entries sort by path (lexicographic, the stable
+// pagination backbone); relevance ranking is the frontend's job.
+//
+// Errors: 400 INVALID_REQUEST (bad type/max_depth/head_limit/offset), 400
+// INVALID_PATH (search root is a regular file), 403 path outside workspace,
+// 500 SEARCH_TIMEOUT (the fixed 10s budget expired — suggest narrowing the
+// search root), 500 INTERNAL otherwise. A missing search root is NOT an
+// error: 200 with empty entries (total 0), matching List.
+func (h *WorkspaceHandler) Search(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	// --- parameter parsing (before any filesystem access) ---
+
+	var entryType string
+	switch strings.TrimSpace(c.Query("type")) {
+	case "":
+		entryType = xizhi.SearchTypeAny
+	case "file":
+		entryType = xizhi.SearchTypeFile
+	case "dir":
+		entryType = xizhi.SearchTypeDirectory
+	default:
+		c.JSON(http.StatusBadRequest, errorBody("INVALID_REQUEST", `type must be "file", "dir" or "any"`))
+		return
+	}
+
+	maxDepth := 0 // unlimited
+	if raw := strings.TrimSpace(c.Query("max_depth")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			c.JSON(http.StatusBadRequest, errorBody("INVALID_REQUEST", "max_depth must be a non-negative integer"))
+			return
+		}
+		maxDepth = n
+	}
+
+	headLimit := xizhi.SearchDefaultHeadLimit
+	if raw := strings.TrimSpace(c.Query("head_limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			c.JSON(http.StatusBadRequest, errorBody("INVALID_REQUEST", "head_limit must be a non-negative integer"))
+			return
+		}
+		if n > 0 {
+			headLimit = n
+		}
+	}
+	offset := 0
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			c.JSON(http.StatusBadRequest, errorBody("INVALID_REQUEST", "offset must be a non-negative integer"))
+			return
+		}
+		offset = n
+	}
+
+	// Tri-state: ignore_case defaults to true (human-search convention), so an
+	// explicitly present value must be able to turn it off. parseBoolQuery's
+	// "anything unrecognized is false" rule applies only when the parameter is
+	// present; include_hidden below defaults to false and needs no tri-state.
+	ignoreCase := true
+	if raw, ok := c.GetQuery("ignore_case"); ok {
+		ignoreCase = parseBoolQuery(raw)
+	}
+	includeHidden := parseBoolQuery(c.Query("include_hidden"))
+
+	// Substring semantics: the user's input is escaped into a literal regex so
+	// "report(1).md" and "a+b" match their literal spellings. A blank pattern
+	// matches everything (with type=dir etc. this yields type-only enumeration).
+	// The ESCAPED form is what flows into the engine (the fd engine consumes
+	// the pattern string verbatim as a regex; the Go engine uses the compiled
+	// Re) — the response echoes the user's original input, not this string.
+	pattern := c.Query("pattern")
+	if strings.TrimSpace(pattern) == "" {
+		pattern = ""
+	}
+	expr := pattern
+	var re *regexp.Regexp
+	if pattern != "" {
+		expr = regexp.QuoteMeta(pattern)
+		if ignoreCase {
+			expr = "(?i)" + expr
+		}
+		compiled, err := regexp.Compile(expr)
+		if err != nil {
+			// Unreachable in practice (QuoteMeta escapes every metacharacter);
+			// kept as a guard so a malformed pattern can never 500.
+			c.JSON(http.StatusBadRequest, errorBody("INVALID_REQUEST", "invalid pattern"))
+			return
+		}
+		re = compiled
+	}
+
+	// --- search-root resolution ---
+
+	wsRoot := h.fsSvc.UserWorkspace(userID)
+	relRoot := strings.TrimSpace(c.Query("path"))
+	absRoot := wsRoot
+	if relRoot != "" {
+		abs, err := xizhi.ValidatePathAllowReserved(wsRoot, relRoot)
+		if err != nil {
+			writeForbidden(c, "path outside workspace")
+			return
+		}
+		absRoot = abs
+	} else {
+		relRoot = "."
+	}
+
+	info, err := os.Stat(absRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Match List: a missing root is an empty listing, not an error.
+			c.JSON(http.StatusOK, searchResponse(pattern, xizhi.SearchPage{
+				Entries:       []xizhi.SearchEntry{},
+				AppliedLimit:  headLimit,
+				AppliedOffset: offset,
+			}, absRoot))
+			return
+		}
+		logWS(ctx, "workspace.search.stat_root", absRoot, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "stat search root failed"))
+		return
+	}
+	if !info.IsDir() {
+		c.JSON(http.StatusBadRequest, errorBody("INVALID_PATH", "search root must be a directory"))
+		return
+	}
+
+	// --- execution: one bounded walk + page-only stat pass ---
+
+	searchCtx, cancel := context.WithTimeout(ctx, workspaceSearchTimeout)
+	defer cancel()
+
+	page, err := xizhi.RunSearch(searchCtx, xizhi.PreparedSearch{
+		RelPath:       relRoot,
+		AbsPath:       absRoot,
+		Pattern:       expr,
+		Re:            re,
+		EntryType:     entryType,
+		MaxDepth:      maxDepth,
+		IgnoreCase:    ignoreCase,
+		IncludeHidden: includeHidden,
+		HeadLimit:     headLimit,
+		Offset:        offset,
+	})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			c.JSON(http.StatusInternalServerError, errorBody("SEARCH_TIMEOUT", "search timed out; try narrowing the search root or pattern"))
+			return
+		}
+		logWS(ctx, "workspace.search.run", absRoot, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "search failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, searchResponse(pattern, page, absRoot))
+}
+
+// searchResponse assembles the wire response for a search: the page metadata
+// (total/truncated/applied window), the user's ORIGINAL pattern (never the
+// escaped regex), and the stat-enriched entries. pathPrefix-joining happens in
+// toSearchEntries; this helper exists so the missing-root early return builds
+// the identical shape.
+func searchResponse(pattern string, page xizhi.SearchPage, absRoot string) gin.H {
+	return gin.H{
+		"pattern":        pattern,
+		"total":          page.Total,
+		"truncated":      page.Truncated,
+		"applied_limit":  page.AppliedLimit,
+		"applied_offset": page.AppliedOffset,
+		"entries":        toSearchEntries(absRoot, page.Entries),
+	}
+}
+
+// toSearchEntries enriches a returned page's engine entries with size /
+// update_time via per-entry os.Stat and maps the engine's type vocabulary
+// ("directory") onto the REST one ("dir"). A stat failure keeps the entry with
+// Size 0 / UpdateTime "" (TOCTOU: the entry vanished between the walk and the
+// stat) — dropping it would shrink the page below applied_limit while total
+// stays put, breaking the caller's pagination arithmetic.
+func toSearchEntries(absRoot string, entries []xizhi.SearchEntry) []searchEntry {
+	out := make([]searchEntry, 0, len(entries))
+	for _, e := range entries {
+		se := searchEntry{
+			Path: e.Path,
+			Name: path.Base(e.Path),
+			Type: "file",
+		}
+		if e.Type == xizhi.SearchTypeDirectory {
+			se.Type = "dir"
+		}
+		if info, err := os.Stat(filepath.Join(absRoot, filepath.FromSlash(e.Path))); err == nil {
+			se.Size = info.Size()
+			se.UpdateTime = info.ModTime().UTC().Format(time.RFC3339)
+		}
+		out = append(out, se)
+	}
+	return out
 }
 
 // List handles GET /api/v1/workspace/files[?path=<sub>][&include_hidden=<bool>].
@@ -1050,7 +1298,12 @@ func (h *WorkspaceHandler) buildOnlyOfficeConfigs(rel, userJWT string) (edit, vi
 		"documentType": documentType,
 		"document":     makeDoc(false),
 		"editorConfig": gin.H{
-			"mode":        "view",
+			"mode": "view",
+			"customization": gin.H{
+				"layout": gin.H{
+					"leftMenu": false,
+				},
+			},
 			"callbackUrl": callbackURL,
 			"user":        user,
 		},

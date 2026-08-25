@@ -26,6 +26,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/store/fs"
+	"github.com/lush/blowball/internal/tool/xizhi"
 )
 
 const testMaxUploadBytes = 1 << 20 // 1 MiB cap for tests
@@ -57,6 +58,7 @@ func newWSTestEnv(t *testing.T) *wsTestEnv {
 	})
 	r.GET("/api/v1/workspace/files", h.List)
 	r.POST("/api/v1/workspace/upload", h.Upload)
+	r.GET("/api/v1/workspace/search", h.Search)
 	r.GET("/api/v1/workspace/files/*path", func(c *gin.Context) {
 		raw := c.Param("path")
 		if len(raw) > 8 && raw[len(raw)-8:] == "/content" {
@@ -1031,6 +1033,7 @@ func newWorkspaceRoutingEngine(t *testing.T) (engine *gin.Engine, jwtSecret, wsR
 		SessionUpdateTitle:     func(*gin.Context) {},
 		WorkspaceList:          h.List,
 		WorkspaceUpload:        h.Upload,
+		WorkspaceSearch:        h.Search,
 		WorkspaceDownload:      h.Download,
 		WorkspaceTokenDownload: h.TokenDownload,
 		WorkspaceContent:       h.Content,
@@ -2150,11 +2153,15 @@ func TestOnlyOfficeConfig_SignedConfig(t *testing.T) {
 	assert.Equal(t, true, editCustom["forcesave"])
 
 	// view config: mode view, edit denied but download allowed, NO forcesave.
+	// (Layout customization IS allowed in view mode — e.g. hiding the left
+	// menu — as long as no save semantics sneak in.)
 	viewPerms := viewDoc["permissions"].(map[string]any)
 	assert.Equal(t, "view", viewEditor["mode"])
 	assert.Equal(t, false, viewPerms["edit"])
 	assert.Equal(t, true, viewPerms["download"])
-	assert.NotContains(t, viewEditor, "customization", "view config must omit customization/forcesave")
+	if viewCustom, ok := viewEditor["customization"].(map[string]any); ok {
+		assert.NotContains(t, viewCustom, "forcesave", "view config must not request forcesave")
+	}
 
 	// callbackUrl is present in both modes, rooted at InternalBackend + JWT.
 	for label, editor := range map[string]map[string]any{"edit": editEditor, "view": viewEditor} {
@@ -2634,4 +2641,366 @@ func normalizeJSON(v any) any {
 	default:
 		return v
 	}
+}
+
+// --- Search (GET /api/v1/workspace/search) tests ---
+
+// searchResp mirrors the Search endpoint's JSON body for test unmarshalling.
+type searchResp struct {
+	Pattern       string `json:"pattern"`
+	Total         int    `json:"total"`
+	Truncated     bool   `json:"truncated"`
+	AppliedLimit  int    `json:"applied_limit"`
+	AppliedOffset int    `json:"applied_offset"`
+	Entries       []struct {
+		Path       string `json:"path"`
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		Size       int64  `json:"size"`
+		UpdateTime string `json:"update_time"`
+	} `json:"entries"`
+}
+
+// searchGET issues a GET /api/v1/workspace/search?<query> against the
+// wsTestEnv engine and returns the recorder plus the decoded body.
+func (e *wsTestEnv) searchGET(t *testing.T, query string) (*httptest.ResponseRecorder, searchResp) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?"+query, nil)
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	var resp searchResp
+	if w.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "body: %s", w.Body.String())
+	}
+	return w, resp
+}
+
+// writeSearchFixture creates a deterministic search fixture tree under ws:
+//
+//	docs/guide.md, docs/sub/note.md
+//	reports/report(1).md, reports/a+b.txt
+//	src/main.go
+//	README.md
+//	.blowball/skills/x/SKILL.md
+func writeSearchFixture(t *testing.T, ws string) {
+	t.Helper()
+	write := func(rel string) {
+		abs := filepath.Join(ws, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+		require.NoError(t, os.WriteFile(abs, []byte("fixture-content"), 0o644))
+	}
+	write("docs/guide.md")
+	write("docs/sub/note.md")
+	write("reports/report(1).md")
+	write("reports/a+b.txt")
+	write("src/main.go")
+	write("README.md")
+	write(".blowball/skills/x/SKILL.md")
+}
+
+// TestSearch_SubstringWithSpecialChars verifies the pattern is matched as a
+// literal SUBSTRING: regex metacharacters must neither alter matching nor blow
+// up compilation, and only the basename participates.
+func TestSearch_SubstringWithSpecialChars(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "pattern=report(1)")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "report(1)", resp.Pattern, "the echoed pattern is the raw user input")
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "reports/report(1).md", resp.Entries[0].Path)
+	assert.Equal(t, "report(1).md", resp.Entries[0].Name)
+	assert.Equal(t, "file", resp.Entries[0].Type)
+	assert.Equal(t, 1, resp.Total)
+
+	// A "+" in the name is literal too.
+	w, resp = env.searchGET(t, "pattern=a%2Bb")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "reports/a+b.txt", resp.Entries[0].Path)
+
+	// Basename-only matching: "docs/guide" spans two components and must not hit.
+	w, resp = env.searchGET(t, "pattern=docs%2Fguide")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, resp.Entries, "path-spanning patterns must not match")
+}
+
+// TestSearch_EmptyPatternWithTypeEnumeration verifies a blank pattern plus a
+// type filter enumerates every non-hidden entry of that type.
+func TestSearch_EmptyPatternWithTypeEnumeration(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	// type=dir → every directory, hidden ones excluded.
+	w, resp := env.searchGET(t, "pattern=&type=dir")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	paths := make([]string, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		assert.Equal(t, "dir", e.Type)
+		paths = append(paths, e.Path)
+	}
+	assert.Equal(t, []string{"docs", "docs/sub", "reports", "src"}, paths)
+	assert.Equal(t, 4, resp.Total)
+	assert.False(t, resp.Truncated)
+
+	// type=file for contrast.
+	w, resp = env.searchGET(t, "type=file")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 6, resp.Total, "visible files only: guide.md, note.md, report(1).md, a+b.txt, main.go, README.md")
+}
+
+// TestSearch_IgnoreCaseDefaultTrue verifies the REST-only default divergence:
+// ignore_case defaults to true (the agent's xizhi_find defaults to false), and
+// an explicit false restores case sensitivity.
+func TestSearch_IgnoreCaseDefaultTrue(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "pattern=readme")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "README.md", resp.Entries[0].Path)
+
+	w, resp = env.searchGET(t, "pattern=readme&ignore_case=false")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, resp.Entries, "explicit ignore_case=false must be case-sensitive")
+}
+
+// TestSearch_HiddenExcludedByDefault verifies hidden entries are invisible by
+// default and appear with include_hidden=true — including the reserved
+// .blowball namespace, which the REST path may see (the agent's xizhi_find
+// cannot).
+func TestSearch_HiddenExcludedByDefault(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "pattern=SKILL")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Empty(t, resp.Entries, "hidden .blowball subtree must be excluded by default")
+	assert.Equal(t, 0, resp.Total)
+
+	w, resp = env.searchGET(t, "pattern=SKILL&include_hidden=true")
+	require.Equal(t, http.StatusOK, w.Code)
+	// Under the default ignore_case, "SKILL" also matches the "skills"
+	// directory name; both entries surface once hidden entries are included.
+	assert.Equal(t, []string{".blowball/skills", ".blowball/skills/x/SKILL.md"}, pathsOf(resp))
+}
+
+// TestSearch_ReservedNamespaceAsRoot verifies .blowball is usable as a search
+// root (ValidatePathAllowReserved), while the same path is rejected by the
+// agent-side ValidatePath.
+func TestSearch_ReservedNamespaceAsRoot(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "path=.blowball/skills&type=file")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "x/SKILL.md", resp.Entries[0].Path, "paths are relative to the search root")
+
+	// The agent-side validator still rejects the same path — the two policies
+	// are independent by design.
+	_, err := xizhi.ValidatePath(env.wsRoot(), ".blowball/skills")
+	require.ErrorIs(t, err, xizhi.ErrPathOutsideWorkspace)
+}
+
+// TestSearch_PathOutsideWorkspace_403 verifies a search root that escapes the
+// workspace is rejected with 403.
+func TestSearch_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	for _, q := range []string{"path=..%2Fescape", "path=%2Fetc"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?"+q, nil)
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusForbidden, w.Code, "query %s; body: %s", q, w.Body.String())
+	}
+}
+
+// TestSearch_MissingRoot_200Empty verifies a non-existent search root yields
+// an empty 200 page (matching List), not a 404.
+func TestSearch_MissingRoot_200Empty(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "path=no%2Fsuch%2Fdir&pattern=x")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, 0, resp.Total)
+	assert.Empty(t, resp.Entries)
+	assert.NotNil(t, resp.Entries)
+	assert.False(t, resp.Truncated)
+	assert.Equal(t, 200, resp.AppliedLimit)
+	assert.Equal(t, 0, resp.AppliedOffset)
+}
+
+// TestSearch_FileRoot_400 verifies a regular-file search root is rejected with
+// 400 INVALID_PATH (deliberately diverging from List, which surfaces ENOTDIR
+// as a 500).
+func TestSearch_FileRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?path=README.md", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "INVALID_PATH")
+	assert.Contains(t, w.Body.String(), "directory")
+}
+
+// TestSearch_PaginationWindowAndTruncated verifies the offset/head_limit
+// window, the truncated flag, and — via two pages — that lexicographic order
+// makes paging exhaustive without overlap.
+func TestSearch_PaginationWindowAndTruncated(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	for i := range 5 {
+		require.NoError(t, os.WriteFile(filepath.Join(ws, fmt.Sprintf("page%d.txt", i)), []byte("x"), 0o644))
+	}
+
+	w, p1 := env.searchGET(t, "pattern=page&head_limit=2&offset=0")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, p1.Entries, 2)
+	assert.Equal(t, 5, p1.Total)
+	assert.True(t, p1.Truncated)
+	assert.Equal(t, 2, p1.AppliedLimit)
+	assert.Equal(t, 0, p1.AppliedOffset)
+	assert.Equal(t, "page0.txt", p1.Entries[0].Path)
+
+	w, p2 := env.searchGET(t, "pattern=page&head_limit=2&offset=2")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, p2.Entries, 2)
+	assert.Equal(t, "page2.txt", p2.Entries[0].Path)
+
+	w, p3 := env.searchGET(t, "pattern=page&head_limit=2&offset=4")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, p3.Entries, 1)
+	assert.False(t, p3.Truncated)
+
+	all := append(append(append([]string{}, pathsOf(p1)...), pathsOf(p2)...), pathsOf(p3)...)
+	assert.Equal(t, []string{"page0.txt", "page1.txt", "page2.txt", "page3.txt", "page4.txt"}, all)
+}
+
+// pathsOf extracts the entry paths of a search response page.
+func pathsOf(r searchResp) []string {
+	out := make([]string, 0, len(r.Entries))
+	for _, e := range r.Entries {
+		out = append(out, e.Path)
+	}
+	return out
+}
+
+// TestSearch_StatFields verifies the per-entry stat enrichment: size, mtime,
+// basename, and the dir/file type mapping.
+func TestSearch_StatFields(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	writeSearchFixture(t, ws)
+
+	mtime := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(filepath.Join(ws, "docs", "guide.md"), mtime, mtime))
+
+	w, resp := env.searchGET(t, "pattern=guide")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.Len(t, resp.Entries, 1)
+	e := resp.Entries[0]
+	assert.Equal(t, "docs/guide.md", e.Path)
+	assert.Equal(t, "guide.md", e.Name)
+	assert.Equal(t, "file", e.Type)
+	assert.Equal(t, int64(len("fixture-content")), e.Size)
+	assert.Equal(t, "2026-08-01T09:00:00Z", e.UpdateTime)
+
+	// A directory hit maps to the "dir" wire type and carries its stat.
+	w, resp = env.searchGET(t, "pattern=docs&type=dir")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "dir", resp.Entries[0].Type)
+	assert.NotEmpty(t, resp.Entries[0].UpdateTime)
+}
+
+// TestSearch_TOCTOUStatFailureDegrades verifies (at the helper level) that an
+// entry vanishing between the engine walk and the stat pass stays in the page
+// with size 0 / update_time "" instead of being dropped — the page count must
+// stay consistent with total/truncated for pagination to work.
+func TestSearch_TOCTOUStatFailureDegrades(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "kept.txt"), []byte("stay"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "keptdir"), 0o755))
+
+	entries := toSearchEntries(ws, []xizhi.SearchEntry{
+		{Path: "kept.txt", Type: xizhi.SearchTypeFile},
+		{Path: "vanished.txt", Type: xizhi.SearchTypeFile}, // never created / already deleted
+		{Path: "keptdir", Type: xizhi.SearchTypeDirectory},
+	})
+	require.Len(t, entries, 3, "a failed stat must not drop the entry")
+	assert.Equal(t, int64(4), entries[0].Size)
+	assert.NotEmpty(t, entries[0].UpdateTime)
+	assert.Equal(t, int64(0), entries[1].Size)
+	assert.Empty(t, entries[1].UpdateTime)
+	assert.Equal(t, "dir", entries[2].Type)
+}
+
+// TestSearch_InvalidParams_400 verifies parameter-level rejections.
+func TestSearch_InvalidParams_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	for _, q := range []string{
+		"type=folder",
+		"max_depth=-1",
+		"max_depth=abc",
+		"head_limit=abc",
+		"offset=-3",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?"+q, nil)
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code, "query %s; body: %s", q, w.Body.String())
+	}
+}
+
+// TestSearch_MissingAuth_401 verifies the search route is gated by
+// AuthMiddleware, and — through the production RegisterRoutes wiring — that
+// the static /workspace/search fork is not swallowed by the /workspace/files
+// catch-all (an unregistered route would 404 before auth could 401).
+func TestSearch_MissingAuth_401(t *testing.T) {
+	engine, _, _ := newWorkspaceRoutingEngine(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?pattern=x", nil)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestSearch_ProductionRouting drives the search endpoint through the full
+// production route table (real auth middleware + RegisterRoutes) to prove the
+// static /workspace/{search,files} fork coexists with the files catch-all.
+func TestSearch_ProductionRouting(t *testing.T) {
+	engine, secret, wsRoot := newWorkspaceRoutingEngine(t)
+	require.NoError(t, os.WriteFile(filepath.Join(wsRoot, "needle.txt"), []byte("x"), 0o644))
+
+	token, err := jwt.Sign(secret, "user-rt", time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?pattern=needle", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp searchResp
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "needle.txt", resp.Entries[0].Path)
+
+	// The catch-all is intact: a GET under /workspace/files still dispatches
+	// to Download (404 for a missing file, not the search handler).
+	dl := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/missing.txt", nil)
+	dl.Header.Set("Authorization", "Bearer "+token)
+	dw := httptest.NewRecorder()
+	engine.ServeHTTP(dw, dl)
+	assert.Equal(t, http.StatusNotFound, dw.Code)
 }

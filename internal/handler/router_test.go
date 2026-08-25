@@ -33,6 +33,7 @@ func stubRouteDeps() RouteDeps {
 		SessionUpdateTitle:          noop,
 		WorkspaceList:               noop,
 		WorkspaceUpload:             noop,
+		WorkspaceSearch:             noop,
 		WorkspaceDownload:           noop,
 		WorkspaceContent:            noop,
 		WorkspaceDelete:             noop,
@@ -70,6 +71,7 @@ var expectedAPIRoutes = []string{
 	"GET /api/v1/models",
 	"GET /api/v1/workspace/files",
 	"GET /api/v1/workspace/files/*path",
+	"GET /api/v1/workspace/search",
 	"PATCH /api/v1/sessions/:session_id",
 	"POST /api/v1/auth/login",
 	"POST /api/v1/sessions",
@@ -198,6 +200,7 @@ func TestAgentPartition_CRUDRoutesReturn404(t *testing.T) {
 		{http.MethodDelete, "/api/v1/sessions/sess-1"},
 		{http.MethodPatch, "/api/v1/sessions/sess-1"},
 		{http.MethodGet, "/api/v1/workspace/files"},
+		{http.MethodGet, "/api/v1/workspace/search"},
 		{http.MethodGet, "/api/v1/skills"},
 		{http.MethodGet, "/api/v1/models"},
 	}

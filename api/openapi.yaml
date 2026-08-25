@@ -446,6 +446,43 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FileEntry'
+    WorkspaceSearchEntry:
+      type: object
+      required: [path, name, type, size, update_time]
+      description: One matched entry in a GET /workspace/search page.
+      properties:
+        path:
+          type: string
+          description: Path relative to the search root ('/'-separated).
+        name: {type: string, description: Basename of the entry.}
+        type: {type: string, enum: [file, dir]}
+        size:
+          type: integer
+          format: int64
+          description: Bytes; 0 when the entry vanished before the stat (TOCTOU degrade).
+        update_time:
+          type: string
+          format: date-time
+          description: RFC3339 UTC mtime; "" when the entry vanished before the stat.
+    WorkspaceSearchResponse:
+      type: object
+      required: [pattern, total, truncated, applied_limit, applied_offset, entries]
+      properties:
+        pattern:
+          type: string
+          description: The caller's raw pattern input (never the escaped regex).
+        total:
+          type: integer
+          description: Match count before pagination (a lower bound when the collect ceiling was hit).
+        truncated:
+          type: boolean
+          description: True when matches exist beyond the offset+head_limit window (or the collect ceiling was hit).
+        applied_limit: {type: integer, description: Effective page size.}
+        applied_offset: {type: integer, description: Effective window offset.}
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkspaceSearchEntry'
     UploadResponse:
       type: object
       required: [path, size]
@@ -982,7 +1019,7 @@ paths:
           schema:
             type: integer
             default: 50
-            maximum: 200
+            maximum: 5000
           description: Number of messages per page. Values above 200 are clamped.
         - name: order
           in: query
@@ -1293,6 +1330,108 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+  /api/v1/workspace/search:
+    get:
+      tags: [Workspace]
+      summary: Search workspace entries by name.
+      description: |
+        Recursively searches the user's workspace for files and directories
+        whose NAME (basename, never the path) contains the pattern as a
+        literal substring — regex metacharacters are escaped server-side, so
+        `report(1).md` and `a+b` match their literal spellings. Reuses the
+        agent-side xizhi_find engine (fd / pure-Go dual backend), so matching
+        semantics match the agent tool: hidden entries excluded by default, no
+        symlink following, ignore files (.gitignore) not consulted. Unlike the
+        agent tool, `ignore_case` defaults to `true` (human-search convention)
+        and the reserved `.blowball/` namespace is searchable — both as a
+        search root and (with `include_hidden=true`) as content.
+
+        Entries are returned in lexicographic path order (the stable
+        pagination backbone; no relevance ranking). `size`/`update_time` are
+        stat'd only for the returned page; an entry deleted between the walk
+        and the stat stays in the page with `size: 0` and `update_time: ""`.
+        The whole search (walk + stat) is bounded by a server-side timeout
+        (~10s) — a timeout returns 500 SEARCH_TIMEOUT rather than hanging.
+      parameters:
+        - name: pattern
+          in: query
+          required: false
+          schema: {type: string}
+          description: |
+            Substring matched against entry names. Empty/blank matches
+            everything (combine with `type` for type-only enumeration). The
+            response echoes this raw value.
+          example: report(1)
+        - name: type
+          in: query
+          required: false
+          schema: {type: string, enum: [file, dir, any], default: any}
+          description: Restrict results to files, directories, or both.
+        - name: path
+          in: query
+          required: false
+          schema: {type: string}
+          description: |
+            Workspace-relative search root (empty/blank = the workspace
+            root). A non-existent root returns 200 with empty entries; a
+            regular-file root returns 400. `.blowball/` subpaths are allowed
+            (unlike the agent's xizhi_find).
+        - name: max_depth
+          in: query
+          required: false
+          schema: {type: integer, minimum: 0}
+          description: Maximum component count below the search root (default unlimited).
+        - name: ignore_case
+          in: query
+          required: false
+          schema: {type: boolean, default: true}
+          description: Case-insensitive matching. Defaults to TRUE on this endpoint.
+        - name: include_hidden
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
+          description: Include entries whose names start with '.' (and hidden subtrees).
+        - name: head_limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 0, default: 200}
+          description: Page size; `applied_limit` echoes the effective value.
+        - name: offset
+          in: query
+          required: false
+          schema: {type: integer, minimum: 0, default: 0}
+          description: Page offset into the lexicographically sorted matches.
+      responses:
+        '200':
+          description: |
+            A page of matches. `total` counts all matches (a lower bound when
+            the internal ~10000-entry collect ceiling was hit); `truncated` is
+            true when more matches exist beyond the window.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkspaceSearchResponse'}
+        '400':
+          description: |
+            Invalid `type`/`max_depth`/`head_limit`/`offset`, or the search
+            root is a regular file.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                invalidType: {value: {error: {code: INVALID_REQUEST, message: "type must be \"file\", \"dir\" or \"any\""}}}
+                fileRoot:    {value: {error: {code: INVALID_PATH, message: "search root must be a directory"}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          description: Search timed out or an unexpected internal error.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                timeout:  {value: {error: {code: SEARCH_TIMEOUT, message: "search timed out; try narrowing the search root or pattern"}}}
+                internal: {value: {error: {code: INTERNAL, message: "search failed"}}}
   /api/v1/workspace/upload:
     post:
       tags: [Workspace]

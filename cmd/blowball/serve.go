@@ -506,6 +506,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		SessionUpdateTitle:               sessionHandler.UpdateTitle,
 		WorkspaceList:                    workspaceHandler.List,
 		WorkspaceUpload:                  workspaceHandler.Upload,
+		WorkspaceSearch:                  workspaceHandler.Search,
 		WorkspaceDownload:                workspaceHandler.Download,
 		WorkspaceTokenDownload:           workspaceHandler.TokenDownload,
 		WorkspaceContent:                 workspaceHandler.Content,

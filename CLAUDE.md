@@ -147,6 +147,7 @@ HTTP routes live in `internal/handler/router.go`. Protected routes use `middlewa
 | `GET` | `/api/v1/sessions/:session_id/turns/:run_id/events` | Resume a run's event stream over SSE (agent role): replay from the start or after `Last-Event-ID`, then live-tail until terminal. 410 once the retention window passed. |
 | `DELETE` | `/api/v1/sessions/:session_id` | Archive + purge; 404 if missing/non-owner. |
 | `GET`  | `/api/v1/workspace/files` | List workspace files. |
+| `GET`  | `/api/v1/workspace/search` | Recursive entry-name search (api partition; add-workspace-search). Query params `pattern` (literal **substring** on the basename, server-side `QuoteMeta`; blank = match all)/`type` (`file`/`dir`/`any`)/`path` (search root, `ValidatePathAllowReserved` — `.blowball` allowed; missing root → 200 empty, file root → 400 `INVALID_PATH`)/`max_depth`/`ignore_case` (default **true**, an intentional divergence from the agent-side `xizhi_find` default)/`include_hidden` (default false)/`head_limit`/`offset` (default 200/0). Reuses the `xizhi_find` engine through the exported `xizhi.RunSearch(ctx, PreparedSearch)` execution half (the agent's `findRun` = agent validation + the same `RunSearch` + envelope). Response `{pattern, total, truncated, applied_limit, applied_offset, entries: [{path, name, type, size, update_time}]}` — entries in lexicographic path order (pagination backbone), `size`/`update_time` stat'd only for the returned page; an entry deleted between walk and stat (TOCTOU) stays with `size: 0` + `update_time: ""`. Bounded by a fixed 10s timeout → 500 `SEARCH_TIMEOUT`. |
 | `POST` | `/api/v1/workspace/upload` | Multipart upload. |
 | `GET`  | `/api/v1/workspace/files/*path` | Download file. |
 | `GET`  | `/api/v1/workspace/files/*path/content` | Read file text content. |
@@ -184,6 +185,8 @@ OnlyOffice integration: the two `onlyoffice-config` GETs are dispatched by the s
 PUT shares the same catch-all and dispatches by suffix via `dispatchWorkspacePut` (mirroring the GET dispatcher): `.../files/*path/content` → `WorkspaceHandler.WriteContent` (atomic text-content write); bare `.../files/*path` → `WorkspaceHandler.Rename` (rename/move, with move-into-folder and optional `overwrite`).
 
 POST shares the same catch-all but registers directly (`authed.POST("/workspace/files/*path", deps.WorkspaceCreate)`) with no suffix dispatcher — there is no `/content` split on POST. `WorkspaceHandler.Create` does a strict create of an empty file or directory selected by the body `{"type": ...}` (409 `ALREADY_EXISTS` on an existing leaf). It does not collide with the static `POST /workspace/upload` route, which diverges at the `/workspace/{upload,files}` node.
+
+The search endpoint `GET /workspace/search` deliberately lives OUTSIDE the catch-all for the same reason: a `/workspace/files/search` path would be swallowed by the `GET /workspace/files/*path` catch-all as `path="/search"` (and gin rejects a static segment beside a wildcard at one node anyway). Like `upload`, it forks statically at the `/workspace/{search,files,upload}` node and is registered in the api partition.
 
 ### Agent orchestration
 

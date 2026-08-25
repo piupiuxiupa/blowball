@@ -68,6 +68,11 @@ type RouteDeps struct {
 	// WorkspaceUpload handles POST /api/v1/workspace/upload. Required.
 	WorkspaceUpload gin.HandlerFunc
 
+	// WorkspaceSearch handles GET /api/v1/workspace/search — the recursive
+	// entry-name search over the workspace (api partition; reuses the xizhi_find
+	// engine). Required.
+	WorkspaceSearch gin.HandlerFunc
+
 	// WorkspaceDownload handles GET /api/v1/workspace/files/*path. Required.
 	WorkspaceDownload gin.HandlerFunc
 
@@ -162,6 +167,7 @@ const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
 //	DELETE /api/v1/sessions/:session_id           (auth)
 //	GET  /api/v1/workspace/files                  (auth)
 //	POST /api/v1/workspace/upload                 (auth)
+//	GET  /api/v1/workspace/search                 (auth, entry-name search)
 //	GET  /api/v1/workspace/files/download/*path    (query token auth)
 //	GET  /api/v1/workspace/files/*path             (auth, download)
 //	GET  /api/v1/workspace/files/*path/content     (auth, text content)
@@ -222,6 +228,12 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 
 	authed.GET("/workspace/files", deps.WorkspaceList)
 	authed.POST("/workspace/upload", deps.WorkspaceUpload)
+
+	// Workspace search. It must NOT live under /workspace/files/search: the
+	// GET catch-all below would swallow it as path="/search" (and gin rejects a
+	// static segment next to a wildcard at the same node anyway). Like upload,
+	// it forks statically at the /workspace/{search,files,upload} node.
+	authed.GET("/workspace/search", deps.WorkspaceSearch)
 
 	// GET workspace files uses a single catch-all. Auth is route-specific:
 	// /workspace/files/download/*path uses the query token; everything else uses
