@@ -39,10 +39,14 @@ VALUES %s
 // the model's plain string fields (nilIfEmpty performs the inverse
 // empty→NULL mapping on write, so the round trip is stable).
 const listMessagesSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
-FROM messages
-WHERE session_id = ?
-ORDER BY msg_time ASC, msg_index ASC
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
+FROM messages msg
+INNER JOIN 
+(
+	SELECT id FROM messages
+	WHERE session_id = ?
+	ORDER BY msg_time ASC, msg_index ASC
+) AS sub ON msg.id = sub.id
 `
 
 // nilIfEmpty maps an absent client_msg_id (legacy rows / callers that predate
@@ -144,23 +148,31 @@ func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int
 // (msg_time, msg_index, id) ascending. The id tie-breaker makes the cursor
 // stable when two rows share the same msg_time and msg_index.
 const listMessagesPagedAscSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
-FROM messages
-WHERE session_id = ?
-  AND (msg_time, msg_index, id) > (?, ?, ?)
-ORDER BY msg_time ASC, msg_index ASC, id ASC
-LIMIT ?
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
+FROM messages msg
+INNER JOIN 
+(
+	SELECT id FROM messages
+	WHERE session_id = ?
+		AND (msg_time, msg_index, id) > (?, ?, ?)
+	ORDER BY msg_time ASC, msg_index ASC, id ASC
+	LIMIT ?
+) AS sub ON msg.id = sub.id
 `
 
 // listMessagesPagedDescSQL returns messages before the cursor ordered by
 // (msg_time, msg_index, id) descending.
 const listMessagesPagedDescSQL = `
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
-FROM messages
-WHERE session_id = ?
-  AND (msg_time, msg_index, id) > (?, ?, ?)
-ORDER BY msg_time DESC, msg_index DESC, id DESC
-LIMIT ?
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, update_time
+FROM messages msg
+INNER JOIN 
+(
+	SELECT id FROM messages
+	WHERE session_id = ?
+		AND (msg_time, msg_index, id) > (?, ?, ?)
+	ORDER BY msg_time DESC, msg_index DESC, id DESC
+	LIMIT ?
+) AS sub ON msg.id = sub.id
 `
 
 // ListMessages returns every message for sessionID in (msg_time, msg_index)
