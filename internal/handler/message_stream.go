@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/memory"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -38,7 +39,11 @@ type MessageStreamHandler struct {
 	msgSvc   *service.MessageService
 	titleSvc *service.TitleService
 	compSvc  *service.CompactionService
-	orch     OrchestratorRunner
+	// memSvc is the cross-session memory facade (cross-session-memory): nil
+	// (or a disabled config) skips both the turn-start recall injection and
+	// the turn-end capture — byte-for-byte pre-capability behavior.
+	memSvc *memory.Service
+	orch   OrchestratorRunner
 	// selection carries the model-catalog state (per-request-model-selection,
 	// dual-axis form of model-effort-v2): it resolves EVERY request's
 	// model/reasoning_effort pair into the turn's (model, effort) and fixes
@@ -69,9 +74,11 @@ type MessageStreamHandler struct {
 // resolve per-user workspace and skills roots. compSvc is the
 // context-compaction service; it may be nil (or constructed with
 // max_context_tokens 0), in which case every compaction check is skipped and
-// turns behave exactly as before the capability. selection is the
-// per-request-model-selection state (see ModelSelectionConfig); build it with
-// NewModelSelectionConfig from the loaded config. maxInputTokens is the
+// turns behave exactly as before the capability. memSvc is the cross-session
+// memory facade (cross-session-memory); it may be nil (disabled config), in
+// which case recall injection and turn capture are both skipped. selection is
+// the per-request-model-selection state (see ModelSelectionConfig); build it
+// with NewModelSelectionConfig from the loaded config. maxInputTokens is the
 // config-resolved user-input token cap (cfg.Messages.MaxInputTokensLimit();
 // non-positive skips the check — pass 0 in tests that don't care). The agent
 // role (and the all role) constructs this; the api role does not.
@@ -80,6 +87,7 @@ func NewMessageStreamHandler(
 	msgSvc *service.MessageService,
 	titleSvc *service.TitleService,
 	compSvc *service.CompactionService,
+	memSvc *memory.Service,
 	orch OrchestratorRunner,
 	dataDir string,
 	runs *run.Manager,
@@ -91,6 +99,7 @@ func NewMessageStreamHandler(
 		msgSvc:         msgSvc,
 		titleSvc:       titleSvc,
 		compSvc:        compSvc,
+		memSvc:         memSvc,
 		orch:           orch,
 		runs:           runs,
 		dataDir:        dataDir,
@@ -336,6 +345,29 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 					zap.String("session_id", sessionID),
 					zap.Error(derr))
 			}
+		}
+	}
+
+	// Cross-session memory recall (cross-session-memory capability): query the
+	// user's OpenViking memory store with the new message and inject the
+	// rendered block as an EPHEMERAL user-role message immediately before it
+	// (adjacent user messages are already gateway-accepted — the compaction
+	// stitched-summary precedent). Ephemeral means it is never persisted, never
+	// part of RecoverMessages output, and never re-captured: it lives only in
+	// this turn's LLM context. This runs on the request context BEFORE the
+	// send-time user-row write below, satisfying the history-read invariant
+	// documented there; any failure or timeout is a WARN + no injection —
+	// memory must never block or fail a turn. (Known cost: recall precedes the
+	// run claim, so a SESSION_BUSY-rejected request pays one wasted Find.)
+	if h.memSvc.Enabled() {
+		if block, err := h.memSvc.Recall(ctx, userID, req.Content); err != nil {
+			logger.L().Warn("memory recall failed; continuing without memory",
+				zap.String("op", "handler.send_message"),
+				zap.String("session_id", sessionID),
+				zap.String("user_id", userID),
+				zap.Error(err))
+		} else if block != "" {
+			agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: block})
 		}
 	}
 
@@ -589,6 +621,44 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 			now := time.Now().UTC()
 			merged := MergeEvents(events)
+
+			// Cross-session memory capture (cross-session-memory capability):
+			// fire-and-forget on BOTH terminal paths (this closure runs on the
+			// error/cancel and the success path alike, exactly once each). Own
+			// goroutine so a slow OpenViking round trip never delays the
+			// message-batch write; own recover + WARN-only errors — the
+			// TitleService fire-and-forget pattern. saveCtx is detached from
+			// the HTTP request, so a client disconnect cannot kill the capture.
+			// The submitted content is the persisted pair (persist.userContent
+			// + top-level assistant tokens), never the ephemeral recall block.
+			if h.memSvc.Enabled() {
+				tc := memory.TurnCapture{
+					UserID:        userID,
+					SessionID:     sessionID,
+					UserContent:   persist.userContent,
+					AssistantText: topLevelAssistantText(merged),
+					UserAt:        persist.userMsgTime,
+					TurnEndAt:     now,
+				}
+				go func(tc memory.TurnCapture) {
+					defer func() {
+						if r := recover(); r != nil {
+							logger.L().Error("panic capturing turn to memory",
+								zap.String("op", "handler.send_message"),
+								zap.String("session_id", tc.SessionID),
+								zap.Any("recover", r))
+						}
+					}()
+					if err := h.memSvc.CaptureTurn(saveCtx, tc); err != nil {
+						logger.L().Warn("memory capture failed; turn unaffected",
+							zap.String("op", "handler.send_message"),
+							zap.String("session_id", tc.SessionID),
+							zap.String("user_id", tc.UserID),
+							zap.Error(err))
+					}
+				}(tc)
+			}
+
 			msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), now)
 			if mErr != nil {
 				logger.L().Error("map event to message failed",

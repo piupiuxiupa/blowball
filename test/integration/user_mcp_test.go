@@ -198,7 +198,7 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
 
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())

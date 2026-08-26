@@ -178,6 +178,27 @@ messages:
   flush_batch_size: 100
   # max_input_tokens: 5000
 
+# Cross-session long-term memory backed by an external OpenViking server
+# (cross-session-memory capability; auto-only v1: recall at turn start,
+# capture at turn end — the model makes zero tool calls). Default OFF: omit
+# the whole block (or keep enabled: false) for zero behavior change.
+#
+# Per-user isolation rides the X-OpenViking-User header derived from the
+# authenticated user_id: one operator api_key + account serve the whole
+# deployment, and the server enforces path-based tenant isolation. api_key
+# may be empty against a local no-auth server (openviking-server without
+# auth configured).
+memory:
+  enabled: false
+  base_url: ${MEMORY_BASE_URL:http://127.0.0.1:1933}
+  api_key: ${MEMORY_API_KEY:}
+  account: blowball
+  # recall_limit: 6             # memories fetched per recall
+  # recall_token_budget: 2000   # aggregate cap (CJK-aware estimate) of the injected block
+  # recall_timeout: 2s          # recall deadline (turn-start path; keep small)
+  # capture_timeout: 30s        # capture deadline (detached goroutine)
+  # max_capture_bytes: 262144   # per-message byte cap (256KB), truncate with marker
+
 # Process-level Landlock sandbox (Linux only; no-op on macOS/Windows). Applied
 # once at startup over the server process. The process RW application dirs
 # ({data-dir}/data, {data-dir}/logs, {data-dir}/skills) and RO dir

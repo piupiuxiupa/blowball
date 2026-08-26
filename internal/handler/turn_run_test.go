@@ -70,7 +70,7 @@ func newTurnRunEnv(t *testing.T, stub *blockingStubOrchestrator) *turnRunTestEnv
 	store := run.NewMemStore()
 	reg := run.NewRegistry()
 	runs := run.NewManager(store, reg)
-	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, stub, "/tmp/blowball-test-data", runs, testSelectionConfig(), 0)
+	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, stub, "/tmp/blowball-test-data", runs, testSelectionConfig(), 0)
 	turnH := NewTurnRunHandler(runs)
 
 	r := gin.New()

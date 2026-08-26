@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lush/blowball/internal/model"
@@ -183,4 +184,27 @@ func marshalToolResultOutput(content string) (any, error) {
 func runIDFromEvent(e stream.StreamEvent) string {
 	id, _ := e.Meta[stream.MetaParentToolCallID].(string)
 	return id
+}
+
+// topLevelAssistantText concatenates the merged TOP-LEVEL assistant token
+// runs of a turn (the memory-capture view of "what the assistant said",
+// cross-session-memory capability): token events only, run-id-less only —
+// every sub-agent Run event carries Meta.parent_tool_call_id
+// (subagent-run-identity), so filtering on the empty run id excludes
+// Chongzhi/Liang output by construction. Reasoning, tool_call/tool_result,
+// and marker events are excluded; multi-round turns contribute every
+// top-level token run (interim narration included), joined by a blank line —
+// the memory extractor benefits from the whole exchange.
+func topLevelAssistantText(merged []stream.StreamEvent) string {
+	var runs []string
+	for _, e := range merged {
+		if e.Type != stream.EventToken || runIDFromEvent(e) != "" {
+			continue
+		}
+		if e.Content == "" {
+			continue
+		}
+		runs = append(runs, e.Content)
+	}
+	return strings.Join(runs, "\n\n")
 }

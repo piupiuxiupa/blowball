@@ -278,7 +278,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg, serverTools, fsSvc.UserWorkspace)
 	skillH := handler.NewSkillHandler(fsSvc)

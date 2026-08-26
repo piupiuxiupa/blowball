@@ -8,6 +8,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type Config struct {
 	OnlyOffice OnlyOfficeConfig `yaml:"onlyoffice"`
 	Storage    StorageConfig    `yaml:"storage"`
 	Messages   MessagesConfig   `yaml:"messages"`
+	Memory     MemoryConfig     `yaml:"memory"`
 }
 
 // WorkspaceBackendLocal is the default workspace storage backend: per-user
@@ -159,6 +161,100 @@ func (m MessagesConfig) validate() error {
 	}
 	if m.MaxInputTokens != nil && *m.MaxInputTokens < 0 {
 		return fmt.Errorf("messages.max_input_tokens: must be zero (disable) or positive (got %d)", *m.MaxInputTokens)
+	}
+	return nil
+}
+
+// Defaults for the cross-session-memory capability (external OpenViking
+// server). The recall knobs mirror OpenViking's official Claude Code
+// integration defaults (limit 6 memories, ~2000-token injection budget); the
+// recall timeout is deliberately tight because recall runs on the turn-start
+// path, before the run claim.
+const (
+	defaultMemoryAccount         = "blowball"
+	defaultMemoryRecallLimit     = 6
+	defaultMemoryRecallBudget    = 2000
+	defaultMemoryRecallTimeout   = 2 * time.Second
+	defaultMemoryCaptureTimeout  = 30 * time.Second
+	defaultMemoryMaxCaptureBytes = 256 << 10 // 256KB per captured message
+)
+
+// MemoryConfig holds the cross-session long-term memory settings (the
+// top-level `memory:` block; cross-session-memory capability, backed by an
+// external OpenViking server). Auto-only v1: recall at turn start + capture at
+// turn end; no agent tools. Default OFF — an omitted block is zero behavior
+// change. Per-user tenant isolation rides the X-OpenViking-User header
+// (derived from the authenticated user_id): one operator APIKey + Account
+// serve the whole deployment and the server enforces path-based isolation.
+// APIKey may be empty against a local no-auth server. All strings get ${VAR}
+// expansion like every other config field.
+type MemoryConfig struct {
+	Enabled           bool          `yaml:"enabled"`
+	BaseURL           string        `yaml:"base_url"`
+	APIKey            string        `yaml:"api_key"`
+	Account           string        `yaml:"account"`
+	RecallLimit       int           `yaml:"recall_limit"`        // memories fetched per recall
+	RecallTokenBudget int           `yaml:"recall_token_budget"` // aggregate injected-block budget (CJK-aware estimate)
+	RecallTimeout     time.Duration `yaml:"recall_timeout"`      // recall deadline (turn-start path)
+	CaptureTimeout    time.Duration `yaml:"capture_timeout"`     // capture deadline (detached goroutine)
+	MaxCaptureBytes   int           `yaml:"max_capture_bytes"`   // per-message byte cap, truncate with marker
+}
+
+// applyDefaults fills zero-valued fields with the documented defaults. It is
+// idempotent and leaves explicit values (including negatives, which validate
+// rejects when enabled) untouched.
+func (m *MemoryConfig) applyDefaults() {
+	if strings.TrimSpace(m.Account) == "" {
+		m.Account = defaultMemoryAccount
+	}
+	if m.RecallLimit == 0 {
+		m.RecallLimit = defaultMemoryRecallLimit
+	}
+	if m.RecallTokenBudget == 0 {
+		m.RecallTokenBudget = defaultMemoryRecallBudget
+	}
+	if m.RecallTimeout == 0 {
+		m.RecallTimeout = defaultMemoryRecallTimeout
+	}
+	if m.CaptureTimeout == 0 {
+		m.CaptureTimeout = defaultMemoryCaptureTimeout
+	}
+	if m.MaxCaptureBytes == 0 {
+		m.MaxCaptureBytes = defaultMemoryMaxCaptureBytes
+	}
+}
+
+// validate guards only the enabled state — a disabled block may carry stale
+// values without failing the load (Webfetch precedent for default-off knobs).
+// When enabled, base_url is required and must be an absolute http(s) URL.
+func (m MemoryConfig) validate() error {
+	if !m.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(m.BaseURL) == "" {
+		return fmt.Errorf("memory.base_url: required when memory.enabled is true")
+	}
+	u, err := url.Parse(strings.TrimSpace(m.BaseURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("memory.base_url: must be an absolute http(s) URL (got %q)", m.BaseURL)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("memory.base_url: unsupported scheme %q (want http or https)", u.Scheme)
+	}
+	if m.RecallLimit < 0 {
+		return fmt.Errorf("memory.recall_limit: must be positive (got %d)", m.RecallLimit)
+	}
+	if m.RecallTokenBudget < 0 {
+		return fmt.Errorf("memory.recall_token_budget: must be positive (got %d)", m.RecallTokenBudget)
+	}
+	if m.MaxCaptureBytes < 0 {
+		return fmt.Errorf("memory.max_capture_bytes: must be positive (got %d)", m.MaxCaptureBytes)
+	}
+	if m.RecallTimeout < 0 {
+		return fmt.Errorf("memory.recall_timeout: must be positive (got %s)", m.RecallTimeout)
+	}
+	if m.CaptureTimeout < 0 {
+		return fmt.Errorf("memory.capture_timeout: must be positive (got %s)", m.CaptureTimeout)
 	}
 	return nil
 }
@@ -1279,6 +1375,7 @@ func Load(path string) (*Config, error) {
 	cfg.Storage.Workspace.applyDefaults()
 	cfg.Landlock.applyDefaults()
 	cfg.Messages.applyDefaults()
+	cfg.Memory.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Sandbox.applyDefaults()
 	// Per-agent retry defaults (capability C, extended by llm-round-retry): all
@@ -1309,6 +1406,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Messages.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Memory.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.MCP.validate(); err != nil {

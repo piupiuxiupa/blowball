@@ -26,6 +26,7 @@ import (
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/llmraw"
+	"github.com/lush/blowball/internal/memory"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -171,21 +172,24 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 	var mcpMgr *mcpclient.Manager
 	var rawFlusher *llmraw.Flusher
 	var runReg *run.Registry
+	var memSvc *memory.Service
 	switch role {
 	case "all":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
-		agentDeps, mgr, fl, reg := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg, mem := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
 		rawFlusher = fl
 		runReg = reg
+		memSvc = mem
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	case "api":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
 	case "agent":
-		agentDeps, mgr, fl, reg := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg, mem := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
 		rawFlusher = fl
 		runReg = reg
+		memSvc = mem
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	}
 	if mcpMgr != nil {
@@ -262,6 +266,13 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 	if msgFlusher != nil {
 		msgFlusher.Close()
 		log.Info("message flusher stopped", zap.String("role", role))
+	}
+	// Release the memory client's idle keep-alive connections last (nil on a
+	// disabled config). In-flight captures are not aborted: whatever landed
+	// on the OpenViking session stays pending and the session's next turn
+	// commits it — at-least-once.
+	if memSvc != nil {
+		memSvc.Close()
 	}
 	return nil
 }
@@ -529,7 +540,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 // populated with only the agent-route handlers (SendMessage, MCPTools) plus
 // the auth middleware, the MCP manager so serveRun can defer its Close, and
 // the raw-capture flusher so serveRun can drain it on shutdown.
-func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry) {
+func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry, *memory.Service) {
 	cfg := rt.cfg
 	dataDir := rt.dataDir
 	fsStore := rt.fsStore
@@ -636,6 +647,29 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		defaultMaxContext,
 	)
 
+	// Cross-session memory (cross-session-memory capability): default OFF —
+	// NewService returns nil for a disabled config and the streaming handler's
+	// nil-safe Enabled() gate makes that byte-for-byte pre-capability
+	// behavior. The api role never constructs this. The startup health probe
+	// is best-effort by contract (memory degrades per turn, it never gates
+	// boot — contrast the MCP manager's fail-fast above).
+	memSvc := memory.NewService(cfg.Memory)
+	if memSvc != nil {
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ok, herr := memSvc.Health(probeCtx)
+		probeCancel()
+		if herr != nil || !ok {
+			log.Warn("openviking memory server not reachable at startup; recall/capture will retry per turn",
+				zap.String("base_url", cfg.Memory.BaseURL),
+				zap.Bool("healthy", ok),
+				zap.Error(herr))
+		} else {
+			log.Info("openviking memory server healthy",
+				zap.String("base_url", cfg.Memory.BaseURL),
+				zap.String("account", cfg.Memory.Account))
+		}
+	}
+
 	// The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
 	wsFn := func(userID string) string {
 		return fsStore.UserWorkspace(userID)
@@ -653,7 +687,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	// registry is returned so serveRun can cancel all running turns within
 	// the bounded graceful-shutdown window.
 	runMgr := run.NewManager(rt.redisStore.RunStore(), run.NewRegistry())
-	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit())
+	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit())
 	turnRunHandler := handler.NewTurnRunHandler(runMgr)
 	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn)
 
@@ -663,7 +697,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		TurnCancel:  turnRunHandler.CancelTurn,
 		TurnEvents:  turnRunHandler.TurnEvents,
 		MCPTools:    mcpHandler.Tools,
-	}, mcpManager, rawFlusher, runMgr.Registry
+	}, mcpManager, rawFlusher, runMgr.Registry, memSvc
 }
 
 // newEngine builds a gin.Engine with the standard middleware chain shared by

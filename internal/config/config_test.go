@@ -1898,3 +1898,150 @@ messages:
 		})
 	}
 }
+
+// TestLoad_MemoryDisabledByDefault verifies the omitted `memory:` block is a
+// no-op: disabled with zero behavior change (cross-session-memory capability).
+func TestLoad_MemoryDisabledByDefault(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Memory.Enabled {
+		t.Error("memory should default to disabled when the block is omitted")
+	}
+	// Defaults are filled even for a disabled block so a later enable-flip in
+	// config picks up sane values; only Enabled stays off.
+	if cfg.Memory.Account != defaultMemoryAccount {
+		t.Errorf("Account = %q, want %q", cfg.Memory.Account, defaultMemoryAccount)
+	}
+	if cfg.Memory.RecallLimit != defaultMemoryRecallLimit {
+		t.Errorf("RecallLimit = %d, want %d", cfg.Memory.RecallLimit, defaultMemoryRecallLimit)
+	}
+}
+
+// TestLoad_MemoryEnabledWithDefaults verifies an enabled minimal block loads
+// with the documented defaults.
+func TestLoad_MemoryEnabledWithDefaults(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+memory:
+  enabled: true
+  base_url: http://127.0.0.1:1933
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Memory.Enabled {
+		t.Fatal("memory should be enabled")
+	}
+	want := MemoryConfig{
+		Enabled:           true,
+		BaseURL:           "http://127.0.0.1:1933",
+		Account:           defaultMemoryAccount,
+		RecallLimit:       defaultMemoryRecallLimit,
+		RecallTokenBudget: defaultMemoryRecallBudget,
+		RecallTimeout:     defaultMemoryRecallTimeout,
+		CaptureTimeout:    defaultMemoryCaptureTimeout,
+		MaxCaptureBytes:   defaultMemoryMaxCaptureBytes,
+	}
+	if cfg.Memory != want {
+		t.Errorf("Memory = %+v, want %+v", cfg.Memory, want)
+	}
+}
+
+// TestLoad_MemoryRejections collects the enabled-state validation failures:
+// missing base_url, non-absolute URL, unsupported scheme, negative knobs.
+// A DISABLED block carrying the same stale values must keep loading.
+func TestLoad_MemoryRejections(t *testing.T) {
+	base := `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{"enabled without base_url", base + `
+memory:
+  enabled: true
+`},
+		{"relative base_url", base + `
+memory:
+  enabled: true
+  base_url: 127.0.0.1:1933
+`},
+		{"unsupported scheme", base + `
+memory:
+  enabled: true
+  base_url: "ftp://127.0.0.1:1933"
+`},
+		{"negative recall_limit", base + `
+memory:
+  enabled: true
+  base_url: http://127.0.0.1:1933
+  recall_limit: -1
+`},
+		{"negative recall_timeout", base + `
+memory:
+  enabled: true
+  base_url: http://127.0.0.1:1933
+  recall_timeout: -1s
+`},
+		{"negative max_capture_bytes", base + `
+memory:
+  enabled: true
+  base_url: http://127.0.0.1:1933
+  max_capture_bytes: -100
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.yaml)
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load accepted an invalid memory block, want load-time rejection")
+			}
+		})
+	}
+
+	// The same stale values on a disabled block load fine (validate only
+	// guards the enabled state, mirroring the Webfetch default-off precedent).
+	path := writeTempYAML(t, base+`
+memory:
+  enabled: false
+  base_url: "not a url"
+  recall_limit: -3
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load rejected a disabled memory block: %v", err)
+	}
+}

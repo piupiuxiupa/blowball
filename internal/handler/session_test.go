@@ -486,7 +486,7 @@ func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerT
 	// SessionHandler owns CRUD only; MessageStreamHandler owns the streaming
 	// endpoint and the orchestrator dependency. Both share the same services.
 	h := NewSessionHandler(sessSvc, titleSvc, nil)
-	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfig(), 0)
+	stream := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, stub, "/tmp/blowball-test-data", run.NewManager(run.NewMemStore(), run.NewRegistry()), testSelectionConfig(), 0)
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -661,7 +661,7 @@ func newLimitTestEngine(t *testing.T, env *sessionHandlerTestEnv, stub *stubOrch
 	stream := NewMessageStreamHandler(
 		newSessionSvc(deps), newMessageSvc(deps),
 		service.NewTitleService(nil, env.mysql, config.OpenAIConfig{TitleModel: "title-model"}),
-		nil, stub, "/tmp/blowball-test-data",
+		nil, nil, stub, "/tmp/blowball-test-data",
 		run.NewManager(run.NewMemStore(), run.NewRegistry()),
 		testSelectionConfig(), maxInputTokens)
 	r := gin.New()
@@ -1270,7 +1270,7 @@ func TestSendMessage_SessionBusy_DoesNotFireTitle(t *testing.T) {
 	stream := NewMessageStreamHandler(
 		newSessionSvc(deps), newMessageSvc(deps),
 		newTitleSvcWithFake(t, deps, "Busy Title"),
-		nil, env.stub, "/tmp/blowball-test-data",
+		nil, nil, env.stub, "/tmp/blowball-test-data",
 		run.NewManager(store, run.NewRegistry()), testSelectionConfig(), 0)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
