@@ -222,9 +222,17 @@ func truncateCapture(s string, max int) string {
 	return s[:cut] + fmt.Sprintf("\n…[blowball: truncated, %d more bytes]", len(s)-cut)
 }
 
-// Health probes the server through an operator-scoped client (no user
-// header). Startup-only; the caller treats a failure as WARN, never fatal —
-// memory degrades per turn, it does not gate boot.
+// Health probes the server through an operator-scoped client. Startup-only;
+// the caller treats a failure as WARN, never fatal — memory degrades per
+// turn, it does not gate boot.
+//
+// The probe client carries a synthetic user identity: in trusted mode the
+// server resolves EVERY request against X-OpenViking-User (registration not
+// required), so a user-less probe would log "Failed to resolve identity"
+// warnings server-side on every startup — the request still succeeds, but
+// the identity keeps the OV log clean.
+const probeUser = "blowball-health"
+
 func (s *Service) Health(ctx context.Context) (bool, error) {
 	s.mu.Lock()
 	if s.opClient == nil {
@@ -232,6 +240,7 @@ func (s *Service) Health(ctx context.Context) (bool, error) {
 			BaseURL:    strings.TrimSpace(s.cfg.BaseURL),
 			APIKey:     s.cfg.APIKey,
 			Account:    s.cfg.Account,
+			User:       probeUser,
 			HTTPClient: s.http,
 		})
 		if err != nil {
