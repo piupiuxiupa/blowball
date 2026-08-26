@@ -160,12 +160,17 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 				return nil
 			})
 		if err != nil {
+			// The error return value carries the failed round's partial
+			// output (tokens already streamed into assistantText), NOT the
+			// always-empty finalContent, so dispatchSubAgent's give-up point
+			// can join it with the error text (subagent-partial-output-on-
+			// failure).
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return finalContent, total, nil, ctxErr
+				return assistantText, total, nil, ctxErr
 			}
 			hub.SendCtx(ctx, stream.AgentErrorEvent(l.Name(), err.Error(), "llm_error"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(l.Name()))
-			return finalContent, total, nil, fmt.Errorf("liang: stream chat: %w", err)
+			return assistantText, total, nil, fmt.Errorf("liang: stream chat: %w", err)
 		}
 
 		total.Add(result.Usage)

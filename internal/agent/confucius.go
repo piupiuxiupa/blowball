@@ -517,7 +517,7 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub strea
 	// Failed. Decide retryability.
 	policy := sub.RetryPolicy()
 	if !shouldRetry(sub, err, policy, budget) {
-		return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
+		return toolResult{content: joinFailure(err, content), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
 	}
 
 	// Retry loop: attempts are numbered from 1 (the first RETRY). MaxAttempts
@@ -545,7 +545,7 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub strea
 		select {
 		case <-time.After(computeBackoff(policy, attempt)):
 		case <-ctx.Done():
-			return toolResult{content: ctx.Err().Error(), isError: true, subUsage: &usage, subAgentName: sub.Name()}
+			return toolResult{content: joinFailure(ctx.Err(), content), isError: true, subUsage: &usage, subAgentName: sub.Name()}
 		}
 		content, usage, _, err = sub.Run(ctx, messages, runHub)
 		if err == nil {
@@ -560,7 +560,24 @@ func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub strea
 	}
 
 	// Retries exhausted / stopped. Surface the last error to Confucius.
-	return toolResult{content: err.Error(), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
+	// content holds the LAST attempt's partial output — every sub.Run above
+	// overwrites it, matching the one-logical-call retry semantics (earlier
+	// attempts' partials are not kept).
+	return toolResult{content: joinFailure(err, content), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
+}
+
+// joinFailure merges a sub-agent's give-up error with the partial output its
+// Run returned alongside the error (subagent-partial-output-on-failure). A
+// blank partial keeps the tool result content byte-identical to the legacy
+// error-only text (zero behavior change when nothing was salvaged — e.g. a
+// round_cap_exhausted failure); otherwise the error text comes first,
+// separated by a fixed marker line, so the model sees both the failure fact
+// and the work already produced.
+func joinFailure(err error, partial string) string {
+	if strings.TrimSpace(partial) == "" {
+		return err.Error()
+	}
+	return err.Error() + "\n\n--- partial output before failure ---\n\n" + partial
 }
 
 // shouldRetry reports whether a failed sub-agent dispatch should be retried:

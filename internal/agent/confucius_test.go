@@ -684,6 +684,11 @@ type scriptedOutcome struct {
 	content string
 	usage   Usage
 	err     error
+	// partial is the partial output returned ALONGSIDE err, mirroring the
+	// real sub-agent error contract (subagent-partial-output-on-failure):
+	// the failed Run's already-streamed assistant text. The dispatcher joins
+	// it into the give-up tool result; blank keeps the legacy error-only text.
+	partial string
 }
 
 func (a *scriptedRetryAgent) Name() string                         { return a.name }
@@ -702,7 +707,7 @@ func (a *scriptedRetryAgent) Run(ctx context.Context, _ []Message, hub stream.Ev
 		if o.err != nil {
 			hub.SendCtx(ctx, stream.AgentErrorEvent(a.name, o.err.Error(), "llm_error"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(a.name))
-			return "", o.usage, nil, o.err
+			return o.partial, o.usage, nil, o.err
 		}
 		hub.SendCtx(ctx, stream.AgentEndEvent(a.name))
 		return o.content, o.usage, nil, nil
