@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/skill"
 )
@@ -27,6 +28,11 @@ type Tools struct {
 	userDirFn  func(userID string) string
 	httpClient *http.Client
 	maxSize    int64
+	// market is the optional skill-market client (skill-market capability):
+	// the third name-resolution source (user > global > market) and the source
+	// of the market entries merged into luban_list_skills. nil = capability
+	// off = every tool behaves exactly as before the capability.
+	market *skillmarket.Client
 }
 
 // NewTools creates a luban tool bundle backed by loader and userDirFn.
@@ -37,6 +43,16 @@ func NewTools(loader *skill.Loader, userDirFn func(userID string) string) *Tools
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		maxSize:    MaxInstallSize,
 	}
+}
+
+// WithMarket attaches the skill-market client (the third name-resolution
+// source; nil = capability off, the default). The market allowlist is fetched
+// lazily per user with the login JWT from the tool-execution context and
+// cached for skill_market.cache_ttl; every market failure degrades
+// fail-closed to local-only behavior. Chainable, mirroring WithHTTPClient.
+func (t *Tools) WithMarket(c *skillmarket.Client) *Tools {
+	t.market = c
+	return t
 }
 
 // WithHTTPClient overrides the HTTP client used for single-file downloads.
@@ -78,7 +94,7 @@ func registerListSkillFiles(r *tool.Registry, tools *Tools) error {
 		Description: "Lists the immediate children of a skill's directory (one level, not recursive) and returns " +
 			"`{path, entries[]}` inside the standard status envelope (`{\"status\":0,\"result\":{...}}` on success, " +
 			"`{\"status\":1,\"error\":...}` on failure); each entry carries `name`, `type` (`file`/`dir`) and `size`. " +
-			"**`name` MUST be a simple skill identifier resolved via `luban_list_skills` (user skills override global);** " +
+			"**`name` MUST be a simple skill identifier resolved via `luban_list_skills` (user > global > skill market);** " +
 			"optional `path` selects a sub-directory relative to the skill root (confined to the skill directory; " +
 			"absolute paths, `..` and symlink escapes are rejected). Hidden entries (names starting with `.`) are " +
 			"excluded unless `include_hidden` is true, so a git-cloned skill's `.git` is hidden by default. " +
@@ -111,7 +127,7 @@ func registerListSkillFiles(r *tool.Registry, tools *Tools) error {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("luban_list_skill_files: parse args: %w", err)
 			}
-			return ListSkillFiles(tools.loader, a.Name, a.Path, skill.UserIDFromContext(ctx), a.IncludeHidden)
+			return ListSkillFiles(ctx, tools.loader, tools.market, a.Name, a.Path, skill.UserIDFromContext(ctx), a.IncludeHidden)
 		},
 	}
 	return r.Register(spec)
@@ -123,7 +139,7 @@ func registerTreeSkill(r *tool.Registry, tools *Tools) error {
 		Description: "Returns a nested tree of a skill's directory and returns `{path, depth, tree[]}` inside the " +
 			"standard status envelope (`{\"status\":0,\"result\":{...}}` on success, `{\"status\":1,\"error\":...}` on " +
 			"failure); each node carries `name`, `type` (`file`/`dir`), `size` (files only) and `children` (dirs). " +
-			"**`name` MUST be a simple skill identifier resolved via `luban_list_skills` (user skills override global);** " +
+			"**`name` MUST be a simple skill identifier resolved via `luban_list_skills` (user > global > skill market);** " +
 			"optional `path` selects a sub-directory relative to the skill root. `depth` defaults to 3 and is clamped to " +
 			"10. Hidden entries (names starting with `.`) are excluded unless `include_hidden` is true. **DO NOT tree " +
 			"skills with `xizhi_*` — use luban.**",
@@ -160,7 +176,7 @@ func registerTreeSkill(r *tool.Registry, tools *Tools) error {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("luban_tree_skill: parse args: %w", err)
 			}
-			return TreeSkill(tools.loader, a.Name, a.Path, skill.UserIDFromContext(ctx), a.Depth, a.IncludeHidden)
+			return TreeSkill(ctx, tools.loader, tools.market, a.Name, a.Path, skill.UserIDFromContext(ctx), a.Depth, a.IncludeHidden)
 		},
 	}
 	return r.Register(spec)
@@ -171,16 +187,19 @@ func registerListSkills(r *tool.Registry, tools *Tools) error {
 		Name: ToolListSkills,
 		Description: "List all available skills. The result is delivered inside the standard status envelope: " +
 			"`{\"status\":0,\"result\":[{name, description, location}, ...]}` on success (each entry's `location` is " +
-			"`global` or `user`), or `{\"status\":1,\"error\":...}` on failure. **User skills OVERRIDE global skills " +
-			"of the same name.** **You MUST discover skill names here first, then load one with `luban_read_skill` " +
-			"(by name, not path).**",
+			"`global`, `user`, or `skill_market`), or `{\"status\":1,\"error\":...}` on failure. **User skills " +
+			"OVERRIDE global skills of the same name; local skills override skill-market skills.** Entries with " +
+			"location `skill_market` come from the platform skill market, authorized per user — they are listed " +
+			"even when their files have not synced to this host yet (reading an unsynced one returns a clear " +
+			"directory-not-found error). **You MUST discover skill names here first, then load one with " +
+			"`luban_read_skill` (by name, not path).**",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {},
 			"additionalProperties": false
 		}`),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
-			return listSkills(tools.loader, skill.UserIDFromContext(ctx))
+			return listSkills(ctx, tools.loader, tools.market, skill.UserIDFromContext(ctx))
 		},
 	}
 	return r.Register(spec)
@@ -191,8 +210,10 @@ func registerReadSkill(r *tool.Registry, tools *Tools) error {
 		Name: ToolReadSkill,
 		Description: "Reads a skill by name and returns its text body. The result is delivered inside the standard " +
 			"status envelope: `{\"status\":0,\"result\":\"<skill text>\"}` on success (a JSON string with YAML " +
-			"frontmatter stripped), or `{\"status\":1,\"error\":...}` on failure. User skills take precedence over " +
-			"global skills. **`name` MUST be a simple skill identifier, not a path.** With `path` omitted it reads the " +
+			"frontmatter stripped), or `{\"status\":1,\"error\":...}` on failure. Name resolution order is " +
+			"user > global > skill market: LOCAL skills take precedence, and skill-market skills (location " +
+			"`skill_market` in luban_list_skills) are available as a fallback when no local skill matches. " +
+			"**`name` MUST be a simple skill identifier, not a path.** With `path` omitted it reads the " +
 			"skill's `SKILL.md`; with `path` provided it reads the text file at that path relative to the skill's " +
 			"directory root (confined to the skill directory; any text file is readable, binary files are rejected). " +
 			"**DO NOT read skills with `xizhi_*` — use luban.** (Skill-directory access rules live in the system prompt.)",
@@ -219,7 +240,7 @@ func registerReadSkill(r *tool.Registry, tools *Tools) error {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("luban_read_skill: parse args: %w", err)
 			}
-			return readSkill(tools.loader, a.Name, a.Path, skill.UserIDFromContext(ctx))
+			return readSkill(ctx, tools.loader, tools.market, a.Name, a.Path, skill.UserIDFromContext(ctx))
 		},
 	}
 	return r.Register(spec)

@@ -129,7 +129,7 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace)
-	skillH := handler.NewSkillHandler(fsSvc)
+	skillH := handler.NewSkillHandler(fsSvc, nil)
 
 	r := gin.New()
 	r.Use(middleware.TraceMiddleware())

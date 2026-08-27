@@ -58,7 +58,7 @@ func TestListSkills(t *testing.T) {
 
 	loader := skill.NewLoader(globalDir, userDirFn)
 
-	entries, err := listSkills(loader, "u1")
+	entries, err := listSkills(context.Background(), loader, nil, "u1")
 	require.NoError(t, err)
 	require.Len(t, entries, 3)
 
@@ -89,22 +89,22 @@ func TestReadSkill(t *testing.T) {
 
 	loader := skill.NewLoader(globalDir, userDirFn)
 
-	body, err := readSkill(loader, "s", "", "u1")
+	body, err := readSkill(context.Background(), loader, nil, "s", "", "u1")
 	require.NoError(t, err)
 	assert.Equal(t, "# User", body)
 
-	body, err = readSkill(loader, "s", "", "")
+	body, err = readSkill(context.Background(), loader, nil, "s", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "# Global", body)
 
-	_, err = readSkill(loader, "missing", "", "")
+	_, err = readSkill(context.Background(), loader, nil, "missing", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
 
 func TestReadSkill_RejectsPathLikeName(t *testing.T) {
 	loader := skill.NewLoader(t.TempDir(), nil)
-	_, err := readSkill(loader, "../workspace/secrets", "", "u1")
+	_, err := readSkill(context.Background(), loader, nil, "../workspace/secrets", "", "u1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "luban_read_skill")
 }
@@ -137,7 +137,7 @@ func TestInstallSkill_SingleFile(t *testing.T) {
 	assert.Contains(t, string(data), "# Body")
 
 	// Listing should discover the newly installed skill.
-	entries, err := listSkills(loader, "u1")
+	entries, err := listSkills(context.Background(), loader, nil, "u1")
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "from-url", entries[0].Name)
@@ -195,7 +195,7 @@ func TestInstallSkill_GitRepo(t *testing.T) {
 	assert.Equal(t, "collection", res.Name)
 	assert.False(t, res.Overwrite)
 
-	entries, err := listSkills(loader, "u1")
+	entries, err := listSkills(context.Background(), loader, nil, "u1")
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "sub-skill", entries[0].Name)
@@ -285,7 +285,7 @@ func TestInstallSkill_SubSkill_ByName(t *testing.T) {
 	assert.FileExists(t, filepath.Join(userDirFn("u1"), "gildata-finance-data", "SKILL.md"))
 	assert.NoDirExists(t, filepath.Join(userDirFn("u1"), "wind-data"))
 
-	entries, err := listSkills(loader, "u1")
+	entries, err := listSkills(context.Background(), loader, nil, "u1")
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "gildata-finance-data", entries[0].Name)
@@ -332,7 +332,7 @@ func TestInstallSkill_SubSkill_NotFoundListsNames(t *testing.T) {
 	assert.Contains(t, err.Error(), "wind-data")
 
 	// Nothing is written to the user skills directory.
-	entries, err := listSkills(loader, "u1")
+	entries, err := listSkills(context.Background(), loader, nil, "u1")
 	require.NoError(t, err)
 	assert.Empty(t, entries)
 }
@@ -382,7 +382,7 @@ func TestInstallSkill_InstallDoc(t *testing.T) {
 	assert.NotEmpty(t, res.Hint)
 
 	// Nothing is written to the user skills directory.
-	entries, err := listSkills(loader, "u1")
+	entries, err := listSkills(context.Background(), loader, nil, "u1")
 	require.NoError(t, err)
 	assert.Empty(t, entries)
 }
@@ -562,12 +562,12 @@ func TestReadSkill_ByPath(t *testing.T) {
 	loader := skill.NewLoader(globalDir, nil)
 
 	// path reads the sub-document.
-	body, err := readSkill(loader, "s", "examples/guide.md", "")
+	body, err := readSkill(context.Background(), loader, nil, "s", "examples/guide.md", "")
 	require.NoError(t, err)
 	assert.Equal(t, "# Guide", body)
 
 	// path omitted reads SKILL.md (backward compatible).
-	body, err = readSkill(loader, "s", "", "")
+	body, err = readSkill(context.Background(), loader, nil, "s", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "# Skill", body)
 }
@@ -577,7 +577,7 @@ func TestReadSkill_ByPath_RejectsTraversal(t *testing.T) {
 	writeSkill(t, filepath.Join(globalDir, "s"), "s", "S", "# Body")
 	loader := skill.NewLoader(globalDir, nil)
 
-	_, err := readSkill(loader, "s", "../../shared.md", "")
+	_, err := readSkill(context.Background(), loader, nil, "s", "../../shared.md", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "luban_read_skill")
 }

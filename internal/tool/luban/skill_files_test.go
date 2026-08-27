@@ -1,6 +1,7 @@
 package luban
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,7 +58,7 @@ func TestListSkillFiles_Root(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	res, err := ListSkillFiles(loader, "my-skill", "", "u1", false)
+	res, err := ListSkillFiles(context.Background(), loader, nil, "my-skill", "", "u1", false)
 	require.NoError(t, err)
 	got := res.(listSkillFilesResult)
 	assert.Equal(t, ".", got.Path, "empty path displays as \".\"")
@@ -78,7 +79,7 @@ func TestListSkillFiles_SubDirectory(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	res, err := ListSkillFiles(loader, "my-skill", "examples", "u1", false)
+	res, err := ListSkillFiles(context.Background(), loader, nil, "my-skill", "examples", "u1", false)
 	require.NoError(t, err)
 	got := res.(listSkillFilesResult)
 	assert.Equal(t, "examples", got.Path)
@@ -97,7 +98,7 @@ func TestListSkillFiles_UserOverridesGlobal(t *testing.T) {
 	writeSkill(t, filepath.Join(userDirFn("u1"), "shared"), "shared", "User", "# User")
 	require.NoError(t, os.WriteFile(filepath.Join(userDirFn("u1"), "shared", "user-marker"), []byte("u"), 0o644))
 
-	res, err := ListSkillFiles(loader, "shared", "", "u1", false)
+	res, err := ListSkillFiles(context.Background(), loader, nil, "shared", "", "u1", false)
 	require.NoError(t, err)
 	got := res.(listSkillFilesResult)
 	assert.Contains(t, entryNames(got.Entries), "user-marker", "user skill directory must be the one listed")
@@ -109,12 +110,12 @@ func TestListSkillFiles_HiddenGitExcludedByDefault(t *testing.T) {
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
 	// Default: .git hidden.
-	res, err := ListSkillFiles(loader, "my-skill", "", "u1", false)
+	res, err := ListSkillFiles(context.Background(), loader, nil, "my-skill", "", "u1", false)
 	require.NoError(t, err)
 	assert.NotContains(t, entryNames(res.(listSkillFilesResult).Entries), ".git")
 
 	// include_hidden surfaces it.
-	res, err = ListSkillFiles(loader, "my-skill", "", "u1", true)
+	res, err = ListSkillFiles(context.Background(), loader, nil, "my-skill", "", "u1", true)
 	require.NoError(t, err)
 	assert.Contains(t, entryNames(res.(listSkillFilesResult).Entries), ".git")
 }
@@ -123,14 +124,14 @@ func TestListSkillFiles_PathTraversalRejected(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	_, err := ListSkillFiles(loader, "my-skill", "../../etc", "u1", false)
+	_, err := ListSkillFiles(context.Background(), loader, nil, "my-skill", "../../etc", "u1", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "traversal")
 }
 
 func TestListSkillFiles_UnknownSkill(t *testing.T) {
 	loader, _, _, _ := newSkillFileLoader(t)
-	_, err := ListSkillFiles(loader, "nonexistent", "", "u1", false)
+	_, err := ListSkillFiles(context.Background(), loader, nil, "nonexistent", "", "u1", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -139,7 +140,7 @@ func TestListSkillFiles_SubDirectoryNotFound(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	_, err := ListSkillFiles(loader, "my-skill", "nope", "u1", false)
+	_, err := ListSkillFiles(context.Background(), loader, nil, "my-skill", "nope", "u1", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "directory not found")
 }
@@ -148,7 +149,7 @@ func TestTreeSkill_RootDefaultDepth(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	res, err := TreeSkill(loader, "my-skill", "", "u1", 0, false)
+	res, err := TreeSkill(context.Background(), loader, nil, "my-skill", "", "u1", 0, false)
 	require.NoError(t, err)
 	got := res.(treeSkillResult)
 	assert.Equal(t, ".", got.Path)
@@ -172,7 +173,7 @@ func TestTreeSkill_DepthClampedToMax(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	res, err := TreeSkill(loader, "my-skill", "", "u1", 42, false)
+	res, err := TreeSkill(context.Background(), loader, nil, "my-skill", "", "u1", 42, false)
 	require.NoError(t, err)
 	got := res.(treeSkillResult)
 	assert.Equal(t, maxSkillTreeDepth, got.Depth, "depth above the maximum must be clamped to 10")
@@ -182,7 +183,7 @@ func TestTreeSkill_SubDirectory(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	res, err := TreeSkill(loader, "my-skill", "examples", "u1", 2, false)
+	res, err := TreeSkill(context.Background(), loader, nil, "my-skill", "examples", "u1", 2, false)
 	require.NoError(t, err)
 	got := res.(treeSkillResult)
 	assert.Equal(t, "examples", got.Path)
@@ -194,11 +195,11 @@ func TestTreeSkill_HiddenExcludedByDefault(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	res, err := TreeSkill(loader, "my-skill", "", "u1", 3, false)
+	res, err := TreeSkill(context.Background(), loader, nil, "my-skill", "", "u1", 3, false)
 	require.NoError(t, err)
 	assert.NotContains(t, nodeNames(res.(treeSkillResult).Tree), ".git")
 
-	res, err = TreeSkill(loader, "my-skill", "", "u1", 3, true)
+	res, err = TreeSkill(context.Background(), loader, nil, "my-skill", "", "u1", 3, true)
 	require.NoError(t, err)
 	assert.Contains(t, nodeNames(res.(treeSkillResult).Tree), ".git")
 }
@@ -207,14 +208,14 @@ func TestTreeSkill_PathTraversalRejected(t *testing.T) {
 	loader, globalDir, _, _ := newSkillFileLoader(t)
 	seedSkill(t, filepath.Join(globalDir, "my-skill"))
 
-	_, err := TreeSkill(loader, "my-skill", "../../etc", "u1", 3, false)
+	_, err := TreeSkill(context.Background(), loader, nil, "my-skill", "../../etc", "u1", 3, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "traversal")
 }
 
 func TestTreeSkill_UnknownSkill(t *testing.T) {
 	loader, _, _, _ := newSkillFileLoader(t)
-	_, err := TreeSkill(loader, "nonexistent", "", "u1", 3, false)
+	_, err := TreeSkill(context.Background(), loader, nil, "nonexistent", "", "u1", 3, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }

@@ -54,7 +54,7 @@ func (t *Tools) run(ctx context.Context, toolName string, cfg config.ExecutorToo
 		return nil, fmt.Errorf("executor: create workspace .pip: %w", err)
 	}
 
-	bwrapArgs := buildBwrapArgs(workspaceRoot, workspaceTmp, t.globalSkillsDir, t.toolsDir, t.cfg.Sandbox, cfg)
+	bwrapArgs := buildBwrapArgs(workspaceRoot, workspaceTmp, t.globalSkillsDir, t.toolsDir, t.cfg.Sandbox, cfg, t.marketBinds(ctx, skill.UserIDFromContext(ctx))...)
 	bwrapArgs = append(bwrapArgs, sandboxArgs...)
 
 	if toolName == ToolBash {

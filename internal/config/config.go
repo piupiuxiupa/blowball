@@ -18,21 +18,22 @@ import (
 
 // Config is the root configuration tree mirroring config.yaml.
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	OpenAI     OpenAIConfig     `yaml:"openai"`
-	MySQL      MySQLConfig      `yaml:"mysql"`
-	Redis      RedisConfig      `yaml:"redis"`
-	Auth       AuthConfig       `yaml:"auth"`
-	JWT        JWTConfig        `yaml:"jwt"`
-	Agents     AgentsConfig     `yaml:"agents"`
-	Tools      ToolsConfig      `yaml:"tools"`
-	MCP        MCPConfig        `yaml:"mcp"`
-	Landlock   LandlockConfig   `yaml:"landlock"`
-	Logging    LoggingConfig    `yaml:"logging"`
-	OnlyOffice OnlyOfficeConfig `yaml:"onlyoffice"`
-	Storage    StorageConfig    `yaml:"storage"`
-	Messages   MessagesConfig   `yaml:"messages"`
-	Memory     MemoryConfig     `yaml:"memory"`
+	Server      ServerConfig      `yaml:"server"`
+	OpenAI      OpenAIConfig      `yaml:"openai"`
+	MySQL       MySQLConfig       `yaml:"mysql"`
+	Redis       RedisConfig       `yaml:"redis"`
+	Auth        AuthConfig        `yaml:"auth"`
+	JWT         JWTConfig         `yaml:"jwt"`
+	Agents      AgentsConfig      `yaml:"agents"`
+	Tools       ToolsConfig       `yaml:"tools"`
+	MCP         MCPConfig         `yaml:"mcp"`
+	Landlock    LandlockConfig    `yaml:"landlock"`
+	Logging     LoggingConfig     `yaml:"logging"`
+	OnlyOffice  OnlyOfficeConfig  `yaml:"onlyoffice"`
+	Storage     StorageConfig     `yaml:"storage"`
+	Messages    MessagesConfig    `yaml:"messages"`
+	Memory      MemoryConfig      `yaml:"memory"`
+	SkillMarket SkillMarketConfig `yaml:"skill_market"`
 }
 
 // WorkspaceBackendLocal is the default workspace storage backend: per-user
@@ -255,6 +256,74 @@ func (m MemoryConfig) validate() error {
 	}
 	if m.CaptureTimeout < 0 {
 		return fmt.Errorf("memory.capture_timeout: must be positive (got %s)", m.CaptureTimeout)
+	}
+	return nil
+}
+
+// Defaults for the skill-market capability (remote-authorized skill source).
+// The timeout bounds each allowlist fetch (it runs inside tool calls, so it
+// must stay tight); the cache TTL is the revoke latency bound — an uninstalled
+// skill disappears from the allowlist at most one TTL after the market side
+// revokes it.
+const (
+	defaultSkillMarketTimeout  = 5 * time.Second
+	defaultSkillMarketCacheTTL = 60 * time.Second
+)
+
+// SkillMarketConfig holds the skill-market settings (the top-level
+// `skill_market:` block; skill-market capability). There is deliberately no
+// `enabled` switch: an omitted block or an empty url means the capability is
+// fully OFF (byte-for-byte pre-capability behavior) and a non-empty url
+// enables it. All string values get ${VAR} expansion like every other config
+// field. Validation guards only the enabled state — a url-less block may
+// carry stale values without failing the load (the memory/Webfetch
+// default-off precedent).
+type SkillMarketConfig struct {
+	URL      string        `yaml:"url"`       // market allowlist endpoint; the caller's login JWT rides Authorization: Bearer
+	Timeout  time.Duration `yaml:"timeout"`   // per-fetch deadline
+	CacheTTL time.Duration `yaml:"cache_ttl"` // per-user allowlist cache window
+}
+
+// IsEnabled reports whether the skill market is on: url set. Nil-receiver
+// semantics are not needed (a value type), but callers construct the client
+// only when this is true.
+func (s SkillMarketConfig) IsEnabled() bool {
+	return strings.TrimSpace(s.URL) != ""
+}
+
+// applyDefaults fills zero-valued durations with the documented defaults. It
+// is idempotent and leaves explicit values (including negatives, which
+// validate rejects when enabled) untouched.
+func (s *SkillMarketConfig) applyDefaults() {
+	if s.Timeout == 0 {
+		s.Timeout = defaultSkillMarketTimeout
+	}
+	if s.CacheTTL == 0 {
+		s.CacheTTL = defaultSkillMarketCacheTTL
+	}
+}
+
+// validate guards only the enabled state (non-empty url): the url must be an
+// absolute http(s) URL and both durations non-negative. Violations fail the
+// load. A disabled block (empty url) validates as nil regardless of sibling
+// values.
+func (s SkillMarketConfig) validate() error {
+	if !s.IsEnabled() {
+		return nil
+	}
+	raw := strings.TrimSpace(s.URL)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("skill_market.url: must be an absolute http(s) URL (got %q)", s.URL)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("skill_market.url: unsupported scheme %q (want http or https)", u.Scheme)
+	}
+	if s.Timeout < 0 {
+		return fmt.Errorf("skill_market.timeout: must be non-negative (got %s)", s.Timeout)
+	}
+	if s.CacheTTL < 0 {
+		return fmt.Errorf("skill_market.cache_ttl: must be non-negative (got %s)", s.CacheTTL)
 	}
 	return nil
 }
@@ -533,9 +602,9 @@ func DefaultLengthContinueRetries() int { return 3 }
 // clamped to none + WARN). The optional LengthContinue sub-block is the
 // per-entry finish_reason=length continuation switch.
 type ModelCatalogEntry struct {
-	Name             string              `yaml:"name"`
-	MaxContextTokens int                 `yaml:"max_context_tokens"`
-	Thinking         bool                `yaml:"thinking"`
+	Name             string `yaml:"name"`
+	MaxContextTokens int    `yaml:"max_context_tokens"`
+	Thinking         bool   `yaml:"thinking"`
 	// MaxCompletionTokens is the model's output-token quota — the field
 	// semantic is "output quota" and the wire family translates it: a
 	// thinking:true entry sends it as max_completion_tokens, a thinking:false
@@ -1376,6 +1445,7 @@ func Load(path string) (*Config, error) {
 	cfg.Landlock.applyDefaults()
 	cfg.Messages.applyDefaults()
 	cfg.Memory.applyDefaults()
+	cfg.SkillMarket.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Sandbox.applyDefaults()
 	// Per-agent retry defaults (capability C, extended by llm-round-retry): all
@@ -1409,6 +1479,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Memory.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.SkillMarket.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.MCP.validate(); err != nil {

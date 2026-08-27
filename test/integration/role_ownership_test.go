@@ -90,7 +90,7 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace)
-	skillH := handler.NewSkillHandler(fsSvc)
+	skillH := handler.NewSkillHandler(fsSvc, nil)
 
 	authMW := middleware.AuthMiddleware(integrationTestSecret)
 	apiDeps := handler.RouteDeps{

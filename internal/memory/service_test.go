@@ -86,9 +86,9 @@ func (f *fakeOpenViking) findMemories(r fakeRequest) (int, any) {
 }
 
 var cannedMemories = []map[string]any{
-	{"uri": "viking://user/memories/preferences/shell", "abstract": "User runs fish shell on macOS.", "score": 0.87},
-	{"uri": "viking://user/memories/projects/blowball", "overview": "The user's main project is blowball, a Go multi-agent chat backend.", "score": 0.74},
-	{"uri": "viking://user/memories/empty", "score": 0.5}, // no abstract, no overview: skipped
+	{"uri": "viking://user/alice/memories/preferences/shell", "abstract": "User runs fish shell on macOS.", "score": 0.87},
+	{"uri": "viking://user/alice/memories/projects/blowball", "overview": "The user's main project is blowball, a Go multi-agent chat backend.", "score": 0.74},
+	{"uri": "viking://user/alice/memories/empty", "score": 0.5}, // no abstract, no overview: skipped
 }
 
 // newMemoriesFake returns the canned-memories fake with its handler bound as
@@ -155,7 +155,7 @@ func TestRecall_RendersBlock(t *testing.T) {
 	assert.Contains(t, block, "fish shell on macOS")                       // abstract preferred
 	assert.Contains(t, block, "blowball, a Go multi-agent chat backend")   // overview fallback
 	assert.Contains(t, block, "[memory 87%]")
-	assert.NotContains(t, block, "viking://user/memories/empty") // textless entry dropped
+	assert.NotContains(t, block, "viking://user/alice/memories/empty") // textless entry dropped
 }
 
 func TestRecall_EmptyAndError(t *testing.T) {
@@ -182,14 +182,14 @@ func TestRecall_EmptyAndError(t *testing.T) {
 
 func TestRecall_TokenBudget(t *testing.T) {
 	long := map[string]any{
-		"uri":      "viking://user/memories/long",
+		"uri":      "viking://user/alice/memories/long",
 		"abstract": strings.Repeat("长记忆条目内容", 200), // 1200 CJK runes ≈ 1200 tokens
 		"score":    0.9,
 	}
 	many := make([]map[string]any, 0, 5)
 	for i := 0; i < 5; i++ {
 		many = append(many, map[string]any{
-			"uri":      fmt.Sprintf("viking://user/memories/m%d", i),
+			"uri":      fmt.Sprintf("viking://user/alice/memories/m%d", i),
 			"abstract": strings.Repeat("次级条目", 100), // 400 tokens each after entry cap
 			"score":    0.5 - float64(i)*0.01,
 		})
@@ -226,7 +226,7 @@ func TestRecall_RequestAndIdentityHeaders(t *testing.T) {
 	r := reqs[0]
 	assert.Equal(t, "POST", r.Method)
 	assert.Equal(t, "/api/v1/search/find", r.Path)
-	assert.Equal(t, "viking://user/memories", r.Body["target_uri"])
+	assert.Equal(t, "viking://~/memories", r.Body["target_uri"])
 	assert.Equal(t, []any{"memory"}, r.Body["context_type"])
 	assert.Equal(t, float64(6), r.Body["limit"])
 

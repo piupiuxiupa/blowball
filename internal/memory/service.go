@@ -139,11 +139,14 @@ func (s *Service) Recall(ctx context.Context, userID, query string) (string, err
 	if err != nil {
 		return "", err
 	}
-	// TargetURI already scopes the search to the authenticated user's
-	// memory namespace; context_type memory is belt-and-braces against the
-	// namespace ever carrying mixed content.
+	// TargetURI "~" expands server-side to the authenticated user's memory
+	// namespace (identity stays in X-OpenViking-User); the literal
+	// "viking://user/memories" predates the server's grammar tightening and
+	// is now rejected ("memories" is a reserved name, not a user id).
+	// context_type memory is belt-and-braces against the namespace ever
+	// carrying mixed content.
 	res, err := c.Find(ctx, query, &openviking.FindOptions{
-		TargetURI:   "viking://user/memories",
+		TargetURI:   "viking://~/memories",
 		ContextType: []string{"memory"},
 		Limit:       s.cfg.RecallLimit,
 	})

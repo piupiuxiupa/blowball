@@ -199,6 +199,31 @@ memory:
   # capture_timeout: 30s        # capture deadline (detached goroutine)
   # max_capture_bytes: 262144   # per-message byte cap (256KB), truncate with marker
 
+# Remote-authorized skill market (skill-market capability). Default OFF: omit
+# the whole block (or leave url empty/uncommented) for zero behavior change —
+# a non-empty url IS the on switch (no separate `enabled` flag).
+#
+# When enabled, blowball fetches the per-user skill allowlist from the market
+# service using the CALLER's login JWT (Authorization: Bearer; the market
+# service resolves the user identity from the token, so it must validate
+# blowball JWTs — shared jwt.secret domain). Skill payloads are NOT fetched:
+# the operator syncs them onto every host at
+# {data-dir}/skills-market/{market_user_id}/{skill_name}/, and blowball only
+# ever exposes the paths the allowlist returns. Any fetch failure (down,
+# timeout, non-200, bad JSON, auth failure) degrades fail-closed: no market
+# skills in any list, no reads, no sandbox mounts — NEVER a directory-scan
+# fallback.
+#
+# Fields:
+#   url       - the allowlist endpoint (absolute http(s) URL). Empty = off.
+#   timeout   - optional; per-fetch deadline (default 5s).
+#   cache_ttl - optional; per-user allowlist cache window; also the bound on
+#               how long a revoked skill stays visible (default 60s).
+skill_market:
+  # url: ${SKILL_MARKET_URL:}
+  # timeout: 5s
+  # cache_ttl: 60s
+
 # Process-level Landlock sandbox (Linux only; no-op on macOS/Windows). Applied
 # once at startup over the server process. The process RW application dirs
 # ({data-dir}/data, {data-dir}/logs, {data-dir}/skills) and RO dir

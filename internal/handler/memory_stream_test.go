@@ -60,7 +60,7 @@ func (o *ovCapture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"status": "ok",
 			"result": map[string]any{
 				"memories": []map[string]any{
-					{"uri": "viking://user/memories/prefs", "abstract": "User runs fish shell on macOS.", "score": 0.87},
+					{"uri": "viking://user/user-1/memories/prefs", "abstract": "User runs fish shell on macOS.", "score": 0.87},
 				},
 			},
 		})

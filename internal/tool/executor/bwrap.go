@@ -60,13 +60,17 @@ const toolsBinPath = sandboxHome + "/.local/bin"
 // writable synthetic home (tmpfs) with the operator tools dir bound read-only
 // at $HOME/.local/bin. Per-user skills are NOT mounted separately: they live
 // under the workspace at .blowball/skills and are already reachable (read-write)
-// via the /workspace bind. The configurable stat-guarded system read-only
-// baseline (sandbox.SystemReadOnly) and the operator-configured extra mounts
+// via the /workspace bind. The optional marketBinds (skill-market capability)
+// add one flattened per-skill read-only mount at /skills/market/{name} — the
+// whole market dir is NEVER mounted wholesale (other users' skills must stay
+// invisible), and an empty slice is byte-for-byte the pre-capability args. The
+// configurable stat-guarded system read-only baseline
+// (sandbox.SystemReadOnly) and the operator-configured extra mounts
 // (sandbox.ExtraReadOnlyMounts / ExtraReadWriteMounts) are appended after the
 // fixed invariants. The load-bearing invariants (/workspace, $HOME,
 // $HOME/.local/bin, the global skills target, --chdir /workspace, PYTHONPATH)
 // are unchanged and not configurable.
-func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir string, sandbox config.ExecutorSandboxConfig, cfg config.ExecutorToolConfig) []string {
+func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir string, sandbox config.ExecutorSandboxConfig, cfg config.ExecutorToolConfig, marketBinds ...MarketBind) []string {
 	args := []string{
 		"--unshare-user",
 		"--unshare-ipc",
@@ -84,6 +88,12 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir strin
 		"--tmpfs", sandboxHome,
 		"--ro-bind", toolsDir, toolsBinPath,
 		"--chdir", "/workspace",
+	}
+
+	// Per-user skill-market mounts (skill-market capability): caller-resolved
+	// (allowlist + stat guard) per-skill ro-binds, flattened by skill name.
+	for _, b := range marketBinds {
+		args = append(args, "--ro-bind", b.Host, b.Target)
 	}
 
 	// Configurable, stat-guarded system read-only baseline (spec D3): bind only

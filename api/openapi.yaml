@@ -611,6 +611,17 @@ components:
         update_time:
           type: string
           format: date-time
+        location:
+          type: string
+          description: |
+            Present ONLY on skill-market entries (skill-market capability):
+            `"skill_market"`. Local (user-directory) entries omit the field and
+            serialize exactly as before the capability. A name conflict
+            between a local skill and a market skill resolves local-first.
+        description:
+          type: string
+          description: Present ONLY on skill-market entries — the description
+            from the market API (the disk SKILL.md is not consulted).
     SkillsResponse:
       type: object
       required: [skills]
@@ -1913,6 +1924,11 @@ paths:
     get:
       tags: [Skills]
       summary: List the authenticated user's skills.
+      description: |
+        When `skill_market.url` is enabled, the response merges the caller's
+        market allowlist entries (additive `location: "skill_market"` +
+        `description` fields; local-first on name conflicts; a market failure
+        degrades to the local-only list with HTTP 200).
       responses:
         '200':
           description: Skill list (empty array when none exist).

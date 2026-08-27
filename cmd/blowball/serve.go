@@ -32,6 +32,7 @@ import (
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
+	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/storage"
 	"github.com/lush/blowball/internal/store/fs"
 	"github.com/lush/blowball/internal/store/mysql"
@@ -289,10 +290,17 @@ type appRuntime struct {
 	logDir     string
 	skillsDir  string
 	toolsDir   string
+	marketDir  string
 	log        *zap.Logger
 	mysqlStore *mysql.Store
 	redisStore *redis.Store
 	fsStore    *fs.Store
+	// market is the skill-market client (skill-market capability), nil when
+	// the skill_market config block is off. Constructed here in the shared
+	// setup because BOTH roles consume it: the api role for the skills list
+	// endpoint, the agent role for the luban tools and the bash sandbox's
+	// per-skill market mounts.
+	market *skillmarket.Client
 }
 
 // setupRuntime performs the shared bootstrap that runs for every role: load
@@ -310,11 +318,12 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		return nil, fmt.Errorf("load config %q: %w", configPath, err)
 	}
 
-	// Derive the four runtime locations from the single -d root (D2/D3/D6): data, logs, skills, tools.
+	// Derive the five runtime locations from the single -d root (D2/D3/D6): data, logs, skills, tools, skills-market.
 	dataDir := filepath.Join(dataRoot, "data")
 	logDir := filepath.Join(dataRoot, "logs")
 	skillsDir := filepath.Join(dataRoot, "skills")
 	toolsDir := filepath.Join(dataRoot, "tools")
+	marketDir := filepath.Join(dataRoot, "skills-market")
 
 	// Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -347,8 +356,15 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		logDir:    logDir,
 		skillsDir: skillsDir,
 		toolsDir:  toolsDir,
+		marketDir: marketDir,
 		log:       log,
 	}
+
+	// Skill-market client (skill-market capability): nil for a disabled
+	// config, constructed here in the shared setup because both roles consume
+	// it. Pure HTTP client holder — no store dependencies, no startup probe
+	// (failures degrade per call, never gate boot).
+	rt.market = skillmarket.New(cfg.SkillMarket, marketDir)
 
 	log.Info("runtime layout",
 		zap.String("role", role),
@@ -357,7 +373,9 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		zap.String("data_dir", dataDir),
 		zap.String("log_dir", logDir),
 		zap.String("skills_dir", skillsDir),
-		zap.String("tools_dir", toolsDir))
+		zap.String("tools_dir", toolsDir),
+		zap.String("skills_market_dir", marketDir),
+		zap.Bool("skill_market_enabled", rt.market.Enabled()))
 
 	// MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
 	mysqlStore, err := mysql.New(cfg.MySQL.DSN)
@@ -428,9 +446,21 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		log.Fatal("create tools dir failed", zap.Error(err))
 	}
 
-	// go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — plus operator extra_read_write; the operator tools dir is restricted read-only, plus operator extra_read_only; the configurable system_read_only baseline is restricted read-only too. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless. landlock.enabled: false skips ApplyLandlock entirely (warning-only). All defaults reproduce the pre-configurability literals.
+	// Ensure the skills-market directory exists (skill-market capability), in
+	// the same always-create-even-empty sequence as tools: operators sync
+	// market skill payloads into {market_uid}/{skill_name}/ here; an empty
+	// directory is harmless (no mounts, no allowlist entries — visibility
+	// comes only from the market API). Like tools, it lives directly under -d
+	// (NOT inside data/), so it never participates in the shared-storage
+	// health check or the FUSE anchor; multi-host deployments sync it per
+	// host.
+	if err := os.MkdirAll(marketDir, 0o755); err != nil {
+		log.Fatal("create skills-market dir failed", zap.Error(err))
+	}
+
+	// go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — plus operator extra_read_write; the operator tools dir and the skills-market dir are restricted read-only (the agent never writes market payloads — operators sync them), plus operator extra_read_only; the configurable system_read_only baseline is restricted read-only too. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless. landlock.enabled: false skips ApplyLandlock entirely (warning-only). All defaults reproduce the pre-configurability literals.
 	rwDirs := append([]string{dataDir, logDir, skillsDir}, cfg.Landlock.ExtraReadWrite...)
-	roDirs := append([]string{toolsDir}, cfg.Landlock.ExtraReadOnly...)
+	roDirs := append([]string{toolsDir, marketDir}, cfg.Landlock.ExtraReadOnly...)
 	log.Info("landlock policy",
 		zap.Bool("enabled", cfg.Landlock.IsEnabled()),
 		zap.Strings("rw_dirs", rwDirs),
@@ -502,7 +532,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		InternalBackend:   cfg.OnlyOffice.InternalBackend,
 		VersionServiceURL: cfg.OnlyOffice.VersionServiceURL,
 	})
-	skillHandler := handler.NewSkillHandler(rt.fsStore)
+	skillHandler := handler.NewSkillHandler(rt.fsStore, rt.market)
 	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
 
 	return handler.RouteDeps{
@@ -565,7 +595,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		// /workspace bind, so only the workspace resolver is needed here.
 		executorTools := executor.NewTools(cfg.Tools.Executor, func(userID string) string {
 			return fsStore.UserWorkspace(userID)
-		}, rt.skillsDir, rt.toolsDir)
+		}, rt.skillsDir, rt.toolsDir).WithMarket(rt.market)
 		if err := executor.RegisterAll(reg, executorTools); err != nil {
 			log.Fatal("register executor tools failed", zap.Error(err))
 		}
@@ -578,7 +608,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	if needsLubanTools(cfg.Agents) {
 		lubanTools := luban.NewTools(skillLoader, func(userID string) string {
 			return fsStore.UserSkills(userID)
-		})
+		}).WithMarket(rt.market)
 		if err := luban.RegisterAll(reg, lubanTools); err != nil {
 			log.Fatal("register luban tools failed", zap.Error(err))
 		}

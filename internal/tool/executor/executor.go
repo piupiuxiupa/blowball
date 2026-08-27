@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/skill"
 )
@@ -33,6 +34,11 @@ type Tools struct {
 	workspaceFn     func(userID string) string
 	globalSkillsDir string
 	toolsDir        string
+	// market is the optional skill-market client (skill-market capability):
+	// per bash call it resolves the CURRENT user's authorized skills into
+	// per-skill --ro-bind mounts at /skills/market/{name}. nil = capability
+	// off = zero market mounts (pre-capability bwrap args).
+	market *skillmarket.Client
 }
 
 // NewTools creates an executor tool bundle backed by cfg, workspaceFn,

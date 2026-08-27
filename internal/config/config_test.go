@@ -2045,3 +2045,174 @@ memory:
 		t.Fatalf("Load rejected a disabled memory block: %v", err)
 	}
 }
+
+// TestLoad_SkillMarketDisabledWhenOmitted verifies the block-omitted and
+// empty-url shapes both load as fully OFF with the duration defaults filled.
+func TestLoad_SkillMarketDisabledWhenOmitted(t *testing.T) {
+	base := `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`
+	for name, extra := range map[string]string{
+		"block omitted": "",
+		"empty url": `
+skill_market:
+  url: ""
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(writeTempYAML(t, base+extra))
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.SkillMarket.IsEnabled() {
+				t.Error("skill_market should be disabled")
+			}
+			// Duration defaults fill even for a disabled block (the memory
+			// precedent) so a later enable-flip picks up sane values.
+			if cfg.SkillMarket.Timeout != defaultSkillMarketTimeout {
+				t.Errorf("Timeout = %s, want %s", cfg.SkillMarket.Timeout, defaultSkillMarketTimeout)
+			}
+			if cfg.SkillMarket.CacheTTL != defaultSkillMarketCacheTTL {
+				t.Errorf("CacheTTL = %s, want %s", cfg.SkillMarket.CacheTTL, defaultSkillMarketCacheTTL)
+			}
+		})
+	}
+}
+
+// TestLoad_SkillMarketEnabled verifies an enabled block loads with explicit
+// values and, separately, with the documented defaults.
+func TestLoad_SkillMarketEnabled(t *testing.T) {
+	base := `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+skill_market:
+  url: http://market.internal:8090/api/v1/skills
+`
+	cfg, err := Load(writeTempYAML(t, base))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.SkillMarket.IsEnabled() {
+		t.Fatal("skill_market should be enabled by a non-empty url")
+	}
+	want := SkillMarketConfig{
+		URL:      "http://market.internal:8090/api/v1/skills",
+		Timeout:  defaultSkillMarketTimeout,
+		CacheTTL: defaultSkillMarketCacheTTL,
+	}
+	if cfg.SkillMarket != want {
+		t.Errorf("SkillMarket = %+v, want %+v", cfg.SkillMarket, want)
+	}
+
+	// Explicit durations survive (no default override).
+	path := writeTempYAML(t, base+"  timeout: 2s\n  cache_ttl: 5m\n")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load with explicit durations returned error: %v", err)
+	}
+	if cfg.SkillMarket.Timeout != 2*time.Second || cfg.SkillMarket.CacheTTL != 5*time.Minute {
+		t.Errorf("explicit durations = %s/%s, want 2s/5m", cfg.SkillMarket.Timeout, cfg.SkillMarket.CacheTTL)
+	}
+}
+
+// TestLoad_SkillMarketEnvSubstitution verifies ${VAR} expansion on url.
+func TestLoad_SkillMarketEnvSubstitution(t *testing.T) {
+	t.Setenv("MARKET_URL", "http://from-env:9990/skills")
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+skill_market:
+  url: "${MARKET_URL}"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.SkillMarket.URL != "http://from-env:9990/skills" {
+		t.Errorf("url = %q, want the MARKET_URL env value", cfg.SkillMarket.URL)
+	}
+}
+
+// TestLoad_SkillMarketRejections collects the enabled-state validation
+// failures: non-absolute url, unsupported scheme, negative durations. A block
+// WITHOUT a url carrying the same stale values must keep loading.
+func TestLoad_SkillMarketRejections(t *testing.T) {
+	base := `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{"relative url", base + `
+skill_market:
+  url: "market.internal:8090/skills"
+`},
+		{"unsupported scheme", base + `
+skill_market:
+  url: "ftp://market.internal/skills"
+`},
+		{"negative timeout", base + `
+skill_market:
+  url: http://market.internal:8090/skills
+  timeout: -1s
+`},
+		{"negative cache_ttl", base + `
+skill_market:
+  url: http://market.internal:8090/skills
+  cache_ttl: -5s
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Load(writeTempYAML(t, tc.yaml)); err == nil {
+				t.Fatal("Load accepted an invalid skill_market block, want load-time rejection")
+			}
+		})
+	}
+
+	// A disabled block (no url) carries stale sibling values without failing
+	// the load — validate guards only the enabled state.
+	path := writeTempYAML(t, base+`
+skill_market:
+  url: ""
+  timeout: -1s
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load rejected a disabled skill_market block: %v", err)
+	}
+}

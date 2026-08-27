@@ -21,6 +21,7 @@ import (
 	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
+	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -239,9 +240,15 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	sessionID := c.Param("session_id")
 	tid := middleware.TraceIDFromCtx(c)
+	// The RAW login JWT also rides the context (skill-market capability) so
+	// the skillmarket client can authenticate the per-user allowlist fetch
+	// from inside tool execution. AuthMiddleware verified the token but keeps
+	// publishing only user_id — this is the single pass-through point, and it
+	// reuses the verified header value rather than any stored copy.
+	rawToken, _ := middleware.BearerToken(c.GetHeader("Authorization"))
 	// trace_id + session_id both ride the context so the raw-capture sink can
 	// attribute every LLM call the orchestrator makes to this session.
-	ctx := agent.WithSessionID(trace.WithContext(c.Request.Context(), tid), sessionID)
+	ctx := skillmarket.WithToken(agent.WithSessionID(trace.WithContext(c.Request.Context(), tid), sessionID), rawToken)
 
 	sess, err := h.sessSvc.GetSessionByID(ctx, sessionID)
 	if err != nil {
@@ -514,9 +521,11 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	}
 
 	// The turn context: detached, but carrying the same trace/session
-	// attribution (raw capture, llm_raw_log) as the request context did.
+	// attribution (raw capture, llm_raw_log) as the request context did — and
+	// the login token, which flows from here into every tool execution ctx so
+	// luban/executor market lookups survive the HTTP request's lifetime.
 	turnCtx, turnCancel := context.WithCancel(context.Background())
-	turnCtx = agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID)
+	turnCtx = skillmarket.WithToken(agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID), rawToken)
 	regRun := h.runs.Registry.Register(tid, turnCancel)
 
 	workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")

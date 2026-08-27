@@ -65,6 +65,16 @@ func QueryTokenAuthMiddleware(secret string) gin.HandlerFunc {
 	}
 }
 
+// BearerToken extracts the credential portion of a "Bearer <token>"
+// Authorization header value. The boolean is false when the header is absent
+// or not a Bearer scheme. Exported for handlers that need the RAW token for
+// pass-through authentication of a downstream service (the skill-market
+// allowlist fetch) — AuthMiddleware itself keeps only publishing user_id and
+// never stores the token anywhere.
+func BearerToken(header string) (string, bool) {
+	return bearerToken(header)
+}
+
 // authenticate verifies the token, publishes user_id, backstops the trace_id,
 // and continues the gin chain. A verification error is returned to the caller
 // so each middleware can keep its source-specific 401 message.

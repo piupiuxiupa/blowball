@@ -24,7 +24,9 @@ func registerBash(r *tool.Registry, tools *Tools) error {
 			"- Commands **MUST finish within the default 30s timeout.**\n" +
 			"- The sandbox runs as an unprivileged user; only current WORKSPACE path (`.`) is writable and network is enabled by default " +
 			"(operator may disable via config). Global skills are read-only at `/skills/global`; per-user skills live at " +
-			"`.blowball/skills` (managed via luban).\n" +
+			"`.blowball/skills` (managed via luban); skill-market skills authorized for the current user are mounted read-only at " +
+			"`/skills/market/{skill-name}/` (scripts and files; resolve the names via `luban_list_skills`, entries with location " +
+			"`skill_market`).\n" +
 			"- Run Python here with `python3 ...` and install packages with `python3 -m pip install --target " +
 			".pip <pkg>`; installed packages are importable in later runs via the injected `PYTHONPATH` bridge.\n" +
 			"- **DO NOT use `cat`, `rm`, `ls`, `find`, `sed`, `awk` or `grep` for workspace file work — use the dedicated " +

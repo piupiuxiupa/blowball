@@ -276,3 +276,54 @@ func TestTraceMiddleware_SetsTraceID(t *testing.T) {
 	require.Equal(t, http.StatusOK, w2.Code)
 	assert.NotEqual(t, firstID, w2.Header().Get("X-Trace-Id"))
 }
+
+// TestAuthMiddleware_PublishesNoRawToken is the skill-market guard test: the
+// middleware keeps publishing ONLY user_id (+ the trace backstop) — the raw
+// Bearer token must never land on the gin.Context (the single pass-through
+// point for the token is the handler reading the request header). This pins
+// the D1 decision that AuthMiddleware stays untouched by the capability.
+func TestAuthMiddleware_PublishesNoRawToken(t *testing.T) {
+	tok := sign(t, "user-raw-guard", time.Hour)
+	r := gin.New()
+	r.Use(TraceMiddleware())
+	var keys map[any]any
+	r.GET("/secure", AuthMiddleware(mwTestSecret), func(c *gin.Context) {
+		keys = map[any]any{}
+		for k, v := range c.Keys {
+			keys[k] = v
+		}
+		c.JSON(http.StatusOK, nil)
+	})
+	w := doGet(t, r, "Bearer "+tok)
+	require.Equal(t, http.StatusOK, w.Code, "request should pass auth")
+
+	// No gin-context VALUE may be the raw token, under any key.
+	for k, v := range keys {
+		if s, ok := v.(string); ok {
+			assert.NotEqual(t, tok, s, "gin context key %v carries the raw token", k)
+		}
+	}
+	// And the published keys are exactly the known set (gin v1.12 Keys is
+	// map[any]any; our middleware only ever sets string keys).
+	want := map[string]bool{string(TraceIDKey): true, UserIDKey: true}
+	require.Len(t, keys, len(want))
+	for k := range keys {
+		ks, isString := k.(string)
+		require.True(t, isString, "gin context key %v is not a string", k)
+		assert.Contains(t, want, ks, "unexpected gin context key %q published by auth middleware", ks)
+	}
+}
+
+// TestBearerToken_ExportedHelper verifies the pass-through helper used by the
+// streaming handler and skills handler to forward the raw JWT.
+func TestBearerToken_ExportedHelper(t *testing.T) {
+	tok, ok := BearerToken("Bearer abc.def")
+	require.True(t, ok)
+	assert.Equal(t, "abc.def", tok)
+	_, ok = BearerToken("")
+	assert.False(t, ok)
+	_, ok = BearerToken("Basic zzz")
+	assert.False(t, ok)
+	_, ok = BearerToken("Bearer   ")
+	assert.False(t, ok)
+}

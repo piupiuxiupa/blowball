@@ -1,12 +1,14 @@
 package luban
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/tool/skill"
 )
 
@@ -57,17 +59,26 @@ func hiddenName(name string) bool {
 }
 
 // resolveSkillSubdir resolves name to its skill directory (user skills override
-// global skills of the same name, identical precedence to luban_read_skill),
-// then confines optional subPath within it using the same rules as
-// skill.ReadPath (absolute paths, ".." escapes, and symlinks resolving outside
-// the skill directory are rejected). It returns the absolute target directory,
-// the skill root, and a display path (subPath, or "." when empty/omitted).
-// toolName prefixes the returned errors (e.g. "luban_list_skill_files").
-func resolveSkillSubdir(loader *skill.Loader, name, subPath, userID, toolName string) (target, skillRoot, display string, err error) {
+// global skills of the same name; after a local miss the skill market
+// allowlist resolves the name to {data-dir}/skills-market{path} — user >
+// global > market, identical precedence to luban_read_skill), then confines
+// optional subPath within it using the same rules as skill.ReadPath (absolute
+// paths, ".." escapes, and symlinks resolving outside the skill directory are
+// rejected — market skill directories get the identical confinement). It
+// returns the absolute target directory, the skill root, and a display path
+// (subPath, or "." when empty/omitted). toolName prefixes the returned errors
+// (e.g. "luban_list_skill_files"). A disk-sync-lagged market directory passes
+// resolution here and the caller's statSkillDir surfaces "directory not found"
+// (the API is the visibility truth; sync lag is a use-point error).
+func resolveSkillSubdir(ctx context.Context, loader *skill.Loader, market *skillmarket.Client, name, subPath, userID, toolName string) (target, skillRoot, display string, err error) {
 	if verr := validateSkillName(name); verr != nil {
 		return "", "", "", fmt.Errorf("%s: %w", toolName, verr)
 	}
 	root, ok := loader.SkillDir(name, userID)
+	if !ok {
+		// Market fallback (third source); nil client = capability off = miss.
+		root, ok = marketSkillDir(ctx, market, name, userID)
+	}
 	if !ok {
 		return "", "", "", fmt.Errorf("%s: skill %q not found", toolName, name)
 	}
@@ -102,10 +113,11 @@ func statSkillDir(target, toolName string) (os.FileInfo, error) {
 // ListSkillFiles lists the immediate children of the named skill's directory
 // (or a sub-directory of it when subPath is provided), one level only. It
 // mirrors xizhi_list_files' shape. Hidden entries are omitted unless
-// includeHidden is true.
-func ListSkillFiles(loader *skill.Loader, name, subPath, userID string, includeHidden bool) (any, error) {
+// includeHidden is true. Name resolution is user > global > market (a nil
+// market client keeps it purely local).
+func ListSkillFiles(ctx context.Context, loader *skill.Loader, market *skillmarket.Client, name, subPath, userID string, includeHidden bool) (any, error) {
 	const toolName = "luban_list_skill_files"
-	target, _, display, err := resolveSkillSubdir(loader, name, subPath, userID, toolName)
+	target, _, display, err := resolveSkillSubdir(ctx, loader, market, name, subPath, userID, toolName)
 	if err != nil {
 		return nil, err
 	}
@@ -145,10 +157,12 @@ func ListSkillFiles(loader *skill.Loader, name, subPath, userID string, includeH
 // TreeSkill returns a nested representation of the named skill's directory (or
 // a sub-directory of it when subPath is provided), recursing up to depth levels.
 // It mirrors xizhi_tree's shape. depth defaults to 3 and is clamped to a
-// maximum of 10. Hidden entries are omitted unless includeHidden is true.
-func TreeSkill(loader *skill.Loader, name, subPath, userID string, depth int, includeHidden bool) (any, error) {
+// maximum of 10. Hidden entries are omitted unless includeHidden is true. Name
+// resolution is user > global > market (a nil market client keeps it purely
+// local).
+func TreeSkill(ctx context.Context, loader *skill.Loader, market *skillmarket.Client, name, subPath, userID string, depth int, includeHidden bool) (any, error) {
 	const toolName = "luban_tree_skill"
-	target, _, display, err := resolveSkillSubdir(loader, name, subPath, userID, toolName)
+	target, _, display, err := resolveSkillSubdir(ctx, loader, market, name, subPath, userID, toolName)
 	if err != nil {
 		return nil, err
 	}
