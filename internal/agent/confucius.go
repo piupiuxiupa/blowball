@@ -254,7 +254,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		// content accumulated across the round's attempts (continuation keeps
 		// partial output), falling back to the streamed accumulation when the
 		// client leaves Content empty.
-		if !shouldDispatchToolCalls(resp) {
+		if !shouldDispatchToolCalls(ctx, resp) {
 			finalContent = result.Content
 			if finalContent == "" {
 				finalContent = assistantText
@@ -293,7 +293,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	// user-facing agent_error fires only if the wrap-up recovers no content.
 	if capped {
 		c.hitCapThisRun = true
-		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
+		emitCapHitWarn(ctx, c.Name(), c.maxRounds, c.maxRounds)
 		tmeta.observeRoundCapped()
 		wrapReq := LLMRequest{
 			Model:               c.turn.Model,

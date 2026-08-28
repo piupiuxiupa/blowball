@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -18,13 +19,16 @@ func testRunStore(t *testing.T) (*RunStore, *miniredis.Miniredis) {
 }
 
 func TestRunStore_ClaimSessionMutex(t *testing.T) {
-	rs, _ := testRunStore(t)
+	rs, mr := testRunStore(t)
 	ctx := context.Background()
 
 	// First claim wins.
 	holder, ok, err := rs.ClaimSession(ctx, "sess-1", "run-a")
 	if err != nil || !ok || holder != "run-a" {
 		t.Fatalf("first claim = (%q,%v,%v), want (run-a,true,nil)", holder, ok, err)
+	}
+	if ttl := mr.TTL("session:sess-1:run"); ttl != run.SessionClaimTTL {
+		t.Fatalf("claim TTL = %s, want %s", ttl, run.SessionClaimTTL)
 	}
 	// Second claim fails and reports the holder.
 	holder, ok, err = rs.ClaimSession(ctx, "sess-1", "run-b")
@@ -44,6 +48,62 @@ func TestRunStore_ClaimSessionMutex(t *testing.T) {
 	}
 	if _, ok, _ := rs.ClaimSession(ctx, "sess-1", "run-c"); !ok {
 		t.Fatal("release did not unlock the session for a new claim")
+	}
+}
+
+func TestRunStore_RunKeyTTLJitter(t *testing.T) {
+	rs, mr := testRunStore(t)
+	ctx := context.Background()
+
+	const runs = 16
+	metaTTLs := make([]time.Duration, 0, runs)
+	for i := 0; i < runs; i++ {
+		runID := fmt.Sprintf("run-%02d", i)
+		sessionID := fmt.Sprintf("sess-%02d", i)
+		meta := run.RunMeta{SessionID: sessionID, Status: run.StatusRunning}
+		if err := rs.InitMeta(ctx, runID, meta); err != nil {
+			t.Fatalf("InitMeta(%s): %v", runID, err)
+		}
+		if err := rs.AppendEvent(ctx, runID, stream.StreamEvent{Type: stream.EventToken}); err != nil {
+			t.Fatalf("AppendEvent(%s): %v", runID, err)
+		}
+		if err := rs.SetStatus(ctx, runID, run.StatusRunning); err != nil {
+			t.Fatalf("SetStatus(%s): %v", runID, err)
+		}
+		if err := rs.SetCancelFlag(ctx, runID); err != nil {
+			t.Fatalf("SetCancelFlag(%s): %v", runID, err)
+		}
+		if err := rs.Heartbeat(ctx, runID, sessionID); err != nil {
+			t.Fatalf("Heartbeat(%s): %v", runID, err)
+		}
+
+		for _, key := range []string{
+			"run:" + runID + ":events",
+			"run:" + runID + ":meta",
+			"run:" + runID + ":cancel",
+		} {
+			assertRunKeyTTLRange(t, mr.TTL(key), key)
+		}
+		metaTTLs = append(metaTTLs, mr.TTL("run:"+runID+":meta"))
+	}
+
+	distinct := make(map[time.Duration]struct{})
+	for _, ttl := range metaTTLs {
+		distinct[ttl] = struct{}{}
+	}
+	if len(distinct) < 2 {
+		t.Fatalf("all %d meta TTLs are %s; jitter did not disperse expiry", len(metaTTLs), metaTTLs[0])
+	}
+}
+
+func assertRunKeyTTLRange(t *testing.T, ttl time.Duration, key string) {
+	t.Helper()
+	const (
+		minTTL = 54 * time.Minute
+		maxTTL = 66 * time.Minute
+	)
+	if ttl < minTTL || ttl > maxTTL {
+		t.Fatalf("%s TTL = %s, want [%s,%s]", key, ttl, minTTL, maxTTL)
 	}
 }
 
@@ -152,7 +212,7 @@ func TestRunStore_HeartbeatAndAlive(t *testing.T) {
 	if err != nil || alive {
 		t.Fatalf("Alive(before) = (%v,%v), want false,nil", alive, err)
 	}
-	if err := rs.Heartbeat(ctx, "run-1"); err != nil {
+	if err := rs.Heartbeat(ctx, "run-1", "sess-1"); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 	if alive, _ := rs.Alive(ctx, "run-1"); !alive {
@@ -162,6 +222,39 @@ func TestRunStore_HeartbeatAndAlive(t *testing.T) {
 	ref.FastForward(run.HeartbeatTTL + time.Second)
 	if alive, _ := rs.Alive(ctx, "run-1"); alive {
 		t.Fatal("Alive(after TTL) = true, want false")
+	}
+}
+
+func TestRunStore_HeartbeatRearmsSessionClaim(t *testing.T) {
+	rs, mr := testRunStore(t)
+	ctx := context.Background()
+	claimKey := "session:sess-1:run"
+
+	if _, ok, _ := rs.ClaimSession(ctx, "sess-1", "run-a"); !ok {
+		t.Fatal("initial claim failed")
+	}
+	mr.FastForward(10 * time.Minute)
+	if err := rs.Heartbeat(ctx, "run-a", "sess-1"); err != nil {
+		t.Fatalf("Heartbeat(holder): %v", err)
+	}
+	if ttl := mr.TTL(claimKey); ttl != run.SessionClaimTTL {
+		t.Fatalf("claim TTL after holder heartbeat = %s, want %s", ttl, run.SessionClaimTTL)
+	}
+
+	_ = rs.ReleaseSession(ctx, "sess-1", "run-a")
+	if err := rs.Heartbeat(ctx, "run-a", "sess-1"); err != nil {
+		t.Fatalf("Heartbeat(released): %v", err)
+	}
+	if _, ok, _ := rs.ClaimSession(ctx, "sess-1", "run-b"); !ok {
+		t.Fatal("released claim was not available to the next run")
+	}
+	mr.FastForward(10 * time.Minute)
+	before := mr.TTL(claimKey)
+	if err := rs.Heartbeat(ctx, "run-a", "sess-1"); err != nil {
+		t.Fatalf("Heartbeat(non-holder): %v", err)
+	}
+	if after := mr.TTL(claimKey); after != before {
+		t.Fatalf("non-holder heartbeat changed claim TTL: got %s, want %s", after, before)
 	}
 }
 

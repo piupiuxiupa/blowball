@@ -10,3 +10,4 @@ bin/
 tmp/
 .DS_Store
 .pi/
+.codex/

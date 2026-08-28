@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/pkg/reqctx"
 	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/tool/skill"
 )
@@ -19,33 +20,19 @@ import (
 // internal/llmraw). OpenAIClient holds the sink as an optional dependency so
 // the client itself stays free of any store import.
 
-// sessionCtxKey is the unexported context key type for the session_id value.
-type sessionCtxKey struct{}
-
 // agentCtxKey is the unexported context key type for the agent-name value.
 type agentCtxKey struct{}
 
-// WithSessionID returns a copy of ctx carrying sessionID so raw capture (and
-// any future per-session consumer) can attribute an LLM call to its session
-// without threading the id through the agent APIs. MessageStreamHandler
-// injects it once per request; TitleService injects it into its background
-// context. Empty sessionID returns ctx unchanged (matching trace.WithContext).
-func WithSessionID(ctx context.Context, sessionID string) context.Context {
-	if sessionID == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, sessionCtxKey{}, sessionID)
-}
-
-// SessionIDFromContext returns the session_id stored in ctx, or an empty
-// string when none is present.
-func SessionIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	v, _ := ctx.Value(sessionCtxKey{}).(string)
-	return v
-}
+// WithSessionID / SessionIDFromContext delegate to the shared reqctx leaf
+// package (tool-call-log-correlation capability): the session-id key now
+// lives there so internal/tool and internal/pkg/logger can read it without
+// importing this package. These aliases keep the historical agent-side API
+// (and its injection points — MessageStreamHandler, TitleService, raw-capture
+// attribution) unchanged; the values are the SAME reqctx key both sides read.
+var (
+	WithSessionID        = reqctx.WithSessionID
+	SessionIDFromContext = reqctx.SessionIDFromContext
+)
 
 // WithAgentName returns a copy of ctx carrying the display name of the agent
 // about to run, so raw capture can attribute the LLM rounds that follow —

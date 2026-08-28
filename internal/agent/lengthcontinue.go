@@ -131,7 +131,7 @@ func runLLMRound(ctx context.Context, client LLMClient, hub stream.EventHub, age
 
 		// finish_reason=length with continuation budget left: keep the
 		// partial output and re-request with an expanded budget.
-		logger.L().Warn("LLM output hit the length limit; continuing with expanded budget",
+		logger.FromContext(ctx).Warn("LLM output hit the length limit; continuing with expanded budget",
 			zap.String("event", "llm_length_continuation"),
 			zap.String("agent", agentName),
 			zap.Int("continuation", attempt+1),

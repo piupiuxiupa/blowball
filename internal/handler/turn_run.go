@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
@@ -68,11 +69,11 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	sessionID := c.Param("session_id")
 	runID := c.Param("run_id")
-	ctx := trace.WithContext(c.Request.Context(), middleware.TraceIDFromCtx(c))
+	ctx := agent.WithSessionID(trace.WithContext(c.Request.Context(), middleware.TraceIDFromCtx(c)), sessionID)
 
 	meta, ok, err := h.runs.Store.GetMeta(ctx, runID)
 	if err != nil {
-		logger.L().Error("cancel: run meta read failed",
+		logger.FromContext(ctx).Error("cancel: run meta read failed",
 			zap.String("op", "handler.cancel_turn"),
 			zap.String("run_id", runID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "run lookup failed"))
@@ -95,7 +96,7 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 	}
 	alive, err := h.runs.Store.Alive(ctx, runID)
 	if err != nil {
-		logger.L().Warn("cancel: alive check failed",
+		logger.FromContext(ctx).Warn("cancel: alive check failed",
 			zap.String("op", "handler.cancel_turn"),
 			zap.String("run_id", runID), zap.Error(err))
 	}
@@ -103,7 +104,7 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 		// Running on another replica: flag it; that process's drainer
 		// cancels the turn within one heartbeat period.
 		if err := h.runs.Store.SetCancelFlag(ctx, runID); err != nil {
-			logger.L().Error("cancel: set cancel flag failed",
+			logger.FromContext(ctx).Error("cancel: set cancel flag failed",
 				zap.String("op", "handler.cancel_turn"),
 				zap.String("run_id", runID), zap.Error(err))
 			c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "cancel failed"))
@@ -115,10 +116,9 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 
 	// Dead run: the owning process is gone. Force-clear so the session
 	// unblocks immediately instead of waiting out the claim TTL.
-	logger.L().Warn("cancel: dead run force-cleared",
+	logger.FromContext(ctx).Warn("cancel: dead run force-cleared",
 		zap.String("op", "handler.cancel_turn"),
-		zap.String("run_id", runID),
-		zap.String("session_id", sessionID))
+		zap.String("run_id", runID))
 	h.runs.Finalize(ctx, runID, sessionID, run.StatusInterrupted)
 	c.JSON(http.StatusOK, turnStatusBody(runID, run.StatusInterrupted))
 }
@@ -132,11 +132,11 @@ func (h *TurnRunHandler) TurnEvents(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	sessionID := c.Param("session_id")
 	runID := c.Param("run_id")
-	ctx := trace.WithContext(c.Request.Context(), middleware.TraceIDFromCtx(c))
+	ctx := agent.WithSessionID(trace.WithContext(c.Request.Context(), middleware.TraceIDFromCtx(c)), sessionID)
 
 	meta, ok, err := h.runs.Store.GetMeta(ctx, runID)
 	if err != nil {
-		logger.L().Error("turn events: run meta read failed",
+		logger.FromContext(ctx).Error("turn events: run meta read failed",
 			zap.String("op", "handler.turn_events"),
 			zap.String("run_id", runID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "run lookup failed"))
@@ -151,11 +151,11 @@ func (h *TurnRunHandler) TurnEvents(c *gin.Context) {
 		return
 	}
 
-	err = writeRunEventStream(c.Request.Context(), c.Writer, h.runs, runID,
+	err = writeRunEventStream(ctx, c.Writer, h.runs, runID,
 		sanitizeAfterID(c.GetHeader("Last-Event-ID")),
 		map[string]string{"X-Run-Id": runID}, nil)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		logger.L().Warn("turn events: sse write returned error",
+		logger.FromContext(ctx).Warn("turn events: sse write returned error",
 			zap.String("op", "handler.turn_events"),
 			zap.String("run_id", runID), zap.Error(err))
 	}
@@ -207,7 +207,7 @@ func writeRunEventStream(ctx context.Context, w http.ResponseWriter, runs *run.M
 			// open rather than tearing down a live subscription — unless the
 			// owning turn already finished (no signal can ever arrive on
 			// this stream again), which ends the response.
-			logger.L().Warn("run events: read failed",
+			logger.FromContext(ctx).Warn("run events: read failed",
 				zap.String("op", "run_events"),
 				zap.String("run_id", runID), zap.Error(err))
 			select {
@@ -280,10 +280,10 @@ func writeRunEventStream(ctx context.Context, w http.ResponseWriter, runs *run.M
 				// Dead run: the owning process died mid-turn. Synthesize the
 				// terminal done the run will never emit, mark it interrupted,
 				// and release the session so the user can send again.
-				logger.L().Warn("run events: dead run detected",
+				logger.FromContext(ctx).Warn("run events: dead run detected",
 					zap.String("op", "run_events"),
 					zap.String("run_id", runID),
-					zap.String("session_id", meta.SessionID))
+					zap.String("meta_session_id", meta.SessionID))
 				ev := stream.DoneEvent(map[string]any{"error": "interrupted: run ended unexpectedly"})
 				if err := stream.WriteSSEFrame(w, ev, ""); err != nil {
 					return err

@@ -113,7 +113,10 @@ func (w *maxBytesWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
-// logAudit emits a structured audit entry for every command execution.
+// logAudit emits a structured audit entry for every command execution. The
+// logger comes from FromContext so the entry additionally carries the turn's
+// session_id/trace_id when the invoking context holds them
+// (tool-call-log-correlation capability).
 func logAudit(ctx context.Context, toolName string, sandboxArgs []string, exitCode, outputBytes int, duration time.Duration, err error) {
 	userID := skill.UserIDFromContext(ctx)
 	fields := []zap.Field{
@@ -126,17 +129,18 @@ func logAudit(ctx context.Context, toolName string, sandboxArgs []string, exitCo
 	}
 	if err != nil {
 		fields = append(fields, zap.Error(err))
-		logger.L().Error("executor audit", fields...)
+		logger.FromContext(ctx).Error("executor audit", fields...)
 		return
 	}
-	logger.L().Info("executor audit", fields...)
+	logger.FromContext(ctx).Info("executor audit", fields...)
 }
 
 // logDangerousCommand emits a warning when the command matches a known
-// dangerous pattern. Execution is not blocked.
+// dangerous pattern. Execution is not blocked. The entry carries the turn's
+// session_id/trace_id via FromContext alongside the explicit fields.
 func logDangerousCommand(ctx context.Context, toolName string, sandboxArgs []string) {
 	if detectDangerousCommand(formatCommand(sandboxArgs)) {
-		logger.L().Warn("executor dangerous command detected",
+		logger.FromContext(ctx).Warn("executor dangerous command detected",
 			zap.String("tool", toolName),
 			zap.String("user_id", skill.UserIDFromContext(ctx)),
 			zap.String("command", formatCommand(sandboxArgs)),

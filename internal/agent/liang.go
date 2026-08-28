@@ -195,7 +195,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 		}
 		round = append(round, assistantMsg)
 
-		if !shouldDispatchToolCalls(resp) {
+		if !shouldDispatchToolCalls(ctx, resp) {
 			finalContent = result.Content
 			if finalContent == "" {
 				finalContent = assistantText
@@ -215,7 +215,7 @@ func (l *Liang) Run(ctx context.Context, messages []Message, hub stream.EventHub
 	// wrap-up recovers no content (genuine empty-end).
 	if capped {
 		l.hitCapThisRun = true
-		emitCapHitWarn(l.Name(), l.maxRounds, l.maxRounds)
+		emitCapHitWarn(ctx, l.Name(), l.maxRounds, l.maxRounds)
 		wrapReq := LLMRequest{
 			Model:               l.turn.Model,
 			Messages:            withSystem(l.cfg.SystemPrompt, round),

@@ -30,7 +30,7 @@ const MetaRunID = "run_id"
 // the hub closes — i.e. when the orchestrator goroutine returns. Store errors
 // are WARNed and never stop the turn: a Redis outage costs replayability,
 // not the turn itself.
-func StartDrainer(hub *stream.Hub, store Store, reg *Registry, runID string, heartbeatEvery time.Duration) <-chan struct{} {
+func StartDrainer(hub *stream.Hub, store Store, reg *Registry, runID, sessionID string, heartbeatEvery time.Duration) <-chan struct{} {
 	if heartbeatEvery <= 0 {
 		heartbeatEvery = HeartbeatEvery
 	}
@@ -42,7 +42,7 @@ func StartDrainer(hub *stream.Hub, store Store, reg *Registry, runID string, hea
 		beat := func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			if err := store.Heartbeat(ctx, runID); err != nil {
+			if err := store.Heartbeat(ctx, runID, sessionID); err != nil {
 				warn("drainer: heartbeat failed", runID, err)
 			}
 			if flagged, err := store.TakeCancelFlag(ctx, runID); err != nil {

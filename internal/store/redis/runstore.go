@@ -15,12 +15,15 @@ import (
 // RunStore implements run.Store over Redis (turn-detach-resume capability).
 // Key families and TTLs mirror the run package contract:
 //
-//	run:{rid}:events  Stream — one entry per turn event, MAXLEN-bounded,
-//	                  TTL refreshed by the drainer heartbeat
-//	run:{rid}:meta    Hash   — session_id/user_id/status/model/created_at
+//	run:{rid}:events  Stream — one entry per turn event, MAXLEN-bounded, with
+//	                  a 1h±10%-jittered crash backstop refreshed on writes
+//	run:{rid}:meta    Hash   — session_id/user_id/status/model/created_at,
+//	                  with the same 1h±10%-jittered backstop
 //	run:{rid}:alive   String — heartbeat, run.HeartbeatTTL
-//	run:{rid}:cancel  String — cross-process cancel flag (GETDEL-consumed)
-//	session:{sid}:run String — single-active-run claim (SET NX, compare-del)
+//	run:{rid}:cancel  String — cross-process cancel flag (GETDEL-consumed),
+//	                  with the same 1h±10%-jittered backstop
+//	session:{sid}:run String — single-active-run claim (SET NX, compare-del),
+//	                  30min backstop compare-and-rearmed by heartbeats
 //
 // compile-time interface check.
 var _ run.Store = (*RunStore)(nil)
@@ -44,6 +47,10 @@ func sessionRunKey(sid string) string  { return "session:" + sid + ":run" }
 // reclaimed) never deletes a newer run's claim.
 const releaseClaimScript = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
 
+// rearmClaimScript compare-and-rearms a claim only while it still points at
+// the heartbeat's run, so a stale drainer cannot extend a newer claim.
+const rearmClaimScript = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("EXPIRE", KEYS[1], ARGV[2]) else return 0 end`
+
 // AppendEvent implements run.Store: XADD the JSON-encoded event with an
 // approximate MAXLEN bound and (re)arm the stream TTL. Entry ids are
 // Redis-assigned ("<ms>-<seq>") and double as SSE ids.
@@ -60,7 +67,7 @@ func (s *RunStore) AppendEvent(ctx context.Context, runID string, e stream.Strea
 		Approx: true,
 		Values: map[string]any{"e": payload},
 	})
-	pipe.Expire(ctx, runEventsKey(runID), run.RunKeyTTL)
+	pipe.Expire(ctx, runEventsKey(runID), run.RunKeyTTLWithJitter())
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("runstore: xadd: %w", err)
 	}
@@ -136,7 +143,7 @@ func (s *RunStore) InitMeta(ctx context.Context, runID string, m run.RunMeta) er
 		"model":      m.Model,
 		"created_at": m.CreatedAt,
 	})
-	pipe.Expire(ctx, key, run.RunKeyTTL)
+	pipe.Expire(ctx, key, run.RunKeyTTLWithJitter())
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("runstore: init meta: %w", err)
@@ -150,7 +157,7 @@ func (s *RunStore) SetStatus(ctx context.Context, runID, status string) error {
 	logCmd(ctx, "run.set_status", key)
 	pipe := s.client.Pipeline()
 	pipe.HSet(ctx, key, "status", status)
-	pipe.Expire(ctx, key, run.RunKeyTTL)
+	pipe.Expire(ctx, key, run.RunKeyTTLWithJitter())
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("runstore: set status: %w", err)
@@ -176,11 +183,11 @@ func (s *RunStore) GetMeta(ctx context.Context, runID string) (run.RunMeta, bool
 	}, true, nil
 }
 
-// ClaimSession implements run.Store: SET NX with the run-key TTL.
+// ClaimSession implements run.Store: SET NX with the session-claim TTL.
 func (s *RunStore) ClaimSession(ctx context.Context, sessionID, runID string) (string, bool, error) {
 	key := sessionRunKey(sessionID)
 	logCmd(ctx, "run.claim_session", key)
-	ok, err := s.client.SetNX(ctx, key, runID, run.RunKeyTTL).Result()
+	ok, err := s.client.SetNX(ctx, key, runID, run.SessionClaimTTL).Result()
 	if err != nil {
 		return "", false, fmt.Errorf("runstore: claim session: %w", err)
 	}
@@ -226,13 +233,15 @@ func (s *RunStore) ActiveRuns(ctx context.Context, sessionIDs []string) (map[str
 	return out, nil
 }
 
-// Heartbeat implements run.Store: refresh the alive TTL and re-arm the
-// event-log / meta TTLs so a long turn never expires mid-flight.
-func (s *RunStore) Heartbeat(ctx context.Context, runID string) error {
+// Heartbeat implements run.Store: refresh the alive TTL, re-arm the event-log
+// / meta TTLs, and compare-and-rearm the session claim so a long turn never
+// expires or loses mutual exclusion mid-flight.
+func (s *RunStore) Heartbeat(ctx context.Context, runID, sessionID string) error {
 	pipe := s.client.Pipeline()
 	pipe.Set(ctx, runAliveKey(runID), runID, run.HeartbeatTTL)
-	pipe.Expire(ctx, runEventsKey(runID), run.RunKeyTTL)
-	pipe.Expire(ctx, runMetaKey(runID), run.RunKeyTTL)
+	pipe.Expire(ctx, runEventsKey(runID), run.RunKeyTTLWithJitter())
+	pipe.Expire(ctx, runMetaKey(runID), run.RunKeyTTLWithJitter())
+	pipe.Eval(ctx, rearmClaimScript, []string{sessionRunKey(sessionID)}, runID, int(run.SessionClaimTTL/time.Second))
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("runstore: heartbeat: %w", err)
 	}
@@ -250,7 +259,7 @@ func (s *RunStore) Alive(ctx context.Context, runID string) (bool, error) {
 
 // SetCancelFlag implements run.Store.
 func (s *RunStore) SetCancelFlag(ctx context.Context, runID string) error {
-	if err := s.client.Set(ctx, runCancelKey(runID), "1", run.RunKeyTTL).Err(); err != nil {
+	if err := s.client.Set(ctx, runCancelKey(runID), "1", run.RunKeyTTLWithJitter()).Err(); err != nil {
 		return fmt.Errorf("runstore: set cancel flag: %w", err)
 	}
 	return nil

@@ -182,7 +182,7 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		}
 		round = append(round, assistantMsg)
 
-		if !shouldDispatchToolCalls(resp) {
+		if !shouldDispatchToolCalls(ctx, resp) {
 			finalContent = result.Content
 			if finalContent == "" {
 				finalContent = assistantText
@@ -204,7 +204,7 @@ func (c *Chongzhi) Run(ctx context.Context, messages []Message, hub stream.Event
 		c.runMu.Lock()
 		c.hitCapThisRun = true
 		c.runMu.Unlock()
-		emitCapHitWarn(c.Name(), c.maxRounds, c.maxRounds)
+		emitCapHitWarn(ctx, c.Name(), c.maxRounds, c.maxRounds)
 		wrapReq := LLMRequest{
 			Model:               c.turn.Model,
 			Messages:            withSystem(c.cfg.SystemPrompt, round),

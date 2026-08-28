@@ -92,8 +92,8 @@ func runWrapUpRound(ctx context.Context, client LLMClient, agentName string, hub
 // answer (the success path emits no agent_error). This is the always-on cap
 // signal; the user-facing agent_error fires only on the genuine empty-end path
 // (see emitCapExhaustedError).
-func emitCapHitWarn(agentName string, cap, executed int) {
-	logger.L().Warn("agent round cap reached; running wrap-up round",
+func emitCapHitWarn(ctx context.Context, agentName string, cap, executed int) {
+	logger.FromContext(ctx).Warn("agent round cap reached; running wrap-up round",
 		zap.String("agent", agentName),
 		zap.Int("max_rounds", cap),
 		zap.Int("rounds_executed", executed),

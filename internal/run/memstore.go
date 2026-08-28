@@ -159,7 +159,7 @@ func (m *MemStore) GetMeta(_ context.Context, runID string) (RunMeta, bool, erro
 	return meta, ok, nil
 }
 
-// ClaimSession implements Store (SET NX with TTL).
+// ClaimSession implements Store (SET NX with SessionClaimTTL).
 func (m *MemStore) ClaimSession(_ context.Context, sessionID, runID string) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -167,7 +167,7 @@ func (m *MemStore) ClaimSession(_ context.Context, sessionID, runID string) (str
 		return holder, false, nil
 	}
 	m.claims[sessionID] = runID
-	m.claimExp[sessionID] = m.now().Add(RunKeyTTL)
+	m.claimExp[sessionID] = m.now().Add(SessionClaimTTL)
 	return runID, true, nil
 }
 
@@ -196,12 +196,15 @@ func (m *MemStore) ActiveRuns(_ context.Context, sessionIDs []string) (map[strin
 }
 
 // Heartbeat implements Store.
-func (m *MemStore) Heartbeat(_ context.Context, runID string) error {
+func (m *MemStore) Heartbeat(_ context.Context, runID, sessionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.alive[runID] = m.now().Add(HeartbeatTTL)
 	if _, ok := m.expire[runID]; ok && !m.expiredLocked(runID) {
 		m.expire[runID] = m.now().Add(RunKeyTTL)
+	}
+	if m.claims[sessionID] == runID && m.now().Before(m.claimExp[sessionID]) {
+		m.claimExp[sessionID] = m.now().Add(SessionClaimTTL)
 	}
 	return nil
 }

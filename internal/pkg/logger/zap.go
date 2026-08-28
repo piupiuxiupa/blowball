@@ -10,12 +10,16 @@
 // hold a *zap.Logger can still emit logs; Init installs the built logger as that
 // default.
 //
-// Per-request fields such as trace_id are intended to be attached through
-// logger.With(zap.String("trace_id", id)) when a context-aware logger is
-// threaded through the call chain; the global L() remains context-free.
+// Per-request fields (session_id, trace_id) are attached via FromContext: any
+// log emitted on the turn path (handler → orchestrator → agent → tool) MUST go
+// through FromContext(ctx) rather than L() so the entry can be located by
+// session_id/trace_id. A missing id is omitted gracefully, never emitted as an
+// empty value. The global L() remains context-free for background tasks
+// (flushers, shutdown paths) that hold no request context.
 package logger
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +31,8 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/pkg/reqctx"
+	"github.com/lush/blowball/internal/pkg/trace"
 )
 
 // LogFileName is the active log file written inside the log directory for the
@@ -206,6 +212,30 @@ func L() *zap.Logger {
 	mu.RLock()
 	defer mu.RUnlock()
 	return defaultLogger
+}
+
+// FromContext returns the default logger with the per-request correlation
+// fields carried by ctx attached: session_id (reqctx) then trace_id (trace),
+// each omitted gracefully when absent — never emitted as an empty value. A nil
+// ctx returns the plain default logger, so FromContext(nil) == L().
+//
+// It is the single assembly point for turn-path log correlation
+// (tool-call-log-correlation capability): every log site holding a request/
+// turn context should emit through FromContext(ctx) so the entry can be
+// filtered by session_id/trace_id, matching how logCmd and the LLM debug
+// entries already treated trace_id.
+func FromContext(ctx context.Context) *zap.Logger {
+	l := L()
+	if ctx == nil {
+		return l
+	}
+	if sid := reqctx.SessionIDFromContext(ctx); sid != "" {
+		l = l.With(zap.String("session_id", sid))
+	}
+	if tid := trace.FromContext(ctx); tid != "" {
+		l = l.With(zap.String("trace_id", tid))
+	}
+	return l
 }
 
 // SetDefault replaces the package-level default logger. Intended for tests and

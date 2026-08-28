@@ -98,6 +98,31 @@ func TestRegistry_WaitAllRespectsDeadline(t *testing.T) {
 	}
 }
 
+func TestRunLifecycleTTLConstantsAndJitter(t *testing.T) {
+	if SessionClaimTTL != 30*time.Minute {
+		t.Fatalf("SessionClaimTTL = %s, want 30m", SessionClaimTTL)
+	}
+	if RunKeyTTL != time.Hour {
+		t.Fatalf("RunKeyTTL = %s, want 1h", RunKeyTTL)
+	}
+
+	const (
+		minTTL = 54 * time.Minute
+		maxTTL = 66 * time.Minute
+	)
+	seen := make(map[time.Duration]struct{})
+	for i := 0; i < 256; i++ {
+		got := RunKeyTTLWithJitter()
+		if got < minTTL || got > maxTTL {
+			t.Fatalf("RunKeyTTLWithJitter sample %d = %s, want [%s,%s]", i, got, minTTL, maxTTL)
+		}
+		seen[got] = struct{}{}
+	}
+	if len(seen) < 2 {
+		t.Fatal("RunKeyTTLWithJitter samples were not dispersed")
+	}
+}
+
 func TestMemStore_ClaimReleaseSemantics(t *testing.T) {
 	s := NewMemStore()
 	ctx := context.Background()
@@ -124,9 +149,12 @@ func TestMemStore_TTLExpiry(t *testing.T) {
 	now := time.Now()
 	s.Now = func() time.Time { return now }
 
+	if _, ok, err := s.ClaimSession(ctx, "s", "r"); err != nil || !ok {
+		t.Fatalf("initial claim = (%v,%v), want true,nil", err, ok)
+	}
 	_ = s.InitMeta(ctx, "r", RunMeta{SessionID: "s", Status: StatusRunning})
 	_ = s.AppendEvent(ctx, "r", stream.StreamEvent{Type: stream.EventToken, Content: "x"})
-	_ = s.Heartbeat(ctx, "r")
+	_ = s.Heartbeat(ctx, "r", "s")
 
 	alive, _ := s.Alive(ctx, "r")
 	if !alive {
@@ -145,7 +173,38 @@ func TestMemStore_TTLExpiry(t *testing.T) {
 		t.Fatal("alive survived HeartbeatTTL")
 	}
 	if _, ok, _ := s.ClaimSession(ctx, "s", "run-next"); !ok {
-		t.Fatal("session claim survived RunKeyTTL")
+		t.Fatal("session claim survived SessionClaimTTL")
+	}
+}
+
+func TestMemStore_HeartbeatRearmsSessionClaim(t *testing.T) {
+	s := NewMemStore()
+	ctx := context.Background()
+	now := time.Now()
+	s.Now = func() time.Time { return now }
+
+	if _, ok, _ := s.ClaimSession(ctx, "sess", "run-a"); !ok {
+		t.Fatal("initial claim failed")
+	}
+	now = now.Add(20 * time.Minute)
+	if err := s.Heartbeat(ctx, "run-a", "sess"); err != nil {
+		t.Fatalf("Heartbeat(holder): %v", err)
+	}
+	want := now.Add(SessionClaimTTL)
+	if got := s.claimExp["sess"]; !got.Equal(want) {
+		t.Fatalf("claim expiry after holder heartbeat = %s, want %s", got, want)
+	}
+
+	_ = s.ReleaseSession(ctx, "sess", "run-a")
+	if _, ok, _ := s.ClaimSession(ctx, "sess", "run-b"); !ok {
+		t.Fatal("claiming after release failed")
+	}
+	expiry := s.claimExp["sess"]
+	if err := s.Heartbeat(ctx, "run-a", "sess"); err != nil {
+		t.Fatalf("Heartbeat(non-holder): %v", err)
+	}
+	if got := s.claimExp["sess"]; !got.Equal(expiry) {
+		t.Fatalf("non-holder heartbeat changed claim expiry: got %s, want %s", got, expiry)
 	}
 }
 
@@ -170,7 +229,7 @@ func TestDrainer_AppendsAllEventsAndStampsRunID(t *testing.T) {
 	reg := NewRegistry()
 	hub := stream.NewHub(16)
 
-	drained := StartDrainer(hub, store, reg, "run-1", time.Hour /* tick never fires */)
+	drained := StartDrainer(hub, store, reg, "run-1", "sess-1", time.Hour /* tick never fires */)
 
 	hub.Send(stream.StreamEvent{Type: stream.EventAgentStart, Agent: "Confucius"})
 	hub.Send(stream.StreamEvent{Type: stream.EventToken, Agent: "Confucius", Content: "hi"})
@@ -209,7 +268,7 @@ func TestDrainer_ConsumesCancelFlag(t *testing.T) {
 	reg.Register("run-1", tcancel)
 
 	// Tick fast so the flag is observed quickly.
-	drained := StartDrainer(hub, store, reg, "run-1", 10*time.Millisecond)
+	drained := StartDrainer(hub, store, reg, "run-1", "sess-1", 10*time.Millisecond)
 	defer func() { hub.Close(); <-drained }()
 
 	_ = store.SetCancelFlag(context.Background(), "run-1")

@@ -12,7 +12,6 @@ import (
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/pkg/logger"
-	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
@@ -67,8 +66,9 @@ func toolNamePreviews(tools []byte) []string {
 
 // logLLMRequest emits a structured debug entry summarizing the request sent to
 // the underlying model. It excludes the API key and Authorization header.
+// Correlation ids (trace_id, session_id when present) ride the logger via
+// FromContext (tool-call-log-correlation capability).
 func logLLMRequest(ctx context.Context, req LLMRequest) {
-	traceID := trace.FromContext(ctx)
 	logMessages := make([]map[string]string, len(req.Messages))
 	for i, m := range req.Messages {
 		logMessages[i] = map[string]string{
@@ -83,9 +83,6 @@ func logLLMRequest(ctx context.Context, req LLMRequest) {
 		zap.Int("message_count", len(req.Messages)),
 		zap.Any("messages", logMessages),
 	}
-	if traceID != "" {
-		fields = append(fields, zap.String("trace_id", traceID))
-	}
 	if req.MaxCompletionTokens > 0 {
 		fields = append(fields, zap.Int("max_completion_tokens", req.MaxCompletionTokens))
 	}
@@ -98,13 +95,13 @@ func logLLMRequest(ctx context.Context, req LLMRequest) {
 		fields = append(fields, zap.Int("tools_count", len(names)))
 		fields = append(fields, zap.Any("tools_preview", names))
 	}
-	logger.L().Debug("LLM request", fields...)
+	logger.FromContext(ctx).Debug("LLM request", fields...)
 }
 
 // logLLMResponse emits a structured debug entry summarizing the aggregated
-// response returned by the underlying model.
+// response returned by the underlying model. Correlation ids ride the logger
+// via FromContext (tool-call-log-correlation capability).
 func logLLMResponse(ctx context.Context, resp LLMResponse) {
-	traceID := trace.FromContext(ctx)
 	toolCalls := make([]map[string]string, len(resp.ToolCalls))
 	for i, tc := range resp.ToolCalls {
 		toolCalls[i] = map[string]string{
@@ -128,10 +125,7 @@ func logLLMResponse(ctx context.Context, resp LLMResponse) {
 		fields = append(fields, zap.Int("reasoning_content_len", len([]rune(resp.ReasoningContent))))
 		fields = append(fields, zap.String("reasoning_content_preview", truncatePreview(resp.ReasoningContent)))
 	}
-	if traceID != "" {
-		fields = append(fields, zap.String("trace_id", traceID))
-	}
-	logger.L().Debug("LLM response", fields...)
+	logger.FromContext(ctx).Debug("LLM response", fields...)
 }
 
 // ErrStreamIdleTimeout is returned by StreamChat when the stream idle
@@ -254,7 +248,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	if c.sink != nil {
 		callID, seq = newRawCall()
 		if raw, err := json.Marshal(params); err != nil {
-			logger.L().Warn("raw capture: marshal request params failed; skipping request row", zap.Error(err))
+			logger.FromContext(ctx).Warn("raw capture: marshal request params failed; skipping request row", zap.Error(err))
 		} else {
 			c.capture(ctx, callID, seq, 0, rawKindRequest, req.Model, "", 0, 0, string(raw))
 		}
@@ -401,7 +395,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 			frameIdx++
 			c.capture(ctx, callID, seq, frameIdx, rawKindChunk, req.Model, "", 0, 0, string(raw))
 		}
-		logger.L().Warn("raw capture: frame budget reached; further chunks not captured for this call",
+		logger.FromContext(ctx).Warn("raw capture: frame budget reached; further chunks not captured for this call",
 			zap.String("call_id", callID),
 			zap.Int("frames", frameIdx),
 			zap.Int("bytes", frameBytes))
@@ -479,7 +473,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		if watchdogFired.Load() {
 			idleErr := fmt.Errorf("%w: no frame for %s (frames=%d, model=%s)",
 				ErrStreamIdleTimeout, c.streamIdleTimeout, frames, req.Model)
-			logger.L().Warn("LLM stream idle timeout: stalled stream aborted",
+			logger.FromContext(ctx).Warn("LLM stream idle timeout: stalled stream aborted",
 				zap.String("event", "llm_stream_idle_timeout"),
 				zap.String("agent", AgentNameFromContext(ctx)),
 				zap.String("model", req.Model),

@@ -13,6 +13,10 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/lush/blowball/internal/pkg/logger"
 )
 
 // ToolSpec describes a single tool that an agent can invoke via function
@@ -131,17 +135,70 @@ func (r *Registry) ToolsFor(names []string) ([]*ToolSpec, error) {
 // bounded by that duration; otherwise execution is unbounded (the prior
 // behavior). The timeout composes with any native tool timeout as a looser
 // outer backstop (capability: tool-execution-timeout).
+//
+// Every call emits the central dispatch log (tool-call-log-correlation
+// capability) through logger.FromContext — one structured line carrying
+// event=tool_call, the tool name, the full execution duration (timeout
+// wrapping included), and a truncated args preview; INFO on success, WARN
+// with the error on failure. This is the single choke point shared by all
+// three agents' registry tools and the per-turn mcp_* family, so slow or
+// failing tool calls (remote MCP round trips included) are observable per
+// session/trace without touching each tool.
 func (r *Registry) Call(ctx context.Context, name string, args json.RawMessage) (any, error) {
 	spec, ok := r.Get(name)
 	if !ok {
 		return nil, fmt.Errorf("tool registry: unknown tool %q", name)
 	}
+	start := time.Now()
 	if d, hasTimeout := r.timeoutFor(name); hasTimeout {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d)
 		defer cancel()
 	}
-	return spec.Execute(ctx, args)
+	result, err := spec.Execute(ctx, args)
+	logToolCall(ctx, name, args, time.Since(start), err)
+	return result, err
+}
+
+// argsPreviewLimit is the maximum number of runes written into the dispatch
+// log's args_preview field. Tool arguments are model-authored content already
+// stored in full (llm_raw_log request rows, messages table); the preview only
+// needs enough to recognize the call.
+const argsPreviewLimit = 200
+
+// truncateArgsPreview renders args (raw JSON bytes) as a string cut to
+// argsPreviewLimit runes, appending "…" when truncation occurred — the same
+// shape as the agent package's truncatePreview, kept local so the tool layer
+// never imports internal/agent.
+func truncateArgsPreview(args json.RawMessage) string {
+	s := string(args)
+	if s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= argsPreviewLimit {
+		return s
+	}
+	return string(runes[:argsPreviewLimit]) + "…"
+}
+
+// logToolCall emits the central registry dispatch log. Failure of the log
+// itself can never affect the dispatch: zap writes are non-blocking sinks and
+// the emission sits strictly after Execute returned. The result body is
+// deliberately NOT logged — it can be huge and already lands in the
+// messages table via the tool_result event.
+func logToolCall(ctx context.Context, name string, args json.RawMessage, dur time.Duration, err error) {
+	log := logger.FromContext(ctx).With(
+		zap.String("event", "tool_call"),
+		zap.String("tool", name),
+		zap.Duration("duration", dur),
+		zap.String("args_preview", truncateArgsPreview(args)),
+	)
+	if err != nil {
+		log.Warn("registry tool call failed", zap.Error(err))
+		return
+	}
+	log.Info("registry tool call completed")
 }
 
 // timeoutFor returns the configured execution timeout for name and whether one

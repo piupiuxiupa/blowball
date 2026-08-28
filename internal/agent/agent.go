@@ -289,7 +289,7 @@ type LLMResponse struct {
 // We dispatch whenever tool_calls are present and the finish_reason is either
 // "tool_calls" or "stop"; other reasons (length, content_filter, etc.) indicate
 // truncation or filtering and are treated as terminal.
-func shouldDispatchToolCalls(resp LLMResponse) bool {
+func shouldDispatchToolCalls(ctx context.Context, resp LLMResponse) bool {
 	if len(resp.ToolCalls) == 0 {
 		return false
 	}
@@ -297,7 +297,7 @@ func shouldDispatchToolCalls(resp LLMResponse) bool {
 	case "tool_calls", "stop":
 		return true
 	}
-	logger.L().Warn("model returned tool_calls with unexpected finish_reason; treating as terminal",
+	logger.FromContext(ctx).Warn("model returned tool_calls with unexpected finish_reason; treating as terminal",
 		zap.String("finish_reason", resp.FinishReason),
 		zap.Int("tool_calls", len(resp.ToolCalls)),
 	)

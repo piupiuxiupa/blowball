@@ -5,17 +5,22 @@
 // connection that started it, and its observable state lives in Redis (Store)
 // so cancellation, resume, and session-busy checks work across processes.
 //
-// Redis key families (all TTL-bearing; see docs in design.md of the change):
+// Redis key families (all TTL-bearing; see the lifecycle constants below):
 //
-//	run:{rid}:events  — Stream, one entry per turn event (incl. done)
-//	run:{rid}:meta    — Hash: session_id / user_id / status / model / created_at
+//	run:{rid}:events  — Stream, one entry per turn event (incl. done); Redis
+//	                    writes use RunKeyTTLWithJitter
+//	run:{rid}:meta    — Hash: session_id / user_id / status / model / created_at;
+//	                    Redis writes use RunKeyTTLWithJitter
 //	run:{rid}:alive   — heartbeat, short TTL refreshed by the drainer
-//	run:{rid}:cancel  — cross-process cancel flag, consumed by the drainer
-//	session:{sid}:run — single-active-run claim (SET NX) + generating marker
+//	run:{rid}:cancel  — cross-process cancel flag, consumed by the drainer;
+//	                    Redis writes use RunKeyTTLWithJitter
+//	session:{sid}:run — single-active-run claim (SET NX) with SessionClaimTTL,
+//	                    compare-and-rearmed by the drainer heartbeat
 package run
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 
 	"github.com/lush/blowball/internal/stream"
@@ -41,22 +46,35 @@ const (
 
 // Shared lifecycle timings. The heartbeat TTL is 3× the beat interval so a
 // single missed tick does not declare a live run dead; the run-key TTL is the
-// crash backstop (no terminal bookkeeping ran); RetainAfterTerminal keeps a
-// finished run's event log replayable for late attach before expiry.
+// run-key family's crash-backstop baseline (no terminal bookkeeping ran);
+// RetainAfterTerminal keeps a finished run's event log replayable for late
+// attach before expiry.
 const (
 	// HeartbeatEvery is the drainer's heartbeat / cancel-poll period.
 	HeartbeatEvery = 5 * time.Second
 	// HeartbeatTTL is the alive-key TTL (3× HeartbeatEvery).
 	HeartbeatTTL = 15 * time.Second
-	// RunKeyTTL bounds every run key family when no terminal cleanup ran
-	// (process crash) so a session can never stay locked longer than this.
-	RunKeyTTL = 30 * time.Minute
+	// RunKeyTTL is the run-key family crash-backstop baseline. Redis writes
+	// add jitter via RunKeyTTLWithJitter; memstore uses this value directly.
+	RunKeyTTL = 1 * time.Hour
+	// SessionClaimTTL is the session claim's independent crash backstop. Do
+	// not adjust it with RunKeyTTL: it bounds how long a crashed process can
+	// leave a session locked, while heartbeats keep a live long turn claimed.
+	SessionClaimTTL = 30 * time.Minute
 	// RetainAfterTerminal is how long a terminal run's event log and meta
 	// survive before cleanup, so a late attach can replay the finished turn.
 	RetainAfterTerminal = 60 * time.Second
 	// MaxStreamLen bounds run:{rid}:events entries (approximate MAXLEN).
 	MaxStreamLen = 100000
 )
+
+// RunKeyTTLWithJitter returns RunKeyTTL with a uniform ±10% offset. Redis
+// write sites call this independently so keys created together do not expire
+// in lockstep. MemStore intentionally uses the deterministic baseline instead.
+func RunKeyTTLWithJitter() time.Duration {
+	offset := int64(RunKeyTTL) / 10
+	return RunKeyTTL + time.Duration(rand.Int64N(2*offset+1)-offset)
+}
 
 // Terminal reports whether status is a terminal run state.
 func Terminal(status string) bool {
@@ -115,9 +133,11 @@ type Store interface {
 	// none). Used by the session list generating flag.
 	ActiveRuns(ctx context.Context, sessionIDs []string) (map[string]string, error)
 
-	// Heartbeat refreshes run:{rid}:alive (HeartbeatTTL) and re-arms the
-	// event/meta TTLs (RunKeyTTL) so a long turn never expires mid-flight.
-	Heartbeat(ctx context.Context, runID string) error
+	// Heartbeat refreshes run:{rid}:alive (HeartbeatTTL), re-arms the
+	// event/meta TTLs (RunKeyTTLWithJitter in Redis), and compare-and-rearms
+	// the session claim (SessionClaimTTL) when it still points at runID, so a
+	// long turn never expires or loses its mutual exclusion mid-flight.
+	Heartbeat(ctx context.Context, runID, sessionID string) error
 	// Alive reports whether the heartbeat key exists (TTL not expired).
 	Alive(ctx context.Context, runID string) (bool, error)
 

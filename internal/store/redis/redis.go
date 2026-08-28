@@ -26,7 +26,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/pkg/logger"
-	"github.com/lush/blowball/internal/pkg/trace"
 )
 
 // Store wraps a *redis.Client and the TTL applied to session-level cache keys.
@@ -75,14 +74,11 @@ func (s *Store) Client() *redis.Client {
 func (s *Store) TTL() time.Duration { return s.ttl }
 
 // logCmd emits a debug log describing the about-to-be-run redis command,
-// attaching trace_id from ctx when present.
+// attaching the ctx's session_id and trace_id correlation fields when present
+// (via logger.FromContext — tool-call-log-correlation capability).
 func logCmd(ctx context.Context, op, key string) {
-	fields := []zap.Field{
+	logger.FromContext(ctx).Debug("redis command",
 		zap.String("op", op),
 		zap.String("key", key),
-	}
-	if tid := trace.FromContext(ctx); tid != "" {
-		fields = append(fields, zap.String("trace_id", tid))
-	}
-	logger.L().Debug("redis command", fields...)
+	)
 }

@@ -42,7 +42,11 @@ type AgentFactory interface {
 	// request-resolved turn config — (model, wire-family, effort) — injected
 	// uniformly into all three agents. It is always non-zero in production:
 	// the handler resolves every request against the mandatory catalog.
-	Build(workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error)
+	//
+	// ctx is the turn context: construction-time log sites (per-user MCP
+	// config read failures) emit through logger.FromContext(ctx) so they carry
+	// the turn's session_id/trace_id (tool-call-log-correlation capability).
+	Build(ctx context.Context, workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error)
 }
 
 // TurnCloser releases per-turn resources created by AgentFactory.Build (the
@@ -62,7 +66,7 @@ type orchestratorFactory struct {
 }
 
 // Build implements AgentFactory.
-func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error) {
+func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error) {
 	// agent.skills must reference global skills only; user skills are discovered
 	// at runtime via luban tools.
 	if err := f.cfg.ValidateAgentSkills(userID, func(name, _ string) bool {
@@ -111,13 +115,13 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string, ove
 	// shell is rebuilt per call.
 	subFactories := map[string]SubAgentFactory{
 		ToolInvokeChongzhi: func() (Agent, error) {
-			return f.buildChongzhi(chongzhiCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
+			return f.buildChongzhi(ctx, chongzhiCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
 		},
 		ToolInvokeLiang: func() (Agent, error) {
-			return f.buildLiang(liangCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
+			return f.buildLiang(ctx, liangCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
 		},
 	}
-	confucius, err := f.buildConfucius(confuciusCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, subFactories, mcpMgr, override)
+	confucius, err := f.buildConfucius(ctx, confuciusCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, subFactories, mcpMgr, override)
 	if err != nil {
 		if closer != nil {
 			closer()
@@ -127,24 +131,24 @@ func (f *orchestratorFactory) Build(workspaceRoot, skillsDir, userID string, ove
 	return confucius, closer, nil
 }
 
-func (f *orchestratorFactory) buildConfucius(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]SubAgentFactory, mcpMgr *mcp.Manager, turn ModelOverride) (*Confucius, error) {
-	reg, agentCfg, err := f.buildAgentRegistry(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
+func (f *orchestratorFactory) buildConfucius(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]SubAgentFactory, mcpMgr *mcp.Manager, turn ModelOverride) (*Confucius, error) {
+	reg, agentCfg, err := f.buildAgentRegistry(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
 	return NewConfucius(agentCfg, f.client, reg, subAgents, turn)
 }
 
-func (f *orchestratorFactory) buildChongzhi(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Chongzhi, error) {
-	reg, agentCfg, err := f.buildAgentRegistry(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
+func (f *orchestratorFactory) buildChongzhi(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Chongzhi, error) {
+	reg, agentCfg, err := f.buildAgentRegistry(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
 	return NewChongzhi(agentCfg, f.client, reg, turn)
 }
 
-func (f *orchestratorFactory) buildLiang(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Liang, error) {
-	reg, agentCfg, err := f.buildAgentRegistry(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
+func (f *orchestratorFactory) buildLiang(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Liang, error) {
+	reg, agentCfg, err := f.buildAgentRegistry(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +160,7 @@ func (f *orchestratorFactory) buildLiang(cfg config.AgentConfig, workspaceRoot, 
 // allowed by cfg.MCP, luban skill tools when they are configured, and the
 // per-user mcp_* tools when the agent lists one and a turn-scoped manager is
 // available.
-func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
+func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
 	fullToolNames = append(fullToolNames, mcpToolNames...)
@@ -197,7 +201,7 @@ func (f *orchestratorFactory) buildAgentRegistry(cfg config.AgentConfig, workspa
 		}
 	}
 
-	rendered, err := f.renderSystemPrompt(cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, reg, mcpMgr)
+	rendered, err := f.renderSystemPrompt(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, reg, mcpMgr)
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -251,7 +255,7 @@ func isLubanTool(name string) bool {
 }
 
 // renderSystemPrompt builds the complete system prompt for an agent.
-func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, reg *tool.Registry, mcpMgr *mcp.Manager) (string, error) {
+func (f *orchestratorFactory) renderSystemPrompt(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, reg *tool.Registry, mcpMgr *mcp.Manager) (string, error) {
 	tools := f.collectTools(cfg)
 	// Per-user mcp_* tools are registered per-turn (not in the base registry),
 	// so surface them from the per-agent registry so the prompt advertises the
@@ -280,7 +284,7 @@ func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspa
 	// description only) when the family is active. Credentials are never loaded
 	// into the prompt — only name/url/description are rendered.
 	if mcpMgr != nil {
-		input.UserMCP = collectUserMCPServers(workspaceRoot)
+		input.UserMCP = collectUserMCPServers(ctx, workspaceRoot)
 	}
 	return prompt.RenderSystemPrompt(input)
 }
@@ -289,10 +293,10 @@ func (f *orchestratorFactory) renderSystemPrompt(cfg config.AgentConfig, workspa
 // server-level descriptions for system-prompt advertisement. A missing or
 // unreadable config yields no servers (the read error is logged but never
 // crashes the turn — see the "malformed config does not crash" requirement).
-func collectUserMCPServers(workspaceRoot string) []prompt.MCPServerInfo {
+func collectUserMCPServers(ctx context.Context, workspaceRoot string) []prompt.MCPServerInfo {
 	cfg, err := mcp.LoadConfig(workspaceRoot)
 	if err != nil {
-		logger.L().Warn("load per-user mcp config for prompt failed; skipping user mcp advertisement",
+		logger.FromContext(ctx).Warn("load per-user mcp config for prompt failed; skipping user mcp advertisement",
 			zap.String("workspace", workspaceRoot),
 			zap.Error(err))
 		return nil
@@ -449,7 +453,7 @@ type WorkspaceRootForUser = func(userID string) string
 // factory can load user-specific skills and validate skill permissions.
 func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, override ModelOverride) error {
 	ctx = skill.WithUserID(ctx, userID)
-	confucius, closer, err := o.factory.Build(workspaceRoot, skillsDir, userID, override)
+	confucius, closer, err := o.factory.Build(ctx, workspaceRoot, skillsDir, userID, override)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}
@@ -521,7 +525,7 @@ func emitDone(hub *stream.Hub, ctx context.Context, u doneUsage) {
 	}
 	if u.err != nil {
 		usage["error"] = u.err.Error()
-		logger.L().Warn("orchestrator completed with error",
+		logger.FromContext(ctx).Warn("orchestrator completed with error",
 			zap.Error(u.err),
 			zap.Int("total_tokens", u.confucius.TotalTokens))
 	}

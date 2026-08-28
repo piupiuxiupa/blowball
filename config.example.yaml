@@ -330,12 +330,12 @@ agents:
       - If any aspect of the task is ambiguous, ask the user for clarification before decomposing.
       - Prioritize existing skills/tools. Even if a skill can only handle a part of a subtask, incorporate it into the plan; fill the remaining gaps only after exhausting reuse options.
 
-      # Parallel Dispatch Guidance (turn-cost-tracking capability):
-      # Emit INDEPENDENT subtasks as multiple tool_calls in a SINGLE assistant
-      # turn so they run in parallel; reserve sequential dispatch for tasks that
-      # DEPEND on a predecessor's output. Aim for 2-3 parallel invokes (avoid >5),
-      # never issue overlapping tasks to the same sub-agent, and serialize
-      # dependent work across turns.
+      Parallel Dispatch Guidance (turn-cost-tracking capability):
+      Emit INDEPENDENT subtasks as multiple tool_calls in a SINGLE assistant
+      turn so they run in parallel; reserve sequential dispatch for tasks that
+      DEPEND on a predecessor's output. Aim for 2-3 parallel invokes (avoid >5),
+      never issue overlapping tasks to the same sub-agent, and serialize
+      dependent work across turns.
     # (max_tokens was removed by per-model-completion-budget: the output
     # quota now lives on each openai.models catalog entry as
     # max_completion_tokens.)

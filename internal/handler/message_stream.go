@@ -252,9 +252,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	sess, err := h.sessSvc.GetSessionByID(ctx, sessionID)
 	if err != nil {
-		logger.L().Error("session lookup failed",
+		logger.FromContext(ctx).Error("session lookup failed",
 			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
 			zap.String("user_id", userID),
 			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "session lookup failed"))
@@ -267,9 +266,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	prior, err := h.msgSvc.RecoverMessages(ctx, userID, sessionID)
 	if err != nil {
-		logger.L().Warn("recover messages failed; proceeding",
+		logger.FromContext(ctx).Warn("recover messages failed; proceeding",
 			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
 			zap.Error(err))
 		prior = nil
 	}
@@ -277,9 +275,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	agentMsgs, _, err := MessagesToAgentMessagesIndexed(prior)
 	if err != nil {
-		logger.L().Warn("reconstruct messages failed; falling back to current message only",
+		logger.FromContext(ctx).Warn("reconstruct messages failed; falling back to current message only",
 			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
 			zap.Error(err))
 		agentMsgs = nil
 	}
@@ -307,9 +304,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		if !isFirstTurn {
 			tokens, terr := h.compSvc.LatestContextTokens(ctx, sessionID)
 			if terr != nil {
-				logger.L().Warn("turn-start context tokens read failed; skipping preventive compaction",
+				logger.FromContext(ctx).Warn("turn-start context tokens read failed; skipping preventive compaction",
 					zap.String("op", "handler.send_message"),
-					zap.String("session_id", sessionID),
 					zap.Error(terr))
 			} else {
 				lastContextTokens = tokens
@@ -320,9 +316,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			if durable, derr := h.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
 				durableMsgs, durableRow, rerr := MessagesToAgentMessagesIndexed(durable)
 				if rerr != nil {
-					logger.L().Warn("durable reconstruct failed; using full recovered history",
+					logger.FromContext(ctx).Warn("durable reconstruct failed; using full recovered history",
 						zap.String("op", "handler.send_message"),
-						zap.String("session_id", sessionID),
 						zap.Error(rerr))
 				} else {
 					if overThreshold {
@@ -347,9 +342,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 					}
 				}
 			} else {
-				logger.L().Warn("durable recovery failed; using full recovered history",
+				logger.FromContext(ctx).Warn("durable recovery failed; using full recovered history",
 					zap.String("op", "handler.send_message"),
-					zap.String("session_id", sessionID),
 					zap.Error(derr))
 			}
 		}
@@ -368,9 +362,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// run claim, so a SESSION_BUSY-rejected request pays one wasted Find.)
 	if h.memSvc.Enabled() {
 		if block, err := h.memSvc.Recall(ctx, userID, req.Content); err != nil {
-			logger.L().Warn("memory recall failed; continuing without memory",
+			logger.FromContext(ctx).Warn("memory recall failed; continuing without memory",
 				zap.String("op", "handler.send_message"),
-				zap.String("session_id", sessionID),
 				zap.String("user_id", userID),
 				zap.Error(err))
 		} else if block != "" {
@@ -426,9 +419,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// the claim is best-effort mutual exclusion, not admission control.
 	holder, claimed, err := h.runs.Store.ClaimSession(ctx, sessionID, tid)
 	if err != nil {
-		logger.L().Warn("session run claim failed; proceeding without mutual exclusion",
+		logger.FromContext(ctx).Warn("session run claim failed; proceeding without mutual exclusion",
 			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
 			zap.Error(err))
 	} else if !claimed {
 		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
@@ -481,7 +473,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		Model:     turnModel,
 		CreatedAt: userMsgTime.Format(time.RFC3339),
 	}); err != nil {
-		logger.L().Warn("run meta init failed",
+		logger.FromContext(ctx).Warn("run meta init failed",
 			zap.String("op", "handler.send_message"),
 			zap.String("run_id", tid),
 			zap.Error(err))
@@ -511,9 +503,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	if err := h.sessSvc.SaveMessagesBatch(ctx, userID, []model.Message{
 		UserMessage(persist.sessionID, persist.traceID, persist.userContent, persist.userMsgTime),
 	}); err != nil {
-		logger.L().Warn("send-time user message persist failed; deferring the user row to the turn-end batch",
+		logger.FromContext(ctx).Warn("send-time user message persist failed; deferring the user row to the turn-end batch",
 			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
 			zap.String("run_id", tid),
 			zap.Error(err))
 	} else {
@@ -536,7 +527,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// run:{rid}:events (done included), heartbeats, and polls the
 	// cross-process cancel flag. drained closes after the final drain, which
 	// orders the terminal status write strictly after the last event.
-	drainDone := run.StartDrainer(hub, h.runs.Store, h.runs.Registry, tid, run.HeartbeatEvery)
+	drainDone := run.StartDrainer(hub, h.runs.Store, h.runs.Registry, tid, sessionID, run.HeartbeatEvery)
 
 	type runResult struct {
 		events []stream.StreamEvent
@@ -581,11 +572,13 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// The SSE response is just another subscription to the run's event log:
 	// it returns when the client disconnects (turn keeps running) or the run
 	// reaches a terminal state (the subscriber loop observes the status — or,
-	// on the degraded no-Redis path, the turn's own completion signal).
-	if sseErr := h.writeRunEvents(c.Request.Context(), c.Writer, h.runs, tid, "0", map[string]string{"X-Run-Id": tid}, regRun.Done()); sseErr != nil && !errors.Is(sseErr, context.Canceled) {
-		logger.L().Warn("sse write returned error",
+	// on the degraded no-Redis path, the turn's own completion signal). The
+	// enriched request ctx (session_id + trace_id) is passed rather than the
+	// bare request ctx so the subscription loop's logs correlate with the turn
+	// (tool-call-log-correlation); cancellation semantics are identical.
+	if sseErr := h.writeRunEvents(ctx, c.Writer, h.runs, tid, "0", map[string]string{"X-Run-Id": tid}, regRun.Done()); sseErr != nil && !errors.Is(sseErr, context.Canceled) {
+		logger.FromContext(ctx).Warn("sse write returned error",
 			zap.String("op", "handler.send_message"),
-			zap.String("session_id", sessionID),
 			zap.Error(sseErr))
 	}
 
@@ -597,7 +590,9 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	// saveCtx is a detached context that survives the HTTP request so the
 	// three-tier persistence goroutine is not killed by a client disconnect.
-	saveCtx := trace.WithContext(context.Background(), tid)
+	// It carries the turn's session_id + trace_id so its log sites (via
+	// logger.FromContext) correlate with the turn (tool-call-log-correlation).
+	saveCtx := agent.WithSessionID(trace.WithContext(context.Background(), tid), sessionID)
 
 	// persistEvents writes the supplied assistant event stream as the turn-end
 	// batch through the existing SaveMessagesBatch path and persists the turn's
@@ -621,9 +616,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		go func(events []stream.StreamEvent, usage map[string]any) {
 			defer func() {
 				if r := recover(); r != nil {
-					logger.L().Error("panic saving event stream",
+					logger.FromContext(saveCtx).Error("panic saving event stream",
 						zap.String("op", "handler.send_message"),
-						zap.String("session_id", sessionID),
 						zap.Any("recover", r))
 				}
 			}()
@@ -652,16 +646,14 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				go func(tc memory.TurnCapture) {
 					defer func() {
 						if r := recover(); r != nil {
-							logger.L().Error("panic capturing turn to memory",
+							logger.FromContext(saveCtx).Error("panic capturing turn to memory",
 								zap.String("op", "handler.send_message"),
-								zap.String("session_id", tc.SessionID),
 								zap.Any("recover", r))
 						}
 					}()
 					if err := h.memSvc.CaptureTurn(saveCtx, tc); err != nil {
-						logger.L().Warn("memory capture failed; turn unaffected",
+						logger.FromContext(saveCtx).Warn("memory capture failed; turn unaffected",
 							zap.String("op", "handler.send_message"),
-							zap.String("session_id", tc.SessionID),
 							zap.String("user_id", tc.UserID),
 							zap.Error(err))
 					}
@@ -670,18 +662,16 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 			msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), now)
 			if mErr != nil {
-				logger.L().Error("map event to message failed",
+				logger.FromContext(saveCtx).Error("map event to message failed",
 					zap.String("op", "handler.send_message"),
-					zap.String("session_id", sessionID),
 					zap.Error(mErr))
 				return
 			}
 
 			if len(msgs) > 0 {
 				if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
-					logger.L().Error("save event stream failed",
+					logger.FromContext(saveCtx).Error("save event stream failed",
 						zap.String("op", "handler.send_message"),
-						zap.String("session_id", sessionID),
 						zap.Error(err))
 				}
 			}
@@ -690,9 +680,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			// batch. Failure is logged only — never roll back messages.
 			if tu, ok := buildTurnUsage(sessionID, tid, userID, turnModel, usage); ok {
 				if err := h.sessSvc.SaveTurnUsage(saveCtx, tu); err != nil {
-					logger.L().Warn("save turn_usage failed; messages persisted",
+					logger.FromContext(saveCtx).Warn("save turn_usage failed; messages persisted",
 						zap.String("op", "handler.send_message"),
-						zap.String("session_id", sessionID),
 						zap.Error(err))
 				}
 			}
@@ -715,16 +704,14 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// Title generation is unaffected either way — it fired at send time,
 		// before the turn started (title-generation-cadence).
 		if errors.Is(res.err, context.Canceled) {
-			logger.L().Warn("turn cancelled; persisting partial interrupted turn",
+			logger.FromContext(ctx).Warn("turn cancelled; persisting partial interrupted turn",
 				zap.String("op", "handler.send_message"),
-				zap.String("session_id", sessionID),
 				zap.String("user_id", userID),
 				zap.Int("event_count", len(res.events)),
 				zap.Error(res.err))
 		} else {
-			logger.L().Error("orchestrator failed; persisting partial turn",
+			logger.FromContext(ctx).Error("orchestrator failed; persisting partial turn",
 				zap.String("op", "handler.send_message"),
-				zap.String("session_id", sessionID),
 				zap.String("user_id", userID),
 				zap.Int("event_count", len(res.events)),
 				zap.Error(res.err))
@@ -920,9 +907,8 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 		if !h.compSvc.ShouldCompact(contextTokens, limit) {
 			return nil
 		}
-		log := logger.L().With(
+		log := logger.FromContext(ctx).With(
 			zap.String("op", "handler.round_hook"),
-			zap.String("session_id", persist.sessionID),
 			zap.Int("context_tokens", contextTokens),
 		)
 
