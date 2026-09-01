@@ -151,7 +151,7 @@ func (h *WorkspaceHandler) Search(c *gin.Context) {
 
 	var entryType string
 	switch strings.TrimSpace(c.Query("type")) {
-	case "":
+	case "", "any":
 		entryType = xizhi.SearchTypeAny
 	case "file":
 		entryType = xizhi.SearchTypeFile
@@ -1260,8 +1260,11 @@ func (h *WorkspaceHandler) buildOnlyOfficeConfigs(rel, userJWT string) (edit, vi
 
 	// The DocumentServer downloads the source file and POSTs saves back to the
 	// backend over InternalBackend (the container-reachable origin), authenticating
-	// as the user via the embedded JWT query token.
-	docURL := h.oo.InternalBackend + "/api/v1/workspace/files/download/" + url.PathEscape(rel) + "?inline=1&token=" + url.QueryEscape(userJWT)
+	// as the user via the embedded JWT query token. The path is escaped strictly
+	// per segment (escapeOnlyOfficePath): url.PathEscape leaves "+" literal, and
+	// the DocumentServer decodes a path "+" with query semantics (as a space), so
+	// "1+3.xlsx" would fail the download.
+	docURL := h.oo.InternalBackend + "/api/v1/workspace/files/download/" + escapeOnlyOfficePath(rel) + "?inline=1&token=" + url.QueryEscape(userJWT)
 	callbackURL := h.oo.InternalBackend + "/api/v1/workspace/onlyoffice-callback?path=" + url.QueryEscape(rel) + "&token=" + url.QueryEscape(userJWT)
 
 	documentType := onlyOfficeDocumentType(ext)
@@ -1363,13 +1366,44 @@ func deriveOnlyOfficeVersionKey(rel, versionID string) string {
 // escapeOnlyOfficePath percent-escapes each "/"-separated segment of a logical
 // path for use in a URL path, preserving the literal separators. Escaping per
 // segment (rather than the whole path) keeps the directory structure visible to
-// office-vers's *filepath catch-all and avoids %2F ambiguity.
+// office-vers's *filepath catch-all and avoids %2F ambiguity — likewise for the
+// proxies in front of the backend's own download catch-all. Segments escape
+// strictly (escapeOnlyOfficePathSegment) so characters like "+" survive
+// third-party consumers of the URL.
 func escapeOnlyOfficePath(rel string) string {
 	parts := strings.Split(rel, "/")
 	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
+		parts[i] = escapeOnlyOfficePathSegment(p)
 	}
 	return strings.Join(parts, "/")
+}
+
+// escapeOnlyOfficePathSegment percent-encodes one path segment as strictly as a
+// URL path allows: every byte outside the RFC 3986 unreserved set
+// (ALPHA / DIGIT / "-" / "." / "_" / "~") becomes %XX. url.PathEscape is
+// deliberately laxer — segment mode leaves the sub-delims `$ & + : = @` literal
+// — which is RFC-correct but fragile toward the third-party consumers of the
+// OnlyOffice config URLs: the DocumentServer (and some proxies) decode a path
+// "+" with query semantics, turning "1+3.xlsx" into "1 3.xlsx" and failing the
+// download. Strict escaping decodes to the identical string server-side
+// (net/url maps %2B back to "+") and is immune to the quirk.
+func escapeOnlyOfficePathSegment(seg string) string {
+	var b strings.Builder
+	b.Grow(len(seg))
+	for i := 0; i < len(seg); i++ {
+		if c := seg[i]; unreservedURLByte(c) {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// unreservedURLByte reports whether c is an RFC 3986 §2.3 unreserved byte.
+func unreservedURLByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '-' || c == '.' || c == '_' || c == '~'
 }
 
 // onlyOfficeDocumentType maps an extension (no dot) to OnlyOffice's documentType

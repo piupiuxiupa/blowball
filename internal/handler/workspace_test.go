@@ -2178,6 +2178,82 @@ func TestOnlyOfficeConfig_SignedConfig(t *testing.T) {
 	assert.NotEqual(t, resp.Edit.Token, resp.View.Token, "edit and view tokens must differ")
 }
 
+// TestOnlyOfficeConfig_DocURLStrictEscaping pins the document.url escaping for
+// the characters that break the DocumentServer download when left literal:
+// url.PathEscape (the previous escaper) keeps "+" and the other sub-delims
+// unescaped in path-segment mode, and the DocumentServer decodes a path "+"
+// with query semantics — "1+3.xlsx" reached it as "1 3.xlsx" and 404'd. The
+// strict per-segment escaper encodes everything outside the RFC 3986 unreserved
+// set (space → %20, "+" → %2B, "&" → %26) while keeping "/" as a literal
+// separator, and still round-trips to the identical logical path.
+func TestOnlyOfficeConfig_DocURLStrictEscaping(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	rel := "测试 123/1+3&x.xlsx"
+	require.NoError(t, os.MkdirAll(filepath.Join(env.wsRoot(), "测试 123"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(env.wsRoot(), rel), []byte("orig"), 0o644))
+
+	target := "/api/v1/workspace/files/" + url.PathEscape(rel) + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp onlyOfficeConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	docURL := resp.Edit.Config["document"].(map[string]any)["url"].(string)
+	// Strict wire form: space %20, "+" %2B, "&" %26; CJK UTF-8 %XX; the directory
+	// separator stays a literal "/".
+	assert.Contains(t, docURL,
+		"/api/v1/workspace/files/download/%E6%B5%8B%E8%AF%95%20123/1%2B3%26x.xlsx?inline=1&token=",
+		"document.url must escape strictly per segment: %s", docURL)
+	pathPart, _, _ := strings.Cut(docURL, "?")
+	assert.NotContains(t, pathPart, "+")
+	assert.NotContains(t, pathPart, " ")
+
+	// The strict form round-trips to the identical logical path the backend
+	// will resolve.
+	u, err := url.Parse(docURL)
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/workspace/files/download/"+rel, u.Path)
+	assert.Equal(t, "1", u.Query().Get("inline"), "token/inline params must stay intact")
+
+	// The callbackUrl keeps its query-context encoding (QueryEscape): "+" → %2B,
+	// space → "+", and the backend's c.Query decodes both back — assert the
+	// round-trip rather than the wire spelling.
+	cbURL := resp.Edit.Config["editorConfig"].(map[string]any)["callbackUrl"].(string)
+	cbu, err := url.Parse(cbURL)
+	require.NoError(t, err)
+	assert.Equal(t, rel, cbu.Query().Get("path"), "callback path must round-trip")
+
+	// The version endpoint shares the same strict escaper via
+	// escapeOnlyOfficePath (it feeds office-vers's *filepath catch-all).
+	vcfg := env.versionConfig(t, rel, "vid-1")
+	vURL := vcfg["document"].(map[string]any)["url"].(string)
+	assert.Contains(t, vURL, "/documents/user-1/%E6%B5%8B%E8%AF%95%20123/1%2B3%26x.xlsx?", "version url: %s", vURL)
+}
+
+// versionConfig requests the version-view endpoint and returns the signed
+// config map (test-local helper for URL-escaping assertions).
+func (e *ooTestEnv) versionConfig(t *testing.T, rel, versionID string) map[string]any {
+	t.Helper()
+	target := "/api/v1/workspace/files/" + url.PathEscape(rel) + onlyOfficeVersionConfigSuffix + "?versionId=" + url.QueryEscape(versionID)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+e.userJWT(t))
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		View struct {
+			Config map[string]any `json:"config"`
+		} `json:"view"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	return resp.View.Config
+}
+
 // TestOnlyOfficeConfig_PathOutsideWorkspace_403 verifies a traversal attempt is
 // rejected with 403 before any config is built.
 func TestOnlyOfficeConfig_PathOutsideWorkspace_403(t *testing.T) {
@@ -2748,6 +2824,13 @@ func TestSearch_EmptyPatternWithTypeEnumeration(t *testing.T) {
 	w, resp = env.searchGET(t, "type=file")
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 6, resp.Total, "visible files only: guide.md, note.md, report(1).md, a+b.txt, main.go, README.md")
+
+	// The literal "any" is the openapi enum's own token — it must be accepted
+	// explicitly, not only via the omitted/blank param (once rejected with
+	// `type must be "file", "dir" or "any"`).
+	w, resp = env.searchGET(t, "pattern=&type=any")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, 10, resp.Total, "4 dirs + 6 visible files")
 }
 
 // TestSearch_IgnoreCaseDefaultTrue verifies the REST-only default divergence:
