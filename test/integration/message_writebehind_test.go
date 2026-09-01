@@ -16,11 +16,14 @@ import (
 	"github.com/lush/blowball/internal/msgflush"
 )
 
-// TestMessageWriteBehind_DualWriteMirrorsQueueAndCache verifies the write path
-// shape before any flush happens: right after a turn, the read cache
-// (msgs:{session_id}) and the ingest queue (msgs:buffer) hold the identical
-// canonical blobs from ONE pipeline, the queue key carries no TTL, and MySQL
-// has NOT been written synchronously.
+// TestMessageWriteBehind_DualWriteMirrorsQueueAndCache verifies the write
+// path shape after a turn (harden-turn-persistence): the read cache
+// (msgs:{session_id}) holds the canonical blobs from the dual-write
+// pipeline, the queue key carries no TTL, and — because the turn goroutine
+// now runs a bounded synchronous drain BEFORE releasing the session claim —
+// MySQL already holds the complete turn by the time the response returns
+// (the history endpoint is a pure MySQL reader, so generating:false implies
+// a complete history).
 func TestMessageWriteBehind_DualWriteMirrorsQueueAndCache(t *testing.T) {
 	env := newTestEnv(t, newScriptedLLMClient(
 		scriptedLLMResponse{
@@ -37,41 +40,40 @@ func TestMessageWriteBehind_DualWriteMirrorsQueueAndCache(t *testing.T) {
 	w := env.postMessage(`{"content":"wb-mirror"}`, authToken(t, defaultUserID))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the detached persistence goroutine's dual write to land in the
-	// read cache.
+	// The turn-end batch lands in the read cache; the pre-release drain lands
+	// it in MySQL before the response returns.
 	require.Eventually(t, func() bool {
 		raws, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
 		return err == nil && len(raws) >= 2
 	}, 2*time.Second, 10*time.Millisecond, "expected the turn to be dual-written")
 
-	// Nothing reached MySQL synchronously — the flusher owns that write.
-	assert.Empty(t, env.mysqlFake.messagesFor(defaultSessionID),
-		"no synchronous MySQL write on the happy path")
-
-	// The ingest queue holds the identical blobs, FIFO, with no TTL.
-	queued, err := env.redisSvc.Client().LRange(ctx, "msgs:buffer", 0, -1).Result()
-	require.NoError(t, err)
-	assert.NotEmpty(t, queued, "ingest queue must hold the batch")
-
-	cached, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(queued), len(cached), "queue holds at least this turn's blobs")
-	for i := range cached {
-		assert.Equal(t, string(cached[i]), queued[len(queued)-len(cached)+i],
-			"queue and cache elements must be the identical canonical blobs")
-	}
-	assert.Equal(t, time.Duration(0), env.miniRedis.TTL("msgs:buffer"),
-		"the ingest queue must never carry a TTL")
-
-	// Draining moves exactly the queued rows into MySQL once.
-	before := env.mysqlFake.insertAttemptCount()
-	require.NoError(t, env.drainMessages(ctx))
+	// Drain-before-release: MySQL holds the full turn (user + merged
+	// assistant events) with idempotency keys, so the history endpoint sees
+	// the complete turn as soon as generating flips false.
 	rows := env.mysqlFake.messagesFor(defaultSessionID)
-	assert.NotEmpty(t, rows)
+	assert.NotEmpty(t, rows, "the turn-end drain lands the batch in MySQL before claim release")
 	for _, m := range rows {
 		assert.NotEmpty(t, m.ClientMsgID, "drained rows carry the idempotency key")
 	}
-	assert.Equal(t, before+len(rows), env.mysqlFake.insertAttemptCount())
+
+	// The turn-end drain emptied the queue of this turn's blobs; the queue
+	// key itself still carries no TTL.
+	queued, err := env.redisSvc.Client().LRange(ctx, "msgs:buffer", 0, -1).Result()
+	require.NoError(t, err)
+	assert.Empty(t, queued, "the turn-end drain consumed the batch")
+
+	cached, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(rows), len(cached),
+		"MySQL holds at least the cache view after the drain")
+	assert.Equal(t, time.Duration(0), env.miniRedis.TTL("msgs:buffer"),
+		"the ingest queue must never carry a TTL")
+
+	// Draining again is idempotent (INSERT IGNORE on client_msg_id).
+	before := env.mysqlFake.insertAttemptCount()
+	require.NoError(t, env.drainMessages(ctx))
+	assert.Equal(t, before, env.mysqlFake.insertAttemptCount(),
+		"re-drain inserts nothing new")
 }
 
 // TestMessageWriteBehind_SendTimeBatchSplitsUserRow verifies the batch split
@@ -108,7 +110,8 @@ func TestMessageWriteBehind_SendTimeBatchSplitsUserRow(t *testing.T) {
 	require.Len(t, queuedMid, 1, "mid-turn the ingest queue holds only the user row")
 	assert.Contains(t, queuedMid[0], "wb-split")
 
-	// Turn-end: the suffix appends to both keys; the user row appears once.
+	// Turn-end: the suffix appends to the cache and drains into MySQL; the
+	// user row appears once (harden-turn-persistence drain-before-release).
 	<-done
 	require.Eventually(t, func() bool {
 		raws, err := env.redisSvc.GetMessages(ctx, defaultSessionID)
@@ -119,7 +122,9 @@ func TestMessageWriteBehind_SendTimeBatchSplitsUserRow(t *testing.T) {
 	require.NoError(t, err)
 	queued, err := env.redisSvc.Client().LRange(ctx, "msgs:buffer", 0, -1).Result()
 	require.NoError(t, err)
-	require.Len(t, queued, 4, "queue and cache receive the same blobs from both batches")
+	assert.Empty(t, queued, "the turn-end drain consumed both batches")
+	mysqlRows := env.mysqlFake.messagesFor(defaultSessionID)
+	require.Len(t, mysqlRows, 4, "MySQL holds the user row + 3 merged assistant events")
 
 	userRows := 0
 	for i, raw := range cached {
@@ -129,9 +134,8 @@ func TestMessageWriteBehind_SendTimeBatchSplitsUserRow(t *testing.T) {
 			userRows++
 			assert.Equal(t, 0, m.MsgIndex, "the user row keeps msg_index 0")
 		}
-		// Queue and cache elements are the identical canonical blobs, in
-		// order, across the two batches.
-		assert.Equal(t, string(raw), queued[i], "queue/cache blob %d must match", i)
+		// The drained MySQL rows mirror the cache blobs in order.
+		assert.Equal(t, m.ClientMsgID, mysqlRows[i].ClientMsgID, "cache/MySQL row %d must match", i)
 	}
 	assert.Equal(t, 1, userRows, "the user row must appear exactly once in msgs:{sid}")
 
@@ -291,4 +295,54 @@ func TestMessageWriteBehind_DoubleDrainInsertsOnce(t *testing.T) {
 	require.Len(t, rows, 2, "duplicate delivery must collapse to one row per client_msg_id")
 	assert.Equal(t, 4, env.mysqlFake.insertAttemptCount(),
 		"both deliveries were attempted; both duplicates ignored")
+}
+
+// TestMessageWriteBehind_HistoryCompleteAtClaimRelease verifies the client
+// state-machine guarantee harden-turn-persistence introduces end to end: by
+// the time the SSE response has returned (and the session detail therefore
+// reports generating=false — the claim was released), the history endpoint —
+// a PURE MySQL reader with no drain of its own — already returns the complete
+// turn. No manual drain, no polling.
+func TestMessageWriteBehind_HistoryCompleteAtClaimRelease(t *testing.T) {
+	env := newTestEnv(t, newScriptedLLMClient(
+		scriptedLLMResponse{
+			tokens:       []string{"hi"},
+			content:      "hi",
+			finishReason: "stop",
+			usage:        agent.Usage{TotalTokens: 1},
+		},
+		scriptedLLMResponse{content: "T", finishReason: "stop", usage: agent.Usage{TotalTokens: 1}},
+	))
+
+	w := env.postMessage(`{"content":"instant"}`, authToken(t, defaultUserID))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// The response returns only after the turn goroutine finalized the run —
+	// so the session claim (the generating flag's source) must already be
+	// released.
+	runs, err := env.redisSvc.RunStore().ActiveRuns(context.Background(), []string{defaultSessionID})
+	require.NoError(t, err)
+	assert.Empty(t, runs[defaultSessionID],
+		"claim released by the time the response returns")
+
+	// The history endpoint sees the complete turn IMMEDIATELY — the
+	// drain-before-release invariant, no manual drain required.
+	msgReq := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/"+defaultSessionID+"/messages?page_size=100", nil)
+	msgReq.Header.Set("Authorization", "Bearer "+authToken(t, defaultUserID))
+	msgW := httptest.NewRecorder()
+	env.engine.ServeHTTP(msgW, msgReq)
+	require.Equal(t, http.StatusOK, msgW.Code, "body: %s", msgW.Body.String())
+
+	var body struct {
+		Messages []model.Message `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(msgW.Body.Bytes(), &body))
+	require.Len(t, body.Messages, 4, "user + 3 merged assistant events visible without a manual drain")
+	assert.Equal(t, model.EventTypeMessage, body.Messages[0].EventType)
+	assert.Equal(t, 0, body.Messages[0].MsgIndex)
+	for i, m := range body.Messages[1:] {
+		assert.Equal(t, i+1, m.MsgIndex, "assistant event %d keeps its merged ordinal", i)
+		assert.NotEmpty(t, m.ClientMsgID)
+	}
 }

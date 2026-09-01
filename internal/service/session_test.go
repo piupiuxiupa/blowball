@@ -95,17 +95,18 @@ func TestSaveMessage_RedisFailure_FallsBackToDirectMySQL(t *testing.T) {
 	assert.Equal(t, sessionID, m.updateSessionTimeArg)
 }
 
-// TestSaveMessage_BothTiersFail_LoggedNotReturned verifies that when Redis
-// AND MySQL are both down the failure is swallowed (SSE response path stays
-// unblocked) — the loud ERROR log is the operator's signal.
-func TestSaveMessage_BothTiersFail_LoggedNotReturned(t *testing.T) {
+// TestSaveMessage_BothTiersFail_ErrorReturned verifies that when Redis AND
+// MySQL are both down the failure is RETURNED (not swallowed) so callers can
+// run their at-least-once recovery — the send-time path defers the user row
+// to the turn-end batch, the turn-end path retries within its bounded budget.
+func TestSaveMessage_BothTiersFail_ErrorReturned(t *testing.T) {
 	const sessionID = "s-3"
 	m := &fakeMySQLStore{appendMessagesErr: errFake}
 	r := &fakeRedisStore{dualErr: errFake}
 	svc := NewSessionService(newDeps(m, r, &fakeFSStore{}))
 
 	err := svc.SaveMessage(context.Background(), "u-3", sampleMessage(sessionID, "x"))
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errFake, "dual-tier failure must surface to the caller")
 	require.Equal(t, 1, m.appendMessagesCalls, "fallback attempt still made")
 }
 

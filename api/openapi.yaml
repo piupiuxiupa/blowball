@@ -95,7 +95,10 @@ components:
             Whether a turn is currently running for this session
             (turn-detach-resume). True while the session's active-run claim
             exists; clients use it to offer resume (attach to
-            `turns/{run_id}/events`) and a cancel affordance.
+            `turns/{run_id}/events`) and a cancel affordance. The server
+            attempts terminal message persistence (and a bounded MySQL drain)
+            before releasing that claim, so a healthy transition to false
+            means the completed turn is visible in message history.
         run_id:
           type: string
           description: |
@@ -135,7 +138,9 @@ components:
           description: |
             Whether a turn is currently running for this session
             (turn-detach-resume) — same active-run-claim semantics as the
-            session list. An unreadable claim degrades to false.
+            session list. The active-run claim is released only after terminal
+            message persistence has been attempted; an unreadable claim
+            degrades to false.
         run_id:
           type: string
           description: |
@@ -186,9 +191,10 @@ components:
             Idempotency key minted at persistence time. Backs the Redis-first
             write-behind delivery: duplicate insert attempts of the same
             logical message collapse to one row. Rows carry either a
-            deterministic "{trace_id}:{msg_index}" key (the mid-turn-compaction
-            flush path, migration 013) or a UUID v7 (legacy write-behind
-            minting). Null on rows written before migration 012.
+            deterministic "{trace_id}:{msg_index}" key (the send-time user
+            row, incremental closed-event batches, mid-turn compaction
+            batches, and terminal suffix batches) or a UUID v7 (legacy
+            write-behind minting). Null on rows written before migration 012.
         run_id:
           type: string
           nullable: true
@@ -1014,6 +1020,13 @@ paths:
         user. Messages are ordered by `(msg_time, msg_index)` ascending by
         default; use `order=desc` to retrieve newest first. Pass
         `page_token` from the previous response to advance pages.
+        While a turn is running, history is incremental: the user row and
+        already-closed merged events can appear before `done`. A still-growing
+        token/reasoning span is not written until it closes. Clients that
+        combine history with live run replay should deduplicate rows by
+        `trace_id` and `msg_index` (equivalently, the deterministic
+        `client_msg_id` when present); the event stream remains authoritative
+        for live output.
       parameters:
         - name: session_id
           in: path
@@ -1081,6 +1094,10 @@ paths:
             the request's trace id); every event's `meta.run_id` carries the
             same value. Disconnecting from this stream does NOT cancel the
             turn — cancel explicitly via the cancel endpoint.
+            Stream closure waits for terminal message persistence with bounded
+            retry and a bounded MySQL drain attempt. On a healthy storage path,
+            stream completion therefore implies that the complete turn is
+            available from the message-history endpoint.
             Event types: `agent_start`, `token`, `reasoning`, `tool_call`, `tool_result`,
             `agent_end`, `agent_error`, `done`. The `done` event is always the final event.
           headers:

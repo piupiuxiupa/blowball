@@ -39,18 +39,54 @@ type stubOrchestrator struct {
 	eventsToEmit  []stream.StreamEvent
 	returnErr     error
 	preCloseSleep time.Duration
+	// interEventDelay parks BETWEEN emitted events (never after the last),
+	// letting tests keep a turn in flight across incremental-persist ticks.
+	interEventDelay time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, _ TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
 	s.gotSkillsDir = skillsDir
 	s.gotMessages = messages
 	s.mu.Unlock()
 
-	for _, e := range s.eventsToEmit {
+	// Serve the (now unconditional) turn tap like the production adapter
+	// does, so the incremental persister can snapshot the stream so far
+	// (incremental-message-persistence). Snapshots reply with the events
+	// emitted up to that moment.
+	var tapMu sync.Mutex
+	var collected []stream.StreamEvent
+	if tap := hooks.Tap; tap != nil {
+		defer tap.close()
+		reqs := tap.requests()
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case req := <-reqs:
+					tapMu.Lock()
+					out := append([]stream.StreamEvent(nil), collected...)
+					tapMu.Unlock()
+					req <- out
+				}
+			}
+		}()
+	}
+
+	for i, e := range s.eventsToEmit {
 		if !hub.SendCtx(ctx, e) {
 			break
+		}
+		tapMu.Lock()
+		collected = append(collected, e)
+		tapMu.Unlock()
+		if s.interEventDelay > 0 && i < len(s.eventsToEmit)-1 {
+			select {
+			case <-time.After(s.interEventDelay):
+			case <-ctx.Done():
+			}
 		}
 	}
 	if s.preCloseSleep > 0 {
@@ -104,11 +140,14 @@ type handlerFakeMySQL struct {
 	appendMessagesCalls int
 	appendMessagesArg   []model.Message
 	appendMessagesErr   error
-	listMessagesRows    []model.Message
-	listMessagesErr     error
-	saveTurnUsageCalls  int
-	saveTurnUsageArg    model.TurnUsage
-	saveTurnUsageErr    error
+	// appendMessagesErrFirst fails only the first N AppendMessages calls
+	// (harden-turn-persistence: send-time dual failure, turn-end recovery).
+	appendMessagesErrFirst int
+	listMessagesRows       []model.Message
+	listMessagesErr        error
+	saveTurnUsageCalls     int
+	saveTurnUsageArg       model.TurnUsage
+	saveTurnUsageErr       error
 
 	// Compaction-storage recording (context-compaction capability).
 	compactions                 []model.ContextCompaction
@@ -187,6 +226,10 @@ func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Messag
 	defer m.mu.Unlock()
 	m.appendMessagesCalls++
 	m.appendMessagesArg = msgs
+	if m.appendMessagesErrFirst > 0 {
+		m.appendMessagesErrFirst--
+		return nil, errFakeHandler
+	}
 	if m.appendMessagesErr != nil {
 		return nil, m.appendMessagesErr
 	}
@@ -323,14 +366,17 @@ type handlerFakeRedis struct {
 	dualRows    []model.Message
 	dualBatches [][]model.Message
 	dualErr     error
-	clearCalls  int
-	delSessErr  error
-	getCalls    int
-	getResult   [][]byte
-	getErr      error
-	setCalls    int
-	setErr      error
-	setArgRows  int
+	// dualErrFirst fails only the first N AppendMessagesDual calls
+	// (harden-turn-persistence: send-time failure, turn-end recovery).
+	dualErrFirst int
+	clearCalls   int
+	delSessErr   error
+	getCalls     int
+	getResult    [][]byte
+	getErr       error
+	setCalls     int
+	setErr       error
+	setArgRows   int
 
 	// Compaction-cache recording (context-compaction capability).
 	compactionCache    []byte
@@ -354,6 +400,10 @@ func (r *handlerFakeRedis) AppendMessagesDual(_ context.Context, sessionID strin
 	}
 	r.dualRows = append(r.dualRows, batch...)
 	r.dualBatches = append(r.dualBatches, batch)
+	if r.dualErrFirst > 0 {
+		r.dualErrFirst--
+		return errFakeHandler
+	}
 	return r.dualErr
 }
 func (r *handlerFakeRedis) dualCount() int {
@@ -462,6 +512,10 @@ type sessionHandlerTestEnv struct {
 	stub   *stubOrchestrator
 	engine *gin.Engine
 }
+
+// errFakeHandler is the canned store error used by the fail-first-N fake
+// knobs (harden-turn-persistence tests).
+var errFakeHandler = errors.New("fake handler store failure")
 
 func newSessionHandlerEnv(t *testing.T, stub *stubOrchestrator) *sessionHandlerTestEnv {
 	t.Helper()

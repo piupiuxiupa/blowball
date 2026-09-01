@@ -271,9 +271,11 @@ func (s *SessionService) SaveMessage(ctx context.Context, userID string, msg mod
 // Failure policy: when the dual-write pipeline fails (Redis unavailable), the
 // batch falls back to a synchronous direct MySQL write (idempotent INSERT
 // IGNORE plus one update_time refresh) so the "messages always win"
-// convention survives a Redis outage. A fallback failure means both tiers are
-// down; it is logged loudly but not surfaced, keeping the SSE response path
-// unblocked per the session-management spec.
+// convention survives a Redis outage; that degraded success still returns nil
+// (a Redis hiccup is not amplified to the caller). A fallback failure means
+// BOTH tiers are down: the error is returned so callers can run their
+// at-least-once recovery (the send-time path defers the user row to the
+// turn-end batch; the turn-end path retries within its bounded budget).
 func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, msgs []model.Message) error {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
@@ -317,8 +319,7 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 		log.Error("redis dual-write failed; falling back to synchronous MySQL write",
 			zap.String("session_id", msgs[0].SessionID),
 			zap.Error(err))
-		s.fallbackDirectWrite(ctx, log, msgs)
-		return nil
+		return s.fallbackDirectWrite(ctx, log, msgs)
 	}
 
 	// Wake the flusher (non-blocking): a signal lets it flush early once the
@@ -333,20 +334,36 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 // fallbackDirectWrite persists msgs straight into MySQL when the Redis
 // dual-write pipeline failed: one idempotent batch INSERT plus one
 // update_time refresh for the batch's session (the flusher normally owns
-// both, but it never sees a batch that never reached the queue). Failures
-// are logged, not returned — the SSE streaming path is never blocked by a
-// store hiccup.
-func (s *SessionService) fallbackDirectWrite(ctx context.Context, log *zap.Logger, msgs []model.Message) {
+// both, but it never sees a batch that never reached the queue). A message
+// insert failure is logged AND returned (both tiers down — the caller's
+// at-least-once recovery depends on seeing it); an update_time refresh
+// failure is cosmetic and stays log-only.
+func (s *SessionService) fallbackDirectWrite(ctx context.Context, log *zap.Logger, msgs []model.Message) error {
 	if _, err := s.mysql.AppendMessages(ctx, msgs); err != nil {
-		log.Error("mysql fallback write failed; batch lost",
+		log.Error("mysql fallback write failed; returning error for caller retry",
 			zap.String("session_id", msgs[0].SessionID),
 			zap.Int("rows", len(msgs)),
 			zap.Error(err))
-		return
+		return fmt.Errorf("session.save_messages_batch: mysql fallback: %w", err)
 	}
 	if err := s.mysql.UpdateSessionTime(ctx, msgs[0].SessionID); err != nil {
 		log.Error("update session time failed", zap.String("session_id", msgs[0].SessionID), zap.Error(err))
 	}
+	return nil
+}
+
+// DrainMessages runs the synchronous write-behind drain primitive (bounded by
+// the caller's context): it claims and inserts everything currently sitting in
+// msgs:buffer / msgs:processing. The turn-end path (harden-turn-persistence)
+// invokes it after the terminal batch's dual write and before the session
+// claim is released, so MySQL — the history endpoint's only read tier — holds
+// the complete turn by the time clients observe generating:false. A nil drain
+// wiring (tests) is a no-op.
+func (s *SessionService) DrainMessages(ctx context.Context) error {
+	if s.drain == nil {
+		return nil
+	}
+	return s.drain(ctx)
 }
 
 // SaveTurnUsage persists one turn's per-agent token cost into the turn_usage

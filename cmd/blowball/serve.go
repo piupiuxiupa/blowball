@@ -238,10 +238,12 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 
 	// Cancel every running turn (turn-detach-resume) so graceful shutdown is
 	// bounded: each cancelled turn persists its partial output through the
-	// ordinary interrupted-turn path and finalizes its run state. A short
-	// grace period follows so the detached persistence goroutines enqueue
-	// their batches before the write-behind flushers run their final drains
-	// below; RunKeyTTL backstops anything that misses the window.
+	// ordinary interrupted-turn path and finalizes its run state. Since
+	// harden-turn-persistence the terminal message batch (bounded retry +
+	// pre-release drain) runs ON the turn goroutine before Finish, so
+	// WaitAll below covers persistence completion directly — no detached
+	// goroutine grace-period heuristic is needed. RunKeyTTL still backstops
+	// anything that misses the shutdown window.
 	if runReg != nil {
 		if n := runReg.CancelAll(); n > 0 {
 			log.Info("cancelling running turns for shutdown", zap.Int("turns", n))
@@ -250,7 +252,6 @@ func serveRun(cmd *cobra.Command, _ []string) error {
 				log.Warn("shutdown turn wait timed out; proceeding", zap.Error(err))
 			}
 			wcancel()
-			time.Sleep(250 * time.Millisecond)
 		}
 	}
 

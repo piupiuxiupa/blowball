@@ -138,6 +138,39 @@ type sendMessageRequest struct {
 // semantic cap lives in messages.max_input_tokens).
 const maxMessageBodyBytes = 1 << 20
 
+// Turn-end persistence retry bounds (harden-turn-persistence D4). Deliberately
+// constants, not config — they are reliability backstops nobody should tune at
+// runtime (mirroring internal/msgflush's errorBackoff/finalDrainTimeout). The
+// budget bounds how long a dual-tier outage may delay the session claim
+// release; attempts × backoff normally stays far below it.
+const (
+	// turnPersistBudget is the wall-clock ceiling for the turn-end message
+	// batch, including retries. After it the batch is declared not durable
+	// (ERROR) and Finalize proceeds so the session cannot lock up forever.
+	turnPersistBudget = 30 * time.Second
+	// turnPersistAttempts is the maximum number of SaveMessagesBatch calls
+	// for one terminal batch; deterministic client_msg_ids make redelivery
+	// idempotent.
+	turnPersistAttempts = 3
+	// turnPersistRetryBackoff parks between attempts so a dead dependency is
+	// retried at a calm pace instead of hot-looping.
+	turnPersistRetryBackoff = 1 * time.Second
+	// turnEndDrainTimeout bounds the synchronous drain executed after the
+	// terminal batch lands in Redis and before the session claim is released,
+	// so the history endpoint (a pure MySQL reader) sees the complete turn as
+	// soon as generating flips false. A drain failure only WARNs — the
+	// background flusher closes the ≤1s residual gap.
+	turnEndDrainTimeout = 5 * time.Second
+)
+
+// incrementalPersistEvery is the cadence of the mid-turn incremental
+// persister (incremental-message-persistence). It deliberately matches the
+// message flusher's default interval: pushing closed entries into msgs:buffer
+// faster than the flusher drains them only grows the queue — MySQL visibility
+// is gated by the flusher either way. A var (not const) so tests can shrink
+// it; production never touches it.
+var incrementalPersistEvery = 1 * time.Second
+
 // SendMessage handles POST /api/v1/sessions/:session_id/messages.
 //
 // Flow:
@@ -175,11 +208,17 @@ const maxMessageBodyBytes = 1 << 20
 //     slow start never misses events and a disconnect only drops the
 //     subscription, never the turn.
 //  11. After the orchestrator returns (whenever that is — possibly long after
-//     the client disconnected), persist the assistant reply as an event-suffix
-//     batch using a detached (background-derived, trace_id-preserving)
-//     context, then finalize the run (terminal status, session release,
-//     retain-window expiry). Title generation does NOT fire here — it already
-//     fired at send time (step 7).
+//     the client disconnected), the TURN goroutine persists the assistant
+//     reply as an event-suffix batch using a detached (background-derived,
+//     trace_id-preserving) context — synchronously, with bounded retry — then
+//     runs a bounded drain so MySQL holds the batch, and only then finalizes
+//     the run (terminal status, session release, retain-window expiry). The
+//     session claim therefore outlives the terminal batch: generating:false
+//     is a reliable "history complete" signal, and a process death can no
+//     longer silently drop the batch (harden-turn-persistence). A heartbeat
+//     keeper runs during the persist/drain phase so attach cannot misclassify
+//     the still-finalizing run as dead. Title generation does NOT fire here —
+//     it already fired at send time (step 7).
 func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// Cap the request body BEFORE JSON parsing so an oversized payload is
 	// rejected as it arrives rather than buffered in full (same pattern as
@@ -394,13 +433,17 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	}
 	flushed := &turnFlushState{}
 
-	// Mid-turn compaction seam: when compaction is configured, install a
-	// between-rounds hook plus the synchronized event tap it flushes through.
+	// The synchronized event tap is now UNCONDITIONAL (incremental-message-
+	// persistence): the incremental persister below snapshots the collected
+	// event stream through it every second, and the mid-turn compaction hook
+	// (when compaction is configured) flushes through the same cursor state.
 	// Both are per-turn values handed to the orchestrator alongside the hub.
 	var hooks TurnHooks
+	tap := NewTurnEventTap()
 	if h.compSvc.Enabled() {
-		tap := NewTurnEventTap()
 		hooks = TurnHooks{Round: h.newRoundHook(tap, persist, flushed, turnLimit, turnModel), Tap: tap}
+	} else {
+		hooks = TurnHooks{Tap: tap}
 	}
 
 	// ── turn-detach-resume: session claim, run registry, event log ──────────
@@ -536,6 +579,142 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	}
 	resultCh := make(chan runResult, 1)
 
+	// saveCtx is a detached context that survives the HTTP request so the
+	// turn-end persistence is not killed by a client disconnect. It carries
+	// the turn's session_id + trace_id so its log sites (via logger.FromContext)
+	// correlate with the turn (tool-call-log-correlation).
+	saveCtx := agent.WithSessionID(trace.WithContext(context.Background(), tid), sessionID)
+
+	// Mid-turn incremental persister (incremental-message-persistence): the
+	// closed merged-event prefix lands every second while the turn runs; the
+	// turn goroutine stops it (draining any in-flight batch) before the
+	// terminal batch computes its suffix.
+	stopIncremental := h.startIncrementalPersister(saveCtx, tap, persist, flushed)
+
+	// persistTurnEvents writes the supplied assistant event stream as the
+	// turn-end batch through the existing SaveMessagesBatch path and persists
+	// the turn's per-agent cost into turn_usage. It runs SYNCHRONOUSLY on the
+	// turn goroutine (harden-turn-persistence): the terminal batch must be
+	// durable before Finalize releases the session claim, so a process death
+	// can no longer silently drop it. The SaveMessagesBatch call retries
+	// within a bounded budget (constants below) so a dual-tier outage delays
+	// — rather than loses — the batch. The user row is included only when the
+	// send-time write failed to land it (the userPersisted flag gates the
+	// render — see send-time-user-message-persistence); on the ordinary path
+	// this batch is a pure event suffix. turn_usage write failure is logged
+	// but does NOT roll back the message batch (usage is observability data,
+	// messages are business data — see the turn-cost-tracking spec's "Usage
+	// write failure does not roll back messages" scenario). Title generation
+	// is NOT triggered here — it fired at send time, before the turn started
+	// (title-generation-cadence).
+	//
+	// Mid-turn flush interaction (context-compaction capability): when a
+	// mid-turn compaction flushed part of this turn already, only the
+	// post-flush suffix is persisted — the deterministic client_msg_ids would
+	// collapse the rows in MySQL, but the Redis msgs:{sid} read cache has no
+	// such dedup, so the suffix split keeps the cache list exact.
+	persistTurnEvents := func(events []stream.StreamEvent, usage map[string]any) {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.FromContext(saveCtx).Error("panic saving event stream",
+					zap.String("op", "handler.send_message"),
+					zap.Any("recover", r))
+			}
+		}()
+
+		now := time.Now().UTC()
+		merged := MergeEvents(events)
+
+		// Cross-session memory capture (cross-session-memory capability):
+		// fire-and-forget on BOTH terminal paths (this closure runs on the
+		// error/cancel and the success path alike, exactly once each). Own
+		// goroutine so a slow OpenViking round trip never delays the
+		// message-batch write; own recover + WARN-only errors — the
+		// TitleService fire-and-forget pattern. saveCtx is detached from the
+		// HTTP request, so a client disconnect cannot kill the capture.
+		// The submitted content is the persisted pair (persist.userContent
+		// + top-level assistant tokens), never the ephemeral recall block.
+		if h.memSvc.Enabled() {
+			tc := memory.TurnCapture{
+				UserID:        userID,
+				SessionID:     sessionID,
+				UserContent:   persist.userContent,
+				AssistantText: topLevelAssistantText(merged),
+				UserAt:        persist.userMsgTime,
+				TurnEndAt:     now,
+			}
+			go func(tc memory.TurnCapture) {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.FromContext(saveCtx).Error("panic capturing turn to memory",
+							zap.String("op", "handler.send_message"),
+							zap.Any("recover", r))
+					}
+				}()
+				if err := h.memSvc.CaptureTurn(saveCtx, tc); err != nil {
+					logger.FromContext(saveCtx).Warn("memory capture failed; turn unaffected",
+						zap.String("op", "handler.send_message"),
+						zap.String("user_id", tc.UserID),
+						zap.Error(err))
+				}
+			}(tc)
+		}
+
+		msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), now)
+		if mErr != nil {
+			logger.FromContext(saveCtx).Error("map event to message failed",
+				zap.String("op", "handler.send_message"),
+				zap.Error(mErr))
+			return
+		}
+
+		if len(msgs) > 0 {
+			// Bounded retry (harden-turn-persistence D4): the batch carries
+			// deterministic client_msg_ids, so redelivery collapses to one
+			// row per message — retrying the whole SaveMessagesBatch is
+			// safe. A dual-tier outage delays the terminal batch (and with
+			// it the claim release) by at most the budget; after the budget
+			// it is an ERROR, not a silent loss.
+			var lastErr error
+			deadline := time.Now().Add(turnPersistBudget)
+			for attempt := 1; attempt <= turnPersistAttempts; attempt++ {
+				if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
+					lastErr = err
+					logger.FromContext(saveCtx).Warn("turn-end message persist attempt failed",
+						zap.String("op", "handler.send_message"),
+						zap.Int("attempt", attempt),
+						zap.Int("rows", len(msgs)),
+						zap.Error(err))
+					if attempt == turnPersistAttempts || !time.Now().Add(turnPersistRetryBackoff).Before(deadline) {
+						break
+					}
+					time.Sleep(turnPersistRetryBackoff)
+					continue
+				}
+				lastErr = nil
+				break
+			}
+			if lastErr != nil {
+				logger.FromContext(saveCtx).Error("turn-end message persist budget exhausted; batch not durable",
+					zap.String("op", "handler.send_message"),
+					zap.String("session_id", sessionID),
+					zap.String("run_id", tid),
+					zap.Int("rows", len(msgs)),
+					zap.Error(lastErr))
+			}
+		}
+
+		// Persist per-agent token cost into turn_usage AFTER the message
+		// batch. Failure is logged only — never roll back messages.
+		if tu, ok := buildTurnUsage(sessionID, tid, userID, turnModel, usage); ok {
+			if err := h.sessSvc.SaveTurnUsage(saveCtx, tu); err != nil {
+				logger.FromContext(saveCtx).Warn("save turn_usage failed; messages persisted",
+					zap.String("op", "handler.send_message"),
+					zap.Error(err))
+			}
+		}
+	}
+
 	go func() {
 		// Registry teardown: Unregister last so Finish (which unblocks
 		// WaitAll) happens while the entry still resolves.
@@ -548,12 +727,72 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// last replayable event.
 		<-drainDone
 
+		// Turn outcome logging (moved from the handler side so it records at
+		// the moment persistence starts): any orchestrator error interrupts
+		// the turn after content may already have been streamed to the client.
+		// That includes an explicit cancellation via the cancel endpoint or
+		// graceful shutdown (context.Canceled — a client disconnect no longer
+		// cancels the turn) AND upstream/transport/timeout failures such as a
+		// model-provider 429 or 5xx. In every case the partial event stream is
+		// persisted below so the reloaded session history matches what the
+		// user saw and the user's own message is never silently lost.
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				logger.FromContext(saveCtx).Warn("turn cancelled; persisting partial interrupted turn",
+					zap.String("op", "handler.send_message"),
+					zap.String("user_id", userID),
+					zap.Int("event_count", len(events)),
+					zap.Error(err))
+			} else {
+				logger.FromContext(saveCtx).Error("orchestrator failed; persisting partial turn",
+					zap.String("op", "handler.send_message"),
+					zap.String("user_id", userID),
+					zap.Int("event_count", len(events)),
+					zap.Error(err))
+			}
+		}
+
+		// Heartbeat keeper (harden-turn-persistence D3): the drainer has exited
+		// (final drain done), but persistence below may span seconds under
+		// retry. Keep run:{rid}:alive and the claim TTL armed so an attach
+		// cannot misclassify this still-finalizing run as dead and force-clear
+		// the claim mid-persist.
+		stopHeartbeat := startPersistHeartbeat(saveCtx, h.runs.Store, tid, sessionID, run.HeartbeatEvery)
+
+		// Stop the incremental persister FIRST (blocking until any in-flight
+		// batch resolves) so the terminal batch below is exclusive and its
+		// suffix starts at the final cursor value.
+		stopIncremental()
+
+		// Terminal persistence BEFORE Finalize (harden-turn-persistence D2):
+		// the session claim is only released after this turn's message batch
+		// is durable, making generating:false a reliable "history complete"
+		// signal for clients.
+		persistTurnEvents(events, usage)
+
+		// Drain-before-release (D5): the terminal batch is in Redis
+		// (msgs:{sid} + msgs:buffer); a bounded synchronous drain lands it in
+		// MySQL before the claim flips so the history endpoint (a pure MySQL
+		// reader) observes the complete turn the moment generating turns
+		// false. A drain failure is a WARN, not a blocker — the background
+		// flusher closes the ≤1s gap.
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), turnEndDrainTimeout)
+		if derr := h.sessSvc.DrainMessages(drainCtx); derr != nil {
+			logger.FromContext(saveCtx).Warn("turn-end drain failed; flusher will catch up",
+				zap.String("op", "handler.send_message"),
+				zap.String("run_id", tid),
+				zap.Error(derr))
+		}
+		drainCancel()
+		stopHeartbeat()
+
 		// Terminal run bookkeeping (turn-detach-resume) runs ON THE TURN
 		// goroutine, not the HTTP handler's: SSE subscribers (including this
 		// request's own response) close their streams on the terminal status,
 		// so it must be published without depending on the handler's own
 		// progress. Status first (unblocks SSE readers), then the session
-		// release (lifts SESSION_BUSY), then the retain-window expiry.
+		// release (lifts SESSION_BUSY), then the retain-window expiry — all
+		// strictly after the terminal message batch is durable.
 		turnStatus := run.StatusDone
 		switch {
 		case err == nil:
@@ -586,144 +825,11 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// the event stream collected by the adapter is complete. This can outlive
 	// the HTTP connection by design: a disconnected client's handler goroutine
 	// parks here until the detached turn completes.
-	res := <-resultCh
-
-	// saveCtx is a detached context that survives the HTTP request so the
-	// three-tier persistence goroutine is not killed by a client disconnect.
-	// It carries the turn's session_id + trace_id so its log sites (via
-	// logger.FromContext) correlate with the turn (tool-call-log-correlation).
-	saveCtx := agent.WithSessionID(trace.WithContext(context.Background(), tid), sessionID)
-
-	// persistEvents writes the supplied assistant event stream as the turn-end
-	// batch through the existing SaveMessagesBatch path and persists the turn's
-	// per-agent cost into turn_usage. It is used for both successful and
-	// interrupted (client-canceled) turns. The user row is included only when
-	// the send-time write failed to land it (the userPersisted flag gates the
-	// render — see send-time-user-message-persistence); on the ordinary path
-	// this batch is a pure event suffix. turn_usage write failure is logged
-	// but does NOT roll back the message batch (usage is observability data,
-	// messages are business data — see the turn-cost-tracking spec's "Usage
-	// write failure does not roll back messages" scenario). Title generation
-	// is NOT triggered here — it fired at send time, before the turn started
-	// (title-generation-cadence).
-	//
-	// Mid-turn flush interaction (context-compaction capability): when a
-	// mid-turn compaction flushed part of this turn already, only the
-	// post-flush suffix is persisted — the deterministic client_msg_ids would
-	// collapse the rows in MySQL, but the Redis msgs:{sid} read cache has no
-	// such dedup, so the suffix split keeps the cache list exact.
-	persistEvents := func(events []stream.StreamEvent, usage map[string]any) {
-		go func(events []stream.StreamEvent, usage map[string]any) {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.FromContext(saveCtx).Error("panic saving event stream",
-						zap.String("op", "handler.send_message"),
-						zap.Any("recover", r))
-				}
-			}()
-
-			now := time.Now().UTC()
-			merged := MergeEvents(events)
-
-			// Cross-session memory capture (cross-session-memory capability):
-			// fire-and-forget on BOTH terminal paths (this closure runs on the
-			// error/cancel and the success path alike, exactly once each). Own
-			// goroutine so a slow OpenViking round trip never delays the
-			// message-batch write; own recover + WARN-only errors — the
-			// TitleService fire-and-forget pattern. saveCtx is detached from
-			// the HTTP request, so a client disconnect cannot kill the capture.
-			// The submitted content is the persisted pair (persist.userContent
-			// + top-level assistant tokens), never the ephemeral recall block.
-			if h.memSvc.Enabled() {
-				tc := memory.TurnCapture{
-					UserID:        userID,
-					SessionID:     sessionID,
-					UserContent:   persist.userContent,
-					AssistantText: topLevelAssistantText(merged),
-					UserAt:        persist.userMsgTime,
-					TurnEndAt:     now,
-				}
-				go func(tc memory.TurnCapture) {
-					defer func() {
-						if r := recover(); r != nil {
-							logger.FromContext(saveCtx).Error("panic capturing turn to memory",
-								zap.String("op", "handler.send_message"),
-								zap.Any("recover", r))
-						}
-					}()
-					if err := h.memSvc.CaptureTurn(saveCtx, tc); err != nil {
-						logger.FromContext(saveCtx).Warn("memory capture failed; turn unaffected",
-							zap.String("op", "handler.send_message"),
-							zap.String("user_id", tc.UserID),
-							zap.Error(err))
-					}
-				}(tc)
-			}
-
-			msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), now)
-			if mErr != nil {
-				logger.FromContext(saveCtx).Error("map event to message failed",
-					zap.String("op", "handler.send_message"),
-					zap.Error(mErr))
-				return
-			}
-
-			if len(msgs) > 0 {
-				if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
-					logger.FromContext(saveCtx).Error("save event stream failed",
-						zap.String("op", "handler.send_message"),
-						zap.Error(err))
-				}
-			}
-
-			// Persist per-agent token cost into turn_usage AFTER the message
-			// batch. Failure is logged only — never roll back messages.
-			if tu, ok := buildTurnUsage(sessionID, tid, userID, turnModel, usage); ok {
-				if err := h.sessSvc.SaveTurnUsage(saveCtx, tu); err != nil {
-					logger.FromContext(saveCtx).Warn("save turn_usage failed; messages persisted",
-						zap.String("op", "handler.send_message"),
-						zap.Error(err))
-				}
-			}
-		}(events, usage)
-	}
-
-	if res.err != nil {
-		// Any orchestrator error interrupts the turn after content may
-		// already have been streamed to the client. That includes an explicit
-		// cancellation via the cancel endpoint or graceful shutdown
-		// (context.Canceled — a client disconnect no longer cancels the turn,
-		// see turn-detach-resume) AND upstream/transport/timeout failures such
-		// as a model-provider 429 or 5xx, which can land mid-turn after
-		// several rounds of assistant tokens/tool results. In both cases we
-		// persist the partial event stream so the reloaded session history
-		// matches what the user saw and the user's own message is never
-		// silently lost. The persistEvents closure records the user message,
-		// the merged assistant events and the turn's token cost into
-		// turn_usage (the done event carries usage on the error path too).
-		// Title generation is unaffected either way — it fired at send time,
-		// before the turn started (title-generation-cadence).
-		if errors.Is(res.err, context.Canceled) {
-			logger.FromContext(ctx).Warn("turn cancelled; persisting partial interrupted turn",
-				zap.String("op", "handler.send_message"),
-				zap.String("user_id", userID),
-				zap.Int("event_count", len(res.events)),
-				zap.Error(res.err))
-		} else {
-			logger.FromContext(ctx).Error("orchestrator failed; persisting partial turn",
-				zap.String("op", "handler.send_message"),
-				zap.String("user_id", userID),
-				zap.Int("event_count", len(res.events)),
-				zap.Error(res.err))
-		}
-		persistEvents(res.events, res.usage)
-		return
-	}
-
-	// Success path: persist the full turn (user message + event stream) in one
-	// asynchronous batch. The response has already been sent; there is no need
-	// to block the HTTP handler on three-layer storage.
-	persistEvents(res.events, res.usage)
+	// By the time the turn goroutine sends this value it has already
+	// persisted the terminal message batch (with bounded retry) and run the
+	// pre-release drain (harden-turn-persistence) — the handler side has no
+	// persistence duty left.
+	<-resultCh
 }
 
 // buildTurnUsage materializes a model.TurnUsage from the done event's usage
@@ -853,6 +959,14 @@ type turnFlushState struct {
 	mu      sync.Mutex
 	flushed int  // number of merged events already persisted (0 = nothing flushed)
 	userRow bool // the turn's user row was persisted at send time
+
+	// persistMu serializes the "read cursor → persist batch → advance cursor"
+	// critical section across the incremental persister goroutine and the
+	// mid-turn compaction round hook (incremental-message-persistence). The
+	// terminal batch runs strictly after the persister is stopped, so it is
+	// naturally exclusive. Distinct from mu: state reads alone stay cheap and
+	// lock-free of I/O ordering concerns.
+	persistMu sync.Mutex
 }
 
 // mark records that the first n merged events are persisted. Monotonic: a
@@ -922,18 +1036,25 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 			return nil
 		}
 		merged := MergeEvents(events)
+		// Serialize the cursor critical section with the incremental
+		// persister (incremental-message-persistence): both read the flushed
+		// cursor, persist a non-overlapping range, then advance it.
+		flushed.persistMu.Lock()
 		msgs, err := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC())
 		if err != nil {
+			flushed.persistMu.Unlock()
 			log.Warn("mid-turn flush batch build failed; compaction skipped", zap.Error(err))
 			return nil
 		}
 		if len(msgs) > 0 {
 			if err := h.sessSvc.SaveMessagesBatch(ctx, persist.userID, msgs); err != nil {
+				flushed.persistMu.Unlock()
 				log.Warn("mid-turn flush failed; compaction skipped", zap.Error(err))
 				return nil
 			}
 		}
 		flushed.mark(len(merged))
+		flushed.persistMu.Unlock()
 
 		// ② Recover the now-complete history from the DURABLE tier (bounded
 		// drain + MySQL read): the flush just queued the turn's rows, and the
@@ -974,5 +1095,124 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 			return nil
 		}
 		return stitched
+	}
+}
+
+// startPersistHeartbeat arms the persist-phase heartbeat keeper
+// (harden-turn-persistence D3). The drainer exits after its final drain, but
+// the terminal persistence that follows may span seconds under retry — without
+// a keeper, run:{rid}:alive (15s TTL) expires and the attach endpoint
+// misclassifies the still-finalizing run as dead, force-clearing the claim
+// mid-persist. The keeper beats at the drainer's cadence (compare-and-rearm
+// semantics via Store.Heartbeat) until the returned stop function is called;
+// stop blocks until the keeper goroutine has exited.
+func startPersistHeartbeat(saveCtx context.Context, store run.Store, runID, sessionID string, every time.Duration) (stop func()) {
+	hbStop := make(chan struct{})
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbStop:
+				return
+			case <-ticker.C:
+				hbCtx, hbCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if err := store.Heartbeat(hbCtx, runID, sessionID); err != nil {
+					logger.FromContext(saveCtx).Warn("persist-phase heartbeat failed",
+						zap.String("op", "handler.send_message"),
+						zap.String("run_id", runID),
+						zap.Error(err))
+				}
+				hbCancel()
+			}
+		}
+	}()
+	return func() {
+		close(hbStop)
+		<-hbDone
+	}
+}
+
+// startIncrementalPersister arms the mid-turn incremental persister
+// (incremental-message-persistence): every incrementalPersistEvery it
+// snapshots the turn's collected event stream through the (now unconditional)
+// TurnEventTap and persists the CLOSED merged-event prefix — everything except
+// the last merged entry, which may still be growing (MergeEvents only merges
+// adjacent token/reasoning events, so every earlier entry is final). The
+// persisted range continues the shared flushed cursor: identical merged
+// ordinals, identical deterministic client_msg_ids as the terminal view, and
+// strictly non-overlapping ranges — the msgs:{sid} read cache has no dedup.
+//
+// Failure policy: best-effort. A failed SaveMessagesBatch logs a WARN and does
+// NOT advance the cursor; the next tick retries the same range and the
+// terminal batch is the completeness backstop (it runs strictly after stop()).
+// The persister therefore never blocks or fails the turn.
+func (h *MessageStreamHandler) startIncrementalPersister(
+	saveCtx context.Context,
+	tap *TurnEventTap,
+	persist turnPersistInfo,
+	flushed *turnFlushState,
+) (stop func()) {
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		ticker := time.NewTicker(incrementalPersistEvery)
+		defer ticker.Stop()
+		log := logger.FromContext(saveCtx).With(
+			zap.String("op", "handler.incremental_persist"),
+			zap.String("run_id", persist.traceID),
+		)
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				// Bound the snapshot wait: a wedged collection goroutine must
+				// never wedge the persister (and stop()) along with it.
+				snapCtx, snapCancel := context.WithTimeout(saveCtx, incrementalPersistEvery)
+				events := tap.Snapshot(snapCtx)
+				snapCancel()
+				if events == nil {
+					continue // turn over (tap closed) or ctx done
+				}
+				merged := MergeEvents(events)
+				if len(merged) < 2 {
+					continue // nothing closed yet
+				}
+				closed := len(merged) - 1 // last entry may still grow
+
+				flushed.persistMu.Lock()
+				from := flushed.count()
+				if closed <= from {
+					flushed.persistMu.Unlock()
+					continue
+				}
+				msgs, err := persist.buildTurnMessages(merged[:closed], from, flushed.userPersisted(), time.Now().UTC())
+				if err != nil {
+					flushed.persistMu.Unlock()
+					log.Warn("incremental batch build failed; terminal batch will cover it", zap.Error(err))
+					continue
+				}
+				if len(msgs) == 0 {
+					flushed.persistMu.Unlock()
+					continue
+				}
+				if err := h.sessSvc.SaveMessagesBatch(saveCtx, persist.userID, msgs); err != nil {
+					flushed.persistMu.Unlock()
+					log.Warn("incremental persist failed; will retry next tick",
+						zap.Int("from", from), zap.Int("rows", len(msgs)), zap.Error(err))
+					continue
+				}
+				flushed.mark(closed)
+				flushed.persistMu.Unlock()
+			}
+		}
+	}()
+	return func() {
+		close(stopCh)
+		<-doneCh
 	}
 }
