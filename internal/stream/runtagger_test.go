@@ -47,6 +47,18 @@ func TestTaggedWithRunID_TagsEveryEvent(t *testing.T) {
 	assert.Equal(t, "call_x1", e.Meta[MetaParentToolCallID])
 }
 
+func TestTaggedWithAgentRun_TagsInstanceAndRun(t *testing.T) {
+	inner := NewHub(0)
+	defer inner.Close()
+	tagged := TaggedWithAgentRun(inner, "w-abc123", "call_x1")
+	e := StreamEvent{Type: EventToken, Agent: "Subagent", Content: "x"}
+	require.True(t, tagged.Send(e))
+	got := drainOne(t, inner)
+	assert.Equal(t, "w-abc123", got.Meta[MetaAgentInstanceID])
+	assert.Equal(t, "call_x1", got.Meta[MetaParentToolCallID])
+	assert.Nil(t, e.Meta, "the caller's event must not be mutated")
+}
+
 // TestTaggedWithRunID_DoesNotOverwriteExistingStamp: an event that already
 // carries the key passes through untouched — first stamp wins, so a dispatcher
 // sharing the raw hub with a tagged view can never be re-stamped.

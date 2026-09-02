@@ -35,7 +35,7 @@ func MergeEvents(events []stream.StreamEvent) []stream.StreamEvent {
 	for i := range events {
 		e := events[i]
 		if current != nil && e.Type == current.Type && current.Agent == e.Agent &&
-			runIDFromEvent(*current) == runIDFromEvent(e) &&
+			eventIdentityKey(*current) == eventIdentityKey(e) &&
 			(e.Type == stream.EventToken || e.Type == stream.EventReasoning) {
 			current.Content += e.Content
 			continue
@@ -102,7 +102,8 @@ func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex 
 		// stamped onto every event of a sub-agent Run by the dispatch layer.
 		// Absent on Confucius's own events and on user rows (built by
 		// UserMessage, which never sets it).
-		RunID: runIDFromEvent(e),
+		AgentInstanceID: agentInstanceIDFromEvent(e),
+		RunID:           runIDFromEvent(e),
 	}
 
 	switch e.Type {
@@ -186,6 +187,17 @@ func runIDFromEvent(e stream.StreamEvent) string {
 	return id
 }
 
+// agentInstanceIDFromEvent extracts the stable sub-agent instance identity.
+// It is empty on top-level and legacy events, mapping to NULL at the store.
+func agentInstanceIDFromEvent(e stream.StreamEvent) string {
+	id, _ := e.Meta[stream.MetaAgentInstanceID].(string)
+	return id
+}
+
+func eventIdentityKey(e stream.StreamEvent) string {
+	return agentInstanceIDFromEvent(e) + "\x00" + runIDFromEvent(e)
+}
+
 // topLevelAssistantText concatenates the merged TOP-LEVEL assistant token
 // runs of a turn (the memory-capture view of "what the assistant said",
 // cross-session-memory capability): token events only, run-id-less only —
@@ -198,7 +210,7 @@ func runIDFromEvent(e stream.StreamEvent) string {
 func topLevelAssistantText(merged []stream.StreamEvent) string {
 	var runs []string
 	for _, e := range merged {
-		if e.Type != stream.EventToken || runIDFromEvent(e) != "" {
+		if e.Type != stream.EventToken || runIDFromEvent(e) != "" || agentInstanceIDFromEvent(e) != "" {
 			continue
 		}
 		if e.Content == "" {

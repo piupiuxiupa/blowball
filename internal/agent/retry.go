@@ -94,9 +94,9 @@ var errRetryBudgetExceeded = errors.New("retry budget exceeded")
 // It is concurrency-safe because parallel dispatches share it. A limit of 0
 // means unlimited (no budget enforced).
 type retryBudget struct {
-	mu     sync.Mutex
-	limit  int
-	spent  int
+	mu    sync.Mutex
+	limit int
+	spent int
 }
 
 // newRetryBudget builds a budget with the given token limit. limit <= 0 means

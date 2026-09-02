@@ -705,7 +705,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	wsFn := func(userID string) string {
 		return fsStore.UserWorkspace(userID)
 	}
-	orch, err := agent.NewOrchestrator(openAIClient, cfg, reg, serverTools, skillLoader, wsFn)
+	orch, err := agent.NewOrchestrator(openAIClient, cfg, reg, serverTools, skillLoader, wsFn, rt.mysqlStore)
 	if err != nil {
 		log.Fatal("orchestrator init failed", zap.Error(err))
 	}
@@ -787,7 +787,7 @@ func executorConfigured(cfg *config.Config) bool {
 // needsLubanTools reports whether any agent explicitly lists one of the luban skill tools in its tools list.
 func needsLubanTools(agents config.AgentsConfig) bool {
 	lubanTools := []string{luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill, luban.ToolListSkillFiles, luban.ToolTreeSkill}
-	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Chongzhi, agents.Liang} {
+	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Subagent.AgentConfig} {
 		for _, name := range lubanTools {
 			if slices.Contains(cfg.Tools, name) {
 				return true

@@ -195,17 +195,25 @@ components:
             row, incremental closed-event batches, mid-turn compaction
             batches, and terminal suffix batches) or a UUID v7 (legacy
             write-behind minting). Null on rows written before migration 012.
+        agent_instance_id:
+          type: string
+          nullable: true
+          description: >
+            Stable dynamic sub-agent instance identity. It survives resume and
+            groups one thread across multiple run_id values. Present only on
+            dynamic sub-agent rows; top-level/user rows and rows written before
+            migration 016 are null.
         run_id:
           type: string
           nullable: true
           description: >
             Sub-agent invocation run identity (subagent-run-identity
-            capability): the id of the parent invoke_* tool_call that spawned
+            capability): the id of the parent spawn_subagent tool_call that spawned
             the producing Run. Present only on rows emitted by a sub-agent
-            (Chongzhi/Liang); Confucius top-level rows and user rows omit it,
+            (dynamic instances); Confucius top-level rows and user rows omit it,
             and rows written before migration 014 are null. Rows stay in
             arrival order (msg_time, msg_index) — consumers regroup
-            interleaved same-agent rows by (agent, run_id) to recover each
+            interleaved same-agent rows by (agent, agent_instance_id) to recover each
             invocation's coherent output.
         update_time:
           type: string
@@ -266,7 +274,7 @@ components:
     # ---- SSE event payloads -------------------------------------------------
     # Every sub-agent-produced event additionally carries the optional
     # meta.parent_tool_call_id (subagent-run-identity capability): the id of
-    # the parent invoke_* tool_call that spawned the emitting Run. It lets
+    # the parent spawn_subagent tool_call that spawned the emitting Run. It lets
     # consumers attribute interleaved parallel same-name invocations; events
     # from the top-level agent (Confucius) and user rows never carry it, and
     # older frontends simply ignore the unknown key.
@@ -279,7 +287,8 @@ components:
         meta:
           type: object
           properties:
-            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
+            agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
     SSEToken:
       type: object
@@ -291,7 +300,8 @@ components:
         meta:
           type: object
           properties:
-            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
+            agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
     SSEReasoning:
       type: object
@@ -303,7 +313,8 @@ components:
         meta:
           type: object
           properties:
-            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
+            agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
     SSEToolCall:
       type: object
@@ -318,7 +329,8 @@ components:
           properties:
             tool_call_id: {type: string, description: Correlates this call with its tool_result event.}
             args: {type: object, additionalProperties: true}
-            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
+            agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
     SSEToolResult:
       type: object
@@ -328,8 +340,9 @@ components:
         via `meta.tool_call_id`. `content` is the same string fed back to the
         model as the role="tool" message body: for registry tools the uniform
         status envelope `{"status":0,"result":...}` / `{"status":1,"error":...}`;
-        for invoke_* sub-agent dispatches, the sub-agent's output (or error text)
-        verbatim. The status envelope is the sole channel for a registry-tool
+        for spawn_subagent dispatches, the sub-agent's output (or error text)
+        followed by a machine-readable `agent_id` and `status` suffix
+        (`completed`, `capped`, or `error`). The status envelope is the sole channel for a registry-tool
         failure: no `agent_error` event is emitted for tool errors (the frontend
         renders tool errors from `content`'s `status` field).
       properties:
@@ -341,7 +354,8 @@ components:
           required: [tool_call_id]
           properties:
             tool_call_id: {type: string, description: Matches the meta.tool_call_id of the originating tool_call event.}
-            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
+            agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
     SSEAgentEnd:
       type: object
@@ -352,7 +366,8 @@ components:
         meta:
           type: object
           properties:
-            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
+            agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
     SSEAgentError:
       type: object
@@ -362,9 +377,10 @@ components:
         failures (those are carried solely by the SSEToolResult status envelope).
         `meta.error_code` is one of: `llm_error` (LLM call failed), `unknown_tool`
         (no tool registry / unknown sub-agent tool), `bad_args` (malformed
-        sub-agent invoke arguments), `retry` (in-progress sub-agent retry, paired
+        sub-agent spawn argument error), `retry` (in-progress sub-agent retry, paired
         with `meta.retry=true`), `round_cap_exhausted` (round-cap wrap-up round
-        produced no content).
+        produced no content), `budget_exhausted` (total/depth spawn budget), or
+        `budget_timeout` (FIFO concurrency-slot wait timed out).
       properties:
         type: {type: string, enum: [agent_error]}
         agent: {type: string}
@@ -373,7 +389,8 @@ components:
           type: object
           properties:
             error_code: {type: string}
-            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent invoke_* tool_call id (run identity).}
+            parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
+            agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
     SSEDone:
       type: object
@@ -389,12 +406,13 @@ components:
                 Per-turn token-usage breakdown. Authoritative shape (turn-cost-tracking
                 spec): `{total, by_agent, meta}`.
 
-                `total` is the aggregate turn usage. `by_agent` carries the per-agent
-                attribution keyed by agent display name (always includes "Confucius",
-                plus one entry per dispatched sub-agent). `meta` records turn-level
-                orchestration facts: `parallel` (true when any assistant round
-                dispatched >=2 tool_calls) and `sub_agent_invocations` (the invoke_*
-                tool names dispatched this turn, in dispatch order, deduplicated).
+                `total` is the aggregate turn usage. `by_agent` carries per-agent
+                attribution keyed by dynamic instance label (always includes
+                "Confucius", plus one label per spawned instance; resume reuses the
+                same label/key). `meta` records turn-level orchestration facts:
+                `parallel` (true when any assistant round dispatched >=2 tool_calls)
+                and `sub_agent_invocations` (objects carrying stable instance id,
+                parent instance id, and dispatch order).
 
                 Legacy flat top-level fields (`prompt_tokens`, `completion_tokens`,
                 `total_tokens`, `reasoning_tokens`) have been MOVED under `total`;
@@ -409,21 +427,29 @@ components:
                   type: object
                   additionalProperties:
                     $ref: '#/components/schemas/SSEUsageTokens'
-                  description: Per-agent usage keyed by agent display name (Confucius, Chongzhi, Liang).
+                  description: Usage keyed by dynamic instance labels such as name#shortid or subagent-shortid; resume reuses one key.
                 meta:
                   type: object
                   required: [sub_agent_invocations, parallel]
                   properties:
                     sub_agent_invocations:
                       type: array
-                      items: {type: string}
-                      description: invoke_* tool names dispatched this turn, dispatch order, deduplicated.
+                      items:
+                        $ref: '#/components/schemas/SSESubAgentInvocation'
+                      description: Every spawn dispatch this turn, in dispatch order; resume is a new entry reusing its instance id.
                     parallel:
                       type: boolean
                       description: True when any assistant round dispatched >=2 tool_calls.
                 error:
                   type: string
                   description: Present only when the turn completed with an error; the failure message.
+    SSESubAgentInvocation:
+      type: object
+      required: [agent_instance_id, order]
+      properties:
+        agent_instance_id: {type: string, description: Stable dynamic sub-agent instance identity.}
+        parent_instance_id: {type: string, description: Empty for root dispatches; otherwise the spawning sub-agent instance.}
+        order: {type: integer, description: One-based dispatch order within the turn.}
     SSEUsageTokens:
       type: object
       required: [prompt_tokens, completion_tokens, total_tokens]
@@ -1922,8 +1948,8 @@ paths:
         tools advertised by configured operator (global) MCP servers, and the
         cached tools of the caller's per-user MCP servers (read from the
         workspace config cache; no live connections are made). Built-in tools
-        (`xizhi_*`, `webfetch`, executor, `luban_*`) and synthetic `invoke_*`
-        dispatch tools are excluded. Each entry follows the OpenAI
+        (`xizhi_*`, `webfetch`, executor, `luban_*`) and synthetic `spawn_subagent`
+        dispatch tool are excluded. Each entry follows the OpenAI
         function-tool shape (`type: function`) and carries a `server` field
         attributing it to its MCP source (an operator server name or a
         per-user server name). The per-user view is cache-based; freshness is

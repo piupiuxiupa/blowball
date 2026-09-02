@@ -9,9 +9,9 @@ const (
 	RoleTool      = "tool"
 )
 
-// Agent names. These match the `agent` column on the messages table and are
-// emitted in StreamEvent.Agent. The special value AgentUser is used for rows
-// produced by the end user rather than an assistant agent.
+// Agent names. AgentUser and AgentConfucius remain active wire labels.
+// AgentChongzhi/AgentLiang are retained for decoding legacy rows; dynamic
+// sub-agents emit operator/model supplied instance labels instead.
 const (
 	AgentUser      = "user"
 	AgentConfucius = "Confucius"
@@ -32,7 +32,8 @@ const (
 )
 
 // Message mirrors the `messages` table (migration 004_messages.sql,
-// 005_messages_event_type.sql and 012_client_msg_id.sql).
+// 005_messages_event_type.sql, 012_client_msg_id.sql and
+// 016_dynamic_subagents.sql).
 type Message struct {
 	ID        int64     `db:"id"          json:"id"`
 	SessionID string    `db:"session_id"  json:"session_id"`
@@ -57,6 +58,10 @@ type Message struct {
 	// NULL/empty, and legacy rows (before migration 014) are NULL. Rows keep
 	// arrival order (msg_time, msg_index); consumers regroup interleaved rows
 	// by (agent, run_id).
-	RunID       string    `db:"run_id"       json:"run_id,omitempty"`
-	UpdateTime  time.Time `db:"update_time"   json:"update_time"`
+	// AgentInstanceID is the stable identity of the sub-agent instance that
+	// produced this event. Unlike RunID it survives resume; UI threads group
+	// by (Agent, AgentInstanceID) and use RunID to split individual runs.
+	RunID           string    `db:"run_id"            json:"run_id,omitempty"`
+	AgentInstanceID string    `db:"agent_instance_id" json:"agent_instance_id,omitempty"`
+	UpdateTime      time.Time `db:"update_time"       json:"update_time"`
 }

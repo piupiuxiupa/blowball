@@ -148,10 +148,10 @@ type archivedSession struct {
 
 // archivedMessage mirrors the columns tests read back from messages_deleted.
 type archivedMessage struct {
-	ID         int64     `db:"id"`
-	SessionID  string    `db:"session_id"`
-	Content    string    `db:"content"`
-	DeletionID string    `db:"deletion_id"`
+	ID         int64  `db:"id"`
+	SessionID  string `db:"session_id"`
+	Content    string `db:"content"`
+	DeletionID string `db:"deletion_id"`
 }
 
 // TestDeleteSession_ArchivesAndPurges verifies that deleting a session copies the

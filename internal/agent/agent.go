@@ -1,13 +1,13 @@
 // Package agent implements the multi-agent orchestration engine.
 //
-// The package exposes an Agent interface that all agents (Confucius, Chongzhi,
-// Liang) satisfy. The LLMClient interface decouples agent logic from any
+// The package exposes an Agent interface satisfied by the root Confucius agent
+// and the generic dynamic SubAgent. The LLMClient interface decouples agent logic from any
 // concrete LLM SDK so the agents are unit-testable with a fake client; the
 // real openai-go-backed implementation lives in openai_client.go.
 //
-// Topology is flat: only Confucius may dispatch to other agents. Sub-agents
-// (Chongzhi, Liang) see only the task description Confucius passes them, never
-// the user's full conversation history.
+// Confucius is the root dispatcher; depth-eligible generic sub-agents may
+// recursively spawn within the turn-wide budget. Every sub-agent sees only the
+// task/snapshot supplied by its parent, never the user's full conversation.
 package agent
 
 import (
@@ -25,8 +25,8 @@ import (
 // returning the final assistant content, the aggregated token usage, and the
 // per-agent usage breakdown.
 type Agent interface {
-	// Name returns the agent's display name (Confucius | Chongzhi | Liang),
-	// matching model.AgentConfucius/AgentChongzhi/AgentLiang and StreamEvent.Agent.
+	// Name returns the display label (Confucius or a dynamic instance label)
+	// carried by StreamEvent.Agent.
 	Name() string
 
 	// SystemPrompt returns the system prompt used to seed the agent's first
@@ -45,33 +45,29 @@ type Agent interface {
 	//   - assistantContent: the final assistant text,
 	//   - usage: aggregated token usage across every LLM round in this Run,
 	//   - breakdown: per-agent usage + orchestration metadata. Only Confucius
-	//     (the dispatcher) populates this; leaf agents (Chongzhi/Liang)
+	//     (the dispatcher) populates this; leaf agents (generic sub-agents)
 	//     return nil and their parent folds their usage into its own breakdown.
 	//
 	// hub is the producer-facing EventHub view rather than a concrete *Hub so
 	// the dispatcher can hand a sub-agent a run-tagging view
-	// (stream.TaggedWithRunID) transparently: *Hub satisfies the interface and
+	// (stream.TaggedWithAgentRun) transparently: *Hub satisfies the interface and
 	// agent bodies only ever call Send/SendCtx, so leaf agents stay unaware of
 	// run identity (subagent-run-identity capability).
 	Run(ctx context.Context, messages []Message, hub stream.EventHub) (assistantContent string, usage Usage, breakdown *TurnBreakdown, err error)
 }
 
-// SubAgentFactory builds a fresh sub-agent instance for ONE invocation
-// (subagent-run-identity capability). Confucius holds factories — not
-// instances — so every invoke_* dispatch constructs its own agent and the
-// per-run mutable state (the side-effect flag backing ToolCallTracker, the
-// round-cap flag backing RoundCapTracker) is isolated per invocation: two
-// concurrent same-name invocations can never read each other's flags.
+// SubAgentFactory builds a sub-agent for ONE spawn request (dynamic-
+// subagents). The coordinator holds a factory — not a shared instance — so
+// every dispatch constructs its own agent and the per-run mutable state (the
+// side-effect flag backing ToolCallTracker, the round-cap flag backing
+// RoundCapTracker) is isolated per invocation.
 // Read-only construction inputs (config, LLM client, per-turn MCP manager)
 // may be shared by capture. The factory must be safe to call concurrently.
-type SubAgentFactory func() (Agent, error)
+type SubAgentFactory func(spec SubAgentSpec) (Agent, error)
 
-// ToolCallTracker is an optional capability implemented by sub-agents whose
-// Run may execute side-effecting tool calls (e.g. Chongzhi's xizhi write
-// tools). The retry wrapper consults it for per-agent idempotency: a
-// side-effecting agent is retried only when its most recent Run executed NO
-// tool call. Read-only sub-agents (Liang) intentionally do NOT implement this
-// interface so they remain unconditionally retryable.
+// ToolCallTracker reports whether a Run dispatched a successful tool call. The
+// retry wrapper uses it for idempotency: a possibly side-effecting agent is
+// retried only when its most recent Run executed NO tool call.
 type ToolCallTracker interface {
 	// LastRunExecutedTool reports whether the most recent Run dispatched at
 	// least one tool call that returned without error. Callers must invoke Run
@@ -104,7 +100,7 @@ type RoundCapTracker interface {
 // Decision (design Open Question "Agent.Run signature"): the original lean was
 // a bare `byAgent map[string]Usage` return value, but the done event also
 // needs turn-level meta — whether any assistant round dispatched >=2
-// tool_calls (parallel) and which invoke_* sub-agents fired, in dispatch
+// tool_calls (parallel) and which dynamic sub-agents fired, in dispatch
 // order (sub_agent_invocations). Neither is reconstructable from the usage
 // map (a map is unordered, and parallelism is per-round, not per-agent), so
 // they must be carried alongside byAgent. Bundling both into a struct keeps
@@ -123,9 +119,9 @@ type TurnBreakdown struct {
 	// tool_calls (the per-round definition of parallel dispatch).
 	Parallel bool
 
-	// SubAgentInvocations lists the invoke_* tool names dispatched this turn,
-	// in first-seen (dispatch) order and de-duplicated.
-	SubAgentInvocations []string
+	// SubAgentInvocations lists every spawn dispatched this turn, in dispatch
+	// order. Resume is a new invocation that reuses the same instance id.
+	SubAgentInvocations []SubAgentInvocation
 
 	// RoundCapped reports whether any agent (Confucius or a dispatched
 	// sub-agent) hit its max_rounds cap this turn. Rendered into the done
@@ -140,6 +136,14 @@ type TurnBreakdown struct {
 	// next turn's preventive compaction check. Deliberately the LAST round,
 	// never the cumulative sum of all rounds.
 	LastRoundContextTokens int
+}
+
+// SubAgentInvocation records one dynamic dispatch for usage metadata. Order is
+// the sequence in which the turn's coordinator accepted the spawn.
+type SubAgentInvocation struct {
+	AgentInstanceID  string `json:"agent_instance_id"`
+	ParentInstanceID string `json:"parent_instance_id,omitempty"`
+	Order            int    `json:"order"`
 }
 
 // Usage accumulates token counts for a single Run. Totals across rounds are
@@ -264,7 +268,7 @@ type LLMRequest struct {
 // disable thinking. MaxCompletionTokens and LengthContinue carry the entry's
 // output quota and per-entry finish_reason=length continuation policy
 // (per-model-completion-budget) — one turn, one model, one quota across
-// Confucius/Chongzhi/Liang.
+// Confucius/generic sub-agents.
 type ModelOverride struct {
 	Model               string
 	Thinking            bool
@@ -304,59 +308,29 @@ func shouldDispatchToolCalls(ctx context.Context, resp LLMResponse) bool {
 	return false
 }
 
-// Sub-agent invocation tool names. Confucius intercepts these in its dispatch
-// loop BEFORE consulting tool.Registry; they never reach the registry. The
-// JSON schema for each is exported via InvokeToolSchema for the MCP handler
-// (Phase 9) and unit tests.
+// SpawnSubagentTool is the single dynamic sub-agent dispatch tool. Confucius
+// and depth-eligible sub-agents intercept it BEFORE consulting tool.Registry;
+// it never reaches the registry.
+const SpawnSubagentTool = "spawn_subagent"
+
+// Legacy fixed-role tool names remain only for readers of pre-migration event
+// data; they are not model-facing and IsInvokeTool no longer recognizes them.
 const (
 	ToolInvokeChongzhi = "invoke_chongzhi"
 	ToolInvokeLiang    = "invoke_liang"
 )
 
-// InvokeToolSchema returns the JSON Schema describing the parameters Confucius
-// must emit when invoking the named sub-agent via function calling. The
-// schema is identical for both sub-agents: a required `task` and an optional
-// `context`. Returns nil if name is not a recognized sub-agent invocation.
-func InvokeToolSchema(name string) []byte {
-	switch name {
-	case ToolInvokeChongzhi, ToolInvokeLiang:
-		return invokeArgsSchema
-	}
-	return nil
-}
+// SpawnSubagentSchema returns the JSON Schema describing spawn_subagent.
+func SpawnSubagentSchema() []byte { return append([]byte(nil), spawnArgsSchema...) }
 
-// InvokeToolDescription returns the human-readable description Confucius uses
-// for the named sub-agent invocation tool. It is the single source of truth
-// shared by the model-facing tools[] array (internal/agent/tools.go) and the
-// MCP catalogue (internal/handler/mcp.go) so the two can never drift apart.
-// Returns "" if name is not a recognized sub-agent invocation.
-func InvokeToolDescription(name string) string {
-	switch name {
-	case ToolInvokeChongzhi:
-		return InvokeChongzhiDescription
-	case ToolInvokeLiang:
-		return InvokeLiangDescription
-	}
-	return ""
-}
+// SpawnSubagentDescription is attached to the synthetic spawn_subagent tool.
+const SpawnSubagentDescription = "Spawn an isolated generic sub-agent with a fresh context. The task prompt must be self-contained; tools may only narrow the caller's available tools. Use resume_agent_id to continue a capped or failed instance."
 
-// InvokeChongzhiDescription / InvokeLiangDescription are the descriptions
-// Confucius attaches to the synthetic invoke_chongzhi / invoke_liang tools.
-const (
-	InvokeChongzhiDescription = "Invoke the Chongzhi (coding) sub-agent for code editing, file writing, or any task " +
-		"that requires modifying files in the user's workspace. **Use it when a task MUST modify workspace files.** " +
-		"**DO NOT use it for analysis-only tasks — use `invoke_liang`.**"
-	InvokeLiangDescription = "Invoke the Liang (analysis) sub-agent for analysis, explanation, or reasoning; " +
-		"**it MUST NOT modify files.** **DO NOT use it for file edits — use `invoke_chongzhi`.**"
-)
+// IsInvokeTool reports whether name is the sub-agent dispatch tool recognized
+// by Confucius and depth-eligible generic sub-agents.
+func IsInvokeTool(name string) bool { return name == SpawnSubagentTool }
 
-// IsInvokeTool reports whether name is a sub-agent invocation tool recognized
-// by the Confucius dispatch loop.
-func IsInvokeTool(name string) bool {
-	return name == ToolInvokeChongzhi || name == ToolInvokeLiang
-}
-
-const invokeArgsSchemaJSON = `{
+const spawnArgsSchemaJSON = `{
   "type": "object",
   "properties": {
     "task": {
@@ -366,17 +340,38 @@ const invokeArgsSchemaJSON = `{
     "context": {
       "type": "string",
       "description": "Additional context the sub-agent needs to complete the task."
+    },
+    "name": {
+      "type": "string",
+      "description": "Short attribution label for this instance."
+    },
+    "tools": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Optional subset of the caller's available tools. Expansion is rejected."
+    },
+    "preset": {
+      "type": "string",
+      "description": "Optional named configuration template."
+    },
+    "resume_agent_id": {
+      "type": "string",
+      "description": "Stable agent_instance_id of a prior capped/error result to continue."
     }
   },
   "required": ["task"],
   "additionalProperties": false
 }`
 
-var invokeArgsSchema = []byte(invokeArgsSchemaJSON)
+var spawnArgsSchema = []byte(spawnArgsSchemaJSON)
 
-// InvokeToolArgs decodes the arguments string a model emits when calling a
-// sub-agent. `context` is optional.
-type InvokeToolArgs struct {
-	Task    string `json:"task"`
-	Context string `json:"context"`
+// SpawnToolArgs decodes the arguments emitted for spawn_subagent. Every field
+// except task is optional.
+type SpawnToolArgs struct {
+	Task          string   `json:"task"`
+	Context       string   `json:"context"`
+	Name          string   `json:"name"`
+	Tools         []string `json:"tools"`
+	Preset        string   `json:"preset"`
+	ResumeAgentID string   `json:"resume_agent_id"`
 }

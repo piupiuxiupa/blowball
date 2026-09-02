@@ -15,6 +15,15 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
+func containsUsagePrefix(byAgent map[string]any, prefix string) bool {
+	for name := range byAgent {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestParallelAgent_ConfuciusDispatchesBothSubAgents drives the full
 // Confucius round-1 parallel dispatch path: a single LLM response with both
 // invoke_chongzhi and invoke_liang tool_calls fires both sub-agents
@@ -58,11 +67,14 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			sys := req.Messages[0].Content
+			task := ""
+			if len(req.Messages) > 1 {
+				task = req.Messages[1].Content
+			}
 			switch {
-			case strings.Contains(sys, "chongzhi"):
+			case strings.Contains(task, "write hello"):
 				chongzhiRounds++
-			case strings.Contains(sys, "liang"):
+			case strings.Contains(task, "analyze greeting"):
 				liangRounds++
 			}
 		},
@@ -72,11 +84,14 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			sys := req.Messages[0].Content
+			task := ""
+			if len(req.Messages) > 1 {
+				task = req.Messages[1].Content
+			}
 			switch {
-			case strings.Contains(sys, "chongzhi"):
+			case strings.Contains(task, "write hello"):
 				chongzhiTokens = append(chongzhiTokens, tok)
-			case strings.Contains(sys, "liang"):
+			case strings.Contains(task, "analyze greeting"):
 				liangTokens = append(liangTokens, tok)
 			}
 		},
@@ -90,15 +105,15 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 			{
 				ID: "call_c",
 				Function: agent.ToolCallFunction{
-					Name:      agent.ToolInvokeChongzhi,
-					Arguments: `{"task":"write hello","context":"greeting file"}`,
+					Name:      agent.SpawnSubagentTool,
+					Arguments: `{"task":"write hello","context":"greeting file","name":"Chongzhi"}`,
 				},
 			},
 			{
 				ID: "call_l",
 				Function: agent.ToolCallFunction{
-					Name:      agent.ToolInvokeLiang,
-					Arguments: `{"task":"analyze greeting"}`,
+					Name:      agent.SpawnSubagentTool,
+					Arguments: `{"task":"analyze greeting","name":"Liang"}`,
 				},
 			},
 		},
@@ -164,18 +179,19 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 	liangTokenCount := 0
 	for i, ty := range types {
 		p := payloads[i]
+		name, _ := p["agent"].(string)
 		switch {
-		case ty == stream.EventAgentStart && p["agent"] == stream.AgentChongzhi:
+		case ty == stream.EventAgentStart && strings.HasPrefix(name, stream.AgentChongzhi):
 			chongzhiStart = true
-		case ty == stream.EventAgentEnd && p["agent"] == stream.AgentChongzhi:
+		case ty == stream.EventAgentEnd && strings.HasPrefix(name, stream.AgentChongzhi):
 			chongzhiEnd = true
-		case ty == stream.EventAgentStart && p["agent"] == stream.AgentLiang:
+		case ty == stream.EventAgentStart && strings.HasPrefix(name, stream.AgentLiang):
 			liangStart = true
-		case ty == stream.EventAgentEnd && p["agent"] == stream.AgentLiang:
+		case ty == stream.EventAgentEnd && strings.HasPrefix(name, stream.AgentLiang):
 			liangEnd = true
-		case ty == stream.EventToken && p["agent"] == stream.AgentChongzhi:
+		case ty == stream.EventToken && strings.HasPrefix(name, stream.AgentChongzhi):
 			chongzhiTokenCount++
-		case ty == stream.EventToken && p["agent"] == stream.AgentLiang:
+		case ty == stream.EventToken && strings.HasPrefix(name, stream.AgentLiang):
 			liangTokenCount++
 		}
 	}
@@ -203,8 +219,8 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 	// by_agent must carry all three agents (Confucius dispatched both).
 	byAgent := usage["by_agent"].(map[string]any)
 	assert.Contains(t, byAgent, stream.AgentConfucius)
-	assert.Contains(t, byAgent, stream.AgentChongzhi)
-	assert.Contains(t, byAgent, stream.AgentLiang)
+	assert.True(t, containsUsagePrefix(byAgent, stream.AgentChongzhi+"#"))
+	assert.True(t, containsUsagePrefix(byAgent, stream.AgentLiang+"#"))
 	// meta.parallel must be true (one round dispatched >=2 tool_calls).
 	metaObj := usage["meta"].(map[string]any)
 	assert.Equal(t, true, metaObj["parallel"])

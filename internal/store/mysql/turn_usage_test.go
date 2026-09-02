@@ -98,8 +98,8 @@ func TestSaveTurnUsage_ModelColumn(t *testing.T) {
 	defer rows.Close()
 
 	got := map[string]struct {
-		model   *string
-		isNull  bool
+		model  *string
+		isNull bool
 	}{}
 	for rows.Next() {
 		var traceID string

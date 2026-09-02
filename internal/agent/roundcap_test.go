@@ -93,7 +93,7 @@ func TestChongzhi_RoundCap_SuccessfulWrapUp(t *testing.T) {
 			usage:        Usage{PromptTokens: 3, CompletionTokens: 3, TotalTokens: 6},
 		},
 	)
-	c, err := NewChongzhi(config.AgentConfig{
+	c, err := newGenericFromAgentConfig(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		Tools: []string{"ping"}, MaxRounds: 2,
 	}, client, reg, testTurn())
@@ -129,7 +129,7 @@ func TestChongzhi_RoundCap_EmptyWrapUp_SurfacesError(t *testing.T) {
 		toolCallResp("tc_2"),
 		fakeResponse{content: "", finishReason: "stop"}, // empty wrap-up
 	)
-	c, err := NewChongzhi(config.AgentConfig{
+	c, err := newGenericFromAgentConfig(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		Tools: []string{"ping"}, MaxRounds: 2,
 	}, client, reg, testTurn())
@@ -156,7 +156,7 @@ func TestChongzhi_NaturalStop_NoCapSignal(t *testing.T) {
 		toolCallResp("tc_1"),
 		fakeResponse{tokens: []string{"done"}, content: "done", finishReason: "stop"},
 	)
-	c, err := NewChongzhi(config.AgentConfig{
+	c, err := newGenericFromAgentConfig(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		Tools: []string{"ping"}, MaxRounds: 5, // generous cap, not hit
 	}, client, reg, testTurn())
@@ -202,7 +202,7 @@ func TestChongzhi_RoundCap_WrapUpReturnsToolCalls_SurfacesError(t *testing.T) {
 			usage: Usage{TotalTokens: 5},
 		},
 	)
-	c, err := NewChongzhi(config.AgentConfig{
+	c, err := newGenericFromAgentConfig(config.AgentConfig{
 		Name: "Chongzhi", SystemPrompt: "you code",
 		Tools: []string{"ping"}, MaxRounds: 2,
 	}, client, reg, testTurn())
@@ -229,8 +229,7 @@ func TestConfucius_RoundCap_SuccessfulWrapUp(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	reg := pingTool(t)
 	subAgents := staticFactories(map[string]Agent{
-		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: &fakeAgent{name: "Chongzhi"},
 	})
 	client := newFake(
 		toolCallResp("tc_1"),
@@ -270,7 +269,7 @@ func TestLiang_RoundCap_WrapUpAppliesResponseFormat(t *testing.T) {
 		toolCallResp("tc_2"),
 		fakeResponse{tokens: []string{"{}"}, content: `{"answer":"ok"}`, finishReason: "stop"},
 	)
-	liang, err := NewLiang(config.AgentConfig{
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
 		Name: "Liang", SystemPrompt: "you analyze",
 		Tools: []string{"ping"}, MaxRounds: 2,
 		OutputSchema: `{"type":"object","properties":{"answer":{"type":"string"}}}`,
@@ -296,15 +295,13 @@ func TestLiang_RoundCap_WrapUpAppliesResponseFormat(t *testing.T) {
 func TestConfucius_SubAgentCapPropagatesToMeta(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	chongzhi := &fakeAgent{name: "Chongzhi", content: "did stuff", hitCap: true}
-	liang := &fakeAgent{name: "Liang", content: "analyzed"}
 	subAgents := staticFactories(map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    liang,
+		SpawnSubagentTool: chongzhi,
 	})
 	client := newFake(
 		// Round 1: dispatch Chongzhi (which reports it hit its cap).
 		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{{ID: "tc_1",
-			Function: ToolCallFunction{Name: "invoke_chongzhi", Arguments: `{"task":"code"}`}}},
+			Function: ToolCallFunction{Name: "spawn_subagent", Arguments: `{"task":"code"}`}}},
 			usage: Usage{TotalTokens: 3}},
 		// Round 2: natural stop (Confucius itself does not hit its cap).
 		fakeResponse{tokens: []string{"ok"}, content: "ok", finishReason: "stop", usage: Usage{TotalTokens: 2}},
@@ -332,12 +329,11 @@ func TestConfucius_SubAgentCapPropagatesToMeta(t *testing.T) {
 func TestConfucius_NoCap_OmitsRoundCappedMeta(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	subAgents := staticFactories(map[string]Agent{
-		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi", content: "did stuff"},
-		ToolInvokeLiang:    &fakeAgent{name: "Liang", content: "analyzed"},
+		SpawnSubagentTool: &fakeAgent{name: "Chongzhi", content: "did stuff"},
 	})
 	client := newFake(
 		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{{ID: "tc_1",
-			Function: ToolCallFunction{Name: "invoke_chongzhi", Arguments: `{"task":"code"}`}}}},
+			Function: ToolCallFunction{Name: "spawn_subagent", Arguments: `{"task":"code"}`}}}},
 		fakeResponse{tokens: []string{"ok"}, content: "ok", finishReason: "stop"},
 	)
 	c, err := NewConfucius(config.AgentConfig{

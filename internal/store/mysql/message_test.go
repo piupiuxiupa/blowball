@@ -39,7 +39,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 	// not require a sessions row. The column layout mirrors the production
 	// schema (migrations 004 + 005 + 012 + 014: nullable role, event_type,
 	// millisecond msg_time, nullable client_msg_id with its UNIQUE index,
-	// nullable run_id) so the SELECT scan paths run against the real shape —
+	// nullable run_id/agent_instance_id) so the SELECT scan paths run against the real shape —
 	// this is exactly how the legacy-NULL scan bug escaped: an out-of-date
 	// test table.
 	_, err = store.db.ExecContext(context.Background(), `
@@ -55,6 +55,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			trace_id    CHAR(36)     NOT NULL,
 			client_msg_id CHAR(36)   NULL,
 			run_id      CHAR(64)     NULL,
+			agent_instance_id CHAR(24) NULL,
 			update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
 			KEY idx_messages_session_time (session_id, msg_time),
@@ -313,4 +314,41 @@ func TestMessages_RunIDRoundTrip(t *testing.T) {
 	require.NoError(t, store.db.GetContext(context.Background(), &nullRuns,
 		`SELECT COUNT(*) FROM messages WHERE session_id = ? AND run_id IS NULL`, sessionID))
 	assert.Equal(t, 1, nullRuns, "unstamped run_id must persist as NULL")
+}
+
+func TestMessages_AgentInstanceIDRoundTrip(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	sessionID := "aaaaaaaa-0000-7000-8000-0000000000ad"
+	msg := model.Message{
+		SessionID:       sessionID,
+		MsgTime:         time.Now().UTC(),
+		Agent:           "Subagent",
+		MsgIndex:        1,
+		Role:            model.RoleAssistant,
+		EventType:       model.EventTypeToken,
+		Content:         "hi",
+		TraceID:         "trace-1",
+		ClientMsgID:     "019a0000-0000-7000-8000-0000000000ad",
+		RunID:           "call_x1",
+		AgentInstanceID: "w-abc123",
+	}
+	_, err := store.AppendMessages(context.Background(), []model.Message{msg})
+	require.NoError(t, err)
+
+	msgs, err := store.ListMessages(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "w-abc123", msgs[0].AgentInstanceID)
+
+	paged, _, err := store.ListMessagesPaged(context.Background(), sessionID, "", 10, "asc")
+	require.NoError(t, err)
+	require.Len(t, paged, 1)
+	assert.Equal(t, "w-abc123", paged[0].AgentInstanceID)
+
+	var nullInstances int
+	require.NoError(t, store.db.GetContext(context.Background(), &nullInstances,
+		`SELECT COUNT(*) FROM messages WHERE session_id = ? AND agent_instance_id IS NULL`, sessionID))
+	assert.Equal(t, 0, nullInstances)
 }

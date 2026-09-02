@@ -254,7 +254,7 @@ func TestLiangRun_WrapUpRoundRetriesTransient(t *testing.T) {
 	cfg.MaxRounds = 1
 	cfg.Tools = []string{xizhi.NameReadFile}
 	cfg.Retry = fastRetryPolicy(3)
-	l, err := NewLiang(cfg, client, reg, ModelOverride{Model: "m", MaxCompletionTokens: 8192})
+	l, err := newGenericFromAgentConfig(cfg, client, reg, ModelOverride{Model: "m", MaxCompletionTokens: 8192})
 	require.NoError(t, err)
 
 	var content string

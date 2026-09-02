@@ -84,7 +84,7 @@ func TestMCPTools_ExcludesBuiltins(t *testing.T) {
 		names[t2.Name] = true
 	}
 	assert.False(t, names[xizhi.NameReadFile])
-	assert.False(t, names["invoke_chongzhi"])
+	assert.False(t, names["spawn_subagent"])
 }
 
 // TestMCPTools_OperatorProxyIncludedWithSource verifies that operator (global)

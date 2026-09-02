@@ -14,7 +14,7 @@ import (
 	"go.uber.org/goleak"
 )
 
-func TestLiang_NoTools_PassesEmptyToolsJSON(t *testing.T) {
+func TestSubAgentOutput_NoTools_PassesEmptyToolsJSON(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -24,8 +24,8 @@ func TestLiang_NoTools_PassesEmptyToolsJSON(t *testing.T) {
 			usage:        Usage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
 		},
 	)
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 		// Tools intentionally empty.
 	}, client, tool.NewRegistry(), testTurn())
@@ -64,7 +64,7 @@ drain:
 	assert.Nil(t, last.Tools, "Liang's LLMRequest.Tools must be nil; got %v", last.Tools)
 }
 
-func TestLiang_ToolCall(t *testing.T) {
+func TestSubAgentOutput_ToolCall(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	reg := tool.NewRegistry()
@@ -101,8 +101,8 @@ func TestLiang_ToolCall(t *testing.T) {
 		},
 	)
 
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 		Tools:        []string{"ping"},
 	}, client, reg, testTurn())
@@ -127,10 +127,10 @@ func TestLiang_ToolCall(t *testing.T) {
 	assert.Contains(t, last.Messages[3].Content, "pong")
 }
 
-// TestLiang_DispatchesToolCallsOnStopFinishReason verifies that Liang dispatches
+// TestSubAgentOutput_DispatchesToolCallsOnStopFinishReason verifies that Liang dispatches
 // tool_calls even when the finish_reason is "stop" rather than the native
 // "tool_calls" value.
-func TestLiang_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
+func TestSubAgentOutput_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	reg := tool.NewRegistry()
@@ -167,8 +167,8 @@ func TestLiang_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 		},
 	)
 
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 		Tools:        []string{"ping"},
 	}, client, reg, testTurn())
@@ -192,7 +192,7 @@ func TestLiang_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 	assert.Contains(t, last.Messages[3].Content, "pong")
 }
 
-func TestLiang_StreamsTokens(t *testing.T) {
+func TestSubAgentOutput_StreamsTokens(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -204,8 +204,8 @@ func TestLiang_StreamsTokens(t *testing.T) {
 			usage:        Usage{PromptTokens: 2, CompletionTokens: 3, TotalTokens: 5},
 		},
 	)
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)
@@ -266,7 +266,7 @@ consumer:
 	assert.Equal(t, 5, tokenCount, "expected exactly 5 token events")
 }
 
-func TestLiang_ReasoningRequest(t *testing.T) {
+func TestSubAgentOutput_ReasoningRequest(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -278,8 +278,8 @@ func TestLiang_ReasoningRequest(t *testing.T) {
 	)
 	turn := testTurn()
 	turn.Thinking, turn.ReasoningEffort = true, "low"
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 	}, client, tool.NewRegistry(), turn)
 	require.NoError(t, err)
@@ -297,11 +297,11 @@ func TestLiang_ReasoningRequest(t *testing.T) {
 	assert.Equal(t, 512, req.MaxCompletionTokens)
 }
 
-// TestLiang_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound verifies
+// TestSubAgentOutput_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound verifies
 // that a Liang configured with output_schema (and no tools) attaches
 // response_format: json_schema to its single (terminal) round so the content
 // returned to Confucius conforms to the schema (capability A).
-func TestLiang_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound(t *testing.T) {
+func TestSubAgentOutput_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -312,8 +312,8 @@ func TestLiang_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound(t *testing
 		},
 	)
 	schema := `{"type":"object","properties":{"verdict":{"type":"string"}},"required":["verdict"],"additionalProperties":false}`
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 		OutputSchema: schema,
 	}, client, tool.NewRegistry(), testTurn())
@@ -333,14 +333,14 @@ func TestLiang_OutputSchema_NoTools_SetsResponseFormatOnTerminalRound(t *testing
 	assert.Equal(t, "json_schema", rf["type"])
 	js, ok := rf["json_schema"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "Liang", js["name"])
+	assert.Equal(t, "Structured", js["name"])
 	assert.Equal(t, true, js["strict"])
 }
 
-// TestLiang_OutputSchema_ToolCall_TerminalRoundOnly verifies that a tooled
+// TestSubAgentOutput_OutputSchema_ToolCall_TerminalRoundOnly verifies that a tooled
 // Liang with output_schema attaches response_format ONLY on the terminal
 // (post-tool-dispatch) round, NOT on the intermediate tool-call round.
-func TestLiang_OutputSchema_ToolCall_TerminalRoundOnly(t *testing.T) {
+func TestSubAgentOutput_OutputSchema_ToolCall_TerminalRoundOnly(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	reg := tool.NewRegistry()
 	require.NoError(t, reg.Register(
@@ -368,8 +368,8 @@ func TestLiang_OutputSchema_ToolCall_TerminalRoundOnly(t *testing.T) {
 		},
 	)
 	schema := `{"type":"object","properties":{"verdict":{"type":"string"}},"required":["verdict"]}`
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 		Tools:        []string{"ping"},
 		OutputSchema: schema,
@@ -391,9 +391,9 @@ func TestLiang_OutputSchema_ToolCall_TerminalRoundOnly(t *testing.T) {
 	assert.NotEmpty(t, reqs[1].ResponseFormat, "terminal round must carry response_format")
 }
 
-// TestLiang_NoOutputSchema_NoResponseFormat verifies that a Liang WITHOUT
+// TestSubAgentOutput_NoOutputSchema_NoResponseFormat verifies that a Liang WITHOUT
 // output_schema never sets response_format (behavior unchanged from before).
-func TestLiang_NoOutputSchema_NoResponseFormat(t *testing.T) {
+func TestSubAgentOutput_NoOutputSchema_NoResponseFormat(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -403,8 +403,8 @@ func TestLiang_NoOutputSchema_NoResponseFormat(t *testing.T) {
 			usage:        Usage{PromptTokens: 3, CompletionTokens: 1, TotalTokens: 4},
 		},
 	)
-	liang, err := NewLiang(config.AgentConfig{
-		Name:         "Liang",
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
+		Name:         "Structured",
 		SystemPrompt: "you are liang",
 	}, client, tool.NewRegistry(), testTurn())
 	require.NoError(t, err)

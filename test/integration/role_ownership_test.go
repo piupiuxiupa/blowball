@@ -78,7 +78,7 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: agentConfig(),
 	}
-	orch, err := agent.NewOrchestrator(llm, cfg, tool.NewRegistry(), nil, skill.NewLoader("", nil), nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, tool.NewRegistry(), nil, skill.NewLoader("", nil), nil, mysqlFake)
 	require.NoError(t, err)
 
 	// Real handler constructors — the same ones serveRun's wireAPI / wireAgent

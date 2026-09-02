@@ -62,7 +62,8 @@ func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []i
 
 		// Ignore sub-agent events; only the top-level agent (Confucius) conversation
 		// belongs in the main prompt history.
-		if msg.Agent == model.AgentChongzhi || msg.Agent == model.AgentLiang {
+		if msg.Agent == model.AgentChongzhi || msg.Agent == model.AgentLiang ||
+			msg.AgentInstanceID != "" {
 			continue
 		}
 
@@ -150,7 +151,7 @@ func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []i
 // reconstructState accumulates partially-built assistant messages while scanning
 // the persisted event stream.
 type reconstructState struct {
-	// tokenRuns accumulates token/reasoning content per (agent, run_id) run,
+	// tokenRuns accumulates token/reasoning content per (agent, instance, run)
 	// in first-seen order: interleaved rows of concurrent sub-agent
 	// invocations (subagent-run-identity capability) regroup into one
 	// coherent fragment per run instead of merging across runs. Rows without
@@ -173,17 +174,18 @@ type runFragment struct {
 	lastRow   int
 }
 
-// runGroupKey is the (agent, run_id) composite that one reconstructed
-// fragment belongs to. An empty run_id is the pre-change shape: the key
+// runGroupKey is the identity composite that one reconstructed
+// fragment belongs to. Empty identities are the pre-change shape: the key
 // degenerates to the agent name, so top-level turns group exactly as before.
 type runGroupKey struct {
-	agent string
-	runID string
+	agent    string
+	instance string
+	runID    string
 }
 
-// runGroupKeyOf returns msg's (agent, run_id) grouping key.
+// runGroupKeyOf returns msg's identity grouping key.
 func runGroupKeyOf(msg model.Message) runGroupKey {
-	return runGroupKey{agent: msg.Agent, runID: msg.RunID}
+	return runGroupKey{agent: msg.Agent, instance: msg.AgentInstanceID, runID: msg.RunID}
 }
 
 // appendToken adds a token fragment to its run's accumulator (no-op on empty

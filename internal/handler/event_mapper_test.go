@@ -201,7 +201,7 @@ func TestMergeEvents(t *testing.T) {
 			name: "sub-agent hand-off preserves order",
 			in: []stream.StreamEvent{
 				stream.TokenEvent(stream.AgentConfucius, "call"),
-				stream.ToolCallEvent(stream.AgentConfucius, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
+				stream.ToolCallEvent(stream.AgentConfucius, "tc-2", "spawn_subagent", map[string]any{"task": "compute"}),
 				stream.AgentStartEvent(stream.AgentChongzhi),
 				stream.TokenEvent(stream.AgentChongzhi, "42"),
 				stream.AgentEndEvent(stream.AgentChongzhi),
@@ -209,7 +209,7 @@ func TestMergeEvents(t *testing.T) {
 			},
 			expected: []stream.StreamEvent{
 				stream.TokenEvent(stream.AgentConfucius, "call"),
-				stream.ToolCallEvent(stream.AgentConfucius, "tc-2", "invoke_chongzhi", map[string]any{"task": "compute"}),
+				stream.ToolCallEvent(stream.AgentConfucius, "tc-2", "spawn_subagent", map[string]any{"task": "compute"}),
 				stream.AgentStartEvent(stream.AgentChongzhi),
 				stream.TokenEvent(stream.AgentChongzhi, "42"),
 				stream.AgentEndEvent(stream.AgentChongzhi),

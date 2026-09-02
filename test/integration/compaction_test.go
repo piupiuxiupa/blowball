@@ -118,7 +118,7 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: agentConfigWithTools(confuciusTools),
 	}
-	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil, mysqlFake)
 	require.NoError(t, err)
 
 	compSvc := service.NewCompactionService(deps, llm, "gpt-test", maxContextTokens)

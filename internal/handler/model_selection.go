@@ -49,7 +49,7 @@ func NewModelSelectionConfig(cfg *config.Config) ModelSelectionConfig {
 		Catalog: cfg.ModelCatalog(),
 		Default: cfg.DefaultModelName(),
 		AnyOutputSchema: anyOutputSchema(
-			cfg.Agents.Confucius.OutputSchema, cfg.Agents.Chongzhi.OutputSchema, cfg.Agents.Liang.OutputSchema),
+			cfg.Agents.Confucius.OutputSchema, cfg.Agents.Subagent.OutputSchema),
 	}
 	// Config load normalizes an unset default_reasoning_effort to "none";
 	// hand-built configs (tests) get the same normalization here so the

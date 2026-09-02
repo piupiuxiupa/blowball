@@ -156,10 +156,10 @@ func captureRequestBody(t *testing.T, req LLMRequest) string {
 // NO reasoning_effort, plain max_tokens, and no sampling parameters.
 func TestOpenAIClient_RequestBranch_NonThinkingFamilyOmitsEffort(t *testing.T) {
 	body := captureRequestBody(t, LLMRequest{
-		Model:     "glm-4.7",
-		Messages:  []Message{{Role: "user", Content: "hi"}},
+		Model:               "glm-4.7",
+		Messages:            []Message{{Role: "user", Content: "hi"}},
 		MaxCompletionTokens: 512,
-		Thinking:  false,
+		Thinking:            false,
 		// The effort axis is clamped to none before the request is built;
 		// the value here is inert on this family.
 		ReasoningEffort: "none",
@@ -176,11 +176,11 @@ func TestOpenAIClient_RequestBranch_NonThinkingFamilyOmitsEffort(t *testing.T) {
 // parameter).
 func TestOpenAIClient_RequestBranch_EffortSendsReasoningParams(t *testing.T) {
 	body := captureRequestBody(t, LLMRequest{
-		Model:           "gpt-5",
-		Messages:        []Message{{Role: "user", Content: "hi"}},
-		MaxCompletionTokens:       512,
-		Thinking:        true,
-		ReasoningEffort: "high",
+		Model:               "gpt-5",
+		Messages:            []Message{{Role: "user", Content: "hi"}},
+		MaxCompletionTokens: 512,
+		Thinking:            true,
+		ReasoningEffort:     "high",
 	})
 	assert.Contains(t, body, `"reasoning_effort":"high"`)
 	assert.Contains(t, body, `"max_completion_tokens":512`)
@@ -195,11 +195,11 @@ func TestOpenAIClient_RequestBranch_EffortSendsReasoningParams(t *testing.T) {
 // back to the model's own default level.
 func TestOpenAIClient_RequestBranch_NoneEffortSentLiterally(t *testing.T) {
 	body := captureRequestBody(t, LLMRequest{
-		Model:           "glm-5.2",
-		Messages:        []Message{{Role: "user", Content: "hi"}},
-		MaxCompletionTokens:       512,
-		Thinking:        true,
-		ReasoningEffort: "none",
+		Model:               "glm-5.2",
+		Messages:            []Message{{Role: "user", Content: "hi"}},
+		MaxCompletionTokens: 512,
+		Thinking:            true,
+		ReasoningEffort:     "none",
 	})
 	assert.Contains(t, body, `"reasoning_effort":"none"`, "none must be sent as a literal value on thinking entries")
 	assert.Contains(t, body, `"max_completion_tokens":512`)

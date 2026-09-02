@@ -122,14 +122,16 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 					}},
 				},
 			},
-			Chongzhi: config.AgentConfig{
-				Name:         stream.AgentChongzhi,
-				SystemPrompt: "you are chongzhi",
-				Tools:        []string{"xizhi_write_file"},
-			},
-			Liang: config.AgentConfig{
-				Name:         stream.AgentLiang,
-				SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name:         stream.AgentChongzhi,
+					SystemPrompt: "you are chongzhi",
+					Tools:        []string{"xizhi_write_file"},
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -205,14 +207,16 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 				Skills:       []string{"coding-style"},
 				Tools:        []string{"luban_list_skills", "luban_read_skill", "luban_install_skill"},
 			},
-			Chongzhi: config.AgentConfig{
-				Name:         stream.AgentChongzhi,
-				SystemPrompt: "you are chongzhi",
-				Tools:        []string{"xizhi_write_file"},
-			},
-			Liang: config.AgentConfig{
-				Name:         stream.AgentLiang,
-				SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name:         stream.AgentChongzhi,
+					SystemPrompt: "you are chongzhi",
+					Tools:        []string{"xizhi_write_file"},
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -272,7 +276,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
-	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, serverTools, loader, nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, serverTools, loader, nil, mysqlFake)
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())

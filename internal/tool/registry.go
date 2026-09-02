@@ -129,6 +129,63 @@ func (r *Registry) ToolsFor(names []string) ([]*ToolSpec, error) {
 	return specs, nil
 }
 
+// Scope returns a new registry containing only names, resolved in the supplied
+// order. It reuses the same ToolSpec pointers (and therefore the same MCP
+// manager closures/connections) rather than reconstructing tools. Unknown names
+// are reported together so callers can return a precise authorization error.
+// Configured execution timeouts are copied for the retained names.
+func (r *Registry) Scope(names []string) (*Registry, error) {
+	specs, err := r.ToolsFor(names)
+	if err != nil {
+		return nil, err
+	}
+	out := NewRegistry()
+	for _, spec := range specs {
+		if err := out.Register(spec); err != nil {
+			return nil, err
+		}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.timeouts) > 0 {
+		timeouts := make(map[string]time.Duration, len(names))
+		for _, name := range names {
+			if d := r.timeouts[name]; d > 0 {
+				timeouts[name] = d
+			}
+		}
+		out.timeouts = timeouts
+	}
+	return out, nil
+}
+
+// Merge adds every tool in other that r does not already contain, copying
+// other's execution timeouts for those additions. It is used to form a
+// turn-wide authorization superset without reconstructing tool closures.
+func (r *Registry) Merge(other *Registry) error {
+	if other == nil || other == r {
+		return nil
+	}
+	specs := other.List()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	other.mu.RLock()
+	defer other.mu.RUnlock()
+	for _, spec := range specs {
+		if _, exists := r.tools[spec.Name]; exists {
+			continue
+		}
+		r.tools[spec.Name] = spec
+		if d := other.timeouts[spec.Name]; d > 0 {
+			if r.timeouts == nil {
+				r.timeouts = make(map[string]time.Duration)
+			}
+			r.timeouts[spec.Name] = d
+		}
+	}
+	return nil
+}
+
 // Call looks up name and invokes its Execute with args. It is a convenience
 // used by the agent loop's tool-call dispatcher. When a positive timeout is
 // configured for name via SetTimeouts, the Execute runs under a child context

@@ -44,8 +44,8 @@ func dispatchAllScript() []scriptedLLMResponse {
 		{
 			finishReason: "tool_calls",
 			toolCalls: []agent.ToolCall{
-				{ID: "c1", Function: agent.ToolCallFunction{Name: agent.ToolInvokeChongzhi, Arguments: `{"task":"t1"}`}},
-				{ID: "c2", Function: agent.ToolCallFunction{Name: agent.ToolInvokeLiang, Arguments: `{"task":"t2"}`}},
+				{ID: "c1", Function: agent.ToolCallFunction{Name: agent.SpawnSubagentTool, Arguments: `{"task":"t1"}`}},
+				{ID: "c2", Function: agent.ToolCallFunction{Name: agent.SpawnSubagentTool, Arguments: `{"task":"t2"}`}},
 			},
 			usage: agent.Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
 		},

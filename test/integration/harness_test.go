@@ -245,8 +245,9 @@ type memoryMySQL struct {
 	// Compaction storage (context-compaction capability): the append-only
 	// record list per session (latest-wins stitching reads the last entry)
 	// and the set of sessions whose context_compacted flag was set.
-	compactions map[string][]model.ContextCompaction
-	compacted   map[string]bool
+	compactions  map[string][]model.ContextCompaction
+	compacted    map[string]bool
+	subagentRuns map[string]model.SubAgentRun
 }
 
 func newMemoryMySQL() *memoryMySQL {
@@ -261,6 +262,7 @@ func newMemoryMySQL() *memoryMySQL {
 		deletionIDs:     map[string]string{},
 		compactions:     map[string][]model.ContextCompaction{},
 		compacted:       map[string]bool{},
+		subagentRuns:    map[string]model.SubAgentRun{},
 	}
 }
 
@@ -437,6 +439,21 @@ func (m *memoryMySQL) ListMessages(_ context.Context, sessionID string) ([]model
 	out := make([]model.Message, len(m.messages[sessionID]))
 	copy(out, m.messages[sessionID])
 	return out, nil
+}
+
+func (m *memoryMySQL) UpsertSubAgentRun(_ context.Context, run model.SubAgentRun) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run.UpdateTime = time.Now().UTC()
+	m.subagentRuns[run.SessionID+"\x00"+run.AgentInstanceID] = run
+	return nil
+}
+
+func (m *memoryMySQL) GetSubAgentRun(_ context.Context, sessionID, instanceID string) (model.SubAgentRun, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run, ok := m.subagentRuns[sessionID+"\x00"+instanceID]
+	return run, ok, nil
 }
 
 func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
@@ -655,15 +672,16 @@ func agentConfig() config.AgentsConfig {
 			SystemPrompt: "you are confucius",
 			Tools:        []string{},
 		},
-		Chongzhi: config.AgentConfig{
-			Name:         stream.AgentChongzhi,
-			SystemPrompt: "you are chongzhi",
-			Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
-		},
-		Liang: config.AgentConfig{
-			Name:         stream.AgentLiang,
-			SystemPrompt: "you are liang",
-			Tools:        []string{},
+		Subagent: config.SubAgentConfig{
+			AgentConfig: config.AgentConfig{
+				Name:         stream.AgentChongzhi,
+				SystemPrompt: "you are chongzhi",
+				Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
+			},
+			MaxDepth:         1,
+			MaxConcurrent:    4,
+			MaxTotalPerTurn:  12,
+			MaxSnapshotBytes: 1 << 20,
 		},
 	}
 }
@@ -678,6 +696,10 @@ func agentConfig() config.AgentsConfig {
 // BEFORE the miniredis cleanup so the LIFO cleanup order drains miniredis
 // (and the redis client) first and only then samples for leaked goroutines.
 func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
+	return newTestEnvWithAgents(t, llm, agentConfig())
+}
+
+func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.AgentsConfig) *testEnv {
 	t.Helper()
 
 	// Register goleak FIRST so it runs LAST in the LIFO cleanup chain — after
@@ -724,10 +746,10 @@ func newTestEnv(t *testing.T, llm agent.LLMClient) *testEnv {
 	cfg := &config.Config{
 		OpenAI: config.OpenAIConfig{APIKey: "test", Models: testCatalog()},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
-		Agents: agentConfig(),
+		Agents: agents,
 	}
 	baseReg := tool.NewRegistry()
-	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil, mysqlFake)
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
@@ -823,7 +845,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
 		Agents: agentConfigWithTools(confuciusTools),
 	}
-	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil, mysqlFake)
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
@@ -923,7 +945,7 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	baseReg := tool.NewRegistry()
-	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, skill.NewLoader("", nil), nil, mysqlFake)
 	require.NoError(t, err)
 
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())

@@ -875,11 +875,66 @@ type AgentConfig struct {
 	Retry AgentRetryConfig `yaml:"retry"`
 }
 
-// AgentsConfig holds the three blowball agents.
+// SubAgentPresetConfig is a named configuration template for dynamic
+// sub-agent dispatch. A preset only supplies defaults; explicit spawn
+// parameters override it, and its tool list remains subject to parent-scope
+// narrowing at dispatch time.
+type SubAgentPresetConfig struct {
+	SystemPrompt string   `yaml:"system_prompt"`
+	Tools        []string `yaml:"tools"`
+}
+
+// SubAgentConfig is the generic sub-agent default configuration plus the
+// turn-wide topology budgets shared by every descendant. The embedded
+// AgentConfig carries the same capability surface as any other agent while
+// keeping agents.subagent a single YAML block.
+type SubAgentConfig struct {
+	AgentConfig `yaml:",inline"`
+	// MaxDepth is the maximum number of sub-agent edges below Confucius.
+	// The default 1 preserves the historical flat topology.
+	MaxDepth int `yaml:"max_depth"`
+	// MaxConcurrent bounds simultaneously running dispatches across the whole
+	// tree, including ancestors that are waiting on descendants.
+	MaxConcurrent int `yaml:"max_concurrent"`
+	// MaxTotalPerTurn bounds all dispatches in one turn, including retries
+	// started through resume_agent_id.
+	MaxTotalPerTurn int `yaml:"max_total_per_turn"`
+	// MaxSnapshotBytes bounds one persisted messages_json snapshot. Larger
+	// snapshots retain identity/status but are marked ineligible for resume.
+	MaxSnapshotBytes int                             `yaml:"max_snapshot_bytes"`
+	Presets          map[string]SubAgentPresetConfig `yaml:"presets"`
+}
+
+// Defaults for dynamic sub-agent topology and snapshots. max_concurrent must
+// exceed max_depth because synchronous nested dispatch holds a slot for every
+// waiting ancestor; equal values can deadlock two sibling chains.
+const (
+	defaultSubAgentMaxDepth         = 1
+	defaultSubAgentMaxConcurrent    = 4
+	defaultSubAgentMaxTotalPerTurn  = 12
+	defaultSubAgentMaxSnapshotBytes = 1 << 20
+)
+
+// applyDefaults fills omitted topology/snapshot values and is idempotent.
+func (s *SubAgentConfig) applyDefaults() {
+	if s.MaxDepth == 0 {
+		s.MaxDepth = defaultSubAgentMaxDepth
+	}
+	if s.MaxConcurrent == 0 {
+		s.MaxConcurrent = defaultSubAgentMaxConcurrent
+	}
+	if s.MaxTotalPerTurn == 0 {
+		s.MaxTotalPerTurn = defaultSubAgentMaxTotalPerTurn
+	}
+	if s.MaxSnapshotBytes == 0 {
+		s.MaxSnapshotBytes = defaultSubAgentMaxSnapshotBytes
+	}
+}
+
+// AgentsConfig holds the root orchestrator and the generic sub-agent default.
 type AgentsConfig struct {
-	Confucius AgentConfig `yaml:"confucius"`
-	Chongzhi  AgentConfig `yaml:"chongzhi"`
-	Liang     AgentConfig `yaml:"liang"`
+	Confucius AgentConfig    `yaml:"confucius"`
+	Subagent  SubAgentConfig `yaml:"subagent"`
 }
 
 // validate checks every agent's MCP server references point to a declared
@@ -889,16 +944,7 @@ type AgentsConfig struct {
 // the output_schema × reasoning gate now lives in Config.validate against
 // openai.default_reasoning_effort.)
 func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
-	for _, name := range []string{"confucius", "chongzhi", "liang"} {
-		var cfg *AgentConfig
-		switch name {
-		case "confucius":
-			cfg = &a.Confucius
-		case "chongzhi":
-			cfg = &a.Chongzhi
-		case "liang":
-			cfg = &a.Liang
-		}
+	validateAgent := func(name string, cfg *AgentConfig) error {
 		// Validate OutputSchema parses as JSON when set (fail fast at load
 		// rather than on the final sub-agent round).
 		if strings.TrimSpace(cfg.OutputSchema) != "" {
@@ -931,6 +977,37 @@ func (a *AgentsConfig) validate(serverNames map[string]struct{}) error {
 			if _, ok := serverNames[s.Name]; !ok {
 				return fmt.Errorf("agents.%s.mcp.servers[%d]: unknown mcp server %q", name, i, s.Name)
 			}
+		}
+		return nil
+	}
+	if err := validateAgent("confucius", &a.Confucius); err != nil {
+		return err
+	}
+	if err := validateAgent("subagent", &a.Subagent.AgentConfig); err != nil {
+		return err
+	}
+	if a.Subagent.MaxDepth < 0 {
+		return fmt.Errorf("agents.subagent.max_depth: must be >= 0 (0 means use the default)")
+	}
+	if a.Subagent.MaxConcurrent < 0 {
+		return fmt.Errorf("agents.subagent.max_concurrent: must be >= 0 (0 means use the default)")
+	}
+	if a.Subagent.MaxTotalPerTurn < 0 {
+		return fmt.Errorf("agents.subagent.max_total_per_turn: must be >= 0 (0 means use the default)")
+	}
+	if a.Subagent.MaxSnapshotBytes < 0 {
+		return fmt.Errorf("agents.subagent.max_snapshot_bytes: must be >= 0 (0 means use the default)")
+	}
+	if a.Subagent.MaxConcurrent <= a.Subagent.MaxDepth {
+		return fmt.Errorf("agents.subagent.max_concurrent: must be greater than max_depth (%d) so synchronous nested dispatches cannot deadlock (got %d)",
+			a.Subagent.MaxDepth, a.Subagent.MaxConcurrent)
+	}
+	for presetName, preset := range a.Subagent.Presets {
+		if strings.TrimSpace(presetName) == "" {
+			return fmt.Errorf("agents.subagent.presets: name must be non-empty")
+		}
+		if strings.TrimSpace(preset.SystemPrompt) == "" && len(preset.Tools) == 0 {
+			return fmt.Errorf("agents.subagent.presets.%s: must set system_prompt or tools", presetName)
 		}
 	}
 	return nil
@@ -1403,6 +1480,11 @@ func Load(path string) (*Config, error) {
 			}
 		}
 	}
+	for _, removed := range []string{"chongzhi", "liang"} {
+		if _, ok := residualAgentFields.Agents[removed]; ok {
+			return nil, fmt.Errorf("config validation error: agents.%s was removed by dynamic-subagents: migrate its prompt/tool defaults into agents.subagent or a named agents.subagent.presets entry, then dispatch with spawn_subagent", removed)
+		}
+	}
 	// The removed tools.xizhi.glob_files key (replaced by tools.xizhi.find,
 	// tool xizhi_find) would be silently ignored by the typed decode; probe the
 	// raw map so a stale config fails fast with a migration pointer.
@@ -1452,6 +1534,7 @@ func Load(path string) (*Config, error) {
 	// three agents default to retry-enabled for both retry levels. The
 	// zero-value Enabled=false is preserved only when the operator explicitly
 	// configures the block (retry: {enabled: false}).
+	cfg.Agents.Subagent.applyDefaults()
 	cfg.Agents.applyRetryDefaults()
 
 	if err := cfg.validate(); err != nil {
@@ -1512,15 +1595,13 @@ func (c *Config) validate() error {
 	// non-none default. The runtime twin (request-resolved effort != none →
 	// 400) lives in the handler.
 	if c.OpenAI.DefaultReasoningEffort != "none" {
-		for _, name := range []string{"confucius", "chongzhi", "liang"} {
+		for _, name := range []string{"confucius", "subagent"} {
 			var cfg AgentConfig
 			switch name {
 			case "confucius":
 				cfg = c.Agents.Confucius
-			case "chongzhi":
-				cfg = c.Agents.Chongzhi
-			case "liang":
-				cfg = c.Agents.Liang
+			case "subagent":
+				cfg = c.Agents.Subagent.AgentConfig
 			}
 			if strings.TrimSpace(cfg.OutputSchema) != "" {
 				return fmt.Errorf("config validation error: agents.%s.output_schema conflicts with openai.default_reasoning_effort %q (structured output and reasoning are mutually exclusive; use a none default and select effort per request)", name, c.OpenAI.DefaultReasoningEffort)
@@ -1612,9 +1693,9 @@ func (m MCPConfig) validate() error {
 	return nil
 }
 
-// applyRetryDefaults fills per-agent retry defaults: all three agents
-// (Confucius/Liang/Chongzhi) default to retry-enabled (llm-round-retry) —
-// Chongzhi's dispatch-level retry safety is carried by the ToolCallTracker
+// applyRetryDefaults fills per-agent retry defaults: Confucius and the generic
+// sub-agent default to retry-enabled (llm-round-retry) — a side-effecting
+// dispatch's retry safety is carried by the ToolCallTracker
 // idempotency gate, not by the enabled flag. Backoff fields use the package
 // defaults when zero. An agent that explicitly sets Retry.Enabled keeps its
 // choice; only the zero value is overridden. It is idempotent.
@@ -1641,8 +1722,7 @@ func (a *AgentsConfig) applyRetryDefaults() {
 		}
 	}
 	applyOne(&a.Confucius, true) // round-level retry by default
-	applyOne(&a.Chongzhi, true)  // round-level by default; dispatch-level gated by ToolCallTracker
-	applyOne(&a.Liang, true)     // read-only: retry by default
+	applyOne(&a.Subagent.AgentConfig, true)
 }
 
 // serverNames returns the set of declared global MCP server names.
@@ -1660,15 +1740,13 @@ func (m MCPConfig) serverNames() map[string]struct{} {
 // that server. A wildcard ("*") entry is always valid. The function is intended
 // to be called after MCP client registration has populated serverTools.
 func (c *Config) ValidateAgentMCPTools(serverTools map[string]map[string]struct{}) error {
-	for _, agentName := range []string{"confucius", "chongzhi", "liang"} {
+	for _, agentName := range []string{"confucius", "subagent"} {
 		var cfg AgentConfig
 		switch agentName {
 		case "confucius":
 			cfg = c.Agents.Confucius
-		case "chongzhi":
-			cfg = c.Agents.Chongzhi
-		case "liang":
-			cfg = c.Agents.Liang
+		case "subagent":
+			cfg = c.Agents.Subagent.AgentConfig
 		}
 		for _, s := range cfg.MCP.Servers {
 			known, ok := serverTools[s.Name]
@@ -1693,15 +1771,13 @@ func (c *Config) ValidateAgentMCPTools(serverTools map[string]map[string]struct{
 // The hasSkill function should report whether a skill with the given name
 // exists. An empty userID checks only the global skill directory.
 func (c *Config) ValidateAgentSkills(userID string, hasSkill func(name, userID string) bool) error {
-	for _, agentName := range []string{"confucius", "chongzhi", "liang"} {
+	for _, agentName := range []string{"confucius", "subagent"} {
 		var cfg AgentConfig
 		switch agentName {
 		case "confucius":
 			cfg = c.Agents.Confucius
-		case "chongzhi":
-			cfg = c.Agents.Chongzhi
-		case "liang":
-			cfg = c.Agents.Liang
+		case "subagent":
+			cfg = c.Agents.Subagent.AgentConfig
 		}
 		for _, skillName := range cfg.Skills {
 			if !hasSkill(skillName, userID) {

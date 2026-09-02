@@ -163,8 +163,13 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 				SystemPrompt: "you are confucius",
 				Tools:        []string{"mcp_add_server", "mcp_call", "mcp_list_servers", "mcp_remove_server"},
 			},
-			Chongzhi: config.AgentConfig{Name: stream.AgentChongzhi, SystemPrompt: "you are chongzhi"},
-			Liang:    config.AgentConfig{Name: stream.AgentLiang, SystemPrompt: "you are liang"},
+			Subagent: config.SubAgentConfig{
+				AgentConfig:      config.AgentConfig{Name: stream.AgentChongzhi, SystemPrompt: "you are chongzhi"},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
+			},
 		},
 	}
 
@@ -193,7 +198,7 @@ func TestIntegration_UserMCPFullTurn(t *testing.T) {
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
 	baseReg := tool.NewRegistry()
-	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, nil, nil)
+	orch, err := agent.NewOrchestrator(llm, cfg, baseReg, nil, nil, nil, mysqlFake)
 	require.NoError(t, err)
 
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
