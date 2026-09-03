@@ -313,6 +313,11 @@ func shouldDispatchToolCalls(ctx context.Context, resp LLMResponse) bool {
 // it never reaches the registry.
 const SpawnSubagentTool = "spawn_subagent"
 
+// UpdatePlanTool is the root-only semantic plan control tool. It is synthesized
+// into Confucius's tools[] and intercepted before tool.Registry; dynamic
+// sub-agents never receive it.
+const UpdatePlanTool = "update_plan"
+
 // Legacy fixed-role tool names remain only for readers of pre-migration event
 // data; they are not model-facing and IsInvokeTool no longer recognizes them.
 const (
@@ -329,6 +334,49 @@ const SpawnSubagentDescription = "Spawn an isolated generic sub-agent with a fre
 // IsInvokeTool reports whether name is the sub-agent dispatch tool recognized
 // by Confucius and depth-eligible generic sub-agents.
 func IsInvokeTool(name string) bool { return name == SpawnSubagentTool }
+
+// UpdatePlanSchema returns the JSON Schema describing update_plan.
+func UpdatePlanSchema() []byte { return append([]byte(nil), updatePlanArgsSchema...) }
+
+// UpdatePlanDescription is attached to the synthetic update_plan tool.
+const UpdatePlanDescription = "Replace the root agent's semantic plan with a complete snapshot. Multiple independent steps may be in_progress when they are being dispatched in parallel. Do not include a revision; the host assigns it."
+
+const updatePlanArgsSchemaJSON = `{
+  "type": "object",
+  "properties": {
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "One semantic work item."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "completed"]
+          }
+        },
+        "required": ["step", "status"],
+        "additionalProperties": false
+      }
+    },
+    "explanation": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Optional why the plan changed."
+    }
+  },
+  "required": ["steps"],
+  "additionalProperties": false
+}`
+
+var updatePlanArgsSchema = []byte(updatePlanArgsSchemaJSON)
 
 const spawnArgsSchemaJSON = `{
   "type": "object",

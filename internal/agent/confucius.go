@@ -29,6 +29,7 @@ type Confucius struct {
 	// coordinator owns the turn-wide dynamic spawn tree: budgets, stable
 	// instance ids, scoped construction, resume snapshots, and usage metadata.
 	coordinator   *spawnCoordinator
+	plan          *planLedger
 	toolsJSON     []byte // pre-rendered OpenAI tools[] including spawn_subagent
 	toolsIsNotNil bool
 	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
@@ -75,6 +76,7 @@ func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, 
 		toolRegistry:  reg,
 		turn:          turn,
 		coordinator:   coordinator,
+		plan:          &planLedger{},
 		toolsJSON:     toolsJSON,
 		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
 		maxRounds:     maxRounds,
@@ -150,6 +152,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	budget := newRetryBudget(c.cfg.Retry.BudgetTokens)
 	ctx = WithRetryBudget(ctx, budget)
 	c.coordinator.meta = tmeta
+	c.plan = &planLedger{}
 	c.hitCapThisRun = false
 	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
@@ -345,6 +348,9 @@ type toolResult struct {
 	subParentID  string
 	subCapped    bool
 	subStatus    string
+	// resultEventSent marks a synthetic control-plane result whose ToolResultEvent
+	// was already emitted before parallel execution (update_plan ordering).
+	resultEventSent bool
 }
 
 // dispatchToolCalls runs every tool_call in parallel via errgroup. Sub-agent
@@ -357,8 +363,13 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 	results := make(map[string]toolResult, len(calls))
 	var mu sync.Mutex
 
+	planCalls, executionCalls := splitUpdatePlanCalls(calls)
+	for id, result := range c.dispatchUpdatePlanCalls(ctx, planCalls, hub) {
+		results[id] = result
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
-	for _, tc := range calls {
+	for _, tc := range executionCalls {
 		tc := tc // capture for goroutine
 		g.Go(func() error {
 			// errgroup cancels gctx on first non-nil return; we never want
@@ -373,6 +384,72 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 	}
 	_ = g.Wait()
 	return results
+}
+
+func splitUpdatePlanCalls(calls []ToolCall) ([]ToolCall, []ToolCall) {
+	var planCalls, executionCalls []ToolCall
+	for _, tc := range calls {
+		if tc.Function.Name == UpdatePlanTool {
+			planCalls = append(planCalls, tc)
+			continue
+		}
+		executionCalls = append(executionCalls, tc)
+	}
+	return planCalls, executionCalls
+}
+
+// dispatchUpdatePlanCalls applies the deterministic semantic-plan pre-phase.
+// Its tool result event is emitted immediately so plan_updated and its result
+// precede any same-round spawn or registry activity. executeAndRecordToolCalls
+// later appends the role=tool message without emitting a duplicate event.
+func (c *Confucius) dispatchUpdatePlanCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub) map[string]toolResult {
+	results := make(map[string]toolResult, len(calls))
+	if len(calls) == 0 {
+		return results
+	}
+
+	if len(calls) > 1 {
+		msg := "update_plan: only one plan update is allowed per assistant round"
+		for _, tc := range calls {
+			results[tc.ID] = c.emitPreDispatchResult(ctx, hub, tc, toolResult{content: msg, isError: true})
+		}
+		return results
+	}
+
+	tc := calls[0]
+	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
+		results[tc.ID] = toolResult{content: "", isError: true, resultEventSent: true}
+		return results
+	}
+
+	args, parseResult := parseUpdatePlanArgs(tc)
+	result := parseResult
+	if !result.isError {
+		snapshot, err := c.plan.update(args)
+		if err != nil {
+			result = toolResult{content: err.Error(), isError: true}
+		} else {
+			content, renderErr := snapshot.canonicalJSON()
+			if renderErr != nil {
+				result = toolResult{content: renderErr.Error(), isError: true}
+			} else {
+				result = toolResult{content: content, isError: false}
+				if !hub.SendCtx(ctx, stream.PlanUpdatedEvent(c.Name(), content, snapshot.Revision)) {
+					result = toolResult{content: "", isError: true}
+				}
+			}
+		}
+	}
+	results[tc.ID] = c.emitPreDispatchResult(ctx, hub, tc, result)
+	return results
+}
+
+func (c *Confucius) emitPreDispatchResult(ctx context.Context, hub stream.EventHub, tc ToolCall, result toolResult) toolResult {
+	result.resultEventSent = true
+	if !hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content)) {
+		return toolResult{content: "", isError: true, resultEventSent: true}
+	}
+	return result
 }
 
 // executeAndRecordToolCalls dispatches calls in parallel via dispatchToolCalls
@@ -413,7 +490,9 @@ func (c *Confucius) executeAndRecordToolCalls(ctx context.Context, calls []ToolC
 		if result.subCapped {
 			tmeta.observeRoundCapped()
 		}
-		hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
+		if !result.resultEventSent {
+			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
+		}
 		*round = append(*round, Message{
 			Role:       "tool",
 			Content:    result.content,

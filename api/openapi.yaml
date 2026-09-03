@@ -178,7 +178,7 @@ components:
           enum: [user, assistant, tool, ""]
         event_type:
           type: string
-          enum: [message, token, tool_call, tool_result, agent_start, agent_end, agent_error, reasoning]
+          enum: [message, token, tool_call, tool_result, plan_updated, agent_start, agent_end, agent_error, reasoning]
         content:
           type: string
         trace_id:
@@ -357,6 +357,51 @@ components:
             parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
             agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
+    SSEPlanUpdated:
+      type: object
+      required: [type, agent, content, meta]
+      description: |
+        Host-accepted semantic plan snapshot submitted through Confucius's
+        root-only `update_plan` tool. The event is emitted between the
+        `update_plan` tool_call and tool_result and before any same-round
+        sub-agent or registry activity. `content` is canonical JSON (encoded as
+        a string) with the SSEPlanSnapshot shape so it survives message
+        persistence. Multiple steps may simultaneously be `in_progress` for
+        parallel dispatch.
+      properties:
+        type: {type: string, enum: [plan_updated]}
+        agent: {type: string, description: Root orchestrator label (normally Confucius).}
+        content:
+          type: string
+          description: Canonical JSON-encoded SSEPlanSnapshot.
+          example: '{"revision":1,"steps":[{"step":"Inspect stream events","status":"completed"},{"step":"Design plan state","status":"in_progress"}],"explanation":"Investigation finished."}'
+        meta:
+          type: object
+          required: [revision]
+          properties:
+            revision: {type: integer, minimum: 1, description: Host-assigned snapshot revision; ignored during persistence in favor of the canonical content.}
+            run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
+    SSEPlanSnapshot:
+      type: object
+      required: [revision, steps]
+      properties:
+        revision: {type: integer, minimum: 1, description: Monotonic per-turn revision assigned by the host.}
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/SSEPlanStep'
+        explanation:
+          type: string
+          maxLength: 2000
+          description: Optional reason for the plan change.
+    SSEPlanStep:
+      type: object
+      required: [step, status]
+      properties:
+        step: {type: string, minLength: 1, maxLength: 1000}
+        status: {type: string, enum: [pending, in_progress, completed]}
     SSEAgentEnd:
       type: object
       required: [type, agent]
@@ -1124,7 +1169,7 @@ paths:
             retry and a bounded MySQL drain attempt. On a healthy storage path,
             stream completion therefore implies that the complete turn is
             available from the message-history endpoint.
-            Event types: `agent_start`, `token`, `reasoning`, `tool_call`, `tool_result`,
+            Event types: `agent_start`, `token`, `reasoning`, `tool_call`, `tool_result`, `plan_updated`,
             `agent_end`, `agent_error`, `done`. The `done` event is always the final event.
           headers:
             X-Run-Id:
@@ -1139,6 +1184,7 @@ paths:
                   - $ref: '#/components/schemas/SSEReasoning'
                   - $ref: '#/components/schemas/SSEToolCall'
                   - $ref: '#/components/schemas/SSEToolResult'
+                  - $ref: '#/components/schemas/SSEPlanUpdated'
                   - $ref: '#/components/schemas/SSEAgentEnd'
                   - $ref: '#/components/schemas/SSEAgentError'
                   - $ref: '#/components/schemas/SSEDone'
@@ -1276,6 +1322,7 @@ paths:
                 oneOf:
                   - $ref: '#/components/schemas/SSEAgentStart'
                   - $ref: '#/components/schemas/SSEToken'
+                  - $ref: '#/components/schemas/SSEPlanUpdated'
                   - $ref: '#/components/schemas/SSEAgentError'
                   - $ref: '#/components/schemas/SSEDone'
         '401':

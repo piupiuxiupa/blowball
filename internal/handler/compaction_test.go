@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/agent"
@@ -149,6 +150,34 @@ func TestStitchCompacted_Unit(t *testing.T) {
 	ghost := &model.ContextCompaction{BoundaryMsgID: 99999, BoundaryMsgTime: time.Now(), BoundaryMsgIndex: 0}
 	require.Nil(t, stitchCompacted(rows, agentMsgs, ghost))
 	require.Nil(t, stitchCompacted(rows, agentMsgs, nil))
+}
+
+func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
+	msgTime := time.Unix(1_700_000_000, 0).UTC()
+	planJSON := `{"revision":9,"steps":[{"step":"post-boundary","status":"in_progress"}]}`
+	rows := []model.Message{
+		{ID: 1, MsgTime: msgTime, MsgIndex: 1, Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "original task"},
+		{ID: 2, MsgTime: msgTime, MsgIndex: 2, Agent: stream.AgentConfucius, Role: "", EventType: model.EventTypePlanUpdated, Content: `{"revision":1}`},
+		{ID: 3, MsgTime: msgTime, MsgIndex: 3, Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"p9","name":"update_plan","args":{"steps":[]}}`},
+		{ID: 4, MsgTime: msgTime, MsgIndex: 4, Agent: stream.AgentConfucius, Role: "", EventType: model.EventTypePlanUpdated, Content: planJSON},
+		{ID: 5, MsgTime: msgTime, MsgIndex: 5, Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"p9","output":{"revision":9}}`},
+	}
+	agentMsgs, _, err := MessagesToAgentMessagesIndexed(rows)
+	require.NoError(t, err)
+
+	rec := &model.ContextCompaction{
+		Content:          "CHECKPOINT BODY",
+		BoundaryMsgTime:  rows[1].MsgTime,
+		BoundaryMsgIndex: rows[1].MsgIndex,
+		BoundaryMsgID:    rows[1].ID,
+	}
+	stitched := stitchCompacted(rows, agentMsgs, rec)
+	require.NotNil(t, stitched)
+	require.Len(t, stitched, 4) // original task + summary + tool call + result
+	for _, m := range stitched {
+		assert.NotContains(t, m.Content, planJSON)
+	}
+	assert.Equal(t, "update_plan", stitched[2].ToolCalls[0].Function.Name)
 }
 
 // TestSendMessage_CompactedFlagStitchesFromCache drives the streaming handler

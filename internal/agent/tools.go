@@ -9,9 +9,10 @@ import (
 
 // buildConfuciusToolsJSON returns the OpenAI tools[] JSON for the root agent.
 // It merges the regular tools listed in cfg.Tools (resolved via the registry)
-// with the synthetic spawn_subagent entry. Spawn is NOT registered in the tool
-// registry — it is intercepted by the dispatch loop. Returns nil when the agent
-// has no tools at all so callers can omit the field from the request.
+// with the synthetic spawn_subagent and root-only update_plan entries. Neither
+// is registered in the tool registry — both are intercepted by the dispatch
+// loop. Returns nil when the agent has no tools at all so callers can omit the
+// field from the request.
 // maxCompletionTokens is the TURN-resolved catalog-entry quota
 // (per-model-completion-budget) behind the write-budget guidance number.
 func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string, maxCompletionTokens int) ([]byte, error) {
@@ -20,7 +21,7 @@ func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string, maxC
 		return nil, err
 	}
 
-	return combineRegularAndSpawnTools(regularJSON, true)
+	return combineRegularAndRootTools(regularJSON)
 }
 
 // buildSubAgentToolsJSON renders a generic sub-agent's narrowed tools and adds
@@ -59,6 +60,29 @@ func combineRegularAndSpawnTools(regularJSON []byte, allowSpawn bool) ([]byte, e
 	}
 	combined := append(regular, spawnTools...)
 	return json.Marshal(combined)
+}
+
+// combineRegularAndRootTools adds the two root-only orchestration tools. Plan
+// state is kept separate from spawn: children may recursively spawn when depth
+// allows, but they can never observe or mutate the root plan.
+func combineRegularAndRootTools(regularJSON []byte) ([]byte, error) {
+	spawnJSON, err := combineRegularAndSpawnTools(regularJSON, true)
+	if err != nil {
+		return nil, err
+	}
+	var regular openAIToolList
+	if err := json.Unmarshal(spawnJSON, &regular); err != nil {
+		return nil, fmt.Errorf("agent: unmarshal root tools: %w", err)
+	}
+	regular = append(regular, openAITool{
+		Type: "function",
+		Function: openAIToolFunc{
+			Name:        UpdatePlanTool,
+			Description: UpdatePlanDescription,
+			Parameters:  updatePlanArgsSchema,
+		},
+	})
+	return json.Marshal(regular)
 }
 
 // buildRegularToolsJSON renders the OpenAI tools[] for an agent's plain tools

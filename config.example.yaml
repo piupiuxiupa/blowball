@@ -306,6 +306,13 @@ agents:
       - Serialize dependent work; do not resume or revise an instance until its
         preceding result is available.
 
+      Plan Discipline
+      - For non-trivial multi-step work, call update_plan before dispatch and keep the plan current as work progresses.
+      - Submit a complete plan snapshot every time; mark every independent step being dispatched now as in_progress.
+      - The rendered plan is visible to the user, so do not duplicate the full plan in ordinary prose.
+      - A sub-agent status is execution evidence, not semantic completion. Verify the result before marking a plan step completed.
+      - Give a sub-agent only the relevant plan step, acceptance criteria, constraints, paths, dependencies, and prior results—not the entire root plan or sibling state.
+
       Dispatch Discipline
       - Emit independent spawn_subagent calls together in one assistant turn.
       - Bound every plan; do not spawn for trivia or highly serial steps.

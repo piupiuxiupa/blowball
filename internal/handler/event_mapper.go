@@ -143,6 +143,10 @@ func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex 
 			return model.Message{}, fmt.Errorf("marshal tool_result content: %w", err)
 		}
 		msg.Content = string(b)
+	case stream.EventPlanUpdated:
+		msg.EventType = model.EventTypePlanUpdated
+		msg.Role = ""
+		msg.Content = e.Content
 	case stream.EventAgentStart:
 		msg.EventType = model.EventTypeAgentStart
 		msg.Role = ""

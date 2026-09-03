@@ -21,14 +21,15 @@ const (
 
 // Event type values. These match the `event_type` column on the messages table.
 const (
-	EventTypeMessage    = "message"
-	EventTypeToken      = "token"
-	EventTypeReasoning  = "reasoning"
-	EventTypeToolCall   = "tool_call"
-	EventTypeToolResult = "tool_result"
-	EventTypeAgentStart = "agent_start"
-	EventTypeAgentEnd   = "agent_end"
-	EventTypeAgentError = "agent_error"
+	EventTypeMessage     = "message"
+	EventTypeToken       = "token"
+	EventTypeReasoning   = "reasoning"
+	EventTypeToolCall    = "tool_call"
+	EventTypeToolResult  = "tool_result"
+	EventTypePlanUpdated = "plan_updated"
+	EventTypeAgentStart  = "agent_start"
+	EventTypeAgentEnd    = "agent_end"
+	EventTypeAgentError  = "agent_error"
 )
 
 // Message mirrors the `messages` table (migration 004_messages.sql,

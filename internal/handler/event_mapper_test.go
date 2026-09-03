@@ -286,6 +286,35 @@ func TestMessageFromEvent_RunIDCopiedFromMeta(t *testing.T) {
 	assert.Empty(t, m.RunID, "top-level events persist no run identity")
 }
 
+// TestMessageFromEvent_PlanUpdated pins the persisted shape of the semantic
+// plan control-plane event: an empty-role marker row whose Content retains the
+// complete canonical JSON (Meta-only state would be lost in messages storage).
+func TestMessageFromEvent_PlanUpdated(t *testing.T) {
+	msgTime := time.Unix(1_700_000_000, 0).UTC()
+	planJSON := `{"revision":2,"steps":[{"step":"verify","status":"completed"}],"explanation":"done"}`
+	e := stream.PlanUpdatedEvent(stream.AgentConfucius, planJSON, 2)
+
+	m, err := MessageFromEvent(e, "sess-1", "trace-1", 3, msgTime)
+	require.NoError(t, err)
+	assert.Equal(t, model.EventTypePlanUpdated, m.EventType)
+	assert.Equal(t, stream.AgentConfucius, m.Agent)
+	assert.Empty(t, m.Role)
+	assert.Equal(t, planJSON, m.Content)
+	assert.Empty(t, m.RunID)
+	assert.Empty(t, m.AgentInstanceID)
+
+	info := turnPersistInfo{
+		sessionID: "sess-1", userID: "u", traceID: "trace-1",
+		userContent: "go", userMsgTime: msgTime,
+	}
+	batch, err := info.buildTurnMessages([]stream.StreamEvent{e}, 0, false, msgTime)
+	require.NoError(t, err)
+	require.Len(t, batch, 2)
+	assert.Equal(t, "trace-1:0", batch[0].ClientMsgID)
+	assert.Equal(t, "trace-1:1", batch[1].ClientMsgID)
+	assert.Equal(t, planJSON, batch[1].Content)
+}
+
 // TestMergeEvents_LengthContinuationSingleRow pins the llm-length-continuation
 // persistence invariant: the token runs of a round's continuation attempts
 // carry the same (type, agent, run_id) and have NO event between them (the

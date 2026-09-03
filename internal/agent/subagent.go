@@ -366,6 +366,11 @@ func (s *SubAgent) dispatchOne(ctx context.Context, tc ToolCall, hub stream.Even
 	if !hub.SendCtx(ctx, stream.ToolCallEvent(s.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
+	if tc.Function.Name == UpdatePlanTool {
+		msg := fmt.Sprintf("tool %q not available: root plan updates are restricted to Confucius", tc.Function.Name)
+		streamAgentError(hub, ctx, s.Name(), msg, "unknown_tool")
+		return toolResult{content: msg, isError: true}
+	}
 	if IsInvokeTool(tc.Function.Name) {
 		if s.spec.Coordinator == nil {
 			msg := fmt.Sprintf("tool %q not available: nested dispatch is disabled", tc.Function.Name)

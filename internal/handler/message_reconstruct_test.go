@@ -116,6 +116,30 @@ func TestMessagesToAgentMessages_SingleToolCallAndResult(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestMessagesToAgentMessages_PlanUpdatedIgnoredButToolPairPreserved(t *testing.T) {
+	planJSON := `{"revision":1,"steps":[{"step":"work","status":"in_progress"}]}`
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "go"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"plan-1","name":"update_plan","args":{"steps":[{"step":"work","status":"in_progress"}]}}`},
+		{Agent: stream.AgentConfucius, Role: "", EventType: model.EventTypePlanUpdated, Content: planJSON},
+		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"plan-1","output":{"revision":1,"steps":[{"step":"work","status":"in_progress"}]}}`},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	require.Len(t, got, 3)
+	assert.Equal(t, agent.Message{Role: "user", Content: "go"}, got[0])
+	require.Len(t, got[1].ToolCalls, 1)
+	assert.Equal(t, "plan-1", got[1].ToolCalls[0].ID)
+	assert.Equal(t, "update_plan", got[1].ToolCalls[0].Function.Name)
+	assert.JSONEq(t, `{"steps":[{"step":"work","status":"in_progress"}]}`, got[1].ToolCalls[0].Function.Arguments)
+	assert.Equal(t, "tool", got[2].Role)
+	assert.Equal(t, "plan-1", got[2].ToolCallID)
+	assert.Equal(t, "update_plan", got[2].Name)
+	assert.JSONEq(t, `{"revision":1,"steps":[{"step":"work","status":"in_progress"}]}`, got[2].Content)
+}
+
 func TestMessagesToAgentMessages_ParallelToolCalls(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search both"},
