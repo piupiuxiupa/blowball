@@ -1032,9 +1032,11 @@ type XizhiConfig struct {
 
 // WebfetchConfig holds the process-level webfetch tool settings.
 type WebfetchConfig struct {
-	Enabled      bool          `yaml:"enabled"`
-	Timeout      time.Duration `yaml:"timeout"`
-	MaxRedirects int           `yaml:"max_redirects"`
+	Enabled          bool          `yaml:"enabled"`
+	Timeout          time.Duration `yaml:"timeout"`
+	MaxRedirects     int           `yaml:"max_redirects"`
+	MaxDownloadBytes int           `yaml:"max_download_bytes"`
+	MaxOutputBytes   int           `yaml:"max_output_bytes"`
 }
 
 // UserMCPConfig holds per-user MCP tool settings. Per-user MCP activates

@@ -435,6 +435,8 @@ tools:
     enabled: true
     timeout: 30s
     # max_redirects: 10   # optional; HTTP redirect cap (default 10, 0/negative -> 10)
+    # max_download_bytes: 5242880   # optional; response bytes retained before extraction (default 5 MiB, 0/negative -> default)
+    # max_output_bytes: 102400      # optional; extracted text bytes returned to the model (default 100 KiB, 0/negative -> default)
 
   # Per-tool execution timeouts (capability: tool-execution-timeout). Maps a
   # built-in tool name (the same identifier agents list under their tools:) to a
