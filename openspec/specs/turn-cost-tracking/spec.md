@@ -47,7 +47,7 @@
 - **THEN** 该 session_id 下所有 `turn_usage` 行由数据库级联删除，无需应用层显式清理
 
 ### Requirement: Usage JSON shape is authoritative
-`turn_usage.usage_json` 与 done 事件 `Meta.usage` SHALL 持有相同的对象形状，作为 per-agent 成本归因的权威定义。形状为：`{total: {prompt_tokens, completion_tokens, total_tokens, reasoning_tokens?}, by_agent: {<agent>: {...}}, meta: {sub_agent_invocations: [...], parallel: bool}}`。
+`turn_usage.usage_json` 与 done 事件 `Meta.usage` SHALL 持有相同的对象形状，作为 per-agent 成本归因的权威定义。形状为：`{total: {prompt_tokens, completion_tokens, total_tokens, reasoning_tokens?}, by_agent: {<agent-label>: {...}}, meta: {sub_agent_invocations: [...], parallel: bool}}`。`by_agent` 的 key SHALL 为动态实例标签（实例 id 或 `name` 参数派生的展示名），跨续跑的同一实例 SHALL 累计到同一 key；`sub_agent_invocations` 的每一项 SHALL 记录实例 id、父实例（根派发为空）与派发顺序。
 
 #### Scenario: Shape matches done event exactly
 - **WHEN** 系统构造 turn 的 usage 对象
@@ -60,7 +60,11 @@
 #### Scenario: Parallelism metadata recorded
 - **WHEN** 一个 turn 中存在某个 assistant 轮次同时调度了 ≥2 个 tool_call
 - **THEN** `usage_json.meta.parallel` 为 `true`
-- **AND THEN** `usage_json.meta.sub_agent_invocations` 列出该 turn 派发的所有 invoke_* 工具名（按调用顺序）
+- **AND THEN** `usage_json.meta.sub_agent_invocations` 按派发顺序列出全部 spawn 派发，每项含实例 id 与父实例
+
+#### Scenario: Resumed instance accumulates into one entry
+- **WHEN** 同一子 Agent 实例在本 turn 内被派发两次（初始 + 续跑）
+- **THEN** 其两次执行的 usage 累计到 `by_agent` 的同一 key 下
 
 ### Requirement: Turn usage row keyed by trace
 `turn_usage` SHALL 以 `(session_id, trace_id)` 标识单次请求的成本，并索引 `(session_id, created_at)` 以支持按会话时间序的成本查询。

@@ -6,25 +6,14 @@
 
 ## Requirements
 
-### Requirement: Flat agent topology
-系统 SHALL 采用 flat 拓扑，仅 Confucius 可调度其他 Agent，子 Agent 不允许嵌套调用。
-
-#### Scenario: Confucius dispatches sub-agents
-- **WHEN** Confucius 通过 function-calling 调用 invoke_chongzhi 或 invoke_liang
-- **THEN** 系统启动对应子 Agent 执行任务
-
-#### Scenario: Sub-agents cannot call other agents
-- **WHEN** Chongzhi 或 Liang 的 tool list 被构建
-- **THEN** tool list 中不包含 invoke_chongzhi、invoke_liang 等其他 Agent 调度工具
-
 ### Requirement: Agent as tool via function calling
-Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子 Agent 定义为一个 tool。
+Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，子 Agent 派发统一经由 `spawn_subagent` 工具（参数契约见 dynamic-subagents 能力）。
 
 子 Agent 执行失败且被放弃（不重试、重试耗尽或取消）时，返回给 Confucius 的 tool result SHALL 携带「错误文本 + 已积累的部分输出」：子 Agent `Run` 在错误返回值中提供部分输出（失败轮已流出的 assistant 文本，或 continuation 耗尽时跨尝试累积的部分内容）且该内容非空白时，tool result content SHALL 为错误文本与部分输出的拼接（错误文本在前，以固定标记行分隔）；部分输出为空白时，tool result content SHALL 与错误文本字节级一致。失败结果 SHALL 保持 `isError` 语义且不套用 tool-result-envelope。
 
 #### Scenario: Confucius receives function call
-- **WHEN** OpenAI 返回包含 tool_calls 的响应，function name 为 invoke_chongzhi 或 invoke_liang
-- **THEN** 系统解析 parameters 中的 task 和 context，启动对应子 Agent
+- **WHEN** OpenAI 返回包含 tool_calls 的响应，function name 为 spawn_subagent
+- **THEN** 系统解析 parameters 中的 task、context、name、tools、preset、resume_agent_id，创建通用子 Agent 执行任务
 
 #### Scenario: Tool call result returned to Confucius
 - **WHEN** 子 Agent 执行完成（成功或失败）
@@ -44,7 +33,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子
 
 #### Scenario: Partial output visible across turn boundary
 - **WHEN** 失败子 agent 调用的 tool_result 事件被持久化，后续 turn 重建历史
-- **THEN** Confucius 上下文中的 invoke tool_call/tool_result 对携带同一合并文本；子 agent 名下的事件行不参与历史重建（既有约定不变）
+- **THEN** Confucius 上下文中的 spawn tool_call/tool_result 对携带同一合并文本；子 agent 名下的事件行不参与历史重建（既有约定不变）
 
 ### Requirement: Parallel agent execution
 系统 SHALL 支持 LLM 自主决定的并行 Agent 调用。当 Confucius 的 LLM 响应包含多个 tool_calls 时，并行执行。每个 tool_call 对应的子 agent 调用 SHALL 使用相互独立的实例（或等价的按调用隔离的 run 状态）；并行同名调用之间不得共享可变 run 状态（副作用执行标志、round-cap 标志）。每次调用的全部流事件 SHALL 携带该次调用的 tool_call id 作为 run 身份（`Meta.parent_tool_call_id`）。
@@ -66,11 +55,15 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子
 - **THEN** 失败信息作为错误 StreamEvent 流式通知，其他 Agent 继续执行，失败结果返回 Confucius 决策
 
 ### Requirement: Independent agent context
-子 Agent SHALL 在独立上下文中运行，只接收 Confucius 传递的 task description 和 context。
+子 Agent SHALL 在独立上下文中运行。全新派发只接收 Confucius 传递的 task description 与 context；续跑派发（`resume_agent_id`）以该实例的持久化历史快照为起点追加新任务消息（见 dynamic-subagents 能力）。
 
 #### Scenario: Sub-agent receives isolated context
-- **WHEN** Confucius 调用子 Agent
+- **WHEN** Confucius 全新派发一个子 Agent
 - **THEN** 子 Agent 的消息列表仅包含：自身 system_prompt + 一条 user message（内容为 task + context），不包含用户的完整历史对话
+
+#### Scenario: Resumed sub-agent starts from snapshot
+- **WHEN** Confucius 续跑一个既有子 Agent 实例
+- **THEN** 子 Agent 的消息列表为该实例持久化历史快照 + 新任务 user message，仍不包含用户完整历史对话
 
 ### Requirement: Streaming passthrough
 子 Agent 的响应 SHALL 通过共享 StreamEvent channel 透传到 SSE 输出。
@@ -88,15 +81,19 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，每个子
 - **THEN** 系统推送 StreamEvent{Type: "agent_error", Agent: "xxx", Content: "错误描述", Meta: {error_code: "..."}}，然后推送 agent_end 事件
 
 ### Requirement: Agent configuration from file
-每个 Agent 的 name、system_prompt、tools 列表、mcp 配置、skills 配置、output_schema 及 max_rounds（tool-calling 循环上限）SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。agent 配置 SHALL NOT 包含任何 LLM 参数字段——模型、思考等级、输出配额（`max_tokens`/`max_completion_tokens`）与续写配置均为 turn 级属性，由模型目录 + 部署默认 + 请求参数解析得出（见 per-request-model-selection），并统一注入该 turn 的全部 agent。未设置或 `<= 0` 的 `max_rounds` SHALL 回退到默认值 `100`。
+主 Agent 与通用子 Agent 的 name、system_prompt、tools 列表、mcp 配置、skills 配置、output_schema 及 max_rounds（tool-calling 循环上限）SHALL 从 config.yaml 加载，其中 tools 列表中的名称可以解析为内置工具或已通过 MCP client 注册的外部 MCP 代理工具。子 Agent 配置 SHALL 位于 `agents.subagent` 段（通用默认值 + max_depth/max_concurrent/max_total_per_turn 预算 + 可选命名 presets），固定角色段 `agents.chongzhi` / `agents.liang` SHALL NOT 再被接受。agent 配置 SHALL NOT 包含任何 LLM 参数字段——模型、思考等级、输出配额（`max_tokens`/`max_completion_tokens`）与续写配置均为 turn 级属性，由模型目录 + 部署默认 + 请求参数解析得出（见 per-request-model-selection），并统一注入该 turn 的全部 agent。未设置或 `<= 0` 的 `max_rounds` SHALL 回退到默认值 `100`。
 
 #### Scenario: Load agent config on startup
 - **WHEN** 服务启动
-- **THEN** 系统从 config.yaml 的 agents 段加载所有 Agent 配置，并从合并后的工具注册表（内置工具 + 外部 MCP 代理工具）解析 tools 列表，构建 Agent 实例
+- **THEN** 系统从 config.yaml 加载主 Agent 与 `agents.subagent` 通用配置（含预算与 presets），并从合并后的工具注册表（内置工具 + 外部 MCP 代理工具）解析 tools 列表
+
+#### Scenario: Legacy role sections rejected
+- **WHEN** config.yaml 仍包含 `agents.chongzhi` 或 `agents.liang` 段
+- **THEN** 配置加载失败，错误信息指向 `agents.subagent` 迁移
 
 #### Scenario: Configurable tool permissions
-- **WHEN** Agent 配置中 tools 列表为空且 mcp.servers 为空
-- **THEN** 该 Agent 调用 LLM 时不传递 tools 参数
+- **WHEN** 派发未收窄且子 Agent 有效工具集为空
+- **THEN** 该子 Agent 调用 LLM 时不传递 tools 参数
 
 #### Scenario: Configurable MCP permissions
 - **WHEN** Agent 配置中 mcp.servers 非空
