@@ -32,6 +32,19 @@ func newTurnGate() *turnGate {
 	return g
 }
 
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
 func (g *turnGate) waitTurn(slot int) {
 	g.mu.Lock()
 	for g.turn < slot {
@@ -140,11 +153,11 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 			scriptedLLMResponse{
 				finishReason: "tool_calls",
 				toolCalls: []agent.ToolCall{
-					{ID: runX1, Function: agent.ToolCallFunction{Name: agent.ToolInvokeChongzhi,
+					{ID: runX1, Function: agent.ToolCallFunction{Name: agent.SpawnSubagentTool,
 						Arguments: `{"task":"collect data from alpha"}`}},
-					{ID: runX2, Function: agent.ToolCallFunction{Name: agent.ToolInvokeChongzhi,
+					{ID: runX2, Function: agent.ToolCallFunction{Name: agent.SpawnSubagentTool,
 						Arguments: `{"task":"collect data from beta"}`}},
-					{ID: runX3, Function: agent.ToolCallFunction{Name: agent.ToolInvokeChongzhi,
+					{ID: runX3, Function: agent.ToolCallFunction{Name: agent.SpawnSubagentTool,
 						Arguments: `{"task":"collect data from gamma"}`}},
 				},
 				usage: agent.Usage{PromptTokens: 30, CompletionTokens: 3, TotalTokens: 33},
@@ -184,6 +197,7 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 
 	// --- SSE attribution -------------------------------------------------
 	perRun := map[string]string{runX1: "", runX2: "", runX3: ""}
+	var instanceIDs []string
 	var sseTokenRunOrder []string
 	for i, ty := range types {
 		p := payloads[i]
@@ -194,17 +208,23 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 				runID = s
 			}
 		}
-		if p["agent"] == stream.AgentChongzhi {
+		instanceID, _ := meta[stream.MetaAgentInstanceID].(string)
+		if instanceID != "" {
 			require.Contains(t, []string{runX1, runX2, runX3}, runID,
 				"every sub-agent %s event must carry a valid run id, got %q", ty, runID)
+			if len(instanceIDs) == 0 || instanceIDs[len(instanceIDs)-1] != instanceID {
+				instanceIDs = append(instanceIDs, instanceID)
+			}
 			if ty == stream.EventToken {
 				perRun[runID] += p["content"].(string)
 				sseTokenRunOrder = append(sseTokenRunOrder, runID)
 			}
 		} else {
 			assert.Empty(t, runID, "non-sub-agent %s event must not carry a run id", ty)
+			assert.Empty(t, instanceID, "non-sub-agent %s event must not carry an instance id", ty)
 		}
 	}
+	require.Len(t, uniqueStrings(instanceIDs), 3, "parallel instances must receive distinct stable ids")
 	// The three runs' tokens interleave on the wire in the gated order.
 	assert.Equal(t, []string{runX1, runX2, runX3, runX1, runX2, runX3}, sseTokenRunOrder,
 		"SSE token events must interleave across runs (arrival order, attributable by id)")
@@ -221,8 +241,8 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 	var rowRunOrder []string
 	perRunRows := map[string]string{runX1: "", runX2: "", runX3: ""}
 	for _, m := range msgs {
-		if m.Agent != stream.AgentChongzhi {
-			// Top-level rows (user, Confucius) never carry a run id.
+		if m.AgentInstanceID == "" {
+			// Top-level rows (user, Confucius) never carry identity.
 			assert.Empty(t, m.RunID, "non-sub-agent row (%s/%s) must have empty run_id", m.Agent, m.EventType)
 			continue
 		}
@@ -248,7 +268,7 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	recoveredRuns := map[string]string{}
 	for _, m := range recovered {
-		if m.Agent == stream.AgentChongzhi && m.EventType == model.EventTypeToken {
+		if m.AgentInstanceID != "" && m.EventType == model.EventTypeToken {
 			recoveredRuns[m.RunID] += m.Content
 		}
 	}
@@ -266,7 +286,7 @@ func TestSubAgentRun_SingleInvocationRegression(t *testing.T) {
 		scriptedLLMResponse{
 			finishReason: "tool_calls",
 			toolCalls: []agent.ToolCall{
-				{ID: "call_only", Function: agent.ToolCallFunction{Name: agent.ToolInvokeChongzhi,
+				{ID: "call_only", Function: agent.ToolCallFunction{Name: agent.SpawnSubagentTool,
 					Arguments: `{"task":"write hello"}`}},
 			},
 			usage: agent.Usage{PromptTokens: 20, CompletionTokens: 2, TotalTokens: 22},
@@ -301,20 +321,23 @@ func TestSubAgentRun_SingleInvocationRegression(t *testing.T) {
 				runID = s
 			}
 		}
-		if p["agent"] == stream.AgentChongzhi {
+		instanceID, _ := meta[stream.MetaAgentInstanceID].(string)
+		if instanceID != "" {
 			assert.Equal(t, "call_only", runID, "the single invocation's events carry its id")
 		} else {
 			assert.Empty(t, runID, "top-level %s event carries no run id", ty)
+			assert.Empty(t, instanceID, "top-level %s event carries no instance id", ty)
 		}
 	}
 	requireEventPresent(t, types, stream.EventDone)
 
 	env.waitForPersistedTurn(t, defaultSessionID, 5)
 	for _, m := range env.mysqlFake.messagesFor(defaultSessionID) {
-		if m.Agent == stream.AgentChongzhi {
+		if m.AgentInstanceID != "" {
 			assert.Equal(t, "call_only", m.RunID)
 		} else {
 			assert.Empty(t, m.RunID, "row %s/%s must have no run id", m.Agent, m.EventType)
+			assert.Empty(t, m.AgentInstanceID, "row %s/%s must have no instance id", m.Agent, m.EventType)
 		}
 	}
 }

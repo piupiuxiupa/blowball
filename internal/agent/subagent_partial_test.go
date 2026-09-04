@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,7 +57,7 @@ func TestChongzhi_Run_LLMErrorReturnsStreamedPartial(t *testing.T) {
 	client := newFake(
 		fakeResponse{tokens: []string{"wrote ", "x.txt"}, err: errString("unexpected EOF")},
 	)
-	chongzhi, err := NewChongzhi(config.AgentConfig{
+	chongzhi, err := newGenericFromAgentConfig(config.AgentConfig{
 		Name:         "Chongzhi",
 		SystemPrompt: "sys",
 	}, client, tool.NewRegistry(), testTurn())
@@ -77,7 +78,7 @@ func TestLiang_Run_LLMErrorReturnsStreamedPartial(t *testing.T) {
 	client := newFake(
 		fakeResponse{tokens: []string{"half ", "analysis"}, err: errString("connection reset by peer")},
 	)
-	liang, err := NewLiang(config.AgentConfig{
+	liang, err := newGenericFromAgentConfig(config.AgentConfig{
 		Name:         "Liang",
 		SystemPrompt: "sys",
 	}, client, tool.NewRegistry(), testTurn())
@@ -100,15 +101,11 @@ func TestLiang_Run_LLMErrorReturnsStreamedPartial(t *testing.T) {
 // separately via runConfuciusRetry.
 func dispatchOneSub(t *testing.T, sub Agent, invokeName string) toolResult {
 	t.Helper()
-	// The Confucius client is never called: only the sub-agent dispatch runs.
-	c := newTestConfucius(t, newFake(), map[string]Agent{
-		ToolInvokeChongzhi: subIf(invokeName == ToolInvokeChongzhi, sub, &fakeAgent{name: "Chongzhi"}),
-		ToolInvokeLiang:    subIf(invokeName == ToolInvokeLiang, sub, &fakeAgent{name: "Liang"}),
-	})
+	coordinator := testSpawnCoordinator(nil, func(SubAgentSpec) (Agent, error) { return sub, nil })
 	tc := ToolCall{ID: "c1", Function: ToolCallFunction{Name: invokeName, Arguments: `{"task":"do"}`}}
 	var result toolResult
 	collectEvents(t, func(hub *stream.Hub) {
-		result = c.dispatchSubAgent(context.Background(), tc, hub, newRetryBudget(0))
+		result = coordinator.dispatch(context.Background(), tc, hub, newRetryBudget(0), spawnParent{agentName: "Confucius"})
 	})
 	return result
 }
@@ -132,10 +129,11 @@ func TestDispatchSubAgent_GiveUpJoinsPartial(t *testing.T) {
 		policy:   config.AgentRetryConfig{Enabled: false, MaxAttempts: 3},
 		outcomes: []scriptedOutcome{{err: transientErr, partial: "analysis so far", usage: Usage{TotalTokens: 5}}},
 	}
-	result := dispatchOneSub(t, liang, ToolInvokeLiang)
+	result := dispatchOneSub(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 1, liang.callCount())
 	assert.True(t, result.isError)
-	assert.Equal(t, transientErr.Error()+partialJoinMarker+"analysis so far", result.content)
+	assert.True(t, strings.HasPrefix(result.content, transientErr.Error()+partialJoinMarker+"analysis so far"))
+	assert.Contains(t, result.content, "status: error")
 }
 
 // 3.3 (zero regression): blank partial keeps the tool result content
@@ -146,10 +144,11 @@ func TestDispatchSubAgent_BlankPartialKeepsErrorText(t *testing.T) {
 		policy:   config.AgentRetryConfig{Enabled: false, MaxAttempts: 3},
 		outcomes: []scriptedOutcome{{err: transientErr, usage: Usage{TotalTokens: 5}}},
 	}
-	result := dispatchOneSub(t, liang, ToolInvokeLiang)
+	result := dispatchOneSub(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 1, liang.callCount())
 	assert.True(t, result.isError)
-	assert.Equal(t, transientErr.Error(), result.content)
+	assert.True(t, strings.HasPrefix(result.content, transientErr.Error()))
+	assert.Contains(t, result.content, "status: error")
 }
 
 // 3.3 (end-to-end): the merged text is what Confucius actually consumes — the
@@ -162,11 +161,11 @@ func TestConfucius_SubAgentFailure_PartialOutputFedBack(t *testing.T) {
 		policy:   config.AgentRetryConfig{Enabled: false, MaxAttempts: 3},
 		outcomes: []scriptedOutcome{{err: transientErr, partial: "half-done analysis", usage: Usage{TotalTokens: 5}}},
 	}
-	content, calls, events := runConfuciusRetry(t, liang, ToolInvokeLiang)
+	content, calls, events := runConfuciusRetry(t, liang, SpawnSubagentTool)
 	require.Equal(t, 1, calls)
 
 	want := transientErr.Error() + partialJoinMarker + "half-done analysis"
-	assert.Equal(t, want, content, "the merged text must be fed back as the tool result")
+	assert.True(t, strings.HasPrefix(content, want), "the merged text must be fed back as the tool result")
 
 	var sseContent string
 	for _, e := range events {
@@ -174,7 +173,7 @@ func TestConfucius_SubAgentFailure_PartialOutputFedBack(t *testing.T) {
 			sseContent = e.Content
 		}
 	}
-	assert.Equal(t, want, sseContent, "the SSE tool_result event must carry the same merged text")
+	assert.True(t, strings.HasPrefix(sseContent, want), "the SSE tool_result event must carry the same merged text")
 }
 
 // 3.4: retry exhaustion carries the LAST attempt's partial output — every
@@ -190,10 +189,10 @@ func TestDispatchSubAgent_RetryExhaustedKeepsLastPartial(t *testing.T) {
 			{err: secondErr, partial: "second attempt partial", usage: Usage{TotalTokens: 5}},
 		},
 	}
-	result := dispatchOneSub(t, liang, ToolInvokeLiang)
+	result := dispatchOneSub(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 2, liang.callCount(), "max_attempts counts the original call")
 	assert.True(t, result.isError)
-	assert.Equal(t, secondErr.Error()+partialJoinMarker+"second attempt partial", result.content,
+	assert.True(t, strings.HasPrefix(result.content, secondErr.Error()+partialJoinMarker+"second attempt partial"),
 		"the give-up point must join the LAST attempt's partial")
 }
 
@@ -208,8 +207,8 @@ func TestDispatchSubAgent_LengthExhaustedJoinsAccumulated(t *testing.T) {
 		policy:   msPolicy(3),
 		outcomes: []scriptedOutcome{{err: exhausted, partial: "a very long answer that got cut", usage: Usage{TotalTokens: 9}}},
 	}
-	result := dispatchOneSub(t, liang, ToolInvokeLiang)
+	result := dispatchOneSub(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 1, liang.callCount(), "length-exhausted text is non-transient: never retried")
 	assert.True(t, result.isError)
-	assert.Equal(t, exhausted.Error()+partialJoinMarker+"a very long answer that got cut", result.content)
+	assert.True(t, strings.HasPrefix(result.content, exhausted.Error()+partialJoinMarker+"a very long answer that got cut"))
 }

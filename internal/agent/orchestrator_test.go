@@ -34,14 +34,16 @@ func newTestOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 				SystemPrompt: "you are confucius",
 				Tools:        []string{},
 			},
-			Chongzhi: config.AgentConfig{
-				Name:         "Chongzhi",
-				SystemPrompt: "you are chongzhi",
-				Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
-			},
-			Liang: config.AgentConfig{
-				Name:         "Liang",
-				SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name:         "Chongzhi",
+					SystemPrompt: "you are chongzhi",
+					Tools:        []string{"xizhi_write_file", "xizhi_read_file", "xizhi_modify_file"},
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -86,12 +88,15 @@ func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name: "Confucius", SystemPrompt: "you are confucius"},
-			Chongzhi: config.AgentConfig{
-				Name: "Chongzhi", SystemPrompt: "you are chongzhi",
-				Tools: []string{"xizhi_write_file", "xizhi_delete"},
-			},
-			Liang: config.AgentConfig{
-				Name: "Liang", SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name: "Chongzhi", SystemPrompt: "you are chongzhi",
+					Tools: []string{"xizhi_write_file", "xizhi_delete"},
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -237,14 +242,16 @@ func TestOrchestrator_ExternalMCPTool(t *testing.T) {
 				SystemPrompt: "you are confucius",
 				Tools:        []string{"external_greet"},
 			},
-			Chongzhi: config.AgentConfig{
-				Name:         "Chongzhi",
-				SystemPrompt: "you are chongzhi",
-				Tools:        []string{"xizhi_write_file"},
-			},
-			Liang: config.AgentConfig{
-				Name:         "Liang",
-				SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name:         "Chongzhi",
+					SystemPrompt: "you are chongzhi",
+					Tools:        []string{"xizhi_write_file"},
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -297,14 +304,16 @@ func TestOrchestrator_MCPToolFiltering(t *testing.T) {
 					}},
 				},
 			},
-			Chongzhi: config.AgentConfig{
-				Name:         "Chongzhi",
-				SystemPrompt: "you are chongzhi",
-				Tools:        []string{"xizhi_write_file"},
-			},
-			Liang: config.AgentConfig{
-				Name:         "Liang",
-				SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name:         "Chongzhi",
+					SystemPrompt: "you are chongzhi",
+					Tools:        []string{"xizhi_write_file"},
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -364,13 +373,15 @@ func TestOrchestrator_SystemPromptIncludesSkills(t *testing.T) {
 				SystemPrompt: "you are confucius",
 				Skills:       []string{"coding-style"},
 			},
-			Chongzhi: config.AgentConfig{
-				Name:         "Chongzhi",
-				SystemPrompt: "you are chongzhi",
-			},
-			Liang: config.AgentConfig{
-				Name:         "Liang",
-				SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name:         "Chongzhi",
+					SystemPrompt: "you are chongzhi",
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -432,13 +443,15 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 				SystemPrompt: "you are confucius",
 				Skills:       []string{"coding-style"},
 			},
-			Chongzhi: config.AgentConfig{
-				Name:         "Chongzhi",
-				SystemPrompt: "you are chongzhi",
-			},
-			Liang: config.AgentConfig{
-				Name:         "Liang",
-				SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name:         "Chongzhi",
+					SystemPrompt: "you are chongzhi",
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -463,12 +476,9 @@ func TestOrchestrator_SystemPromptExcludesUserSkills(t *testing.T) {
 	assert.NotContains(t, prompt, "User override")
 }
 
-// TestOrchestrator_ConfuciusPromptIncludesParallelGuidance verifies the
-// parallel dispatch decision guidance (capability E) is present in the rendered
-// Confucius system prompt. The guidance lives in the base prompt text
-// (config.yaml), so this asserts the rendered prompt carries the key guidance
-// phrases without depending on the full prompt string.
-func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
+// TestOrchestrator_ConfuciusPromptIncludesDispatchDiscipline verifies the
+// dynamic-subagent dispatch discipline survives system-prompt rendering.
+func TestOrchestrator_ConfuciusPromptIncludesDispatchDiscipline(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(fakeResponse{
 		tokens:       []string{"done"},
@@ -481,10 +491,15 @@ func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				SystemPrompt: "you are confucius\n\nParallel Dispatch Guidance\n- Emit INDEPENDENT subtasks as multiple tool_calls in a SINGLE assistant turn.\n- Parallel budget: aim for 2-3 parallel invokes per turn and avoid more than 5.\n- Never issue overlapping/duplicate tasks to the same sub-agent in one turn.",
+				SystemPrompt: "you are confucius\n\nDispatch Discipline\n- A sub-agent sees only the task prompt you send it.\n- Emit independent spawn_subagent calls together in one assistant turn.\n- Small, bounded, unambiguous tasks are often faster to complete yourself.\n- Keep write sets disjoint when dispatching parallel sub-agents.\n- A result marked `status: capped` can be continued through resume_agent_id.",
 			},
-			Chongzhi: config.AgentConfig{Name: "Chongzhi", SystemPrompt: "you are chongzhi"},
-			Liang:    config.AgentConfig{Name: "Liang", SystemPrompt: "you are liang"},
+			Subagent: config.SubAgentConfig{
+				AgentConfig:      config.AgentConfig{Name: "Chongzhi", SystemPrompt: "you are chongzhi"},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
+			},
 		},
 	}
 	o, err := NewOrchestrator(client, cfg, nil, nil, skill.NewLoader("", nil), nil)
@@ -497,8 +512,9 @@ func TestOrchestrator_ConfuciusPromptIncludesParallelGuidance(t *testing.T) {
 	hub.Close()
 
 	prompt := client.lastRequest().Messages[0].Content
-	assert.Contains(t, prompt, "Parallel Dispatch Guidance")
-	assert.Contains(t, prompt, "SINGLE assistant turn")
-	assert.Contains(t, prompt, "2-3 parallel invokes")
-	assert.Contains(t, prompt, "overlapping/duplicate tasks to the same sub-agent")
+	assert.Contains(t, prompt, "Dispatch Discipline")
+	assert.Contains(t, prompt, "sees only the task prompt")
+	assert.Contains(t, prompt, "one assistant turn")
+	assert.Contains(t, prompt, "write sets disjoint")
+	assert.Contains(t, prompt, "resume_agent_id")
 }

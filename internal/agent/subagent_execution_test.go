@@ -16,9 +16,9 @@ import (
 	"go.uber.org/goleak"
 )
 
-func testChongzhiConfig(tools ...string) config.AgentConfig {
+func testExecutionConfig(tools ...string) config.AgentConfig {
 	return config.AgentConfig{
-		Name:         "Chongzhi",
+		Name:         "Execution",
 		SystemPrompt: "you are chongzhi",
 		Tools:        tools,
 	}
@@ -53,7 +53,7 @@ func (f *fakeExecutor) callCount() int {
 	return len(f.mu.calls)
 }
 
-func newTestChongzhi(t *testing.T, client LLMClient, reg *tool.Registry) *Chongzhi {
+func newTestSubAgent(t *testing.T, client LLMClient, reg *tool.Registry) *SubAgent {
 	t.Helper()
 	// Chongzhi config names exactly the tools present in reg. The caller
 	// builds reg with the fake tool it wants to exercise.
@@ -61,12 +61,12 @@ func newTestChongzhi(t *testing.T, client LLMClient, reg *tool.Registry) *Chongz
 	for _, s := range reg.List() {
 		names = append(names, s.Name)
 	}
-	c, err := NewChongzhi(testChongzhiConfig(names...), client, reg, testTurn())
+	c, err := newGenericFromAgentConfig(testExecutionConfig(names...), client, reg, testTurn())
 	require.NoError(t, err)
 	return c
 }
 
-func newChongzhiRegistryWithFake(t *testing.T, fake *fakeExecutor) *tool.Registry {
+func newSubAgentRegistryWithFake(t *testing.T, fake *fakeExecutor) *tool.Registry {
 	t.Helper()
 	reg := tool.NewRegistry()
 	spec := &tool.ToolSpec{
@@ -79,8 +79,8 @@ func newChongzhiRegistryWithFake(t *testing.T, fake *fakeExecutor) *tool.Registr
 	return reg
 }
 
-// runChongzhiAndCollect mirrors runConfuciusAndCollect for Chongzhi.
-func runChongzhiAndCollect(t *testing.T, c *Chongzhi, messages []Message) ([]stream.StreamEvent, string, Usage, error) {
+// runSubAgentAndCollect mirrors runConfuciusAndCollect for Chongzhi.
+func runSubAgentAndCollect(t *testing.T, c *SubAgent, messages []Message) ([]stream.StreamEvent, string, Usage, error) {
 	t.Helper()
 	hub := stream.NewHub(0)
 
@@ -153,10 +153,10 @@ func runChongzhiAndCollect(t *testing.T, c *Chongzhi, messages []Message) ([]str
 	return out, r.content, r.usage, r.err
 }
 
-func TestChongzhi_RunsXizhiTool(t *testing.T) {
+func TestSubAgentExecution_RunsXizhiTool(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	fake := &fakeExecutor{name: "xizhi_write_file", result: map[string]any{"ok": true}}
-	reg := newChongzhiRegistryWithFake(t, fake)
+	reg := newSubAgentRegistryWithFake(t, fake)
 
 	client := newFake(
 		fakeResponse{
@@ -172,9 +172,9 @@ func TestChongzhi_RunsXizhiTool(t *testing.T) {
 			tokens:       []string{"wrote", " file"},
 		},
 	)
-	c := newTestChongzhi(t, client, reg)
+	c := newTestSubAgent(t, client, reg)
 
-	events, content, _, err := runChongzhiAndCollect(t, c, []Message{
+	events, content, _, err := runSubAgentAndCollect(t, c, []Message{
 		{Role: "user", Content: "write a.txt"},
 	})
 	require.NoError(t, err)
@@ -206,17 +206,17 @@ func TestChongzhi_RunsXizhiTool(t *testing.T) {
 	assert.True(t, sawTool, "expected tool_call event for xizhi_write_file")
 }
 
-// TestChongzhi_ToolFailure_NoAgentError verifies that a registry-tool failure
+// TestSubAgentExecution_ToolFailure_NoAgentError verifies that a registry-tool failure
 // is carried solely by the status envelope in the role="tool" message and does
 // NOT emit an agent_error SSE event. The frontend renders tool errors from the
 // status field; surfacing them again as agent_error misrepresents a recoverable
 // tool hiccup as an agent failure (capability: tool-result-envelope). This guards
 // the shared leaf-agent dispatchOneRegistryTool path used by Chongzhi/Liang and
 // the parallel structure of Confucius's dispatchRegistryTool.
-func TestChongzhi_ToolFailure_NoAgentError(t *testing.T) {
+func TestSubAgentExecution_ToolFailure_NoAgentError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	fake := &fakeExecutor{name: "xizhi_write_file", err: errors.New("disk full")}
-	reg := newChongzhiRegistryWithFake(t, fake)
+	reg := newSubAgentRegistryWithFake(t, fake)
 
 	client := newFake(
 		fakeResponse{
@@ -232,9 +232,9 @@ func TestChongzhi_ToolFailure_NoAgentError(t *testing.T) {
 			tokens:       []string{"could not write the file"},
 		},
 	)
-	c := newTestChongzhi(t, client, reg)
+	c := newTestSubAgent(t, client, reg)
 
-	events, _, _, err := runChongzhiAndCollect(t, c, []Message{
+	events, _, _, err := runSubAgentAndCollect(t, c, []Message{
 		{Role: "user", Content: "write a.txt"},
 	})
 	require.NoError(t, err)
@@ -257,13 +257,13 @@ func TestChongzhi_ToolFailure_NoAgentError(t *testing.T) {
 	}
 }
 
-// TestChongzhi_DispatchesToolCallsOnStopFinishReason verifies that Chongzhi
+// TestSubAgentExecution_DispatchesToolCallsOnStopFinishReason verifies that Chongzhi
 // dispatches tool_calls even when the finish_reason is "stop" rather than the
 // native "tool_calls" value.
-func TestChongzhi_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
+func TestSubAgentExecution_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	fake := &fakeExecutor{name: "xizhi_write_file", result: map[string]any{"ok": true}}
-	reg := newChongzhiRegistryWithFake(t, fake)
+	reg := newSubAgentRegistryWithFake(t, fake)
 
 	client := newFake(
 		fakeResponse{
@@ -281,9 +281,9 @@ func TestChongzhi_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 			tokens:       []string{"wrote", " file"},
 		},
 	)
-	c := newTestChongzhi(t, client, reg)
+	c := newTestSubAgent(t, client, reg)
 
-	events, content, _, err := runChongzhiAndCollect(t, c, []Message{
+	events, content, _, err := runSubAgentAndCollect(t, c, []Message{
 		{Role: "user", Content: "write a.txt"},
 	})
 	require.NoError(t, err)
@@ -309,17 +309,17 @@ func TestChongzhi_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 	assert.Contains(t, toolContent, `"ok":true`, "tool result must be JSON-marshaled into the tool message")
 }
 
-func TestChongzhi_FlatTopology_NoInvokeTools(t *testing.T) {
+func TestSubAgentExecution_FlatTopology_NoInvokeTools(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	fake := &fakeExecutor{name: "xizhi_read_file", result: ""}
-	reg := newChongzhiRegistryWithFake(t, fake)
+	reg := newSubAgentRegistryWithFake(t, fake)
 
 	client := newFake(
 		fakeResponse{
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{{
 				ID:       "t-inv",
-				Function: ToolCallFunction{Name: ToolInvokeLiang, Arguments: `{"task":"recurse"}`},
+				Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"recurse"}`},
 			}},
 		},
 		fakeResponse{
@@ -327,36 +327,23 @@ func TestChongzhi_FlatTopology_NoInvokeTools(t *testing.T) {
 			finishReason: "stop",
 		},
 	)
-	c := newTestChongzhi(t, client, reg)
+	c := newTestSubAgent(t, client, reg)
 
-	events, content, _, err := runChongzhiAndCollect(t, c, []Message{
+	_, content, _, err := runSubAgentAndCollect(t, c, []Message{
 		{Role: "user", Content: "go"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "fallback", content)
 
-	// Flat-topology contract: invoke_* tools are NEVER recognized by Chongzhi.
-	// The tool_call errors as a registry miss — surfaced to the model in-band via
-	// the status envelope ({"status":1,"error":...}), NOT as an agent_error event:
-	// a registry-tool failure (including an unrecognized name) is carried solely by
-	// the envelope so it does not misrepresent a recoverable error as an agent crash.
-	var toolContent string
-	for _, m := range client.lastRequest().Messages {
-		if m.Role == "tool" && m.ToolCallID == "t-inv" {
-			toolContent = m.Content
-		}
-	}
-	assert.Contains(t, toolContent, `"status":1`, "invoke_liang must fail as a registry miss in the status envelope")
-	assert.Contains(t, toolContent, ToolInvokeLiang, "the tool-result error must name the unrecognized invoke_* tool")
-	for _, e := range events {
-		assert.NotEqual(t, stream.EventAgentError, e.Type, "a registry-tool failure must not emit an agent_error event")
-	}
+	// Default-depth contract: spawn_subagent is not advertised to a child.
+	assert.NotContains(t, string(c.toolsJSON), SpawnSubagentTool,
+		"a depth-capped generic sub-agent must not receive the spawn tool")
 
 	// The fake xizhi tool should not have been touched.
 	assert.Equal(t, 0, fake.callCount(), "xizhi tool must not be invoked by an invoke_liang tool_call")
 }
 
-func TestChongzhi_ReasoningRequest(t *testing.T) {
+func TestSubAgentExecution_ReasoningRequest(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	client := newFake(
 		fakeResponse{
@@ -367,12 +354,12 @@ func TestChongzhi_ReasoningRequest(t *testing.T) {
 		},
 	)
 	reg := tool.NewRegistry()
-	cfg := testChongzhiConfig()
+	cfg := testExecutionConfig()
 	// The thinking wire family and output quota both ride the turn config
 	// (model-effort-v2, per-model-completion-budget), not the agent config.
 	turn := testTurn()
 	turn.Thinking, turn.ReasoningEffort, turn.MaxCompletionTokens = true, "high", 1024
-	c, err := NewChongzhi(cfg, client, reg, turn)
+	c, err := newGenericFromAgentConfig(cfg, client, reg, turn)
 	require.NoError(t, err)
 
 	hub := stream.NewHub(0)

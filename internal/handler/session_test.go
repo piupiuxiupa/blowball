@@ -1444,7 +1444,7 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 		eventsToEmit: []stream.StreamEvent{
 			stream.AgentStartEvent(stream.AgentConfucius),
 			stream.TokenEvent(stream.AgentConfucius, "Thinking"),
-			stream.ToolCallEvent(stream.AgentConfucius, "tc-1", "invoke_chongzhi", map[string]any{"task": "compute"}),
+			stream.ToolCallEvent(stream.AgentConfucius, "tc-1", "spawn_subagent", map[string]any{"task": "compute"}),
 			stream.AgentStartEvent(stream.AgentChongzhi),
 			stream.TokenEvent(stream.AgentChongzhi, "42"),
 			stream.AgentEndEvent(stream.AgentChongzhi),
@@ -1513,7 +1513,7 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	require.Equal(t, model.EventTypeToolCall, toolMsg.EventType)
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal([]byte(toolMsg.Content), &payload))
-	assert.Equal(t, "invoke_chongzhi", payload["name"])
+	assert.Equal(t, "spawn_subagent", payload["name"])
 }
 
 // TestSendMessage_OrchestratorFailure_PersistsPartialTurn verifies that when

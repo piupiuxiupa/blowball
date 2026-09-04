@@ -10,14 +10,15 @@ import "encoding/json"
 
 // Event type values, emitted as StreamEvent.Type and used as the SSE event name.
 const (
-	EventAgentStart = "agent_start"
-	EventToken      = "token"
-	EventReasoning  = "reasoning"
-	EventToolCall   = "tool_call"
-	EventToolResult = "tool_result"
-	EventAgentEnd   = "agent_end"
-	EventAgentError = "agent_error"
-	EventDone       = "done"
+	EventAgentStart  = "agent_start"
+	EventToken       = "token"
+	EventReasoning   = "reasoning"
+	EventToolCall    = "tool_call"
+	EventToolResult  = "tool_result"
+	EventPlanUpdated = "plan_updated"
+	EventAgentEnd    = "agent_end"
+	EventAgentError  = "agent_error"
+	EventDone        = "done"
 	// EventMessage is a sentinel used for user message rows persisted to the
 	// messages table; it is never emitted as an SSE event.
 	EventMessage = "message"
@@ -39,6 +40,7 @@ const (
 	MetaCode       = "error_code"
 	MetaDetail     = "error_detail"
 	MetaToolCallID = "tool_call_id"
+	MetaRevision   = "revision"
 )
 
 // StreamEvent is the unit of data exchanged between agents and the SSE consumer.
@@ -118,6 +120,18 @@ func ToolResultEvent(agent, toolCallID, output string) StreamEvent {
 		Agent:   agent,
 		Content: output,
 		Meta:    map[string]any{MetaToolCallID: toolCallID},
+	}
+}
+
+// PlanUpdatedEvent reports a host-accepted semantic plan snapshot. Content is
+// the complete canonical JSON so event persistence retains the plan even though
+// arbitrary Meta keys are not persisted as part of message content.
+func PlanUpdatedEvent(agent, planJSON string, revision int) StreamEvent {
+	return StreamEvent{
+		Type:    EventPlanUpdated,
+		Agent:   agent,
+		Content: planJSON,
+		Meta:    map[string]any{MetaRevision: revision},
 	}
 }
 

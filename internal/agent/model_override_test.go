@@ -25,11 +25,14 @@ func newTurnConfigOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 			Confucius: config.AgentConfig{
 				Name: "Confucius", SystemPrompt: "you are confucius",
 			},
-			Chongzhi: config.AgentConfig{
-				Name: "Chongzhi", SystemPrompt: "you are chongzhi",
-			},
-			Liang: config.AgentConfig{
-				Name: "Liang", SystemPrompt: "you are liang",
+			Subagent: config.SubAgentConfig{
+				AgentConfig: config.AgentConfig{
+					Name: "Chongzhi", SystemPrompt: "you are chongzhi",
+				},
+				MaxDepth:         1,
+				MaxConcurrent:    4,
+				MaxTotalPerTurn:  12,
+				MaxSnapshotBytes: 1 << 20,
 			},
 		},
 	}
@@ -46,8 +49,8 @@ func dispatchScript() []fakeResponse {
 		{
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{
-				{ID: "c1", Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"t1"}`}},
-				{ID: "c2", Function: ToolCallFunction{Name: ToolInvokeLiang, Arguments: `{"task":"t2"}`}},
+				{ID: "c1", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t1","name":"Chongzhi"}`}},
+				{ID: "c2", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t2","name":"Liang"}`}},
 			},
 			usage: Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
 		},

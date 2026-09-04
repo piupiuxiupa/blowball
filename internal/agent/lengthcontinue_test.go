@@ -361,9 +361,9 @@ func testLiangCfg() config.AgentConfig {
 // newTestLiang builds a Liang whose turn resolves to a catalog entry with the
 // given quota and continuation policy (the entry-driven form of the old
 // cfg.max_tokens + global lc constructor pair).
-func newTestLiang(t *testing.T, client LLMClient, quota int, lc config.LengthContinueConfig) *Liang {
+func newTestLiang(t *testing.T, client LLMClient, quota int, lc config.LengthContinueConfig) *SubAgent {
 	t.Helper()
-	l, err := NewLiang(testLiangCfg(), client, tool.NewRegistry(),
+	l, err := newGenericFromAgentConfig(testLiangCfg(), client, tool.NewRegistry(),
 		ModelOverride{Model: "m", MaxCompletionTokens: quota, LengthContinue: lc})
 	require.NoError(t, err)
 	return l
@@ -404,11 +404,8 @@ func TestConfuciusRun_LengthContinuation(t *testing.T) {
 		fakeResponse{content: "second half", tokens: []string{"second half"}, finishReason: "stop", usage: Usage{PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150}},
 	)
 	cfg := config.AgentConfig{Name: "Confucius", SystemPrompt: "sys"}
-	subAgents := map[string]SubAgentFactory{
-		ToolInvokeChongzhi: func() (Agent, error) { return &fakeAgent{name: "Chongzhi"}, nil },
-		ToolInvokeLiang:    func() (Agent, error) { return &fakeAgent{name: "Liang"}, nil },
-	}
-	c, err := NewConfucius(cfg, client, tool.NewRegistry(), subAgents,
+	factory := func(SubAgentSpec) (Agent, error) { return &fakeAgent{name: "Chongzhi"}, nil }
+	c, err := NewConfucius(cfg, client, tool.NewRegistry(), testSpawnCoordinator(tool.NewRegistry(), factory),
 		ModelOverride{Model: "m", MaxCompletionTokens: 8192, LengthContinue: enabledPolicy(8192, 3)})
 	require.NoError(t, err)
 
@@ -483,7 +480,7 @@ func TestLiangRun_WrapUpContinuesOnLength(t *testing.T) {
 	cfg := testLiangCfg()
 	cfg.MaxRounds = 2
 	cfg.Tools = []string{xizhi.NameReadFile}
-	l, err := NewLiang(cfg, client, reg,
+	l, err := newGenericFromAgentConfig(cfg, client, reg,
 		ModelOverride{Model: "m", MaxCompletionTokens: 8192, LengthContinue: enabledPolicy(8192, 3)})
 	require.NoError(t, err)
 

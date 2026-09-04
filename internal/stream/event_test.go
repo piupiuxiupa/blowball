@@ -70,6 +70,18 @@ func TestEventConstructors(t *testing.T) {
 		assert.False(t, present, "nil args must not populate Meta[args]")
 	})
 
+	t.Run("PlanUpdatedEvent", func(t *testing.T) {
+		planJSON := `{"revision":3,"steps":[{"step":"verify","status":"completed"}]}`
+		e := PlanUpdatedEvent(AgentConfucius, planJSON, 3)
+		assert.Equal(t, EventPlanUpdated, e.Type)
+		assert.Equal(t, AgentConfucius, e.Agent)
+		assert.Equal(t, planJSON, e.Content)
+		require.NotNil(t, e.Meta)
+		assert.Equal(t, 3, e.Meta[MetaRevision])
+		assert.NotContains(t, e.Meta, MetaParentToolCallID)
+		assert.NotContains(t, e.Meta, MetaAgentInstanceID)
+	})
+
 	t.Run("DoneEvent with usage", func(t *testing.T) {
 		usage := map[string]any{
 			"total_tokens": 1234,

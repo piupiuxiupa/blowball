@@ -232,10 +232,10 @@ func streamChatWithRetry(ctx context.Context, client LLMClient, hub stream.Event
 func scaffoldLengthRound(ctx context.Context, hub stream.EventHub, agentName string,
 	round *[]Message, resp LLMResponse, dispatch lengthRoundDispatch) {
 	*round = append(*round, Message{
-		Role:            "assistant",
-		Content:         resp.Content,
+		Role:             "assistant",
+		Content:          resp.Content,
 		ReasoningContent: resp.ReasoningContent,
-		ToolCalls:       resp.ToolCalls,
+		ToolCalls:        resp.ToolCalls,
 	})
 	if len(resp.ToolCalls) == 0 {
 		*round = append(*round, Message{Role: "user", Content: lengthContinueInstruction})

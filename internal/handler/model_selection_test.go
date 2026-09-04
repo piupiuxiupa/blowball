@@ -255,7 +255,7 @@ func TestNewModelSelectionConfig(t *testing.T) {
 			},
 			Agents: config.AgentsConfig{
 				Confucius: config.AgentConfig{Name: "Confucius"},
-				Chongzhi:  config.AgentConfig{Name: "Chongzhi"},
+				Subagent:  config.SubAgentConfig{AgentConfig: config.AgentConfig{Name: "Subagent"}},
 			},
 		}
 		msc := NewModelSelectionConfig(cfg)
@@ -270,7 +270,13 @@ func TestNewModelSelectionConfig(t *testing.T) {
 				Models: []config.ModelCatalogEntry{{Name: "m-a", MaxContextTokens: 100000}},
 			},
 			Agents: config.AgentsConfig{
-				Liang: config.AgentConfig{Name: "Liang", OutputSchema: `{"type":"object"}`},
+				Subagent: config.SubAgentConfig{
+					AgentConfig:      config.AgentConfig{Name: "Liang", OutputSchema: `{"type":"object"}`},
+					MaxDepth:         1,
+					MaxConcurrent:    4,
+					MaxTotalPerTurn:  12,
+					MaxSnapshotBytes: 1 << 20,
+				},
 			},
 		}
 		msc := NewModelSelectionConfig(cfg)

@@ -8,21 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestInvokeToolDescription_KnownAndUnknown pins the single exported source for
-// the synthetic invoke_* tool descriptions, so the model-facing tools[] array
-// and the MCP catalogue cannot drift (delta spec change "eliminate H1 double-write").
-func TestInvokeToolDescription_KnownAndUnknown(t *testing.T) {
-	assert.Equal(t, InvokeChongzhiDescription, InvokeToolDescription(ToolInvokeChongzhi))
-	assert.Equal(t, InvokeLiangDescription, InvokeToolDescription(ToolInvokeLiang))
-	assert.NotEmpty(t, InvokeToolDescription(ToolInvokeChongzhi))
-	assert.NotEmpty(t, InvokeToolDescription(ToolInvokeLiang))
-	assert.Empty(t, InvokeToolDescription("invoke_unknown"))
-}
-
-// TestBuildConfuciusToolsJSON_InvokeDescriptionsFromSingleSource asserts that
-// buildConfuciusToolsJSON renders the descriptions produced by
-// InvokeToolDescription rather than a second hardcoded copy.
-func TestBuildConfuciusToolsJSON_InvokeDescriptionsFromSingleSource(t *testing.T) {
+func TestBuildConfuciusToolsJSON_RootSyntheticTools(t *testing.T) {
 	data, err := buildConfuciusToolsJSON(nil, nil, 0)
 	require.NoError(t, err)
 
@@ -33,11 +19,21 @@ func TestBuildConfuciusToolsJSON_InvokeDescriptionsFromSingleSource(t *testing.T
 		} `json:"function"`
 	}
 	require.NoError(t, json.Unmarshal(data, &tools))
+	require.Len(t, tools, 2)
+	assert.Equal(t, SpawnSubagentTool, tools[0].Function.Name)
+	assert.Equal(t, SpawnSubagentDescription, tools[0].Function.Description)
+	assert.Equal(t, UpdatePlanTool, tools[1].Function.Name)
+	assert.Equal(t, UpdatePlanDescription, tools[1].Function.Description)
+}
 
-	descByName := make(map[string]string, len(tools))
-	for _, t2 := range tools {
-		descByName[t2.Function.Name] = t2.Function.Description
-	}
-	assert.Equal(t, InvokeToolDescription(ToolInvokeChongzhi), descByName[ToolInvokeChongzhi])
-	assert.Equal(t, InvokeToolDescription(ToolInvokeLiang), descByName[ToolInvokeLiang])
+func TestBuildSubAgentToolsJSON_DepthControlsSpawn(t *testing.T) {
+	withSpawn, err := buildSubAgentToolsJSON(nil, nil, true, 100)
+	require.NoError(t, err)
+	assert.Contains(t, string(withSpawn), SpawnSubagentTool)
+	assert.NotContains(t, string(withSpawn), UpdatePlanTool)
+
+	withoutSpawn, err := buildSubAgentToolsJSON(nil, nil, false, 100)
+	require.NoError(t, err)
+	assert.NotContains(t, string(withoutSpawn), SpawnSubagentTool)
+	assert.NotContains(t, string(withoutSpawn), UpdatePlanTool)
 }

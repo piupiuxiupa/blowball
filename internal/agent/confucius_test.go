@@ -33,6 +33,15 @@ func testTurn() ModelOverride {
 	return ModelOverride{Model: "gpt-test", MaxCompletionTokens: 512}
 }
 
+func containsUsagePrefix(byAgent map[string]Usage, prefix string) bool {
+	for name := range byAgent {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // newTestConfucius builds a Confucius with a registry holding no real tools and
 // per-invocation factories returning the provided sub-agent implementations
 // (every dispatch of the same name yields the same shared fake — tests that
@@ -41,20 +50,46 @@ func testTurn() ModelOverride {
 func newTestConfucius(t *testing.T, client LLMClient, subAgents map[string]Agent) *Confucius {
 	t.Helper()
 	reg := tool.NewRegistry()
-	c, err := NewConfucius(testConfuciusConfig(), client, reg, staticFactories(subAgents), testTurn())
+	factory := func(spec SubAgentSpec) (Agent, error) {
+		for _, a := range subAgents {
+			if a != nil && strings.HasPrefix(spec.Name, a.Name()) {
+				return a, nil
+			}
+		}
+		for _, a := range subAgents {
+			return a, nil
+		}
+		return nil, errors.New("no fake sub-agent configured")
+	}
+	c, err := NewConfucius(testConfuciusConfig(), client, reg, testSpawnCoordinator(reg, factory), testTurn())
 	require.NoError(t, err)
 	return c
 }
 
-// staticFactories converts a name→agent map into name→factory closures that
-// hand out the same agent on every call, preserving the pre-factory test
-// ergonomics for fakes whose state is meant to be observed across calls.
-func staticFactories(subAgents map[string]Agent) map[string]SubAgentFactory {
-	factories := make(map[string]SubAgentFactory, len(subAgents))
-	for name, a := range subAgents {
-		factories[name] = func() (Agent, error) { return a, nil }
+func testSpawnCoordinator(reg *tool.Registry, factory SubAgentFactory) *spawnCoordinator {
+	cfg := config.SubAgentConfig{
+		AgentConfig:      config.AgentConfig{Name: "Subagent", SystemPrompt: "you are a subagent"},
+		MaxDepth:         1,
+		MaxConcurrent:    4,
+		MaxTotalPerTurn:  12,
+		MaxSnapshotBytes: 1 << 20,
 	}
-	return factories
+	c := newSpawnCoordinator(cfg, factory, nil, nil)
+	c.rootRegistry = reg
+	c.rootToolNames = nil
+	return c
+}
+
+// staticFactories preserves the old one-fake test ergonomics under the
+// single dynamic spawn tool.
+func staticFactories(subAgents map[string]Agent) *spawnCoordinator {
+	factory := func(SubAgentSpec) (Agent, error) {
+		for _, a := range subAgents {
+			return a, nil
+		}
+		return nil, errors.New("no fake sub-agent configured")
+	}
+	return testSpawnCoordinator(nil, factory)
 }
 
 // runConfuciusAndCollect runs c.Run against a fresh hub, drains the hub after
@@ -149,8 +184,7 @@ func TestConfucius_HandlesDirectly(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: &fakeAgent{name: "Chongzhi"},
 	})
 
 	events, content, usage, _, err := runConfuciusAndCollect(t, c, []Message{
@@ -183,7 +217,7 @@ func TestConfucius_CallsSubAgent_ThenSummarizes(t *testing.T) {
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{{
 				ID:       "call_1",
-				Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"write file","context":"context-x"}`},
+				Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"write file","context":"context-x"}`},
 			}},
 			usage: Usage{PromptTokens: 11, CompletionTokens: 1, TotalTokens: 12},
 		},
@@ -195,8 +229,7 @@ func TestConfucius_CallsSubAgent_ThenSummarizes(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: chongzhi,
 	})
 
 	events, content, _, _, err := runConfuciusAndCollect(t, c, []Message{
@@ -218,7 +251,7 @@ func TestConfucius_CallsSubAgent_ThenSummarizes(t *testing.T) {
 	assert.Contains(t, eventTypes(events), stream.EventAgentEnd)
 	var sawChongzhiStart, sawChongzhiEnd, sawToolCall bool
 	for _, e := range events {
-		if e.Type == stream.EventToolCall && e.Content == ToolInvokeChongzhi {
+		if e.Type == stream.EventToolCall && e.Content == SpawnSubagentTool {
 			sawToolCall = true
 		}
 		if e.Type == stream.EventAgentStart && e.Agent == "Chongzhi" {
@@ -244,7 +277,7 @@ func TestConfucius_CallsSubAgent_ThenSummarizes(t *testing.T) {
 		}
 	}
 	require.NotNil(t, toolMsg, "second round must include a role=tool message")
-	assert.Equal(t, "DONE", toolMsg.Content, "tool result content must be the sub-agent's output")
+	assert.Contains(t, toolMsg.Content, "DONE", "tool result content must be the sub-agent's output")
 	assert.Equal(t, "call_1", toolMsg.ToolCallID)
 }
 
@@ -267,7 +300,7 @@ func TestConfucius_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 			finishReason: "stop", // non-compliant endpoint
 			toolCalls: []ToolCall{{
 				ID:       "call_stop",
-				Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"do it"}`},
+				Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"do it"}`},
 			}},
 			usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 		},
@@ -279,8 +312,7 @@ func TestConfucius_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: chongzhi,
 	})
 
 	events, content, usage, _, err := runConfuciusAndCollect(t, c, []Message{
@@ -293,7 +325,7 @@ func TestConfucius_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 
 	sawToolCall := false
 	for _, e := range events {
-		if e.Type == stream.EventToolCall && e.Content == ToolInvokeChongzhi {
+		if e.Type == stream.EventToolCall && e.Content == SpawnSubagentTool {
 			sawToolCall = true
 		}
 	}
@@ -308,7 +340,7 @@ func TestConfucius_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 		}
 	}
 	require.NotNil(t, toolMsg)
-	assert.Equal(t, "C_RESULT", toolMsg.Content)
+	assert.Contains(t, toolMsg.Content, "C_RESULT")
 }
 
 func TestConfucius_ParallelToolCalls(t *testing.T) {
@@ -329,8 +361,8 @@ func TestConfucius_ParallelToolCalls(t *testing.T) {
 		fakeResponse{
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{
-				{ID: "c1", Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"t1"}`}},
-				{ID: "c2", Function: ToolCallFunction{Name: ToolInvokeLiang, Arguments: `{"task":"t2"}`}},
+				{ID: "c1", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t1","name":"Chongzhi"}`}},
+				{ID: "c2", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t2","name":"Liang"}`}},
 			},
 		},
 		fakeResponse{
@@ -339,10 +371,9 @@ func TestConfucius_ParallelToolCalls(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    liang,
+		"Chongzhi": chongzhi,
+		"Liang":    liang,
 	})
-
 	events, content, _, _, err := runConfuciusAndCollect(t, c, []Message{
 		{Role: "user", Content: "go"},
 	})
@@ -400,8 +431,8 @@ func TestConfucius_ByAgent_ParallelDispatch(t *testing.T) {
 		fakeResponse{
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{
-				{ID: "c1", Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"t1"}`}},
-				{ID: "c2", Function: ToolCallFunction{Name: ToolInvokeLiang, Arguments: `{"task":"t2"}`}},
+				{ID: "c1", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t1","name":"Chongzhi"}`}},
+				{ID: "c2", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t2","name":"Liang"}`}},
 			},
 			usage: Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
 		},
@@ -412,10 +443,9 @@ func TestConfucius_ByAgent_ParallelDispatch(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    liang,
+		"Chongzhi": chongzhi,
+		"Liang":    liang,
 	})
-
 	_, _, usage, breakdown, err := runConfuciusAndCollect(t, c, []Message{
 		{Role: "user", Content: "go"},
 	})
@@ -425,8 +455,8 @@ func TestConfucius_ByAgent_ParallelDispatch(t *testing.T) {
 	require.NotNil(t, breakdown)
 	require.Len(t, breakdown.ByAgent, 3, "byAgent must include Confucius + both sub-agents")
 	assert.Contains(t, breakdown.ByAgent, "Confucius")
-	assert.Contains(t, breakdown.ByAgent, "Chongzhi")
-	assert.Contains(t, breakdown.ByAgent, "Liang")
+	assert.True(t, containsUsagePrefix(breakdown.ByAgent, "Chongzhi#"))
+	assert.True(t, containsUsagePrefix(breakdown.ByAgent, "Liang#"))
 
 	// Sum of per-agent totals must equal the aggregated turn total.
 	var sum int
@@ -438,8 +468,11 @@ func TestConfucius_ByAgent_ParallelDispatch(t *testing.T) {
 	// Parallel flag set: one round dispatched >=2 tool_calls.
 	assert.True(t, breakdown.Parallel, "parallel must be true when a round has >=2 tool_calls")
 
-	// Both invoke_* tools recorded in dispatch order.
-	assert.Equal(t, []string{ToolInvokeChongzhi, ToolInvokeLiang}, breakdown.SubAgentInvocations)
+	// Both spawns recorded in dispatch order with distinct stable instances.
+	require.Len(t, breakdown.SubAgentInvocations, 2)
+	assert.NotEqual(t, breakdown.SubAgentInvocations[0].AgentInstanceID, breakdown.SubAgentInvocations[1].AgentInstanceID)
+	assert.Equal(t, 1, breakdown.SubAgentInvocations[0].Order)
+	assert.Equal(t, 2, breakdown.SubAgentInvocations[1].Order)
 }
 
 // TestConfucius_ByAgent_NoSubAgents verifies that when Confucius answers
@@ -456,8 +489,7 @@ func TestConfucius_ByAgent_NoSubAgents(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: &fakeAgent{name: "Chongzhi"},
 	})
 
 	_, _, usage, breakdown, err := runConfuciusAndCollect(t, c, []Message{
@@ -488,7 +520,7 @@ func TestConfucius_ByAgent_ErrorTurnStillAttributed(t *testing.T) {
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{{
 				ID:       "cx",
-				Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"fail"}`},
+				Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"fail","name":"Chongzhi"}`},
 			}},
 			usage: Usage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11},
 		},
@@ -499,8 +531,7 @@ func TestConfucius_ByAgent_ErrorTurnStillAttributed(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: chongzhi,
 	})
 
 	_, _, _, breakdown, err := runConfuciusAndCollect(t, c, []Message{
@@ -513,8 +544,8 @@ func TestConfucius_ByAgent_ErrorTurnStillAttributed(t *testing.T) {
 	// dispatch is attributable on the error turn — this is the task 2.5
 	// invariant that cost attribution is never lost on failure.
 	assert.Contains(t, breakdown.ByAgent, "Confucius")
-	assert.Contains(t, breakdown.ByAgent, "Chongzhi", "failed sub-agent must still be attributable")
-	assert.Contains(t, breakdown.SubAgentInvocations, ToolInvokeChongzhi)
+	assert.True(t, containsUsagePrefix(breakdown.ByAgent, "Chongzhi#"), "failed sub-agent must still be attributable")
+	require.Len(t, breakdown.SubAgentInvocations, 1)
 }
 
 func TestConfucius_SubAgentFailure_StreamsError(t *testing.T) {
@@ -529,7 +560,7 @@ func TestConfucius_SubAgentFailure_StreamsError(t *testing.T) {
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{{
 				ID:       "cx",
-				Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"fail-me"}`},
+				Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"fail-me"}`},
 			}},
 		},
 		fakeResponse{
@@ -538,8 +569,7 @@ func TestConfucius_SubAgentFailure_StreamsError(t *testing.T) {
 		},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: chongzhi,
 	})
 
 	events, content, _, _, err := runConfuciusAndCollect(t, c, []Message{
@@ -580,8 +610,7 @@ func TestConfucius_ContextCancellation_Stops(t *testing.T) {
 	client.responses = nil // we will not use the queue; slow client short-circuits
 
 	c := newTestConfucius(t, slow, map[string]Agent{
-		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: &fakeAgent{name: "Chongzhi"},
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -625,8 +654,7 @@ func TestConfucius_ReasoningRequest(t *testing.T) {
 	turn.Thinking, turn.ReasoningEffort = true, "medium"
 	reg := tool.NewRegistry()
 	c, err := NewConfucius(cfg, client, reg, staticFactories(map[string]Agent{
-		ToolInvokeChongzhi: &fakeAgent{name: "Chongzhi"},
-		ToolInvokeLiang:    &fakeAgent{name: "Liang"},
+		SpawnSubagentTool: &fakeAgent{name: "Chongzhi"},
 	}), turn)
 	require.NoError(t, err)
 
@@ -746,8 +774,7 @@ func runConfuciusRetry(t *testing.T, sub Agent, invokeName string) (string, int,
 		fakeResponse{content: "ok", finishReason: "stop"},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: subIf(invokeName == ToolInvokeChongzhi, sub, &fakeAgent{name: "Chongzhi"}),
-		ToolInvokeLiang:    subIf(invokeName == ToolInvokeLiang, sub, &fakeAgent{name: "Liang"}),
+		SpawnSubagentTool: subIf(invokeName == SpawnSubagentTool, sub, &fakeAgent{name: "Chongzhi"}),
 	})
 	events, _, _, _, _ := runConfuciusAndCollect(t, c, []Message{{Role: "user", Content: "go"}})
 	// Recover the tool result fed to Confucius round 2.
@@ -782,9 +809,9 @@ func TestRetry_TransientErrorRetriedThenSucceeds(t *testing.T) {
 			{content: "RECOVERED", usage: Usage{TotalTokens: 8}},
 		},
 	}
-	content, calls, _ := runConfuciusRetry(t, liang, ToolInvokeLiang)
+	content, calls, _ := runConfuciusRetry(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 2, calls, "Liang must be invoked twice (initial + 1 retry)")
-	assert.Equal(t, "RECOVERED", content, "recovered result must be fed back to Confucius")
+	assert.Contains(t, content, "RECOVERED", "recovered result must be fed back to Confucius")
 }
 
 func TestRetry_SemanticErrorNotRetried(t *testing.T) {
@@ -794,7 +821,7 @@ func TestRetry_SemanticErrorNotRetried(t *testing.T) {
 		policy:   config.AgentRetryConfig{Enabled: true, MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
 		outcomes: []scriptedOutcome{{err: semanticErr, usage: Usage{TotalTokens: 5}}},
 	}
-	content, calls, _ := runConfuciusRetry(t, liang, ToolInvokeLiang)
+	content, calls, _ := runConfuciusRetry(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 1, calls, "semantic error must not be retried")
 	assert.Contains(t, content, "bad_args", "semantic error must be fed back to Confucius")
 }
@@ -809,7 +836,7 @@ func TestRetry_DisabledPolicyNotRetried(t *testing.T) {
 			{content: "RECOVERED", usage: Usage{TotalTokens: 8}},
 		},
 	}
-	content, calls, _ := runConfuciusRetry(t, liang, ToolInvokeLiang)
+	content, calls, _ := runConfuciusRetry(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 1, calls, "disabled retry policy must not retry")
 	assert.Contains(t, content, "429", "transient error fed back when retry disabled")
 }
@@ -826,7 +853,7 @@ func TestRetry_SideEffectAfterToolNotRetried(t *testing.T) {
 			{content: "RECOVERED", usage: Usage{TotalTokens: 8}},
 		},
 	}
-	content, calls, _ := runConfuciusRetry(t, chongzhi, ToolInvokeChongzhi)
+	content, calls, _ := runConfuciusRetry(t, chongzhi, SpawnSubagentTool)
 	assert.Equal(t, 1, calls, "side-effecting agent post-tool-call must not be retried")
 	assert.Contains(t, content, "429", "error fed back when retry suppressed by idempotency")
 }
@@ -843,9 +870,9 @@ func TestRetry_SideEffectBeforeToolRetried(t *testing.T) {
 			{content: "DONE", usage: Usage{TotalTokens: 8}},
 		},
 	}
-	content, calls, _ := runConfuciusRetry(t, chongzhi, ToolInvokeChongzhi)
+	content, calls, _ := runConfuciusRetry(t, chongzhi, SpawnSubagentTool)
 	assert.Equal(t, 2, calls, "side-effecting agent pre-tool-call must be retried")
-	assert.Equal(t, "DONE", content)
+	assert.Contains(t, content, "DONE")
 }
 
 func TestRetry_BudgetExhaustedStopsRetry(t *testing.T) {
@@ -862,7 +889,7 @@ func TestRetry_BudgetExhaustedStopsRetry(t *testing.T) {
 			{content: "RECOVERED", usage: Usage{TotalTokens: 8}},
 		},
 	}
-	content, calls, _ := runConfuciusRetry(t, liang, ToolInvokeLiang)
+	content, calls, _ := runConfuciusRetry(t, liang, SpawnSubagentTool)
 	// The budget lives on Confucius's cfg.Retry.BudgetTokens, which is 0
 	// (unlimited) in the test confucius config — so this scenario is exercised
 	// at the unit level via the retry budget type directly below, and this test
@@ -870,7 +897,7 @@ func TestRetry_BudgetExhaustedStopsRetry(t *testing.T) {
 	// (the cap is turn-level on Confucius). When Confucius has no budget, the
 	// retry proceeds using the agent's own MaxAttempts.
 	assert.Equal(t, 2, calls)
-	assert.Equal(t, "RECOVERED", content)
+	assert.Contains(t, content, "RECOVERED")
 }
 
 func TestRetry_BudgetTypeStopsWhenExhausted(t *testing.T) {
@@ -894,7 +921,7 @@ func TestRetry_ExhaustedSurfacesErrorToConfucius(t *testing.T) {
 		policy:   config.AgentRetryConfig{Enabled: true, MaxAttempts: 1, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
 		outcomes: []scriptedOutcome{{err: transientErr, usage: Usage{TotalTokens: 5}}},
 	}
-	content, calls, events := runConfuciusRetry(t, liang, ToolInvokeLiang)
+	content, calls, events := runConfuciusRetry(t, liang, SpawnSubagentTool)
 	assert.Equal(t, 1, calls)
 	assert.Contains(t, content, "429", "exhausted-retry error must feed back to Confucius")
 	// No retry event should be emitted when MaxAttempts==1.

@@ -7,12 +7,12 @@ import (
 	"github.com/lush/blowball/internal/tool"
 )
 
-// buildConfuciusToolsJSON returns the OpenAI tools[] JSON for the Confucius agent.
+// buildConfuciusToolsJSON returns the OpenAI tools[] JSON for the root agent.
 // It merges the regular tools listed in cfg.Tools (resolved via the registry)
-// with the synthetic invoke_chongzhi / invoke_liang entries that Confucius uses
-// to dispatch sub-agents. The invoke_* tools are NOT registered in the tool
-// registry — they are intercepted by the Confucius Run loop. Returns nil when
-// the agent has no tools at all so callers can omit the field from the request.
+// with the synthetic spawn_subagent and root-only update_plan entries. Neither
+// is registered in the tool registry — both are intercepted by the dispatch
+// loop. Returns nil when the agent has no tools at all so callers can omit the
+// field from the request.
 // maxCompletionTokens is the TURN-resolved catalog-entry quota
 // (per-model-completion-budget) behind the write-budget guidance number.
 func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string, maxCompletionTokens int) ([]byte, error) {
@@ -21,29 +21,68 @@ func buildConfuciusToolsJSON(reg *tool.Registry, regularToolNames []string, maxC
 		return nil, err
 	}
 
-	invokeTools := openAIToolList{
+	return combineRegularAndRootTools(regularJSON)
+}
+
+// buildSubAgentToolsJSON renders a generic sub-agent's narrowed tools and adds
+// spawn_subagent only when another nesting level is allowed.
+func buildSubAgentToolsJSON(reg *tool.Registry, regularToolNames []string, allowSpawn bool, maxCompletionTokens int) ([]byte, error) {
+	regularJSON, err := buildRegularToolsJSON(reg, regularToolNames, maxCompletionTokens)
+	if err != nil {
+		return nil, err
+	}
+	return combineRegularAndSpawnTools(regularJSON, allowSpawn)
+}
+
+func combineRegularAndSpawnTools(regularJSON []byte, allowSpawn bool) ([]byte, error) {
+	var regular openAIToolList
+	if len(regularJSON) > 0 {
+		if err := json.Unmarshal(regularJSON, &regular); err != nil {
+			return nil, fmt.Errorf("agent: unmarshal regular tools: %w", err)
+		}
+	}
+	if !allowSpawn {
+		if len(regular) == 0 {
+			return nil, nil
+		}
+		return json.Marshal(regular)
+	}
+	spawnTools := openAIToolList{
 		{Type: "function", Function: openAIToolFunc{
-			Name:        ToolInvokeChongzhi,
-			Description: InvokeToolDescription(ToolInvokeChongzhi),
-			Parameters:  invokeArgsSchema,
-		}},
-		{Type: "function", Function: openAIToolFunc{
-			Name:        ToolInvokeLiang,
-			Description: InvokeToolDescription(ToolInvokeLiang),
-			Parameters:  invokeArgsSchema,
+			Name:        SpawnSubagentTool,
+			Description: SpawnSubagentDescription,
+			Parameters:  spawnArgsSchema,
 		}},
 	}
 
 	if len(regularJSON) == 0 {
-		return json.Marshal(invokeTools)
+		return json.Marshal(spawnTools)
 	}
-
-	var regular openAIToolList
-	if err := json.Unmarshal(regularJSON, &regular); err != nil {
-		return nil, fmt.Errorf("agent: unmarshal regular tools: %w", err)
-	}
-	combined := append(regular, invokeTools...)
+	combined := append(regular, spawnTools...)
 	return json.Marshal(combined)
+}
+
+// combineRegularAndRootTools adds the two root-only orchestration tools. Plan
+// state is kept separate from spawn: children may recursively spawn when depth
+// allows, but they can never observe or mutate the root plan.
+func combineRegularAndRootTools(regularJSON []byte) ([]byte, error) {
+	spawnJSON, err := combineRegularAndSpawnTools(regularJSON, true)
+	if err != nil {
+		return nil, err
+	}
+	var regular openAIToolList
+	if err := json.Unmarshal(spawnJSON, &regular); err != nil {
+		return nil, fmt.Errorf("agent: unmarshal root tools: %w", err)
+	}
+	regular = append(regular, openAITool{
+		Type: "function",
+		Function: openAIToolFunc{
+			Name:        UpdatePlanTool,
+			Description: UpdatePlanDescription,
+			Parameters:  updatePlanArgsSchema,
+		},
+	})
+	return json.Marshal(regular)
 }
 
 // buildRegularToolsJSON renders the OpenAI tools[] for an agent's plain tools

@@ -18,11 +18,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// AgentFactory builds a fresh set of agents for a single request. The Chongzhi
-// agent binds Xizhi tools against the requesting user's workspace_root, which
-// varies per request, so a new Chongzhi (and therefore a new tool registry
-// scoped to that workspace) is required per request. Confucius and Liang have
-// no per-request state but are rebuilt alongside Chongzhi for symmetry.
+// AgentFactory builds a fresh root agent for a single request. Tool closures
+// bind to the requesting user's workspace_root, so each turn gets a fresh
+// registry; dynamic children are then constructed lazily by the coordinator.
 //
 // Per-request construction is the documented choice. The alternative —
 // passing workspace_root through context — was rejected because (a) the tool
@@ -31,16 +29,15 @@ import (
 // context plumbing it does not currently understand.
 type AgentFactory interface {
 	// Build returns a freshly-constructed Confucius agent for the request whose
-	// user owns workspaceRoot. The returned Confucius holds per-invocation
-	// factories for its Chongzhi / Liang sub-agents (each dispatch builds a
-	// fresh instance; see SubAgentFactory), all wired to the same LLMClient.
+	// user owns workspaceRoot. The coordinator builds a fresh generic instance
+	// for every spawn, all wired to the same LLMClient.
 	// The returned TurnCloser releases per-turn resources (the per-user MCP
 	// connection manager) once the turn's Run completes; it is nil when no
 	// per-turn resources were created.
 	//
 	// override (per-request-model-selection, model-effort-v2) is the
 	// request-resolved turn config — (model, wire-family, effort) — injected
-	// uniformly into all three agents. It is always non-zero in production:
+	// uniformly across the spawn tree. It is always non-zero in production:
 	// the handler resolves every request against the mandatory catalog.
 	//
 	// ctx is the turn context: construction-time log sites (per-user MCP
@@ -63,6 +60,7 @@ type orchestratorFactory struct {
 	serverTools  map[string][]string  // server name -> prefixed tool names
 	skillLoader  *skill.Loader        // discovers global and per-user skills
 	userMCP      config.UserMCPConfig // per-user MCP tool timeouts/enabled flag
+	snapshots    SubAgentSnapshotStore
 }
 
 // Build implements AgentFactory.
@@ -81,11 +79,10 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 	// the handler ALWAYS resolves a turn config (model + wire family + effort
 	// — a parameter-less request takes the default entry + deployment default
 	// effort), and Build injects that one value into every agent constructed
-	// below — one turn, one model, one effort across Confucius, Chongzhi, and
-	// Liang. Agent configs carry no model fields of their own anymore.
+	// below — one turn, one model, one effort across the whole spawn tree.
+	// Agent configs carry no model fields of their own anymore.
 	confuciusCfg := f.cfg.Agents.Confucius
-	chongzhiCfg := f.cfg.Agents.Chongzhi
-	liangCfg := f.cfg.Agents.Liang
+	subagentCfg := f.cfg.Agents.Subagent
 
 	// Per-user MCP connection manager is created once per turn and shared
 	// across Confucius + its sub-agents so connections are reused within the
@@ -95,7 +92,7 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 	// construction (see design D1/D5).
 	var mcpMgr *mcp.Manager
 	var closer TurnCloser
-	if mcp.AnyMCPTool(f.cfg.Agents.Confucius.Tools, f.cfg.Agents.Chongzhi.Tools, f.cfg.Agents.Liang.Tools) {
+	if mcp.AnyMCPTool(confuciusCfg.Tools, subagentCfg.Tools) {
 		mcpMgr = mcp.NewManager(mcp.ManagerOptions{
 			WorkspaceRoot:         workspaceRoot,
 			ConnectTimeout:        f.userMCP.ConnectTimeout,
@@ -105,54 +102,80 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 		closer = func() { _ = mcpMgr.Close() }
 	}
 
-	// Sub-agents are delivered as per-invocation FACTORIES, not pre-built
-	// instances (subagent-run-identity capability): every invoke_* dispatch
-	// constructs a fresh Chongzhi/Liang so concurrent same-name invocations
-	// never share mutable run state (side-effect / round-cap flags). The
-	// factories capture the turn-scoped inputs below — including the
-	// turn-shared per-user MCP manager and the overridden configs — so
-	// connection reuse within the turn is unchanged; only the per-run mutable
-	// shell is rebuilt per call.
-	subFactories := map[string]SubAgentFactory{
-		ToolInvokeChongzhi: func() (Agent, error) {
-			return f.buildChongzhi(ctx, chongzhiCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
-		},
-		ToolInvokeLiang: func() (Agent, error) {
-			return f.buildLiang(ctx, liangCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr, override)
-		},
-	}
-	confucius, err := f.buildConfucius(ctx, confuciusCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, subFactories, mcpMgr, override)
+	rootReg, rootCfg, err := f.buildAgentRegistry(ctx, confuciusCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
 	if err != nil {
-		if closer != nil {
-			closer()
+		closeTurn(closer)
+		return nil, nil, fmt.Errorf("agent factory: build confucius registry: %w", err)
+	}
+	subReg, renderedSubCfg, err := f.buildAgentRegistry(ctx, subagentCfg.AgentConfig, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+	if err != nil {
+		closeTurn(closer)
+		return nil, nil, fmt.Errorf("agent factory: build subagent registry: %w", err)
+	}
+	subCfg := subagentCfg
+	subCfg.AgentConfig = renderedSubCfg
+	spawnScope, err := unionRegistries(rootReg, subReg)
+	if err != nil {
+		closeTurn(closer)
+		return nil, nil, fmt.Errorf("agent factory: build spawn scope: %w", err)
+	}
+	factory := func(spec SubAgentSpec) (Agent, error) {
+		cfg := subCfg.AgentConfig
+		cfg.Name = spec.Name
+		cfg.SystemPrompt = spec.SystemPrompt
+		cfg.Tools = spec.Tools
+		cfg.MaxRounds = spec.MaxRounds
+		cfg.OutputSchema = spec.OutputSchema
+		cfg.Retry = spec.Retry
+		rendered, err := f.renderSystemPrompt(ctx, cfg, workspaceRoot, globalSkillsDir, skillsDir, userID, spec.ToolRegistry, mcpMgr)
+		if err != nil {
+			return nil, err
 		}
+		spec.SystemPrompt = rendered
+		spec.Turn = override
+		return NewSubAgent(spec, f.client)
+	}
+	coordinator := newSpawnCoordinator(subCfg, factory, f.snapshots, nil)
+	coordinator.rootRegistry = spawnScope
+	coordinator.rootToolNames = unionToolNames(rootCfg.Tools, subCfg.Tools)
+	confucius, err := NewConfucius(rootCfg, f.client, rootReg, coordinator, override)
+	if err != nil {
+		closeTurn(closer)
 		return nil, nil, fmt.Errorf("agent factory: build confucius: %w", err)
 	}
 	return confucius, closer, nil
 }
 
-func (f *orchestratorFactory) buildConfucius(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, subAgents map[string]SubAgentFactory, mcpMgr *mcp.Manager, turn ModelOverride) (*Confucius, error) {
-	reg, agentCfg, err := f.buildAgentRegistry(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
-	if err != nil {
-		return nil, err
+func closeTurn(closer TurnCloser) {
+	if closer != nil {
+		closer()
 	}
-	return NewConfucius(agentCfg, f.client, reg, subAgents, turn)
 }
 
-func (f *orchestratorFactory) buildChongzhi(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Chongzhi, error) {
-	reg, agentCfg, err := f.buildAgentRegistry(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
-	if err != nil {
+func unionRegistries(left, right *tool.Registry) (*tool.Registry, error) {
+	out := tool.NewRegistry()
+	if err := out.Merge(left); err != nil {
 		return nil, err
 	}
-	return NewChongzhi(agentCfg, f.client, reg, turn)
+	if err := out.Merge(right); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func (f *orchestratorFactory) buildLiang(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager, turn ModelOverride) (*Liang, error) {
-	reg, agentCfg, err := f.buildAgentRegistry(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, mcpMgr)
-	if err != nil {
-		return nil, err
+func unionToolNames(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, group := range groups {
+		for _, name := range group {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
 	}
-	return NewLiang(agentCfg, f.client, reg, turn)
+	return out
 }
 
 // buildAgentRegistry creates a registry scoped to workspaceRoot containing the
@@ -383,7 +406,7 @@ func (f *orchestratorFactory) classifyTools(cfg config.AgentConfig) ([]*tool.Too
 
 // Orchestrator is the top-level entry point that the HTTP handler calls per
 // chat request. It builds a per-request agent set via the AgentFactory (so
-// Chongzhi binds to the right user workspace), seeds the Confucius loop with
+// generic children bind to the right user workspace), seeds the Confucius loop with
 // the user message, runs the loop, and emits a final done event with the
 // aggregated token-usage breakdown.
 type Orchestrator struct {
@@ -401,7 +424,7 @@ type Orchestrator struct {
 // o.WorkspaceRootForUser(userID) without recomputing the path. serverTools is
 // the server-name -> tool-names mapping produced by mcpclient registration;
 // skillLoader discovers global and per-user skills for system prompt injection.
-func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Registry, serverTools map[string][]string, skillLoader *skill.Loader, workspaceRootForUser WorkspaceRootForUser) (*Orchestrator, error) {
+func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Registry, serverTools map[string][]string, skillLoader *skill.Loader, workspaceRootForUser WorkspaceRootForUser, snapshotStores ...SubAgentSnapshotStore) (*Orchestrator, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("agent: orchestrator requires non-nil config")
 	}
@@ -417,6 +440,10 @@ func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Re
 	if skillLoader == nil {
 		skillLoader = skill.NewLoader("", nil)
 	}
+	var snapshots SubAgentSnapshotStore
+	if len(snapshotStores) > 0 {
+		snapshots = snapshotStores[0]
+	}
 	factory := &orchestratorFactory{
 		cfg:          cfg,
 		client:       client,
@@ -424,6 +451,7 @@ func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Re
 		serverTools:  serverTools,
 		skillLoader:  skillLoader,
 		userMCP:      cfg.Tools.UserMCP,
+		snapshots:    snapshots,
 	}
 	return &Orchestrator{factory: factory, workspaceRootForUser: workspaceRootForUser}, nil
 }
@@ -434,7 +462,7 @@ func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Re
 type WorkspaceRootForUser = func(userID string) string
 
 // Handle executes one full chat turn:
-//   - Build a per-request agent set via the factory (Chongzhi → user workspace),
+//   - Build a per-request agent set via the factory (spawn tree → user workspace),
 //   - Run the Confucius loop with the provided conversation history,
 //   - Stream events to hub,
 //   - Emit a final done event with the aggregated usage breakdown.
@@ -492,7 +520,7 @@ func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, use
 // sub-agents); breakdown is the per-agent attribution + orchestration meta
 // Confucius assembled during its dispatch loop (Confucius's own usage under
 // "Confucius", each dispatched sub-agent under its display name, plus the
-// parallel flag and ordered invoke_* list). Both are persisted into
+// parallel flag and ordered spawn invocation list). Both are persisted into
 // turn_usage so historical cost is queryable per agent and per session.
 type doneUsage struct {
 	confucius Usage
@@ -514,7 +542,7 @@ type doneUsage struct {
 // `total` is the aggregate turn usage. `by_agent` carries the per-agent
 // breakdown Confucius assembled; it always includes "Confucius" and one entry
 // per dispatched sub-agent. `meta` records whether any assistant round
-// dispatched >=2 tool_calls (parallel) and which invoke_* sub-agents fired
+// dispatched >=2 tool_calls (parallel) and which dynamic sub-agents fired
 // (sub_agent_invocations, deduplicated, dispatch order). On error, an `error`
 // field is added at the top level describing the failure.
 func emitDone(hub *stream.Hub, ctx context.Context, u doneUsage) {
@@ -555,7 +583,7 @@ func buildByAgentObject(b *TurnBreakdown) map[string]any {
 // and an empty invocations list.
 func buildMetaObject(b *TurnBreakdown) map[string]any {
 	m := map[string]any{
-		"sub_agent_invocations": []string{},
+		"sub_agent_invocations": []map[string]any{},
 		"parallel":              false,
 	}
 	if b == nil {
@@ -563,7 +591,15 @@ func buildMetaObject(b *TurnBreakdown) map[string]any {
 	}
 	m["parallel"] = b.Parallel
 	if len(b.SubAgentInvocations) > 0 {
-		m["sub_agent_invocations"] = append([]string(nil), b.SubAgentInvocations...)
+		invocations := make([]map[string]any, 0, len(b.SubAgentInvocations))
+		for _, invocation := range b.SubAgentInvocations {
+			invocations = append(invocations, map[string]any{
+				"agent_instance_id":  invocation.AgentInstanceID,
+				"parent_instance_id": invocation.ParentInstanceID,
+				"order":              invocation.Order,
+			})
+		}
+		m["sub_agent_invocations"] = invocations
 	}
 	// round_capped is emitted ONLY when an agent hit its cap this turn, so
 	// non-capped turns serialize identically to before (additive key).

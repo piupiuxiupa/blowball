@@ -62,7 +62,7 @@ func TestFileOps_UploadThenAgentWritesThenListAndRead(t *testing.T) {
 			toolCalls: []agent.ToolCall{{
 				ID: "call_invoke_c",
 				Function: agent.ToolCallFunction{
-					Name:      agent.ToolInvokeChongzhi,
+					Name:      agent.SpawnSubagentTool,
 					Arguments: `{"task":"write a markdown summary to ` + agentFilePath + `","context":"user asked for a file"}`,
 				},
 			}},

@@ -25,7 +25,8 @@ var expectedDBTags = map[string][]string{
 	},
 	"Message": {
 		"id", "session_id", "msg_time", "agent", "msg_index",
-		"role", "event_type", "content", "trace_id", "client_msg_id", "run_id", "update_time",
+		"role", "event_type", "content", "trace_id", "client_msg_id", "run_id",
+		"agent_instance_id", "update_time",
 	},
 	"TurnUsage": {
 		"id", "session_id", "trace_id", "user_id", "usage_json",
@@ -118,12 +119,13 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 			target: Message{
 				ID: 42, SessionID: "s-1", Agent: AgentConfucius,
 				MsgIndex: 3, Role: RoleUser, EventType: EventTypeMessage,
-				Content: "hi", TraceID: "t-1", RunID: "call_x1",
+				Content: "hi", TraceID: "t-1", RunID: "call_x1", AgentInstanceID: "w-abc123",
 				MsgTime:    time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 				UpdateTime: time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC),
 			},
 			want: []string{"id", "session_id", "msg_time", "agent", "msg_index",
-				"role", "event_type", "content", "trace_id", "client_msg_id", "run_id", "update_time"},
+				"role", "event_type", "content", "trace_id", "client_msg_id", "run_id",
+				"agent_instance_id", "update_time"},
 		},
 	}
 
@@ -148,6 +150,23 @@ func TestStructs_JSONTagsRoundTrip(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMessage_InstanceIDOmitEmpty(t *testing.T) {
+	legacy, err := json.Marshal(Message{ID: 1, SessionID: "s", Agent: AgentConfucius})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(legacy), "agent_instance_id") {
+		t.Fatalf("legacy payload must omit agent_instance_id: %s", legacy)
+	}
+	stamped, err := json.Marshal(Message{ID: 1, AgentInstanceID: "w-abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stamped), `"agent_instance_id":"w-abc123"`) {
+		t.Fatalf("stamped payload must carry agent_instance_id: %s", stamped)
 	}
 }
 

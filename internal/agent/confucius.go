@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/stream"
@@ -14,11 +13,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Confucius is the central orchestrator agent. It owns its own tool-calling
-// loop and is the only agent permitted to dispatch sub-agents (Chongzhi,
-// Liang). Sub-agent invocation is intercepted in the dispatch switch before
-// the tool registry is consulted; the synthetic invoke_chongzhi /
-// invoke_liang tools therefore never reach the registry.
+// Confucius is the root orchestrator agent. It owns its own tool-calling loop
+// and dispatches generic children through spawn_subagent. That synthetic tool
+// is intercepted before the tool registry is consulted.
 type Confucius struct {
 	cfg          config.AgentConfig
 	client       LLMClient
@@ -29,12 +26,11 @@ type Confucius struct {
 	// construction, so per-invocation isolation is preserved by the factory
 	// building a fresh agent per dispatch.
 	turn ModelOverride
-	// subAgents maps ToolInvokeChongzhi / ToolInvokeLiang to per-invocation
-	// factories (not shared instances): every dispatch builds a fresh sub-agent
-	// so concurrent same-name invocations never share mutable run state
-	// (executedToolThisRun / hitCapThisRun; subagent-run-identity capability).
-	subAgents     map[string]SubAgentFactory
-	toolsJSON     []byte // pre-rendered OpenAI tools[] including invoke_*
+	// coordinator owns the turn-wide dynamic spawn tree: budgets, stable
+	// instance ids, scoped construction, resume snapshots, and usage metadata.
+	coordinator   *spawnCoordinator
+	plan          *planLedger
+	toolsJSON     []byte // pre-rendered OpenAI tools[] including spawn_subagent
 	toolsIsNotNil bool
 	// maxRounds bounds the tool-calling loop; resolved from cfg.MaxRounds
 	// (default config.DefaultAgentMaxRounds) at construction.
@@ -55,21 +51,16 @@ type Confucius struct {
 // never outlives the turn.
 func (c *Confucius) SetRoundHook(hook RoundHook) { c.roundHook = hook }
 
-// NewConfucius builds a Confucius agent. subAgents maps invoke_chongzhi /
-// invoke_liang to SubAgentFactories; it must contain at least those keys. Each
-// factory is invoked once per dispatch to build a per-invocation instance (see
-// SubAgentFactory). The tools[] JSON is rendered once at construction time
-// from cfg.Tools plus the two synthetic invoke_* tools. turn is the
+// NewConfucius builds the root agent. coordinator constructs one isolated
+// generic child per spawn. The tools[] JSON is rendered once at construction
+// time from cfg.Tools plus the synthetic spawn_subagent tool. turn is the
 // turn-resolved model/effort/quota/continuation configuration applied to every
 // LLM call this agent makes (model-effort-v2, per-model-completion-budget) —
 // including the write-budget number injected into the tools[] descriptions
 // and the turn's finish_reason=length continuation policy.
-func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, subAgents map[string]SubAgentFactory, turn ModelOverride) (*Confucius, error) {
-	if _, ok := subAgents[ToolInvokeChongzhi]; !ok {
-		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeChongzhi)
-	}
-	if _, ok := subAgents[ToolInvokeLiang]; !ok {
-		return nil, fmt.Errorf("agent: confucius sub-agents missing %q", ToolInvokeLiang)
+func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, coordinator *spawnCoordinator, turn ModelOverride) (*Confucius, error) {
+	if coordinator == nil {
+		return nil, fmt.Errorf("agent: confucius requires a spawn coordinator")
 	}
 	toolsJSON, err := buildConfuciusToolsJSON(reg, cfg.Tools, turn.MaxCompletionTokens)
 	if err != nil {
@@ -84,7 +75,8 @@ func NewConfucius(cfg config.AgentConfig, client LLMClient, reg *tool.Registry, 
 		client:        client,
 		toolRegistry:  reg,
 		turn:          turn,
-		subAgents:     subAgents,
+		coordinator:   coordinator,
+		plan:          &planLedger{},
 		toolsJSON:     toolsJSON,
 		toolsIsNotNil: len(toolsJSON) > 0 && string(toolsJSON) != "null",
 		maxRounds:     maxRounds,
@@ -121,7 +113,7 @@ func (c *Confucius) LastRunHitCap() bool { return c.hitCapThisRun }
 // The returned TurnBreakdown is the per-agent cost attribution: it always
 // contains Confucius's own usage under "Confucius", plus one entry per
 // dispatched sub-agent under its display name, and the turn-level meta
-// (parallel flag + ordered invoke_* list). emitDone renders it as
+// (parallel flag + ordered spawn invocation list). emitDone renders it as
 // usage.by_agent / usage.meta on the done event and it is persisted verbatim
 // into turn_usage.usage_json.
 func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.EventHub) (string, Usage, *TurnBreakdown, error) {
@@ -147,7 +139,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	// under the "Confucius" key, and each dispatched sub-agent under its own
 	// name. Used to render usage.by_agent on the done event.
 	byAgent := map[string]Usage{}
-	// turnMeta tracks cross-agent turn facts: which invoke_* tools fired and
+	// turnMeta tracks cross-agent turn facts: which spawns fired and
 	// whether any assistant round dispatched >=2 tool_calls in parallel.
 	tmeta := newTurnMeta()
 	// retryBudget bounds the total tokens spent on retries across the whole
@@ -159,6 +151,8 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	// nil-safe (an unset policy.BudgetTokens means unlimited).
 	budget := newRetryBudget(c.cfg.Retry.BudgetTokens)
 	ctx = WithRetryBudget(ctx, budget)
+	c.coordinator.meta = tmeta
+	c.plan = &planLedger{}
 	c.hitCapThisRun = false
 	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
@@ -189,7 +183,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			// Dispatch of the parseable tool_calls of an intermediate length
 			// response (design D5): reuses the main loop's
 			// dispatch-and-record block so sub-agent usage folding, cap
-			// propagation, and invoke_* tracking apply unchanged.
+			// propagation, and spawn tracking apply unchanged.
 			func(gctx context.Context, calls []ToolCall) {
 				c.executeAndRecordToolCalls(gctx, calls, hub, budget, tmeta, &total, byAgent, &round)
 			},
@@ -348,12 +342,19 @@ type toolResult struct {
 	content      string
 	isError      bool
 	subUsage     *Usage // non-nil when this result came from a sub-agent run
-	subAgentName string // display name of the producing sub-agent ("" for registry tools)
-	subCapped    bool   // true when the producing sub-agent hit its max_rounds cap this Run
+	subOwnUsage  *Usage // instance-direct usage for by_agent (differs from subUsage for subtrees)
+	subAgentName string // stable dynamic label ("" for registry tools)
+	subAgentID   string
+	subParentID  string
+	subCapped    bool
+	subStatus    string
+	// resultEventSent marks a synthetic control-plane result whose ToolResultEvent
+	// was already emitted before parallel execution (update_plan ordering).
+	resultEventSent bool
 }
 
 // dispatchToolCalls runs every tool_call in parallel via errgroup. Sub-agent
-// invocations (invoke_chongzhi / invoke_liang) are dispatched to the matching
+// invocations (spawn_subagent) are dispatched to the matching
 // Agent; everything else goes through toolRegistry.Call. Errors are streamed
 // as agent_error events and turned into error-string tool results so the LLM
 // can react. Returns a map keyed by tool_call.ID. budget carries the per-turn
@@ -362,8 +363,13 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 	results := make(map[string]toolResult, len(calls))
 	var mu sync.Mutex
 
+	planCalls, executionCalls := splitUpdatePlanCalls(calls)
+	for id, result := range c.dispatchUpdatePlanCalls(ctx, planCalls, hub) {
+		results[id] = result
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
-	for _, tc := range calls {
+	for _, tc := range executionCalls {
 		tc := tc // capture for goroutine
 		g.Go(func() error {
 			// errgroup cancels gctx on first non-nil return; we never want
@@ -380,9 +386,75 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 	return results
 }
 
+func splitUpdatePlanCalls(calls []ToolCall) ([]ToolCall, []ToolCall) {
+	var planCalls, executionCalls []ToolCall
+	for _, tc := range calls {
+		if tc.Function.Name == UpdatePlanTool {
+			planCalls = append(planCalls, tc)
+			continue
+		}
+		executionCalls = append(executionCalls, tc)
+	}
+	return planCalls, executionCalls
+}
+
+// dispatchUpdatePlanCalls applies the deterministic semantic-plan pre-phase.
+// Its tool result event is emitted immediately so plan_updated and its result
+// precede any same-round spawn or registry activity. executeAndRecordToolCalls
+// later appends the role=tool message without emitting a duplicate event.
+func (c *Confucius) dispatchUpdatePlanCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub) map[string]toolResult {
+	results := make(map[string]toolResult, len(calls))
+	if len(calls) == 0 {
+		return results
+	}
+
+	if len(calls) > 1 {
+		msg := "update_plan: only one plan update is allowed per assistant round"
+		for _, tc := range calls {
+			results[tc.ID] = c.emitPreDispatchResult(ctx, hub, tc, toolResult{content: msg, isError: true})
+		}
+		return results
+	}
+
+	tc := calls[0]
+	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
+		results[tc.ID] = toolResult{content: "", isError: true, resultEventSent: true}
+		return results
+	}
+
+	args, parseResult := parseUpdatePlanArgs(tc)
+	result := parseResult
+	if !result.isError {
+		snapshot, err := c.plan.update(args)
+		if err != nil {
+			result = toolResult{content: err.Error(), isError: true}
+		} else {
+			content, renderErr := snapshot.canonicalJSON()
+			if renderErr != nil {
+				result = toolResult{content: renderErr.Error(), isError: true}
+			} else {
+				result = toolResult{content: content, isError: false}
+				if !hub.SendCtx(ctx, stream.PlanUpdatedEvent(c.Name(), content, snapshot.Revision)) {
+					result = toolResult{content: "", isError: true}
+				}
+			}
+		}
+	}
+	results[tc.ID] = c.emitPreDispatchResult(ctx, hub, tc, result)
+	return results
+}
+
+func (c *Confucius) emitPreDispatchResult(ctx context.Context, hub stream.EventHub, tc ToolCall, result toolResult) toolResult {
+	result.resultEventSent = true
+	if !hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content)) {
+		return toolResult{content: "", isError: true, resultEventSent: true}
+	}
+	return result
+}
+
 // executeAndRecordToolCalls dispatches calls in parallel via dispatchToolCalls
 // and folds every result into the turn accounting and the round: sub-agent
-// token usage into total/byAgent, cap propagation and invoke_* tracking into
+// token usage into total/byAgent, cap propagation and spawn tracking into
 // tmeta, one ToolResultEvent per call, and one role="tool" message per call
 // appended to *round (each tool result references its tool_call_id, in the
 // order OpenAI expects). Shared by the main loop and the length-continuation
@@ -405,7 +477,11 @@ func (c *Confucius) executeAndRecordToolCalls(ctx context.Context, calls []ToolC
 			// the Confucius total). The sub-agent's display name is
 			// recorded on the result by dispatchSubAgent.
 			if result.subAgentName != "" {
-				byAgent[result.subAgentName] = addUsage(byAgent[result.subAgentName], *result.subUsage)
+				attr := result.subUsage
+				if result.subOwnUsage != nil {
+					attr = result.subOwnUsage
+				}
+				byAgent[result.subAgentName] = addUsage(byAgent[result.subAgentName], *attr)
 			}
 		}
 		// Propagate a sub-agent cap into the turn-level meta: a capped
@@ -414,12 +490,9 @@ func (c *Confucius) executeAndRecordToolCalls(ctx context.Context, calls []ToolC
 		if result.subCapped {
 			tmeta.observeRoundCapped()
 		}
-		// Record which invoke_* sub-agents fired this turn (for
-		// usage.meta.sub_agent_invocations), regardless of success.
-		if IsInvokeTool(tc.Function.Name) {
-			tmeta.observeInvoke(tc.Function.Name)
+		if !result.resultEventSent {
+			hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
 		}
-		hub.SendCtx(ctx, stream.ToolResultEvent(c.Name(), tc.ID, result.content))
 		*round = append(*round, Message{
 			Role:       "tool",
 			Content:    result.content,
@@ -429,141 +502,17 @@ func (c *Confucius) executeAndRecordToolCalls(ctx context.Context, calls []ToolC
 	}
 }
 
-// dispatchOne resolves a single tool_call. The agent name used for error
-// events is the sub-agent's own name when dispatching to a sub-agent, and
-// Confucius's own name for plain tool errors (since the tool itself has no
-// identity in the stream model).
+// dispatchOne resolves a single tool_call. spawn_subagent is intercepted by the
+// turn-wide coordinator; all other names go through Confucius's registry.
 func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub stream.EventHub, budget *retryBudget) toolResult {
 	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
 		return toolResult{content: "", isError: true}
 	}
-
 	if IsInvokeTool(tc.Function.Name) {
-		return c.dispatchSubAgent(ctx, tc, hub, budget)
+		parent := spawnParent{agentName: c.Name(), registry: c.coordinator.rootRegistry, toolNames: c.coordinator.rootToolNames}
+		return c.coordinator.dispatch(ctx, tc, hub, budget, parent)
 	}
 	return c.dispatchRegistryTool(ctx, tc, hub)
-}
-
-// dispatchSubAgent runs the named sub-agent with an isolated context: only
-// the sub-agent's own system prompt + one user message assembled from the
-// invoke tool's {task, context} arguments. The sub-agent's events propagate
-// up through the shared hub (already wired — same hub, the sub-agent's Run
-// emits its own agent_start/token/agent_end). Its usage is folded back into
-// the result so Confucius can aggregate.
-//
-// Capability C — transient error retry: when the sub-agent's RetryPolicy is
-// enabled and the failure is transient (429/5xx/timeout), the LLM call is
-// retried up to MaxAttempts with exponential backoff (capped at MaxBackoff),
-// subject to the per-turn token budget (budget). Semantic errors (bad_args,
-// unknown_tool) are never retried; side-effecting agents (those implementing
-// ToolCallTracker) are retried only before they execute any tool call. Each
-// retry emits an agent_error event with Meta.retry=true so the frontend can
-// signal the retry. Retries are skipped entirely when the policy is disabled
-// (Chongzhi by default) or the budget is exhausted.
-func (c *Confucius) dispatchSubAgent(ctx context.Context, tc ToolCall, hub stream.EventHub, budget *retryBudget) toolResult {
-	factory, ok := c.subAgents[tc.Function.Name]
-	if !ok {
-		// Should not happen — NewConfucius validates presence — but defensive.
-		msg := fmt.Sprintf("unknown sub-agent tool %q", tc.Function.Name)
-		streamAgentError(hub, ctx, subAgentNameFor(tc.Function.Name), msg, "unknown_tool")
-		return toolResult{content: msg, isError: true}
-	}
-
-	// Build a FRESH instance for this invocation and discard it afterwards.
-	// The per-run flags the dispatcher reads afterwards (ToolCallTracker's
-	// side-effect flag, RoundCapTracker's cap flag) live on the instance, so
-	// per-invocation construction makes them per-invocation by construction:
-	// a concurrent same-name invocation can neither reset nor set them for
-	// this call. Retries below reuse the SAME instance (one logical call).
-	sub, err := factory()
-	if err != nil {
-		// A construction failure means the sub-agent is effectively
-		// unavailable for this dispatch (config/wiring error); it is
-		// deterministic, so surface it without retry, mirroring the
-		// unknown-tool path.
-		msg := fmt.Sprintf("build sub-agent for %q: %v", tc.Function.Name, err)
-		streamAgentError(hub, ctx, subAgentNameFor(tc.Function.Name), msg, "unknown_tool")
-		return toolResult{content: msg, isError: true}
-	}
-
-	var args InvokeToolArgs
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		msg := fmt.Sprintf("parse %s args: %v", tc.Function.Name, err)
-		streamAgentError(hub, ctx, sub.Name(), msg, "bad_args")
-		return toolResult{content: msg, isError: true}
-	}
-	if args.Task == "" {
-		msg := fmt.Sprintf("%s: missing required field %q", tc.Function.Name, "task")
-		streamAgentError(hub, ctx, sub.Name(), msg, "bad_args")
-		return toolResult{content: msg, isError: true}
-	}
-
-	userMsg := buildSubAgentUserMessage(args)
-	messages := []Message{{Role: "user", Content: userMsg}}
-
-	// Stamp every event this Run emits with the invocation's identity: the
-	// invoke tool_call id. The tagging view is producer-only — Confucius's own
-	// dispatcher-emitted events (the invoke tool_call/tool_result pair, retry
-	// agent_error) keep flowing through the raw hub untagged.
-	runHub := stream.TaggedWithRunID(hub, tc.ID)
-
-	// First attempt.
-	content, usage, _, err := sub.Run(ctx, messages, runHub)
-	if err == nil {
-		u := usage
-		return toolResult{content: content, subUsage: &u, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
-	}
-
-	// Failed. Decide retryability.
-	policy := sub.RetryPolicy()
-	if !shouldRetry(sub, err, policy, budget) {
-		return toolResult{content: joinFailure(err, content), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
-	}
-
-	// Retry loop: attempts are numbered from 1 (the first RETRY). MaxAttempts
-	// is the total attempt count including the initial call already performed.
-	maxAttempts := policy.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = config.DefaultRetryMaxAttempts()
-	}
-	for attempt := 1; attempt < maxAttempts; attempt++ {
-		// Charge the failed attempt's cost to the budget before deciding to
-		// retry, so a flapping downstream cannot burn unbounded tokens.
-		budget.charge(usage)
-		if !budget.allows() {
-			break
-		}
-		// Idempotency re-check before each retry: a prior attempt may have
-		// executed a tool call between this check and the failure.
-		if tracker, ok := sub.(ToolCallTracker); ok && tracker.LastRunExecutedTool() {
-			break
-		}
-		// Signal the retry to the frontend: an agent_error carrying Meta.retry=true
-		// (plus the triggering error) so the UI can distinguish a retry from a
-		// terminal failure.
-		hub.SendCtx(ctx, retryErrorEvent(sub.Name(), err))
-		select {
-		case <-time.After(computeBackoff(policy, attempt)):
-		case <-ctx.Done():
-			return toolResult{content: joinFailure(ctx.Err(), content), isError: true, subUsage: &usage, subAgentName: sub.Name()}
-		}
-		content, usage, _, err = sub.Run(ctx, messages, runHub)
-		if err == nil {
-			u := usage
-			return toolResult{content: content, subUsage: &u, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
-		}
-		// A non-transient follow-up error (e.g. bad_args surfaced on retry)
-		// stops the loop; the last error is surfaced to Confucius.
-		if !isTransientError(err) {
-			break
-		}
-	}
-
-	// Retries exhausted / stopped. Surface the last error to Confucius.
-	// content holds the LAST attempt's partial output — every sub.Run above
-	// overwrites it, matching the one-logical-call retry semantics (earlier
-	// attempts' partials are not kept).
-	return toolResult{content: joinFailure(err, content), isError: true, subUsage: &usage, subAgentName: sub.Name(), subCapped: subHitCap(sub)}
 }
 
 // joinFailure merges a sub-agent's give-up error with the partial output its
@@ -635,7 +584,7 @@ func withSystem(prompt string, msgs []Message) []Message {
 
 // buildSubAgentUserMessage assembles the single user message handed to a
 // sub-agent from the invoke tool's {task, context} arguments.
-func buildSubAgentUserMessage(args InvokeToolArgs) string {
+func buildSubAgentUserMessage(args SpawnToolArgs) string {
 	if args.Context == "" {
 		return args.Task
 	}
@@ -659,7 +608,7 @@ type toolEnvelope struct {
 //	failure → {"status":1,"error":"<err.Error()>"}
 //
 // It is the single rendering point shared by every agent's registry-tool
-// dispatch path (Confucius, Chongzhi, Liang). On success a []byte return is
+// dispatch path (Confucius and generic sub-agents). On success a []byte return is
 // normalized to a Go string before encoding so it is emitted as text rather
 // than base64 (matching the prior marshalToolResult semantics); nil renders as
 // result:null. (json.RawMessage is a distinct named type from []byte, so it is
@@ -695,19 +644,6 @@ func streamAgentError(hub stream.EventHub, ctx context.Context, agent, msg, code
 	hub.SendCtx(ctx, stream.AgentErrorEvent(agent, msg, code))
 }
 
-// subAgentNameFor returns the agent display name an invoke_* tool dispatches
-// to. Used only for the defensive "unknown tool" path where we don't have a
-// sub-agent instance to ask for its Name().
-func subAgentNameFor(toolName string) string {
-	switch toolName {
-	case ToolInvokeChongzhi:
-		return "Chongzhi"
-	case ToolInvokeLiang:
-		return "Liang"
-	}
-	return toolName
-}
-
 // addUsage returns base with delta merged in, returning a new map value so it
 // is safe to call when base is the zero value. Mirrors Usage.Add without the
 // pointer receiver so it composes with map lookups.
@@ -723,9 +659,13 @@ func addUsage(base, delta Usage) Usage {
 // so partial attribution is never lost.
 func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
 	invokes, parallel, roundCapped, lastRoundContext := tmeta.snapshot()
-	out := make(map[string]Usage, len(byAgent))
+	nested := tmeta.snapshotNestedUsage()
+	out := make(map[string]Usage, len(byAgent)+len(nested))
 	for k, v := range byAgent {
 		out[k] = v
+	}
+	for k, v := range nested {
+		out[k] = addUsage(out[k], v)
 	}
 	return &TurnBreakdown{
 		ByAgent:                out,
@@ -737,7 +677,7 @@ func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
 }
 
 // turnMeta accumulates cross-agent facts about one Confucius turn for the done
-// event's usage.meta: which invoke_* sub-agents fired (sub_agent_invocations,
+// event's usage.meta: which dynamic sub-agents fired (sub_agent_invocations,
 // in dispatch order, deduplicated) and whether any assistant round dispatched
 // >=2 tool_calls (parallel). It is concurrency-safe because dispatch happens
 // across goroutines; observeRound/observeInvoke may be called from multiple
@@ -746,16 +686,16 @@ type turnMeta struct {
 	mu          sync.Mutex
 	parallel    bool
 	roundCapped bool
-	invokes     []string // ordered, deduplicated invoke_* tool names
-	invokesSeen map[string]struct{}
+	invocations []SubAgentInvocation
 	// lastRoundContext is the most recent LLM round's prompt+completion —
 	// the authoritative end-of-turn context size (context-compaction
 	// capability), rendered into usage.meta.context_tokens.
 	lastRoundContext int
+	nestedUsage      map[string]Usage
 }
 
 func newTurnMeta() *turnMeta {
-	return &turnMeta{invokesSeen: map[string]struct{}{}}
+	return &turnMeta{nestedUsage: map[string]Usage{}}
 }
 
 // observeRoundContext records the context size of the LLM round that just
@@ -788,23 +728,42 @@ func (t *turnMeta) observeRoundCapped() {
 
 // observeInvoke records that the named invoke_* sub-agent was dispatched this
 // turn, preserving first-seen order and de-duplicating.
-func (t *turnMeta) observeInvoke(toolName string) {
+func (t *turnMeta) observeInvoke(invocation SubAgentInvocation) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if _, ok := t.invokesSeen[toolName]; ok {
-		return
+	invocation.Order = len(t.invocations) + 1
+	t.invocations = append(t.invocations, invocation)
+}
+
+// observeNestedUsage records a descendant-only invocation. Root children are
+// folded by Confucius's local byAgent map; this map makes deeper invocations
+// independently observable without changing the Agent.Run return shape.
+func (t *turnMeta) observeNestedUsage(label string, usage Usage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.nestedUsage == nil {
+		t.nestedUsage = map[string]Usage{}
 	}
-	t.invokesSeen[toolName] = struct{}{}
-	t.invokes = append(t.invokes, toolName)
+	t.nestedUsage[label] = addUsage(t.nestedUsage[label], usage)
+}
+
+func (t *turnMeta) snapshotNestedUsage() map[string]Usage {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]Usage, len(t.nestedUsage))
+	for k, v := range t.nestedUsage {
+		out[k] = v
+	}
+	return out
 }
 
 // snapshot returns the invoke list, parallel flag, round-capped flag, and
 // last-round context size safe for emission. The returned slice is a copy so
 // callers may use it after further mutations.
-func (t *turnMeta) snapshot() ([]string, bool, bool, int) {
+func (t *turnMeta) snapshot() ([]SubAgentInvocation, bool, bool, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make([]string, len(t.invokes))
-	copy(out, t.invokes)
+	out := make([]SubAgentInvocation, len(t.invocations))
+	copy(out, t.invocations)
 	return out, t.parallel, t.roundCapped, t.lastRoundContext
 }

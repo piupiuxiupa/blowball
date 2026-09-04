@@ -50,14 +50,10 @@ agents:
     name: Confucius
     system_prompt: "you are confucius"
     tools: [chongzhi, liang]
-  chongzhi:
-    name: Chongzhi
-    system_prompt: "you are chongzhi"
+  subagent:
+    name: Subagent
+    system_prompt: "you are a generic subagent"
     tools: [read_file, write_file]
-  liang:
-    name: Liang
-    system_prompt: "you are liang"
-    tools: []
 tools:
   xizhi:
     read: {enabled: true}
@@ -82,8 +78,8 @@ logging:
 	if cfg.Agents.Confucius.Name != "Confucius" {
 		t.Errorf("Agents.Confucius.Name = %q", cfg.Agents.Confucius.Name)
 	}
-	if len(cfg.Agents.Chongzhi.Tools) != 2 {
-		t.Errorf("Agents.Chongzhi.Tools len = %d, want 2", len(cfg.Agents.Chongzhi.Tools))
+	if len(cfg.Agents.Subagent.Tools) != 2 {
+		t.Errorf("Agents.Subagent.Tools len = %d, want 2", len(cfg.Agents.Subagent.Tools))
 	}
 	if cfg.Tools.Xizhi.Modify.Enabled != false {
 		t.Errorf("Tools.Xizhi.Modify.Enabled = true, want false")
@@ -96,6 +92,129 @@ logging:
 	const day = 24 * time.Hour
 	if d != 7*day {
 		t.Errorf("JWT duration = %v, want %v", d, 7*day)
+	}
+}
+
+func TestLoad_DynamicSubagentConfig(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confucius: {name: Confucius}
+  subagent:
+    name: Subagent
+    system_prompt: "generic"
+    tools: [read_file]
+    max_depth: 2
+    max_concurrent: 5
+    max_total_per_turn: 9
+    max_snapshot_bytes: 2048
+    presets:
+      reviewer:
+        system_prompt: "review"
+        tools: [read_file]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := cfg.Agents.Subagent
+	if got.MaxDepth != 2 || got.MaxConcurrent != 5 || got.MaxTotalPerTurn != 9 || got.MaxSnapshotBytes != 2048 {
+		t.Fatalf("budgets decoded as depth=%d concurrent=%d total=%d snapshot=%d", got.MaxDepth, got.MaxConcurrent, got.MaxTotalPerTurn, got.MaxSnapshotBytes)
+	}
+	if len(got.Presets["reviewer"].Tools) != 1 || got.Presets["reviewer"].SystemPrompt != "review" {
+		t.Fatalf("preset decoded as %+v", got.Presets["reviewer"])
+	}
+}
+
+func TestLoad_DynamicSubagentDefaults(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confucius: {name: Confucius}
+  subagent: {name: Subagent}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := cfg.Agents.Subagent
+	if got.MaxDepth != 1 || got.MaxConcurrent != 4 || got.MaxTotalPerTurn != 12 || got.MaxSnapshotBytes != 1<<20 {
+		t.Fatalf("defaults decoded as depth=%d concurrent=%d total=%d snapshot=%d", got.MaxDepth, got.MaxConcurrent, got.MaxTotalPerTurn, got.MaxSnapshotBytes)
+	}
+}
+
+func TestLoad_LegacySubagentSectionsRejected(t *testing.T) {
+	for _, section := range []string{"chongzhi", "liang"} {
+		t.Run(section, func(t *testing.T) {
+			path := writeTempYAML(t, fmt.Sprintf(`
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confucius: {name: Confucius}
+  subagent: {name: Subagent}
+  %s: {name: Legacy}
+`, section))
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load expected legacy section error")
+			}
+			for _, want := range []string{"agents." + section, "dynamic-subagents", "agents.subagent"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not contain %q", err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoad_SubagentConcurrencyMustExceedDepth(t *testing.T) {
+	path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+agents:
+  confucius: {name: Confucius}
+  subagent: {name: Subagent, max_depth: 2, max_concurrent: 2}
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load expected max_concurrent <= max_depth error")
+	}
+	if !strings.Contains(err.Error(), "must be greater than max_depth") {
+		t.Fatalf("error %q does not explain deadlock guard", err)
 	}
 }
 
@@ -118,8 +237,7 @@ jwt:
   expire: 1d
 agents:
   confucius: {name: Confucius}
-  chongzhi: {name: Chongzhi}
-  liang: {name: Liang}
+  subagent: {name: Subagent}
 `)
 
 	cfg, err := Load(path)
@@ -493,8 +611,7 @@ agents:
       servers:
         - name: missing
           tools: ["*"]
-  chongzhi: {name: Chongzhi}
-  liang: {name: Liang}
+  subagent: {name: Subagent}
 `)
 	_, err := Load(path)
 	if err == nil {
@@ -521,8 +638,7 @@ agents:
       servers:
         - name: ""
           tools: ["*"]
-  chongzhi: {name: Chongzhi}
-  liang: {name: Liang}
+  subagent: {name: Subagent}
 `)
 	_, err := Load(path)
 	if err == nil {
@@ -576,8 +692,8 @@ func TestLoad_RemovedAgentModelFields(t *testing.T) {
 		},
 		{
 			name:        "residual agent reasoning_effort",
-			agentBlock:  "chongzhi:\n    name: Chongzhi\n    reasoning_effort: low",
-			errContains: "agents.chongzhi.reasoning_effort was removed",
+			agentBlock:  "subagent:\n    name: Subagent\n    reasoning_effort: low",
+			errContains: "agents.subagent.reasoning_effort was removed",
 		},
 	}
 
@@ -679,25 +795,25 @@ func TestLoad_OutputSchemaConfig(t *testing.T) {
 	}{
 		{
 			name:       "output_schema with none default is valid",
-			agentBlock: "liang:\n    name: Liang\n    output_schema: '{\"type\":\"object\"}'",
+			agentBlock: "subagent:\n    name: Subagent\n    output_schema: '{\"type\":\"object\"}'",
 			wantErr:    false,
 		},
 		{
 			name:        "output_schema with non-none default rejected",
 			openaiExtra: "  default_reasoning_effort: high\n",
-			agentBlock:  "liang:\n    name: Liang\n    output_schema: '{\"type\":\"object\"}'",
+			agentBlock:  "subagent:\n    name: Subagent\n    output_schema: '{\"type\":\"object\"}'",
 			wantErr:     true,
 			errContains: "output_schema conflicts with openai.default_reasoning_effort",
 		},
 		{
 			name:        "invalid JSON output_schema rejected",
-			agentBlock:  "liang:\n    name: Liang\n    output_schema: 'not-json'",
+			agentBlock:  "subagent:\n    name: Subagent\n    output_schema: 'not-json'",
 			wantErr:     true,
 			errContains: "output_schema",
 		},
 		{
 			name:        "retry negative max_attempts rejected",
-			agentBlock:  "liang:\n    name: Liang\n    retry:\n        enabled: true\n        max_attempts: -1",
+			agentBlock:  "subagent:\n    name: Subagent\n    retry:\n        enabled: true\n        max_attempts: -1",
 			wantErr:     true,
 			errContains: "max_attempts",
 		},
@@ -718,7 +834,6 @@ jwt:
   secret: "ok"
 agents:
   confucius: {name: Confucius}
-  chongzhi: {name: Chongzhi}
   %s
 `, tc.openaiExtra, tc.agentBlock))
 
@@ -757,8 +872,7 @@ jwt:
   secret: "ok"
 agents:
   confucius: {name: Confucius}
-  chongzhi: {name: Chongzhi}
-  liang: {name: Liang}
+  subagent: {name: Subagent}
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -773,8 +887,7 @@ agents:
 		retry AgentRetryConfig
 	}{
 		{"Confucius", cfg.Agents.Confucius.Retry},
-		{"Chongzhi", cfg.Agents.Chongzhi.Retry},
-		{"Liang", cfg.Agents.Liang.Retry},
+		{"Subagent", cfg.Agents.Subagent.Retry},
 	} {
 		if !tc.retry.Enabled {
 			t.Errorf("%s retry should default to enabled", tc.name)
@@ -813,11 +926,8 @@ agents:
   confucius:
     name: Confucius
     retry: {enabled: false}
-  chongzhi:
-    name: Chongzhi
-    retry: {enabled: false}
-  liang:
-    name: Liang
+  subagent:
+    name: Subagent
     retry: {enabled: false}
 `)
 	cfg, err := Load(path)
@@ -829,8 +939,7 @@ agents:
 		retry AgentRetryConfig
 	}{
 		{"Confucius", cfg.Agents.Confucius.Retry},
-		{"Chongzhi", cfg.Agents.Chongzhi.Retry},
-		{"Liang", cfg.Agents.Liang.Retry},
+		{"Subagent", cfg.Agents.Subagent.Retry},
 	} {
 		if tc.retry.Enabled {
 			t.Errorf("%s explicit retry.enabled=false must be preserved", tc.name)

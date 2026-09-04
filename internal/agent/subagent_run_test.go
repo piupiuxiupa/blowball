@@ -21,7 +21,14 @@ import (
 // to newTestConfucius, which hands out one shared fake per name).
 func newTestConfuciusWithFactories(t *testing.T, client LLMClient, factories map[string]SubAgentFactory) *Confucius {
 	t.Helper()
-	c, err := NewConfucius(testConfuciusConfig(), client, nil, factories, testTurn())
+	factory, ok := factories[SpawnSubagentTool]
+	if !ok {
+		for _, f := range factories {
+			factory = f
+			break
+		}
+	}
+	c, err := NewConfucius(testConfuciusConfig(), client, nil, testSpawnCoordinator(nil, factory), testTurn())
 	require.NoError(t, err)
 	return c
 }
@@ -123,9 +130,9 @@ func parallelInvokeClient() *fakeLLMClient {
 		fakeResponse{
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{
-				{ID: "run_x1", Function: ToolCallFunction{Name: ToolInvokeChongzhi,
+				{ID: "run_x1", Function: ToolCallFunction{Name: SpawnSubagentTool,
 					Arguments: `{"task":"collect from source A"}`}},
-				{ID: "run_x2", Function: ToolCallFunction{Name: ToolInvokeChongzhi,
+				{ID: "run_x2", Function: ToolCallFunction{Name: SpawnSubagentTool,
 					Arguments: `{"task":"collect from source B"}`}},
 			},
 		},
@@ -145,7 +152,7 @@ func TestConfucius_ParallelSameInvoke_SideEffectFlagsIsolated(t *testing.T) {
 	var builds atomic.Int32
 	instances := make([]*concurrentSubAgent, 0, 2)
 	var instMu sync.Mutex
-	factory := func() (Agent, error) {
+	factory := func(SubAgentSpec) (Agent, error) {
 		builds.Add(1)
 		a := &concurrentSubAgent{
 			name:      "Chongzhi",
@@ -160,8 +167,7 @@ func TestConfucius_ParallelSameInvoke_SideEffectFlagsIsolated(t *testing.T) {
 	}
 
 	c := newTestConfuciusWithFactories(t, parallelInvokeClient(), map[string]SubAgentFactory{
-		ToolInvokeChongzhi: factory,
-		ToolInvokeLiang:    func() (Agent, error) { return &fakeAgent{name: "Liang"}, nil },
+		SpawnSubagentTool: factory,
 	})
 
 	_, _, _, _, err := runConfuciusAndCollect(t, c, []Message{{Role: "user", Content: "go"}})
@@ -196,14 +202,13 @@ func TestConfucius_ParallelSameInvoke_RoundCapPerInvocation(t *testing.T) {
 
 	signal := make(chan struct{})
 	var builds atomic.Int32
-	factory := func() (Agent, error) {
+	factory := func(SubAgentSpec) (Agent, error) {
 		builds.Add(1)
 		return &concurrentSubAgent{name: "Chongzhi", signal: signal}, nil
 	}
 
 	c := newTestConfuciusWithFactories(t, parallelInvokeClient(), map[string]SubAgentFactory{
-		ToolInvokeChongzhi: factory,
-		ToolInvokeLiang:    func() (Agent, error) { return &fakeAgent{name: "Liang"}, nil },
+		SpawnSubagentTool: factory,
 	})
 
 	_, _, _, breakdown, err := runConfuciusAndCollect(t, c, []Message{{Role: "user", Content: "go"}})
@@ -223,21 +228,20 @@ func TestConfucius_SubAgentEventsCarryRunIdentity(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	chongzhi := &fakeAgent{name: "Chongzhi", content: "C_RESULT", tokens: []string{"c1", "c2"}}
-	liang := &fakeAgent{name: "Liang", content: "L_RESULT", tokens: []string{"l1"}}
 
 	client := newFake(
 		fakeResponse{
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{
-				{ID: "run_x1", Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"t1"}`}},
-				{ID: "run_x2", Function: ToolCallFunction{Name: ToolInvokeLiang, Arguments: `{"task":"t2"}`}},
+				{ID: "run_x1", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t1","name":"Chongzhi"}`}},
+				{ID: "run_x2", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t2","name":"Liang"}`}},
 			},
 		},
 		fakeResponse{content: "merged", finishReason: "stop", tokens: []string{"merged"}},
 	)
 	c := newTestConfucius(t, client, map[string]Agent{
-		ToolInvokeChongzhi: chongzhi,
-		ToolInvokeLiang:    liang,
+		"Chongzhi": chongzhi,
+		"Liang":    &fakeAgent{name: "Liang", content: "L_RESULT", tokens: []string{"l"}},
 	})
 
 	events, _, _, _, err := runConfuciusAndCollect(t, c, []Message{{Role: "user", Content: "go"}})
@@ -295,15 +299,14 @@ func TestConfucius_FactoryBuildFailureSurfacesError(t *testing.T) {
 		fakeResponse{
 			finishReason: "tool_calls",
 			toolCalls: []ToolCall{
-				{ID: "run_x1", Function: ToolCallFunction{Name: ToolInvokeChongzhi, Arguments: `{"task":"t1"}`}},
+				{ID: "run_x1", Function: ToolCallFunction{Name: SpawnSubagentTool, Arguments: `{"task":"t1","name":"Chongzhi"}`}},
 			},
 		},
 		fakeResponse{content: "ok", finishReason: "stop"},
 	)
 	buildErr := errors.New("registry exploded")
 	c := newTestConfuciusWithFactories(t, client, map[string]SubAgentFactory{
-		ToolInvokeChongzhi: func() (Agent, error) { return nil, buildErr },
-		ToolInvokeLiang:    func() (Agent, error) { return &fakeAgent{name: "Liang"}, nil },
+		SpawnSubagentTool: func(SubAgentSpec) (Agent, error) { return nil, buildErr },
 	})
 
 	events, _, _, _, err := runConfuciusAndCollect(t, c, []Message{{Role: "user", Content: "go"}})

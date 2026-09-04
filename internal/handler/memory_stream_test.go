@@ -29,11 +29,11 @@ import (
 // channels so tests can await the fire-and-forget capture deterministically.
 type ovCapture struct {
 	mu       sync.Mutex
-	users    []string                 // X-OpenViking-User per find call
-	bodies   []map[string]any         // decoded bodies of every request
-	findCode int                      // non-zero → Find fails (degradation path)
-	batch    chan map[string]any      // signals a messages/batch arrival
-	commit   chan map[string]any      // signals a commit arrival
+	users    []string            // X-OpenViking-User per find call
+	bodies   []map[string]any    // decoded bodies of every request
+	findCode int                 // non-zero → Find fails (degradation path)
+	batch    chan map[string]any // signals a messages/batch arrival
+	commit   chan map[string]any // signals a commit arrival
 }
 
 func newOVCapture() *ovCapture {
@@ -270,7 +270,7 @@ func TestTopLevelAssistantText(t *testing.T) {
 	events := []stream.StreamEvent{
 		{Type: stream.EventToken, Agent: model.AgentConfucius, Content: "first round"},
 		{Type: stream.EventReasoning, Agent: model.AgentConfucius, Content: "thinking…"},
-		{Type: stream.EventToolCall, Agent: model.AgentConfucius, Content: "invoke_chongzhi"},
+		{Type: stream.EventToolCall, Agent: model.AgentConfucius, Content: "spawn_subagent"},
 		{Type: stream.EventToken, Agent: model.AgentChongzhi, Content: "subagent output", Meta: subAgent},
 		{Type: stream.EventToken, Agent: model.AgentConfucius, Content: "second round"},
 	}
