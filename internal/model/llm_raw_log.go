@@ -2,11 +2,11 @@ package model
 
 import "time"
 
-// Raw-log kind values. These match the `kind` column on the llm_raw_log
-// table. One LLM call produces a request row, one row per SSE frame
-// (kind=chunk, raw = the frame's wire bytes), and a response row (success) or
-// an error row (failure); all rows of a call share call_id and seq, ordered
-// by frame_index within the call.
+// Raw-log kind values. These match the kind column on the llm_raw_log table.
+// A new LLM call produces a request row and a response row (success) or an
+// error row (failure); all rows of a call share call_id and seq, ordered by
+// frame_index within the call. chunk remains a historical kind for rows written
+// by deployments that captured individual SSE frames.
 const (
 	RawKindRequest  = "request"
 	RawKindChunk    = "chunk"
@@ -16,9 +16,10 @@ const (
 
 // LLMRawLog mirrors the `llm_raw_log` table (migration 011_llm_raw_log.sql).
 // One row is one raw payload captured around a single LLM call: the as-sent
-// request params (kind=request), a single SSE frame's verbatim wire bytes
-// (kind=chunk), the stitched chat.completion-equivalent response
-// (kind=response), or the gateway's error body (kind=error).
+// request params (kind=request), the stitched chat.completion-equivalent
+// response (kind=response), or the gateway's error body (kind=error).
+// Historical rows may instead contain a single SSE frame's verbatim wire bytes
+// (kind=chunk).
 //
 // model / finish_reason / http_status / duration_ms are materialized
 // redundantly from raw for filter-without-parse queries. The table carries no

@@ -19,6 +19,8 @@ import (
 // the production wiring implements (Redis write-behind buffer — see
 // internal/llmraw). OpenAIClient holds the sink as an optional dependency so
 // the client itself stays free of any store import.
+// Capture emits the request and the stitched terminal response/error; individual
+// SSE chunks are not captured.
 
 // agentCtxKey is the unexported context key type for the agent-name value.
 type agentCtxKey struct{}
@@ -66,10 +68,10 @@ type RawCaptureSink interface {
 }
 
 // RawCaptureRecord is one raw payload captured around a single LLM call. All
-// rows of a call (request, per-frame chunks, response/error) share CallID and
-// Seq; FrameIndex orders them within the call (request=0, chunks 1..N in
-// arrival order, response/error last). Seq comes from the process-wide
-// monotonic counter below so calls order stably within (and across) traces.
+// rows of a call (request, response/error) share CallID and Seq; FrameIndex
+// orders them within the call (request=0, response/error=1). Seq comes from
+// the process-wide monotonic counter below so calls order stably within (and
+// across) traces.
 // Field set mirrors the llm_raw_log table columns.
 type RawCaptureRecord struct {
 	CallID       string    `json:"call_id"`
@@ -99,18 +101,9 @@ var rawCallSeq atomic.Int64
 // internal/model).
 const (
 	rawKindRequest  = model.RawKindRequest
-	rawKindChunk    = model.RawKindChunk
 	rawKindResponse = model.RawKindResponse
 	rawKindError    = model.RawKindError
 )
-
-// frameCaptureCap bounds the cumulative kind=chunk bytes captured per LLM
-// call. Frame data is 50-100x the aggregated content (each SSE frame carries
-// ~200B of envelope for a few tokens), so without a cap a runaway stream
-// could overflow the MEDIUMTEXT row ceiling; past the cap a
-// {"_truncated":true,...} marker row is emitted and further frames are
-// skipped for that call (the stitched response row is unaffected).
-const frameCaptureCap = 8 << 20
 
 // newRawCall mints the (call_id, seq) pair shared by one LLM call's request
 // and response/error rows.

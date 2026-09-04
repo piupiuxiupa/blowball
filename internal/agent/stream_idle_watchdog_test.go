@@ -245,8 +245,7 @@ func TestErrStreamIdleTimeout_TransientClassified(t *testing.T) {
 
 // TestStreamIdleWatchdog_CaptureErrorRow covers the llm-raw-capture delta: a
 // watchdog abort ends as a kind=error row with http_status=0 and the typed
-// message (idle, frames, model) as the raw body, ordered after the last
-// kind=chunk row of the same call.
+// message (idle, frames, model) as the terminal raw body of the same call.
 func TestStreamIdleWatchdog_CaptureErrorRow(t *testing.T) {
 	srv := newStallingSrv(t, 2)
 	defer srv.Close()
@@ -256,18 +255,17 @@ func TestStreamIdleWatchdog_CaptureErrorRow(t *testing.T) {
 	_, err := callStreamChat(t, client, captureTestCtx())
 	require.ErrorIs(t, err, ErrStreamIdleTimeout)
 
-	// request(0) + chunk(1..2) + error(3); async settle for the final row.
+	// request(0) + error(1); async settle for the terminal row.
 	require.Eventually(t, func() bool {
-		return len(sink.snapshot()) == 4
+		return len(sink.snapshot()) == 2
 	}, 5*time.Second, 20*time.Millisecond)
 
 	recs := sink.snapshot()
-	reqRow, lastChunk, errRow := recs[0], recs[2], recs[3]
+	reqRow, errRow := recs[0], recs[1]
 	assert.Equal(t, rawKindRequest, reqRow.Kind)
-	assert.Equal(t, rawKindChunk, lastChunk.Kind)
 	assert.Equal(t, rawKindError, errRow.Kind, "watchdog abort is an error row, not a partial response row")
 	assert.Equal(t, 0, errRow.HTTPStatus)
-	assert.Equal(t, lastChunk.FrameIndex+1, errRow.FrameIndex, "error row takes frame_index = last chunk + 1")
+	assert.Equal(t, 1, errRow.FrameIndex, "error row is the terminal record")
 	for _, r := range recs {
 		assert.Equal(t, reqRow.CallID, r.CallID)
 		assert.Equal(t, reqRow.Seq, r.Seq)
@@ -293,15 +291,14 @@ func TestStreamIdleWatchdog_CaptureParentCancelStaysPartial(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 
-	// request(0) + arrived chunk(1) + partial response(2); async settle for
-	// the final row.
+	// request(0) + partial response(1); async settle for the final row.
 	require.Eventually(t, func() bool {
-		return len(sink.snapshot()) == 3
-	}, 5*time.Second, 20*time.Millisecond, "parent cancel must produce request + arrived chunk + partial-response rows")
+		return len(sink.snapshot()) == 2
+	}, 5*time.Second, 20*time.Millisecond, "parent cancel must produce request + partial-response rows")
 
 	recs := sink.snapshot()
-	assert.Equal(t, rawKindResponse, recs[2].Kind, "local cancellation stays a partial response row, not an error row")
-	assert.Equal(t, 0, recs[2].HTTPStatus)
+	assert.Equal(t, rawKindResponse, recs[1].Kind, "local cancellation stays a partial response row, not an error row")
+	assert.Equal(t, 0, recs[1].HTTPStatus)
 	for _, r := range recs {
 		assert.NotEqual(t, rawKindError, r.Kind)
 	}

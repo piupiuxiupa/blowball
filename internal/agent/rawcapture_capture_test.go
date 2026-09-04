@@ -3,10 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/tool/skill"
 )
@@ -84,12 +83,12 @@ func TestStreamChatCapture_SuccessPair(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Hello", resp.Content)
 
-	// sseSuccessBody carries 3 SSE frames (+ the [DONE] sentinel, which is
-	// not a chunk): request(0) + chunk(1..3) + response(4).
+	// sseSuccessBody carries 3 SSE frames (+ the [DONE] sentinel), but frames
+	// are intentionally not captured: request(0) + stitched response(1).
 	recs := sink.snapshot()
-	require.Len(t, recs, 5)
+	require.Len(t, recs, 2, "successful calls must emit request and response rows only")
 
-	req, res := recs[0], recs[4]
+	req, res := recs[0], recs[1]
 
 	// Pairing and attribution shared by every row of the call.
 	assert.Equal(t, req.CallID, res.CallID)
@@ -102,6 +101,7 @@ func TestStreamChatCapture_SuccessPair(t *testing.T) {
 		assert.Equal(t, "Chongzhi", r.Agent)
 		assert.Equal(t, "gpt-test", r.Model)
 		assert.Equal(t, i, r.FrameIndex, "frame_index must order records within the call")
+		assert.NotEqual(t, model.RawKindChunk, r.Kind, "new captures must not emit chunk rows")
 	}
 
 	// Request row: the as-sent params JSON.
@@ -113,21 +113,6 @@ func TestStreamChatCapture_SuccessPair(t *testing.T) {
 	require.True(t, ok, "as-sent request must carry the messages array")
 	require.Len(t, msgs, 1)
 	assert.Equal(t, 0, res.HTTPStatus)
-
-	// Chunk rows: verbatim wire bytes, in arrival order.
-	frame1 := `{"id":"chatcmpl-cap","object":"chat.completion.chunk","created":1700000000,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}`
-	for i, want := range []string{frame1, recs[2].Raw, recs[3].Raw} {
-		c := recs[1+i]
-		assert.Equal(t, rawKindChunk, c.Kind)
-		if i == 0 {
-			assert.Equal(t, want, c.Raw, "chunk raw must be the frame's wire bytes, verbatim")
-		}
-		var frame map[string]any
-		require.NoError(t, json.Unmarshal([]byte(c.Raw), &frame), "each chunk raw must parse as one chat.completion.chunk")
-	}
-	// The three frames concatenated inside their delta.content reproduce the reply.
-	assert.Contains(t, recs[1].Raw, `"Hel"`)
-	assert.Contains(t, recs[2].Raw, `"lo"`)
 
 	// Response row: the stitched non-streaming-equivalent completion.
 	assert.Equal(t, rawKindResponse, res.Kind)
@@ -208,18 +193,19 @@ func TestStreamChatCapture_CancelMidStream(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 
 	// Deadline for the async capture to settle (the SDK surfaces cancellation
-	// on its own schedule). One frame arrived: request(0) + chunk(1) +
-	// partial response(2).
+	// on its own schedule). One frame arrived, but chunks are not captured:
+	// request(0) + partial response(1).
 	require.Eventually(t, func() bool {
-		return len(sink.snapshot()) == 3
-	}, 5*time.Second, 20*time.Millisecond, "cancel path must produce request + arrived chunk + partial-response rows")
+		return len(sink.snapshot()) == 2
+	}, 5*time.Second, 20*time.Millisecond, "cancel path must produce request + partial-response rows")
 
 	recs := sink.snapshot()
-	req, res := recs[0], recs[2]
+	req, res := recs[0], recs[1]
 	assert.Equal(t, rawKindRequest, req.Kind)
 	assert.Equal(t, req.CallID, res.CallID)
-	assert.Equal(t, rawKindChunk, recs[1].Kind)
-	assert.Contains(t, recs[1].Raw, "partial")
+	assert.Equal(t, 0, req.FrameIndex)
+	assert.Equal(t, 1, res.FrameIndex)
+	assert.NotEqual(t, model.RawKindChunk, recs[1].Kind)
 	assert.Equal(t, rawKindResponse, res.Kind, "local cancellation is a partial response row, not an error row")
 	assert.Equal(t, 0, res.HTTPStatus)
 
@@ -227,71 +213,6 @@ func TestStreamChatCapture_CancelMidStream(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(res.Raw), &completion))
 	require.Len(t, completion.Choices, 1)
 	assert.Equal(t, "partial", completion.Choices[0].Message.Content)
-}
-
-func TestStreamChatCapture_FrameBudgetTruncation(t *testing.T) {
-	// Nine ~1MB frames cross the 8MB per-call frame budget mid-stream: frame
-	// capture stops, a {"_truncated":true,...} marker row lands, and the
-	// stitched response row still lands.
-	bigPayload := strings.Repeat("x", 1<<20)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		for i := 0; i < 9; i++ {
-			frame := fmt.Sprintf(`data: {"id":"chatcmpl-big","object":"chat.completion.chunk","created":1700000000,"model":"gpt-test","choices":[{"index":0,"delta":{"content":%s},"finish_reason":null}]}`+"\n\n",
-				mustJSON(bigPayload))
-			_, _ = w.Write([]byte(frame))
-			w.(http.Flusher).Flush()
-		}
-		_, _ = w.Write([]byte(`data: {"id":"chatcmpl-big","object":"chat.completion.chunk","created":1700000000,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
-	}))
-	defer srv.Close()
-
-	sink := &fakeCaptureSink{}
-	client := newCapturingClient(sink, srv.URL)
-
-	resp, err := client.StreamChat(captureTestCtx(), LLMRequest{
-		Model:    "gpt-test",
-		Messages: []Message{{Role: "user", Content: "hi"}},
-	}, nil, nil)
-	require.NoError(t, err)
-
-	recs := sink.snapshot()
-	require.NotEmpty(t, recs)
-
-	var chunks, markers int
-	var lastChunkIdx int
-	for _, r := range recs {
-		switch r.Kind {
-		case rawKindChunk:
-			if strings.Contains(r.Raw, `"_truncated":true`) {
-				markers++
-				var m map[string]any
-				require.NoError(t, json.Unmarshal([]byte(r.Raw), &m))
-				assert.Equal(t, true, m["_truncated"])
-				assert.Equal(t, "frame_capture_cap", m["reason"])
-				assert.Greater(t, m["bytes"], float64(frameCaptureCap-1<<20))
-			} else {
-				chunks++
-				lastChunkIdx = r.FrameIndex
-			}
-		}
-	}
-	assert.Equal(t, 1, markers, "exactly one truncation marker row")
-	// The budget check runs after the frame that crosses it: 8 ~1MB frames
-	// accumulate past 8MB, the marker lands, and frame 9 is never captured.
-	assert.Equal(t, 8, chunks, "frames up to and including the budget-crossing one must be captured")
-	// The response row sits after the last chunk/marker record.
-	var res *RawCaptureRecord
-	for i := range recs {
-		if recs[i].Kind == rawKindResponse {
-			res = &recs[i]
-		}
-	}
-	require.NotNil(t, res, "response row must survive frame truncation")
-	assert.Equal(t, lastChunkIdx+2, res.FrameIndex, "response row follows the marker row")
-	assert.NotEmpty(t, resp.Content)
 }
 
 func TestStreamChatCapture_NilSinkZeroBehavior(t *testing.T) {
