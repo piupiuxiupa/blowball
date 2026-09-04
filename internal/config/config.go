@@ -1030,13 +1030,92 @@ type XizhiConfig struct {
 	Delete    XizhiToolConfig `yaml:"delete"`
 }
 
+// Default webfetch digest knobs. Digesting is off until its Enabled field is
+// set; these values bound model cost once an operator turns it on.
+const (
+	DefaultWebfetchDigestThresholdBytes     = 128 << 10
+	DefaultWebfetchDigestSingleShotMaxBytes = 256 << 10
+	DefaultWebfetchDigestChunkBytes         = 32 << 10
+	DefaultWebfetchDigestMaxChunks          = 8
+	DefaultWebfetchDigestConcurrency        = 3
+	DefaultWebfetchDigestTimeout            = 120 * time.Second
+	DefaultWebfetchDigestChunkTokens        = 1200
+	DefaultWebfetchDigestFinalTokens        = 4000
+)
+
+// WebfetchDigestConfig configures threshold-gated small-model digestion for
+// unusually large extracted documents. Zero/negative numeric fields resolve to
+// the documented defaults so the block mirrors webfetch's other knob semantics.
+type WebfetchDigestConfig struct {
+	Enabled            bool          `yaml:"enabled"`
+	Model              string        `yaml:"model"`
+	ThresholdBytes     int           `yaml:"threshold_bytes"`
+	SingleShotMaxBytes int           `yaml:"single_shot_max_bytes"`
+	ChunkBytes         int           `yaml:"chunk_bytes"`
+	MaxChunks          int           `yaml:"max_chunks"`
+	Concurrency        int           `yaml:"concurrency"`
+	Timeout            time.Duration `yaml:"timeout"`
+	ChunkOutputTokens  int           `yaml:"chunk_output_tokens"`
+	FinalOutputTokens  int           `yaml:"final_output_tokens"`
+}
+
+// Resolve returns the effective digest configuration, substituting defaults for
+// unset or invalid numeric values. It deliberately does not inspect Enabled:
+// callers can report normalized settings even when digestion is disabled.
+func (d WebfetchDigestConfig) Resolve() WebfetchDigestConfig {
+	if d.ThresholdBytes <= 0 {
+		d.ThresholdBytes = DefaultWebfetchDigestThresholdBytes
+	}
+	if d.SingleShotMaxBytes <= 0 {
+		d.SingleShotMaxBytes = DefaultWebfetchDigestSingleShotMaxBytes
+	}
+	if d.SingleShotMaxBytes <= d.ThresholdBytes {
+		d.SingleShotMaxBytes = d.ThresholdBytes + DefaultWebfetchDigestChunkBytes
+	}
+	if d.ChunkBytes <= 0 {
+		d.ChunkBytes = DefaultWebfetchDigestChunkBytes
+	}
+	if d.MaxChunks <= 0 {
+		d.MaxChunks = DefaultWebfetchDigestMaxChunks
+	}
+	if d.Concurrency <= 0 {
+		d.Concurrency = DefaultWebfetchDigestConcurrency
+	}
+	if d.Timeout <= 0 {
+		d.Timeout = DefaultWebfetchDigestTimeout
+	}
+	if d.ChunkOutputTokens <= 0 {
+		d.ChunkOutputTokens = DefaultWebfetchDigestChunkTokens
+	}
+	if d.FinalOutputTokens <= 0 {
+		d.FinalOutputTokens = DefaultWebfetchDigestFinalTokens
+	}
+	return d
+}
+
+// validate rejects a digest model that cannot be resolved against the mandatory
+// model catalog. Numeric values are not rejected here: Resolve documents and
+// normalizes zero/negative values like the other webfetch knobs.
+func (d WebfetchDigestConfig) validate(openAI OpenAIConfig) error {
+	if !d.Enabled {
+		return nil
+	}
+	if name := strings.TrimSpace(d.Model); name != "" {
+		if _, ok := openAI.FindModelCatalogEntry(name); !ok {
+			return fmt.Errorf("tools.webfetch.digest.model: unknown model %q (must appear in openai.models)", name)
+		}
+	}
+	return nil
+}
+
 // WebfetchConfig holds the process-level webfetch tool settings.
 type WebfetchConfig struct {
-	Enabled          bool          `yaml:"enabled"`
-	Timeout          time.Duration `yaml:"timeout"`
-	MaxRedirects     int           `yaml:"max_redirects"`
-	MaxDownloadBytes int           `yaml:"max_download_bytes"`
-	MaxOutputBytes   int           `yaml:"max_output_bytes"`
+	Enabled          bool                 `yaml:"enabled"`
+	Timeout          time.Duration        `yaml:"timeout"`
+	MaxRedirects     int                  `yaml:"max_redirects"`
+	MaxDownloadBytes int                  `yaml:"max_download_bytes"`
+	MaxOutputBytes   int                  `yaml:"max_output_bytes"`
+	Digest           WebfetchDigestConfig `yaml:"digest"`
 }
 
 // UserMCPConfig holds per-user MCP tool settings. Per-user MCP activates
@@ -1585,6 +1664,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Tools.UserMCP.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Tools.Webfetch.Digest.validate(c.OpenAI); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.OpenAI.validate(); err != nil {

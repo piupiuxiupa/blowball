@@ -7,10 +7,11 @@
 - Add an operator-configurable download cap that bounds response bytes retained by `webfetch`.
 - Convert HTML responses to a compact, Markdown-oriented text representation before returning them to the model.
 - Add an operator-configurable extracted-content cap and machine-readable truncation metadata.
+- Add opt-in, threshold-gated small-model digestion: small pages return directly, medium pages use one model call, and large pages use bounded concurrent chunk analysis.
 - Retain existing redirect, timeout, method, header, and error-recovery behavior.
 - Document the new knobs in `config.example.yaml`.
 
-The change does not add model-backed content digestion in this step. Large-content fan-out to a small model is a subsequent design decision because it needs persisted chunks, worker budgets, and merge/failure semantics.
+Model digestion is opt-in. It is triggered by extracted `content_bytes`, not raw HTML size, so ordinary small pages never incur model calls.
 
 ## Capabilities
 
@@ -24,7 +25,9 @@ None.
 
 ## Impact
 
-- `internal/tool/webfetch`: response reading, HTML extraction, result schema, and tool description.
-- `internal/config`: `tools.webfetch` fields.
+- `internal/tool/webfetch`: response reading, HTML extraction, digest chunking, result schema, and tool description.
+- `internal/agent`: a narrow adapter from the digest prompt interface to the shared LLM client.
+- `cmd/blowball`: webfetch digest wiring.
+- `internal/config`: `tools.webfetch` and `tools.webfetch.digest` fields.
 - `config.example.yaml`: examples for the new fields.
 - Tests and the `webfetch` OpenSpec delta.

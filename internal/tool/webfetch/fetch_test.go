@@ -320,6 +320,8 @@ func TestRegisterAll_DescriptionDeclaresErrorRecovery(t *testing.T) {
 	assert.Contains(t, spec.Description, "retry")
 	assert.Contains(t, spec.Description, "converted_from_html")
 	assert.Contains(t, spec.Description, "truncated")
+	assert.Contains(t, spec.Description, "objective")
+	assert.Contains(t, string(spec.ParametersJSON), `"objective"`)
 	// url parameter description makes the scheme explicit.
 	assert.Contains(t, string(spec.ParametersJSON), "Absolute http(s) URL")
 }

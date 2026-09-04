@@ -437,6 +437,20 @@ tools:
     # max_redirects: 10   # optional; HTTP redirect cap (default 10, 0/negative -> 10)
     # max_download_bytes: 5242880   # optional; response bytes retained before extraction (default 5 MiB, 0/negative -> default)
     # max_output_bytes: 102400      # optional; extracted text bytes returned to the model (default 100 KiB, 0/negative -> default)
+    # Small-model digestion is opt-in and threshold-gated by extracted content size:
+    # <= threshold returns directly; <= single-shot max makes one model call;
+    # larger content is split into transient files and analyzed concurrently.
+    # digest:
+    #   enabled: false
+    #   model: ""                    # optional; catalog model name (default: openai.default_model)
+    #   threshold_bytes: 131072      # no model call at/below 128 KiB
+    #   single_shot_max_bytes: 262144 # one model call through 256 KiB
+    #   chunk_bytes: 32768           # map-reduce chunk target (32 KiB)
+    #   max_chunks: 8                # hard model-call fan-out cap
+    #   concurrency: 3               # simultaneous chunk model calls
+    #   timeout: 120s                # total digest budget
+    #   chunk_output_tokens: 1200    # per-chunk output quota
+    #   final_output_tokens: 4000    # single-shot/reducer output quota
 
   # Per-tool execution timeouts (capability: tool-execution-timeout). Maps a
   # built-in tool name (the same identifier agents list under their tools:) to a

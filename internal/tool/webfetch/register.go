@@ -27,6 +27,10 @@ var schemaFetch = json.RawMessage(`{
       "type": "object",
       "description": "Optional HTTP headers as key-value pairs.",
       "additionalProperties": { "type": "string" }
+    },
+    "objective": {
+      "type": "string",
+      "description": "Optional extraction objective used only when model digestion is enabled for large content; keep it concise."
     }
   },
   "required": ["url"],
@@ -35,13 +39,20 @@ var schemaFetch = json.RawMessage(`{
 
 // fetchArgs decodes the model-supplied tool arguments.
 type fetchArgs struct {
-	URL     string            `json:"url"`
-	Method  string            `json:"method"`
-	Headers map[string]string `json:"headers"`
+	URL       string            `json:"url"`
+	Method    string            `json:"method"`
+	Headers   map[string]string `json:"headers"`
+	Objective string            `json:"objective"`
 }
 
 // RegisterAll registers the webfetch tool against r when enabled in cfg.
 func RegisterAll(r *tool.Registry, cfg config.WebfetchConfig) {
+	RegisterAllWithDigester(r, cfg, nil)
+}
+
+// RegisterAllWithDigester registers webfetch with optional model-backed large-content
+// digestion.
+func RegisterAllWithDigester(r *tool.Registry, cfg config.WebfetchConfig, digester ContentDigester) {
 	if !cfg.Enabled {
 		return
 	}
@@ -49,10 +60,11 @@ func RegisterAll(r *tool.Registry, cfg config.WebfetchConfig) {
 	spec := &tool.ToolSpec{
 		Name: Name,
 		Description: "Fetch an external URL and return `{url, status_code, headers, body, converted_from_html, content_bytes, " +
-			"download_truncated, truncated}`: `url` is the final URL after redirects, `status_code` is the HTTP status int, " +
+			"download_truncated, truncated, processing_mode, digest}`: `url` is the final URL after redirects, `status_code` is the HTTP status int, " +
 			"`headers` maps each response header to its value(s), and `body` is bounded, model-oriented text. HTML is converted " +
 			"to compact Markdown (scripts/styles omitted). `content_bytes` is the extracted size before the output cap; " +
 			"`download_truncated` and `truncated` disclose size cuts, and truncated bodies end with a visible marker. " +
+			"When operator-enabled, unusually large extracted content may be digested by a small model; `objective` tells it what to retain. " +
 			"**`url` MUST be an absolute http(s) URL " +
 			"including the scheme.** Follows redirects up to a configurable limit (default 10) and uses the configured " +
 			"timeout (default 30s). The download and extracted-content caps default to 5 MiB and 100 KiB respectively. " +
@@ -66,10 +78,10 @@ func RegisterAll(r *tool.Registry, cfg config.WebfetchConfig) {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("webfetch: parse args: %w", err)
 			}
-			return FetchWithOptions(a.URL, a.Method, a.Headers, cfg.Timeout, cfg.MaxRedirects, Options{
+			return FetchWithContext(ctx, a.URL, a.Objective, a.Method, a.Headers, cfg.Timeout, cfg.MaxRedirects, Options{
 				MaxDownloadBytes: cfg.MaxDownloadBytes,
 				MaxOutputBytes:   cfg.MaxOutputBytes,
-			})
+			}, digester)
 		},
 	}
 	if err := r.Register(spec); err != nil {

@@ -40,3 +40,33 @@ For HTML or XHTML responses, `webfetch` SHALL parse the response with charset de
 - **WHEN** a response has a non-HTML text content type
 - **THEN** the tool returns the text body without applying HTML extraction
 - **AND** the result reports `converted_from_html: false`
+
+### Requirement: Threshold-gated small-model content digestion
+When `tools.webfetch.digest.enabled` is true, `webfetch` SHALL decide whether to invoke the configured digest model from extracted `content_bytes`, not from raw response size. Content at or below `threshold_bytes` SHALL be returned directly with no digest model call. Content above `threshold_bytes` and at or below `single_shot_max_bytes` SHALL use one digest model call. Larger content SHALL be split into bounded chunks and analyzed concurrently up to `concurrency` before being reduced. The tool SHALL accept an optional `objective` argument that tells the digest model what information to retain.
+
+#### Scenario: Small content does not invoke the digest model
+- **WHEN** digesting is enabled and extracted `content_bytes` is at or below `threshold_bytes`
+- **THEN** the result has `processing_mode: "direct"` and no digest model call is made
+
+#### Scenario: Medium content uses one model call
+- **WHEN** extracted `content_bytes` is above `threshold_bytes` and at or below `single_shot_max_bytes`
+- **THEN** the digest model is called once with the full extracted content and objective
+- **AND** the result reports a single-shot digest
+
+#### Scenario: Large content uses bounded concurrent map-reduce
+- **WHEN** extracted `content_bytes` is above `single_shot_max_bytes`
+- **THEN** the content is split into chunk files of at most `chunk_bytes`
+- **AND** at most `max_chunks` chunks are accepted
+- **AND** at most `concurrency` digest model calls run simultaneously
+- **AND** successful chunk analyses are reduced in original order
+- **AND** the result reports chunk counts, analyzed coverage, and digest status
+
+#### Scenario: Digest cost is bounded
+- **WHEN** extracted content would require more than `max_chunks` chunks
+- **THEN** the tool does not expand the worker fan-out
+- **AND** it falls back to bounded direct content with a skipped digest result
+
+#### Scenario: Digest failure preserves the fetch result
+- **WHEN** a digest model call fails or returns no usable content
+- **THEN** `webfetch` still returns the fetched status, headers, and bounded direct content
+- **AND** the digest metadata reports the failure

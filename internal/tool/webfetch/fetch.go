@@ -3,6 +3,7 @@
 package webfetch
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,8 @@ type fetchResult struct {
 	ContentBytes      int               `json:"content_bytes"`
 	DownloadTruncated bool              `json:"download_truncated"`
 	Truncated         bool              `json:"truncated"`
+	ProcessingMode    string            `json:"processing_mode"`
+	Digest            *DigestResult     `json:"digest,omitempty"`
 }
 
 // Options carries the two independent webfetch content bounds. MaxDownloadBytes
@@ -63,12 +66,21 @@ func (o Options) resolve() Options {
 // non-UTF-8 bytes in non-HTML responses may render as replacement characters
 // in JSON.
 func Fetch(rawURL, method string, headers map[string]string, timeout time.Duration, maxRedirects int) (any, error) {
-	return FetchWithOptions(rawURL, method, headers, timeout, maxRedirects, Options{})
+	return FetchWithContext(context.Background(), rawURL, "", method, headers, timeout, maxRedirects, Options{}, nil)
 }
 
 // FetchWithOptions is Fetch with explicit content limits. Zero or negative
 // limits resolve to the documented defaults.
 func FetchWithOptions(rawURL, method string, headers map[string]string, timeout time.Duration, maxRedirects int, options Options) (any, error) {
+	return FetchWithContext(context.Background(), rawURL, "", method, headers, timeout, maxRedirects, options, nil)
+}
+
+// FetchWithContext is Fetch with a request context, optional extraction
+// objective, and optional model-backed digest service.
+func FetchWithContext(ctx context.Context, rawURL, objective, method string, headers map[string]string, timeout time.Duration, maxRedirects int, options Options, digester ContentDigester) (any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	options = options.resolve()
 	if strings.TrimSpace(rawURL) == "" {
 		return nil, fmt.Errorf("webfetch: url is empty")
@@ -86,7 +98,7 @@ func FetchWithOptions(rawURL, method string, headers map[string]string, timeout 
 		maxRedirects = defaultMaxRedirects
 	}
 
-	req, err := http.NewRequest(method, rawURL, nil)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webfetch: create request: %w", err)
 	}
@@ -144,7 +156,22 @@ func FetchWithOptions(rawURL, method string, headers map[string]string, timeout 
 	}
 
 	contentBytes := len(content)
-	outputTruncated := contentBytes > options.MaxOutputBytes
+	processingMode := ProcessingModeDirect
+	var digest *DigestResult
+	if !downloadTruncated && digester != nil && digester.ShouldDigest(contentBytes) {
+		result, err := digester.Digest(ctx, DigestRequest{
+			URL:       resp.Request.URL.String(),
+			Objective: objective,
+			Content:   content,
+		})
+		digest = &result
+		processingMode = result.Mode
+		if err == nil && result.Content != "" {
+			content = result.Content
+		}
+	}
+
+	outputTruncated := len(content) > options.MaxOutputBytes
 	truncated := downloadTruncated || outputTruncated
 	if truncated {
 		marker := truncationMarker(options.MaxOutputBytes, downloadTruncated, outputTruncated, options.MaxDownloadBytes, contentBytes)
@@ -167,6 +194,8 @@ func FetchWithOptions(rawURL, method string, headers map[string]string, timeout 
 		ContentBytes:      contentBytes,
 		DownloadTruncated: downloadTruncated,
 		Truncated:         truncated,
+		ProcessingMode:    processingMode,
+		Digest:            digest,
 	}, nil
 }
 

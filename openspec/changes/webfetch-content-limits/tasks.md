@@ -16,3 +16,19 @@
 - [x] 3.2 Test HTML extraction, script/style removal, and semantic conversion.
 - [x] 3.3 Test output truncation and defaults.
 - [x] 3.4 Run `gofmt`, package tests, and the relevant broader test suite.
+
+## 4. Threshold-gated model digestion
+
+- [x] 4.1 Add `tools.webfetch.digest` configuration, normalized defaults, validation, and examples.
+- [x] 4.2 Add a webfetch-owned digest service with direct/single-shot/map-reduce modes, transient chunk files, bounded concurrency, prompts, and result metadata.
+- [x] 4.3 Refactor fetch execution to carry context and the optional objective, invoke digestion before the final output cap, and degrade gracefully on digest failure.
+- [x] 4.4 Add the agent-side prompt adapter and wire it into server startup with a catalog-resolved digest model.
+- [x] 4.5 Update the tool schema and description.
+
+## 5. Digest tests and validation
+
+- [x] 5.1 Test configuration normalization and validation.
+- [x] 5.2 Test no model call below threshold, one call in single-shot mode, and bounded concurrent calls in map-reduce mode.
+- [x] 5.3 Test chunk-file cleanup, partial failure, oversized-content fallback, and fetch degradation.
+- [x] 5.4 Test the agent prompt adapter and registration objective passthrough.
+- [x] 5.5 Run formatting, lint, focused tests, OpenSpec validation, and the full race suite.

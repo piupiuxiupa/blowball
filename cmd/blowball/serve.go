@@ -581,7 +581,6 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	reg := tool.NewRegistry()
 	reg.SetTimeouts(cfg.Tools.Timeouts)
 	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi)
-	webfetch.RegisterAll(reg, cfg.Tools.Webfetch)
 
 	// Sandboxed bash execution. Only registered on Linux where bwrap is available; on other platforms the enabled tool is ignored. If bash is explicitly enabled but bwrap is missing on Linux, startup fails fast. (The dedicated python/pip_install executors were removed; Python code and pip installs run via bash.)
 	if executorConfigured(cfg) {
@@ -655,6 +654,21 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	rawFlusher.Start()
 
 	openAIClient := agent.NewOpenAIClientWithSink(cfg.OpenAI, rawSink)
+	var webfetchDigester webfetch.ContentDigester
+	if cfg.Tools.Webfetch.Digest.Enabled {
+		promptClient, err := agent.NewWebfetchPromptClient(openAIClient, cfg.OpenAI, cfg.Tools.Webfetch.Digest.Model)
+		if err != nil {
+			log.Fatal("webfetch digest model resolution failed", zap.Error(err))
+		}
+		webfetchDigester = webfetch.NewDigester(
+			promptClient,
+			cfg.Tools.Webfetch.Digest,
+			cfg.DefaultModelName(),
+			func(userID string) string { return fsStore.UserWorkspace(userID) },
+		)
+	}
+	webfetch.RegisterAllWithDigester(reg, cfg.Tools.Webfetch, webfetchDigester)
+
 	// Title generation runs on its own resolved model (openai.title_model or
 	// the default catalog entry) over the shared client.
 	titleCfg := cfg.OpenAI
