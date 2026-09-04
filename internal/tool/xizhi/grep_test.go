@@ -1,10 +1,13 @@
 package xizhi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -247,6 +250,49 @@ func TestGrepFiles_HiddenExcludedByDefault(t *testing.T) {
 	assert.Contains(t, files, ".git/config")
 }
 
+func TestGrepFiles_WorkspaceRootExcludesReservedNamespace(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, reservedNamespaceDir, "mcp"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, reservedNamespaceDir, "mcp", "config.json"), []byte("secret=reserved\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".git", "config"), []byte("secret=git\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".env"), []byte("secret=env\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "visible.txt"), []byte("secret=visible\n"), 0o644))
+
+	res, err := GrepSearch(root, ".", "secret", "", false, true, 0, 0, outputModeContent, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	files := make([]string, 0, len(got.Matches))
+	for _, m := range got.Matches {
+		files = append(files, m.File)
+	}
+	assert.ElementsMatch(t, []string{".env", ".git/config", "visible.txt"}, files)
+	assert.NotContains(t, files, filepath.ToSlash(filepath.Join(reservedNamespaceDir, "mcp", "config.json")))
+}
+
+func TestGrepFiles_NestedReservedNameRemainsSearchable(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "nested", reservedNamespaceDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "nested", reservedNamespaceDir, "config"), []byte("secret\n"), 0o644))
+
+	res, err := GrepSearch(root, "nested", "secret", "", false, true, 0, 0, outputModeContent, 0, 0)
+	require.NoError(t, err)
+	got := res.(grepResult)
+	require.Len(t, got.Matches, 1)
+	assert.Equal(t, filepath.ToSlash(filepath.Join(reservedNamespaceDir, "config")), got.Matches[0].File)
+}
+
+func TestGrepFiles_ExplicitReservedTargetRejected(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(reservedNamespaceDir, "mcp", "config.json")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, filepath.Dir(target)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, target), []byte("secret\n"), 0o644))
+
+	_, err := GrepSearch(root, target, "secret", "", false, true, 0, 0, outputModeContent, 0, 0)
+	require.ErrorIs(t, err, ErrPathOutsideWorkspace)
+	assert.Contains(t, err.Error(), "reserved application directory")
+}
+
 func TestGrepFiles_SymlinksNotFollowed(t *testing.T) {
 	root := t.TempDir()
 	target := t.TempDir() // outside the workspace root
@@ -288,6 +334,101 @@ func TestGrepFiles_ViaRegistry_Execute(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"file":"a.go"`)
 	assert.Contains(t, string(b), `"line_number":1`)
+}
+
+func TestGrepRegisteredCallback_ReceivesRegistryContext(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("func Foo() {}\n"), 0o644))
+
+	r := newTestRegistry(t)
+	RegisterAll(r, root, testXizhiConfig())
+	spec, ok := r.Get(NameGrep)
+	require.True(t, ok)
+	args, err := json.Marshal(grepArgs{Path: ".", Pattern: "Foo"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = spec.Execute(ctx, args)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestGrepSearchCtx_ShortDeadlineFailsBeforeSearch(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("func Foo() {}\n"), 0o644))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 0)
+	defer cancel()
+	_, err := GrepSearchCtx(ctx, root, ".", "Foo", "", false, false, 0, 0, outputModeContent, 0, 0)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestGoGrepEngine_CancelledBeforeWalk(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("hit\n"), 0o644))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := goGrepEngine{}.search(ctx, grepInput{
+		workspaceRoot: root,
+		absPath:       root,
+		pattern:       "hit",
+		outputMode:    outputModeContent,
+		headLimit:     defaultGrepHeadLimit,
+		re:            regexp.MustCompile("hit"),
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestAttachContext_CancelledBeforeRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := attachContext(ctx, grepInput{
+		outputMode:    outputModeContent,
+		contextBefore: 1,
+	}, []rawLocation{{file: "a.txt", line: 1, text: "hit"}})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestReadTextLines_PreservesLineClassification(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+		ok      bool
+	}{
+		{name: "empty", content: "", want: nil, ok: true},
+		{name: "crlf", content: "alpha\r\nbeta\r\n", want: []string{"alpha", "beta"}, ok: true},
+		{name: "final line without newline", content: "alpha\nbeta", want: []string{"alpha", "beta"}, ok: true},
+		{name: "binary", content: "alpha\x00beta\n", ok: false},
+		{
+			name:    "line exceeds one mebibyte",
+			content: strings.Repeat("A", maxGrepLineBytes+1) + "\n",
+			ok:      false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(root, tt.name+".txt")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o644))
+
+			got, ok, err := readTextLines(t.Context(), path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestReadTextLines_Cancelled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hit\n"), 0o644))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err := readTextLines(ctx, path)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestGrepFiles_LineTruncated(t *testing.T) {

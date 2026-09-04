@@ -6,7 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -145,6 +147,40 @@ func TestGrep_RgGoParity(t *testing.T) {
 			},
 			pattern: "import", outputMode: outputModeFiles,
 		},
+		{
+			name: "hidden descendants included on request",
+			files: map[string]string{
+				".env":        "secret\n",
+				".git/config": "secret\n",
+				"visible.txt": "secret\n",
+			},
+			pattern: "secret", includeHidden: true, outputMode: outputModeContent,
+		},
+		{
+			name: "directory binary file is skipped",
+			files: map[string]string{
+				"visible.txt": "hit\n",
+				"bin.dat":     "hit\x00\x00\x00",
+			},
+			pattern: "hit", outputMode: outputModeContent,
+		},
+		{
+			name: "workspace root excludes reserved namespace",
+			files: map[string]string{
+				".blowball/mcp/config.json": "secret\n",
+				".env":                      "secret\n",
+				".git/config":               "secret\n",
+				"visible.txt":               "secret\n",
+			},
+			pattern: "secret", includeHidden: true, outputMode: outputModeContent,
+		},
+		{
+			name: "nested reserved-named directory remains searchable",
+			files: map[string]string{
+				"nested/.blowball/config": "secret\n",
+			},
+			target: "nested", pattern: "secret", includeHidden: true, outputMode: outputModeContent,
+		},
 	}
 
 	for _, f := range fixtures {
@@ -176,6 +212,7 @@ func TestGrep_RgGoParity(t *testing.T) {
 				searchFile = filepath.Base(absTarget)
 			}
 			in := grepInput{
+				workspaceRoot: root,
 				relPath:       target,
 				absPath:       absTarget,
 				searchFile:    searchFile,
@@ -203,5 +240,45 @@ func TestGrep_RgGoParity(t *testing.T) {
 			goOut := buildGrepResult(in, goRes)
 			assert.Equal(t, goOut, rgOut, "rg and Go engines must produce identical grepResult")
 		})
+	}
+}
+
+func TestRgGrepEngine_CancelledDuringExecution(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("ripgrep not installed; skipping rg cancellation test")
+	}
+
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	script := filepath.Join(dir, "fake-rg")
+	source := "#!/bin/sh\ntrap 'exit 0' TERM\n: > " + strconv.Quote(ready) + "\nwhile :; do :; done\n"
+	require.NoError(t, os.WriteFile(script, []byte(source), 0o755))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := rgGrepEngine{rgPath: script}.search(ctx, grepInput{
+			workspaceRoot: dir,
+			absPath:       dir,
+			pattern:       "hit",
+			outputMode:    outputModeContent,
+			headLimit:     defaultGrepHeadLimit,
+			re:            regexp.MustCompile("hit"),
+		})
+		errCh <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	}, 2*time.Second, 5*time.Millisecond, "fake rg did not start")
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("rg engine did not return after context cancellation")
 	}
 }

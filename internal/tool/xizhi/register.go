@@ -442,11 +442,14 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 				"`glob` to filter by file name (e.g. `*.go`).",
 			ParametersJSON: schemaGrep,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, fmt.Errorf("xizhi_grep: %w", err)
+				}
 				var a grepArgs
 				if err := json.Unmarshal(args, &a); err != nil {
 					return nil, fmt.Errorf("xizhi_grep: parse args: %w", err)
 				}
-				return GrepSearch(workspaceRoot, a.Path, a.Pattern, a.Glob, a.IgnoreCase, a.IncludeHidden, a.ContextBefore, a.ContextAfter, a.OutputMode, a.HeadLimit, a.Offset)
+				return GrepSearchCtx(ctx, workspaceRoot, a.Path, a.Pattern, a.Glob, a.IgnoreCase, a.IncludeHidden, a.ContextBefore, a.ContextAfter, a.OutputMode, a.HeadLimit, a.Offset)
 			},
 		})
 	}

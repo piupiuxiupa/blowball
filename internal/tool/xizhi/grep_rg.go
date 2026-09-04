@@ -63,6 +63,9 @@ type rawLocation struct {
 }
 
 func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, error) {
+	if err := ctx.Err(); err != nil {
+		return engineResult{}, err
+	}
 	// Directory mode runs rg with cwd at the search root scanning "." (the
 	// historical shape); single-file mode runs it with cwd at the file's parent
 	// scanning the bare file name, so --json path output stays a plain basename
@@ -85,6 +88,12 @@ func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, e
 	if in.includeHidden {
 		args = append(args, "--hidden")
 	}
+	// A glob containing a separator is anchored to rg's cwd, so this excludes
+	// only the workspace-level namespace and leaves a nested directory of the
+	// same name subject to ordinary hidden-entry rules.
+	if in.searchFile == "" && isWorkspaceReservedNamespace(in, filepath.Join(in.absPath, reservedNamespaceDir)) {
+		args = append(args, "--glob", "!"+reservedNamespaceDir+"/**")
+	}
 	if in.ignoreCase {
 		args = append(args, "-i")
 	}
@@ -99,7 +108,13 @@ func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, e
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
+		if ctx.Err() != nil {
+			return engineResult{}, ctx.Err()
+		}
 		return engineResult{}, fmt.Errorf("xizhi grep: start rg: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return engineResult{}, err
 	}
 
 	var locs []rawLocation
@@ -107,6 +122,9 @@ func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, e
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), 4<<20) // tolerate long matched lines
 	for sc.Scan() {
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		var ev rgEvent
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			continue
@@ -142,6 +160,9 @@ func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, e
 		}
 	}
 	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return engineResult{}, err
+	}
 	if waitErr != nil && !capped {
 		if ee, ok := waitErr.(*exec.ExitError); ok {
 			// rg exits 1 when no matches were found — a normal empty result,
@@ -160,20 +181,27 @@ func (e rgGrepEngine) search(ctx context.Context, in grepInput) (engineResult, e
 		}
 	}
 
-	return engineResult{matches: attachContext(in, locs), collectCapped: capped}, nil
+	matches, err := attachContext(ctx, in, locs)
+	if err != nil {
+		return engineResult{}, err
+	}
+	return engineResult{matches: matches, collectCapped: capped}, nil
 }
 
 // attachContext builds rawMatches from the collected locations. In content mode
 // with context requested, it reads each matching file once and slices context
 // via the shared contextAround helper (matching the Go engine exactly).
-func attachContext(in grepInput, locs []rawLocation) []rawMatch {
+func attachContext(ctx context.Context, in grepInput, locs []rawLocation) ([]rawMatch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	needContext := in.outputMode == outputModeContent && (in.contextBefore > 0 || in.contextAfter > 0)
 	if !needContext {
 		out := make([]rawMatch, len(locs))
 		for i, l := range locs {
 			out[i] = rawMatch{file: l.file, lineNumber: l.line, line: l.text}
 		}
-		return out
+		return out, nil
 	}
 
 	// Match files are relative to the search root; in single-file mode the root
@@ -191,15 +219,24 @@ func attachContext(in grepInput, locs []rawLocation) []rawMatch {
 
 	var out []rawMatch
 	for file, ls := range byFile {
-		lines, ok := readTextLines(filepath.Join(base, filepath.FromSlash(file)))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lines, ok, err := readTextLines(ctx, filepath.Join(base, filepath.FromSlash(file)))
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}
 		for _, l := range ls {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			m := rawMatch{file: file, lineNumber: l.line, line: l.text}
 			m.contextBefore, m.contextAfter = contextAround(lines, l.line, in.contextBefore, in.contextAfter)
 			out = append(out, m)
 		}
 	}
-	return out
+	return out, nil
 }

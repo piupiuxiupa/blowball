@@ -35,6 +35,7 @@ const maxGrepCollect = 10000
 // grepInput is the validated input shared by every grep engine.
 type grepInput struct {
 	relPath       string // workspace-relative search path (for the result Path field)
+	workspaceRoot string // workspace root; used only for workspace-level traversal policy
 	absPath       string // resolved absolute search root (the target file itself in single-file mode)
 	searchFile    string // single-file mode: basename of the target file; empty = directory mode
 	pattern       string
@@ -87,10 +88,25 @@ var defaultEngine = sync.OnceValue(func() grepEngine {
 	return goGrepEngine{}
 })
 
-// GrepSearch is the full-parameter entry point used by the tool registry: it
-// validates inputs, delegates to the resolved grep engine (ripgrep when
-// available, Go fallback otherwise), and maps the raw matches into the final
-// paginated result.
+// GrepSearchCtx is the context-aware full-parameter entry point used by the
+// tool registry. The supplied context bounds validation, engine selection, the
+// search engine, and any follow-up context-line reads.
+func GrepSearchCtx(
+	ctx context.Context,
+	workspaceRoot, relPath, pattern, glob string,
+	ignoreCase, includeHidden bool,
+	contextBefore, contextAfter int,
+	outputMode string, headLimit, offset int,
+) (any, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("xizhi_grep: nil context")
+	}
+	return grepRun(ctx, workspaceRoot, relPath, pattern, glob, ignoreCase, includeHidden, contextBefore, contextAfter, outputMode, headLimit, offset)
+}
+
+// GrepSearch is the background-context compatibility entry retained for legacy
+// callers and tests. New registry-facing callers should use GrepSearchCtx so the
+// dispatcher's deadline bounds the search.
 func GrepSearch(
 	workspaceRoot, relPath, pattern, glob string,
 	ignoreCase, includeHidden bool,
@@ -107,6 +123,16 @@ func GrepFiles(workspaceRoot, relPath, pattern, glob string, ignoreCase, include
 	return grepRun(context.Background(), workspaceRoot, relPath, pattern, glob, ignoreCase, includeHidden, contextBefore, contextAfter, outputModeContent, defaultGrepHeadLimit, 0)
 }
 
+// selectGrepEngine resolves the process-wide engine after observing ctx. The
+// engine probe is cached, but a search that reaches this point with an expired
+// context fails before any engine work starts.
+func selectGrepEngine(ctx context.Context) (grepEngine, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return defaultEngine(), nil
+}
+
 func grepRun(
 	ctx context.Context,
 	workspaceRoot, relPath, pattern, glob string,
@@ -114,6 +140,12 @@ func grepRun(
 	contextBefore, contextAfter int,
 	outputMode string, headLimit, offset int,
 ) (any, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("xizhi_grep: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(relPath) == "" {
 		return nil, fmt.Errorf("xizhi_grep: path is required")
 	}
@@ -173,6 +205,7 @@ func grepRun(
 
 	in := grepInput{
 		relPath:       relPath,
+		workspaceRoot: workspaceRoot,
 		absPath:       absPath,
 		searchFile:    searchFile,
 		pattern:       pattern,
@@ -187,7 +220,11 @@ func grepRun(
 		re:            re,
 	}
 
-	er, err := defaultEngine().search(ctx, in)
+	engine, err := selectGrepEngine(ctx)
+	if err != nil {
+		return nil, err
+	}
+	er, err := engine.search(ctx, in)
 	if err != nil {
 		return nil, err
 	}

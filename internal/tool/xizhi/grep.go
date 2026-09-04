@@ -3,11 +3,14 @@ package xizhi
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -21,7 +24,17 @@ import (
 const (
 	maxGrepMatches   = 200
 	maxGrepLineRunes = 500
+	// grepReadBufferSize is the buffered reader size used while scanning text.
+	grepReadBufferSize = 64 * 1024
+	// maxGrepLineBytes preserves the prior bufio.Scanner limit: files with a
+	// line longer than 1 MiB are silently skipped as non-line-oriented text.
+	maxGrepLineBytes = 1 << 20
 )
+
+// errGrepLineTooLong is internal to readTextLines; it makes a bounded reader
+// distinguish an oversized line (silently skipped) from cancellation (an
+// error).
+var errGrepLineTooLong = errors.New("grep line too long")
 
 // grepMatch is one content match returned by xizhi_grep in content mode.
 type grepMatch struct {
@@ -83,6 +96,9 @@ func (goGrepEngine) search(ctx context.Context, in grepInput) (engineResult, err
 			return nil
 		}
 		if d.IsDir() {
+			if isWorkspaceReservedNamespace(in, p) {
+				return filepath.SkipDir
+			}
 			if p != in.absPath && !in.includeHidden && isHiddenName(d.Name()) {
 				return filepath.SkipDir
 			}
@@ -111,7 +127,11 @@ func (goGrepEngine) search(ctx context.Context, in grepInput) (engineResult, err
 			// match file is the basename (Rel of a path against itself is ".").
 			fileRel = in.searchFile
 		}
-		er.matches = append(er.matches, scanGrepFileRaw(p, filepath.ToSlash(fileRel), in.re, in.contextBefore, in.contextAfter)...)
+		matches, err := scanGrepFileRaw(ctx, p, filepath.ToSlash(fileRel), in.re, in.contextBefore, in.contextAfter)
+		if err != nil {
+			return err
+		}
+		er.matches = append(er.matches, matches...)
 		if len(er.matches) >= maxGrepCollect {
 			er.collectCapped = true
 			return filepath.SkipAll
@@ -132,13 +152,19 @@ func (goGrepEngine) search(ctx context.Context, in grepInput) (engineResult, err
 // binary (leading bytes contain a NUL byte, aligning with grep -I) yields no
 // matches and no error. Truncation of long lines is applied later by the shared
 // mapper so this stays engine-agnostic.
-func scanGrepFileRaw(absFile, fileRel string, re *regexp.Regexp, contextBefore, contextAfter int) []rawMatch {
-	lines, ok := readTextLines(absFile)
+func scanGrepFileRaw(ctx context.Context, absFile, fileRel string, re *regexp.Regexp, contextBefore, contextAfter int) ([]rawMatch, error) {
+	lines, ok, err := readTextLines(ctx, absFile)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	var out []rawMatch
 	for i, line := range lines {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !re.MatchString(line) {
 			continue
 		}
@@ -146,39 +172,142 @@ func scanGrepFileRaw(absFile, fileRel string, re *regexp.Regexp, contextBefore, 
 		m.contextBefore, m.contextAfter = contextAround(lines, i+1, contextBefore, contextAfter)
 		out = append(out, m)
 	}
-	return out
+	return out, nil
 }
 
-// readTextLines reads absFile and returns its lines. It reports ok=false (no
-// error) if the file cannot be opened, is binary, or has a line that exceeds the
-// scanner buffer — matching the grep engines' silent-skip behavior. CRLF line
-// endings are normalized (the trailing CR is stripped, like bufio.Scanner).
-func readTextLines(absFile string) ([]string, bool) {
+// readTextLines reads absFile and returns its lines. It reports ok=false (and a
+// nil error) if the file cannot be opened, is binary, or has a line that
+// exceeds the reader limit — matching the engines' silent-skip behavior. CRLF
+// line endings are normalized. A cancelled context is returned as err so a
+// deadline is never mistaken for an empty result.
+func readTextLines(ctx context.Context, absFile string) ([]string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	f, err := os.Open(absFile)
 	if err != nil {
-		return nil, false
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, false, ctxErr
+		}
+		return nil, false, nil
 	}
 	defer f.Close()
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 
-	reader := bufio.NewReader(f)
+	reader := bufio.NewReaderSize(f, grepReadBufferSize)
 	// Binary detection: a NUL byte in the leading bytes marks the file binary.
-	if preview, _ := reader.Peek(binarySniffPeek); looksBinary(preview) {
-		return nil, false
+	preview, _ := reader.Peek(binarySniffPeek)
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if looksBinary(preview) {
+		return nil, false, nil
 	}
 
-	scanner := bufio.NewScanner(reader)
-	// Allow long lines (up to 1 MiB) before Scanner errors out.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		line, err := readTextLine(ctx, reader)
+		if errors.Is(err, io.EOF) {
+			return lines, true, nil
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
+			if errors.Is(err, errGrepLineTooLong) {
+				return nil, false, nil
+			}
+			// Other read errors retain the historical silent-skip behavior.
+			return nil, false, nil
+		}
+		lines = append(lines, line)
 	}
-	// A scan error (e.g. an oversized line) means the file is not cleanly
-	// line-oriented text; skip it rather than returning a partial result.
-	if err := scanner.Err(); err != nil {
-		return nil, false
+}
+
+// readTextLine reads one newline-terminated line without loading an unbounded
+// token into memory. It returns io.EOF only when the file ends with no pending
+// bytes.
+func readTextLine(ctx context.Context, reader *bufio.Reader) (string, error) {
+	var line []byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		fragment, err := reader.ReadSlice('\n')
+		newline := err == nil
+		length := len(line) + len(fragment)
+		if newline {
+			length--
+		}
+		if length > maxGrepLineBytes {
+			if err := drainTextLine(ctx, reader); err != nil && ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", errGrepLineTooLong
+		}
+		line = append(line, fragment...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if len(line) == 0 {
+					return "", io.EOF
+				}
+				// Return the final unterminated line successfully; the next
+				// read will report EOF with no pending bytes.
+				return trimGrepEOL(string(line)), nil
+			}
+			return "", err
+		}
+		return trimGrepEOL(string(line)), nil
 	}
-	return lines, true
+}
+
+// drainTextLine consumes the remainder of an oversized line so the reader is
+// positioned at the next line before reporting the skip. Cancellation still
+// takes priority over the silent-skip classification.
+func drainTextLine(ctx context.Context, reader *bufio.Reader) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err := reader.Discard(grepReadBufferSize)
+		if errors.Is(err, io.EOF) || (err != nil && !errors.Is(err, bufio.ErrBufferFull)) {
+			return nil
+		}
+	}
+}
+
+// trimGrepEOL removes LF and, like bufio.Scanner's ScanLines, an immediately
+// preceding CR.
+func trimGrepEOL(line string) string {
+	line = strings.TrimSuffix(line, "\n")
+	return strings.TrimSuffix(line, "\r")
+}
+
+// isWorkspaceReservedNamespace reports whether p is the workspace-level
+// reserved namespace encountered during a recursive search rooted at the
+// workspace itself. Nested directories with the same name keep ordinary hidden
+// entry semantics.
+func isWorkspaceReservedNamespace(in grepInput, p string) bool {
+	if in.workspaceRoot == "" || in.searchFile != "" {
+		return false
+	}
+	root, err := filepath.Abs(in.workspaceRoot)
+	if err != nil || filepath.Clean(root) != filepath.Clean(in.absPath) {
+		return false
+	}
+	rel, err := filepath.Rel(in.absPath, p)
+	if err != nil {
+		return false
+	}
+	return firstSegment(rel) == reservedNamespaceDir
 }
 
 // contextAround returns the before/after context lines for the 1-based
