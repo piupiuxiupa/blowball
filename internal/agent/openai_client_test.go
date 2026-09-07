@@ -110,6 +110,57 @@ data: [DONE]
 	assert.Empty(t, resp.ReasoningContent)
 }
 
+// TestOpenAIClient_StreamChat_EmptyReasoningDeltaDropped verifies that gateways
+// which stamp an empty reasoning_content on every content chunk do not produce
+// empty reasoning deltas: the callback fires only for non-empty fragments, and
+// the aggregated reasoning stays unpolluted. Without this guard each empty
+// delta becomes an empty reasoning event downstream, which both persists an
+// empty row and breaks adjacency-based token merging.
+func TestOpenAIClient_StreamChat_EmptyReasoningDeltaDropped(t *testing.T) {
+	body := `data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"o3-mini","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Analyzing"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"o3-mini","choices":[{"index":0,"delta":{"content":"Hel","reasoning_content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"o3-mini","choices":[{"index":0,"delta":{"content":"lo","reasoning_content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"o3-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	client := NewOpenAIClientFromClient(openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(srv.URL+"/v1"),
+	), 0)
+
+	var tokens []string
+	var reasoningTokens []string
+	resp, err := client.StreamChat(context.Background(), LLMRequest{
+		Model:           "o3-mini",
+		Messages:        []Message{{Role: "user", Content: "hi"}},
+		Thinking:        true,
+		ReasoningEffort: "medium",
+	}, func(tok string) error {
+		tokens = append(tokens, tok)
+		return nil
+	}, func(tok string) error {
+		reasoningTokens = append(reasoningTokens, tok)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Hello", resp.Content)
+	assert.Equal(t, "Analyzing", resp.ReasoningContent)
+	assert.Equal(t, []string{"Hel", "lo"}, tokens)
+	assert.Equal(t, []string{"Analyzing"}, reasoningTokens)
+}
+
 func mustJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {

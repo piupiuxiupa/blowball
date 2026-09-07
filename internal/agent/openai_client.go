@@ -397,11 +397,18 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 				if raw != "" && raw != "null" {
 					var rc string
 					if err := json.Unmarshal([]byte(raw), &rc); err == nil {
-						reasoningContent.WriteString(rc)
-						if onReasoning != nil {
-							if err := onReasoning(rc); err != nil {
-								capturePartial()
-								return resp, err
+						// Some OpenAI-compatible gateways stamp an empty
+						// reasoning_content on every content chunk. An empty
+						// delta carries no reasoning; emitting it would both
+						// produce empty reasoning events persisted as rows and
+						// break adjacency-based token merging downstream.
+						if rc != "" {
+							reasoningContent.WriteString(rc)
+							if onReasoning != nil {
+								if err := onReasoning(rc); err != nil {
+									capturePartial()
+									return resp, err
+								}
 							}
 						}
 					}

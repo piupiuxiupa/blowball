@@ -63,6 +63,38 @@
 2. 按需执行随交付提供的独立清理 SQL（不在代码仓库内）。
 3. 回滚：revert 代码即可恢复旧行为；已执行的清理 SQL 不可自动回滚（删除的均为空内容行，无信息损失）。
 
+## Delivery: 存量清理 SQL（独立执行，不入 migrations/）
+
+```sql
+-- ① 复核：确认将被删除的行（应全部是 content 为空字符串的 reasoning 行）
+SELECT id, session_id, msg_time, agent, msg_index, trace_id
+FROM messages
+WHERE event_type = 'reasoning'
+  AND content = ''
+ORDER BY session_id, msg_time, msg_index;
+
+-- ② 统计影响面
+SELECT session_id, COUNT(*) AS empty_reasoning_rows
+FROM messages
+WHERE event_type = 'reasoning' AND content = ''
+GROUP BY session_id;
+```
+
+```sql
+-- ③ 事务内删除
+START TRANSACTION;
+
+DELETE FROM messages
+WHERE event_type = 'reasoning'
+  AND content = '';
+
+-- 核对删除行数与 ② 的合计一致后提交；不符则 ROLLBACK
+COMMIT;
+```
+
+删除条件精确限定 `event_type='reasoning' AND content=''`，只命中本 bug 产生的空行；
+`msg_index` 留下的空洞无害——历史重建按 `(msg_time, msg_index)` 排序，跳号不影响顺序。
+
 ## Open Questions
 
 （无）
