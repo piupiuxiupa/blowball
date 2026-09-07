@@ -297,6 +297,8 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
+		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
+		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,

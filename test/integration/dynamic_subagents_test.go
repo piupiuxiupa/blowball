@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -188,11 +191,99 @@ func TestDynamicSubagents_ResumeEndToEnd(t *testing.T) {
 	assert.Equal(t, "start work", resumeMessages[1].Content)
 	assert.Equal(t, "continue work", resumeMessages[len(resumeMessages)-1].Content)
 
-	run, ok, err := env.mysqlFake.GetSubAgentRun(nil, defaultSessionID, agentID)
+	history, ok, err := env.mysqlFake.GetSubAgentHistory(context.Background(), defaultSessionID, agentID)
 	require.NoError(t, err)
 	require.True(t, ok)
+	require.Len(t, history.Runs, 2)
+	run := history.Runs[1]
+	assert.Equal(t, "resume_call", run.RunID)
+	assert.Equal(t, "initial_call", run.PreviousRunID)
 	assert.Equal(t, model.SubAgentStatusCompleted, run.Status)
 	assert.Contains(t, string(run.MessagesJSON), "continue work")
+	assert.NotContains(t, string(run.MessagesJSON), "start work", "a run row stores only its delta")
+
+	listURL := fmt.Sprintf("/api/v1/sessions/%s/subagents/%s/runs", defaultSessionID, agentID)
+	req := httptest.NewRequest(http.MethodGet, listURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	listW := httptest.NewRecorder()
+	env.engine.ServeHTTP(listW, req)
+	require.Equal(t, http.StatusOK, listW.Code, listW.Body.String())
+	assert.NotContains(t, listW.Body.String(), "messages_json")
+	assert.NotContains(t, listW.Body.String(), "system_prompt")
+
+	detailURL := listURL + "/resume_call"
+	req = httptest.NewRequest(http.MethodGet, detailURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	detailW := httptest.NewRecorder()
+	env.engine.ServeHTTP(detailW, req)
+	require.Equal(t, http.StatusOK, detailW.Code, detailW.Body.String())
+	assert.Contains(t, detailW.Body.String(), "continue work")
+	assert.NotContains(t, detailW.Body.String(), "start work")
+}
+
+func TestDynamicSubagents_LegacyFullSnapshotResumeAndDetail(t *testing.T) {
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{
+			finishReason: "tool_calls",
+			toolCalls: []agent.ToolCall{{
+				ID: "resume_legacy",
+				Function: agent.ToolCallFunction{
+					Name:      agent.SpawnSubagentTool,
+					Arguments: `{"task":"continue legacy","resume_agent_id":"w-legacy"}`,
+				},
+			}},
+		},
+		scriptedLLMResponse{content: "continued legacy result", finishReason: "stop"},
+		scriptedLLMResponse{content: "legacy summary", finishReason: "stop"},
+	)
+	env := newTestEnvWithAgents(t, llm, agentConfig())
+	token := authToken(t, defaultUserID)
+	now := time.Now().UTC()
+	instance := model.SubAgentInstance{
+		SessionID: defaultSessionID, AgentInstanceID: "w-legacy", Depth: 1,
+		Name: "Legacy", SystemPrompt: "legacy system", ToolsJSON: []byte(`[]`),
+	}
+	legacyRun := model.SubAgentRun{
+		SessionID: defaultSessionID, AgentInstanceID: "w-legacy",
+		RunID: "legacy-call", RunNo: 1, Name: "Legacy",
+		Status: model.SubAgentStatusCapped, SnapshotKind: model.SubAgentSnapshotLegacyFull,
+		ResumeEligible: true, MessageCount: 3, ContextMessageCount: 2,
+		ContextBytes: 120, StartedAt: now, FinishedAt: now,
+		MessagesJSON: []byte(`[
+			{"role":"system","content":"legacy system"},
+			{"role":"user","content":"old task"},
+			{"role":"assistant","content":"old result"}
+		]`),
+	}
+	require.NoError(t, env.mysqlFake.AppendSubAgentRun(context.Background(), instance, legacyRun))
+
+	w := env.postMessage(`{"content":"continue old instance"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	history, ok, err := env.mysqlFake.GetSubAgentHistory(context.Background(), defaultSessionID, "w-legacy")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, history.Runs, 2)
+	assert.Equal(t, model.SubAgentSnapshotLegacyFull, history.Runs[0].SnapshotKind)
+	assert.Equal(t, model.SubAgentSnapshotDelta, history.Runs[1].SnapshotKind)
+	assert.Contains(t, string(history.Runs[1].MessagesJSON), "continue legacy")
+	assert.NotContains(t, string(history.Runs[1].MessagesJSON), "old task")
+
+	base := "/api/v1/sessions/" + defaultSessionID + "/subagents/w-legacy/runs"
+	for _, tc := range []struct {
+		runID, contains, omit string
+	}{
+		{"legacy-call", "old task", "continue legacy"},
+		{"resume_legacy", "continue legacy", "old task"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, base+"/"+tc.runID, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		env.engine.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), tc.contains)
+		assert.NotContains(t, rec.Body.String(), tc.omit)
+	}
 }
 
 func TestAgentPlanState_EndToEnd(t *testing.T) {

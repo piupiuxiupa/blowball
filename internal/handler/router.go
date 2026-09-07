@@ -38,6 +38,14 @@ type RouteDeps struct {
 	// SessionMessages handles GET /api/v1/sessions/:session_id/messages. Required.
 	SessionMessages gin.HandlerFunc
 
+	// SubAgentRuns handles GET /api/v1/sessions/:session_id/subagents/:agent_instance_id/runs.
+	// Required by the API partition.
+	SubAgentRuns gin.HandlerFunc
+
+	// SubAgentRunDetail handles GET /api/v1/sessions/:session_id/subagents/:agent_instance_id/runs/:run_id.
+	// Required by the API partition.
+	SubAgentRunDetail gin.HandlerFunc
+
 	// SessionGet handles GET /api/v1/sessions/:session_id — the single-session
 	// detail read (list-entry superset incl. create_time and the generating /
 	// run_id active-turn markers). Required.
@@ -223,6 +231,8 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.POST("/sessions", deps.SessionCreate)
 	authed.GET("/sessions/:session_id", deps.SessionGet)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
+	authed.GET("/sessions/:session_id/subagents/:agent_instance_id/runs", deps.SubAgentRuns)
+	authed.GET("/sessions/:session_id/subagents/:agent_instance_id/runs/:run_id", deps.SubAgentRunDetail)
 	authed.PATCH("/sessions/:session_id", deps.SessionUpdateTitle)
 	authed.DELETE("/sessions/:session_id", deps.SessionDelete)
 

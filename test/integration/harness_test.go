@@ -245,24 +245,26 @@ type memoryMySQL struct {
 	// Compaction storage (context-compaction capability): the append-only
 	// record list per session (latest-wins stitching reads the last entry)
 	// and the set of sessions whose context_compacted flag was set.
-	compactions  map[string][]model.ContextCompaction
-	compacted    map[string]bool
-	subagentRuns map[string]model.SubAgentRun
+	compactions       map[string][]model.ContextCompaction
+	compacted         map[string]bool
+	subagentInstances map[string]model.SubAgentInstance
+	subagentRuns      map[string][]model.SubAgentRun
 }
 
 func newMemoryMySQL() *memoryMySQL {
 	return &memoryMySQL{
-		sessions:        map[string]*model.Session{},
-		titles:          map[string]model.Title{},
-		messages:        map[string][]model.Message{},
-		turnUsages:      map[string][]model.TurnUsage{},
-		deletedSessions: map[string]model.Session{},
-		deletedTitles:   map[string]model.Title{},
-		deletedMessages: map[string][]model.Message{},
-		deletionIDs:     map[string]string{},
-		compactions:     map[string][]model.ContextCompaction{},
-		compacted:       map[string]bool{},
-		subagentRuns:    map[string]model.SubAgentRun{},
+		sessions:          map[string]*model.Session{},
+		titles:            map[string]model.Title{},
+		messages:          map[string][]model.Message{},
+		turnUsages:        map[string][]model.TurnUsage{},
+		deletedSessions:   map[string]model.Session{},
+		deletedTitles:     map[string]model.Title{},
+		deletedMessages:   map[string][]model.Message{},
+		deletionIDs:       map[string]string{},
+		compactions:       map[string][]model.ContextCompaction{},
+		compacted:         map[string]bool{},
+		subagentInstances: map[string]model.SubAgentInstance{},
+		subagentRuns:      map[string][]model.SubAgentRun{},
 	}
 }
 
@@ -317,6 +319,8 @@ func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
 	// context_compactions cascades the same way (migration 013).
 	delete(m.compactions, sessionID)
 	delete(m.compacted, sessionID)
+	delete(m.subagentInstances, sessionID)
+	delete(m.subagentRuns, sessionID)
 	return nil
 }
 
@@ -441,19 +445,74 @@ func (m *memoryMySQL) ListMessages(_ context.Context, sessionID string) ([]model
 	return out, nil
 }
 
-func (m *memoryMySQL) UpsertSubAgentRun(_ context.Context, run model.SubAgentRun) error {
+func (m *memoryMySQL) AppendSubAgentRun(_ context.Context, instance model.SubAgentInstance, run model.SubAgentRun) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	run.UpdateTime = time.Now().UTC()
-	m.subagentRuns[run.SessionID+"\x00"+run.AgentInstanceID] = run
+	key := instance.SessionID + "\x00" + instance.AgentInstanceID
+	current, ok := m.subagentInstances[key]
+	if !ok {
+		if run.PreviousRunID != "" {
+			return model.ErrSubAgentChainConflict
+		}
+		instance.LatestRunID = run.RunID
+		m.subagentInstances[key] = instance
+		m.subagentRuns[key] = append(m.subagentRuns[key], run)
+		return nil
+	}
+	if current.LatestRunID != run.RunID && current.LatestRunID != run.PreviousRunID {
+		return model.ErrSubAgentChainConflict
+	}
+	for i := range m.subagentRuns[key] {
+		if m.subagentRuns[key][i].RunID == run.RunID {
+			m.subagentRuns[key][i] = run
+			instance.LatestRunID = run.RunID
+			m.subagentInstances[key] = instance
+			return nil
+		}
+	}
+	instance.LatestRunID = run.RunID
+	m.subagentInstances[key] = instance
+	m.subagentRuns[key] = append(m.subagentRuns[key], run)
 	return nil
 }
 
-func (m *memoryMySQL) GetSubAgentRun(_ context.Context, sessionID, instanceID string) (model.SubAgentRun, bool, error) {
+func (m *memoryMySQL) GetSubAgentInstance(_ context.Context, sessionID, instanceID string) (model.SubAgentInstance, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	run, ok := m.subagentRuns[sessionID+"\x00"+instanceID]
-	return run, ok, nil
+	key := sessionID + "\x00" + instanceID
+	instance, ok := m.subagentInstances[key]
+	return instance, ok, nil
+}
+
+func (m *memoryMySQL) ListSubAgentRuns(_ context.Context, sessionID, instanceID string) ([]model.SubAgentRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]model.SubAgentRun(nil), m.subagentRuns[sessionID+"\x00"+instanceID]...), nil
+}
+
+func (m *memoryMySQL) GetSubAgentRun(_ context.Context, sessionID, instanceID, runID string) (model.SubAgentRun, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, run := range m.subagentRuns[sessionID+"\x00"+instanceID] {
+		if run.RunID == runID {
+			return run, true, nil
+		}
+	}
+	return model.SubAgentRun{}, false, nil
+}
+
+func (m *memoryMySQL) GetSubAgentHistory(_ context.Context, sessionID, instanceID string) (model.SubAgentHistory, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := sessionID + "\x00" + instanceID
+	instance, ok := m.subagentInstances[key]
+	if !ok {
+		return model.SubAgentHistory{}, false, nil
+	}
+	return model.SubAgentHistory{
+		Instance: instance,
+		Runs:     append([]model.SubAgentRun(nil), m.subagentRuns[key]...),
+	}, true, nil
 }
 
 func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
@@ -769,6 +828,8 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
+		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
+		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,
@@ -865,6 +926,8 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
+		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
+		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,
@@ -966,6 +1029,8 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
+		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
+		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,

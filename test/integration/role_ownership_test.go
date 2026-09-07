@@ -101,6 +101,8 @@ func newRoleTestEnv(t *testing.T, llm agent.LLMClient) *roleTestEnv {
 		SessionCreate:               sessH.CreateSession,
 		SessionGet:                  sessH.GetSession,
 		SessionMessages:             sessH.GetSessionMessages,
+		SubAgentRuns:                handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
+		SubAgentRunDetail:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SessionDelete:               sessH.DeleteSession,
 		SessionUpdateTitle:          sessH.UpdateTitle,
 		WorkspaceList:               wsH.List,

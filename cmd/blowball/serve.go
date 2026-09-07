@@ -527,6 +527,8 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	// The run store feeds the session list's generating flag; the api role
 	// reads the shared Redis claims but never constructs a run registry.
 	sessionHandler := handler.NewSessionHandler(sessSvc, titleSvc, rt.redisStore.RunStore())
+	subAgentService := service.NewSubAgentService(rt.mysqlStore)
+	subAgentHandler := handler.NewSubAgentHandler(subAgentService)
 	workspaceHandler := handler.NewWorkspaceHandler(rt.fsStore, MaxUploadBytes, handler.OnlyOfficeSettings{
 		Secret:            cfg.OnlyOffice.Secret,
 		ServerURL:         cfg.OnlyOffice.ServerURL,
@@ -544,6 +546,8 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		SessionCreate:                    sessionHandler.CreateSession,
 		SessionGet:                       sessionHandler.GetSession,
 		SessionMessages:                  sessionHandler.GetSessionMessages,
+		SubAgentRuns:                     subAgentHandler.ListRuns,
+		SubAgentRunDetail:                subAgentHandler.GetRun,
 		SessionDelete:                    sessionHandler.DeleteSession,
 		SessionUpdateTitle:               sessionHandler.UpdateTitle,
 		WorkspaceList:                    workspaceHandler.List,

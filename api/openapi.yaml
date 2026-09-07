@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: blowball Multi-Agent Backend API
-  version: "1.1.0"
+  version: "1.2.0"
   description: |
     HTTP API surface for the blowball multi-agent backend.
 
@@ -14,6 +14,9 @@ info:
     endpoints, `generating`/`run_id` on the session list) and
     per-request-model-selection (`model`/`reasoning_effort` request params,
     `GET /api/v1/models`).
+
+    1.2.0 — per-run dynamic sub-agent transcript snapshots and lazily loaded
+    sub-agent run list/detail endpoints.
 
     Workspace file endpoints are transparent to the physical storage backend:
     requests and responses are identical whether `storage.workspace.backend` is
@@ -229,6 +232,143 @@ components:
         next_page_token:
           type: string
           description: Opaque cursor for the next page. Absent on the final page.
+    SubAgentToolCall:
+      type: object
+      required: [id, name, arguments]
+      properties:
+        id:
+          type: string
+          description: Tool call id used for result pairing.
+        name:
+          type: string
+          description: Tool function name.
+        arguments:
+          type: object
+          additionalProperties: true
+          description: Decoded tool-call arguments. Empty arguments are `{}`.
+    SubAgentTranscriptItem:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [task, assistant, tool_result]
+          description: |
+            Frontend transcript kind. Internal system messages and unknown
+            model roles are never exposed by this API.
+        content:
+          type: string
+          description: Task text, assistant answer text, or tool result text.
+        reasoning_content:
+          type: string
+          description: Assistant reasoning text, when captured in the model-context delta.
+        tool_calls:
+          type: array
+          description: Tool calls emitted by this assistant message.
+          items:
+            $ref: '#/components/schemas/SubAgentToolCall'
+        tool_call_id:
+          type: string
+          description: ID pairing a tool result with its assistant tool call.
+        name:
+          type: string
+          description: Tool name on a tool-result item.
+    SubAgentRunSummary:
+      type: object
+      required:
+        - agent_instance_id
+        - run_id
+        - run_no
+        - name
+        - status
+        - message_count
+        - started_at
+        - finished_at
+      properties:
+        agent_instance_id:
+          type: string
+          description: Stable sub-agent instance/thread identity.
+        run_id:
+          type: string
+          description: One dispatch identity; equals the parent spawn tool_call id.
+        previous_run_id:
+          type: string
+          description: Predecessor run when this execution resumed an instance.
+        run_no:
+          type: integer
+          minimum: 1
+          description: Linear execution number within the instance.
+        name:
+          type: string
+          description: Stable sub-agent attribution label.
+        status:
+          type: string
+          enum: [completed, capped, error]
+        message_count:
+          type: integer
+          description: Number of messages in this run's persisted delta.
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+    SubAgentRunListResponse:
+      type: object
+      required: [runs]
+      example:
+        runs:
+          - agent_instance_id: w-9f2d4c
+            run_id: call_019glegacy
+            run_no: 1
+            name: researcher#w-9f2d4c
+            status: completed
+            message_count: 4
+            started_at: '2026-09-07T01:00:00Z'
+            finished_at: '2026-09-07T01:02:00Z'
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubAgentRunSummary'
+    SubAgentRunDetail:
+      allOf:
+        - $ref: '#/components/schemas/SubAgentRunSummary'
+        - type: object
+          required: [transcript]
+          properties:
+            transcript:
+              type: array
+              description: |
+                Sanitized frontend transcript for this terminal run. New rows
+                contain only that run's delta; a legacy full-snapshot row
+                contains the retained instance baseline.
+              items:
+                $ref: '#/components/schemas/SubAgentTranscriptItem'
+      example:
+        agent_instance_id: w-9f2d4c
+        run_id: call_019glegacy
+        previous_run_id: call_019gprevious
+        run_no: 2
+        name: researcher#w-9f2d4c
+        status: completed
+        message_count: 3
+        started_at: '2026-09-07T01:05:00Z'
+        finished_at: '2026-09-07T01:07:00Z'
+        transcript:
+          - type: task
+            content: Continue the investigation.
+          - type: assistant
+            content: I found the regression.
+            reasoning_content: Compare the two call sites first.
+            tool_calls:
+              - id: call_tool_1
+                name: executor
+                arguments: {command: rg regression}
+          - type: tool_result
+            tool_call_id: call_tool_1
+            name: executor
+            content: two matches
     SendMessageRequest:
       type: object
       required: [content]
@@ -1076,6 +1216,73 @@ paths:
               schema: {$ref: '#/components/schemas/UpdateTitleResponse'}
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/sessions/{session_id}/subagents/{agent_instance_id}/runs:
+    get:
+      tags: [Session]
+      summary: List terminal sub-agent runs.
+      description: |
+        Returns lightweight metadata for every durably persisted run of one
+        sub-agent instance. The session must belong to the authenticated user;
+        missing sessions, cross-user sessions, and missing instances all return
+        404 without distinguishing the cause. Message payloads are intentionally
+        omitted — fetch a run detail lazily when the user expands it.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: agent_instance_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Run metadata ordered by `run_no` ascending.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubAgentRunListResponse'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/sessions/{session_id}/subagents/{agent_instance_id}/runs/{run_id}:
+    get:
+      tags: [Session]
+      summary: Lazily load one sub-agent run transcript.
+      description: |
+        Returns a sanitized transcript for one terminal run. The response is a
+        stable frontend DTO, not the internal OpenAI chat snapshot: system
+        prompts, tool definitions, resume metadata, context counters, and raw
+        `messages_json` are never exposed. A run still executing has no durable
+        terminal row and returns 404; use the live SSE/run event endpoint for
+        in-flight output.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: agent_instance_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: run_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Sanitized per-run transcript.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubAgentRunDetail'}
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,8 +35,8 @@ const (
 // It is intentionally small enough for MySQL and integration fakes to implement
 // without importing the agent package.
 type SubAgentSnapshotStore interface {
-	UpsertSubAgentRun(ctx context.Context, run model.SubAgentRun) error
-	GetSubAgentRun(ctx context.Context, sessionID, instanceID string) (model.SubAgentRun, bool, error)
+	AppendSubAgentRun(ctx context.Context, instance model.SubAgentInstance, run model.SubAgentRun) error
+	GetSubAgentHistory(ctx context.Context, sessionID, instanceID string) (model.SubAgentHistory, bool, error)
 }
 
 // SubAgentSpec is the resolved, per-run construction inputs for the generic
@@ -114,25 +115,30 @@ func (c *spawnCoordinator) dispatch(ctx context.Context, tc ToolCall, hub stream
 	parentID := parent.instanceID
 	depth := parent.depth + 1
 	var history []Message
+	previousRunID := ""
+	runNo := 1
+	baseMessageCount := 0
 	resumedLabel := ""
 	if args.ResumeAgentID != "" {
-		snapshot, messages, err := c.loadSnapshot(ctx, args.ResumeAgentID)
+		instance, messages, latest, err := c.loadSnapshot(ctx, args.ResumeAgentID)
 		if err != nil {
 			streamAgentError(hub, ctx, parent.agentName, err.Error(), "bad_args")
 			return toolResult{content: err.Error(), isError: true}
 		}
-		instanceID = snapshot.AgentInstanceID
-		parentID = snapshot.ParentInstanceID
-		depth = snapshot.Depth
+		instanceID = instance.AgentInstanceID
+		parentID = instance.ParentInstanceID
+		depth = instance.Depth
 		history = messages
-		// The persisted system message is authoritative even when a preset or
+		// The persisted instance prompt is authoritative even when a preset or
 		// changed deployment default is supplied on the resume call.
-		prompt = systemPromptFromSnapshot(messages, c.cfg.SystemPrompt)
-		if len(history) > 0 && history[0].Role == "system" {
-			history = history[1:] // Run prepends the resumed system prompt itself.
+		if strings.TrimSpace(instance.SystemPrompt) != "" {
+			prompt = instance.SystemPrompt
 		}
 		// Instance labels are stable across resume so usage.by_agent keeps one key.
-		resumedLabel = snapshot.Name
+		resumedLabel = instance.Name
+		previousRunID = instance.LatestRunID
+		runNo = latest.RunNo + 1
+		baseMessageCount = len(history)
 	}
 
 	childDepth := depth
@@ -206,6 +212,7 @@ func (c *spawnCoordinator) dispatch(ctx context.Context, tc ToolCall, hub stream
 		Task: args.Task, Context: args.Context, Name: args.Name,
 	})})
 	runHub := stream.TaggedWithAgentRun(hub, instanceID, tc.ID)
+	startedAt := time.Now().UTC()
 
 	content, usage, err := c.runWithRetry(ctx, sub, messages, runHub, retryBudget, hub)
 	status := SubAgentStatusCompleted
@@ -215,11 +222,30 @@ func (c *spawnCoordinator) dispatch(ctx context.Context, tc ToolCall, hub stream
 	case subHitCap(sub):
 		status = SubAgentStatusCapped
 	}
-	c.saveSnapshot(ctx, sub, snapshotData{
-		instanceID: instanceID, parentID: parentID, depth: childDepth,
-		name: label, tools: effectiveTools, status: status,
-		systemPrompt: prompt,
+	saveErr := c.saveSnapshot(ctx, sub, snapshotData{
+		instance: model.SubAgentInstance{
+			SessionID:        SessionIDFromContext(ctx),
+			AgentInstanceID:  instanceID,
+			ParentInstanceID: parentID,
+			Depth:            childDepth,
+			Name:             label,
+			SystemPrompt:     prompt,
+		},
+		previousRunID:    previousRunID,
+		runNo:            runNo,
+		baseMessageCount: baseMessageCount,
+		preRunMessages:   history,
+		tools:            effectiveTools,
+		status:           status,
+		runID:            tc.ID,
+		startedAt:        startedAt,
 	})
+	if errors.Is(saveErr, model.ErrSubAgentChainConflict) {
+		msg := fmt.Sprintf("spawn_subagent: resume target %q was resumed concurrently", instanceID)
+		streamAgentError(hub, ctx, sub.Name(), msg, "bad_args")
+		return toolResult{content: appendSpawnResult(msg, instanceID, SubAgentStatusError), isError: true,
+			subAgentName: label, subAgentID: instanceID, subParentID: parentID, subStatus: SubAgentStatusError}
+	}
 	if parent.instanceID != "" {
 		c.meta.observeNestedUsage(label, ownUsageForSub(sub, usage))
 	}
@@ -326,73 +352,148 @@ func (c *spawnCoordinator) runWithRetry(ctx context.Context, sub Agent, messages
 }
 
 type snapshotData struct {
-	instanceID, parentID       string
-	name, status, systemPrompt string
-	depth                      int
-	tools                      []string
+	instance                model.SubAgentInstance
+	runID, previousRunID    string
+	runNo, baseMessageCount int
+	status                  string
+	preRunMessages          []Message
+	tools                   []string
+	startedAt               time.Time
 }
 
-func (c *spawnCoordinator) loadSnapshot(ctx context.Context, instanceID string) (model.SubAgentRun, []Message, error) {
+func (c *spawnCoordinator) loadSnapshot(ctx context.Context, instanceID string) (model.SubAgentInstance, []Message, model.SubAgentRun, error) {
 	if c.store == nil {
-		return model.SubAgentRun{}, nil, fmt.Errorf("spawn_subagent: resume target %q is not available (snapshot store unavailable)", instanceID)
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: resume target %q is not available (snapshot store unavailable)", instanceID)
 	}
 	sessionID := SessionIDFromContext(ctx)
 	if sessionID == "" {
-		return model.SubAgentRun{}, nil, fmt.Errorf("spawn_subagent: resume target %q is not available (session identity missing)", instanceID)
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: resume target %q is not available (session identity missing)", instanceID)
 	}
-	run, ok, err := c.store.GetSubAgentRun(ctx, sessionID, instanceID)
+	history, ok, err := c.store.GetSubAgentHistory(ctx, sessionID, instanceID)
 	if err != nil {
-		return model.SubAgentRun{}, nil, fmt.Errorf("spawn_subagent: load resume target %q: %w", instanceID, err)
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: load resume target %q: %w", instanceID, err)
 	}
 	if !ok {
-		return model.SubAgentRun{}, nil, fmt.Errorf("spawn_subagent: resume target %q does not exist in this session", instanceID)
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: resume target %q does not exist in this session", instanceID)
 	}
-	if !run.ResumeEligible {
-		return model.SubAgentRun{}, nil, fmt.Errorf("spawn_subagent: resume target %q has an oversized or unreadable snapshot", instanceID)
+	if len(history.Runs) == 0 {
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: resume target %q has no readable run history", instanceID)
 	}
-	var messages []Message
-	if err := json.Unmarshal(run.MessagesJSON, &messages); err != nil {
-		return model.SubAgentRun{}, nil, fmt.Errorf("spawn_subagent: decode resume target %q: %w", instanceID, err)
+	latest := history.Runs[len(history.Runs)-1]
+	if latest.RunID != history.Instance.LatestRunID {
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: resume target %q has a broken run chain", instanceID)
 	}
-	return run, messages, nil
+	if !latest.ResumeEligible || latest.ContextBytes > c.cfg.MaxSnapshotBytes {
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: resume target %q has an oversized or unreadable snapshot", instanceID)
+	}
+	messages, err := messagesFromRunChain(history.Runs)
+	if err != nil {
+		return model.SubAgentInstance{}, nil, model.SubAgentRun{}, fmt.Errorf("spawn_subagent: decode resume target %q: %w", instanceID, err)
+	}
+	return history.Instance, messages, latest, nil
 }
 
-func (c *spawnCoordinator) saveSnapshot(ctx context.Context, sub Agent, data snapshotData) {
+func messagesFromRunChain(runs []model.SubAgentRun) ([]Message, error) {
+	var messages []Message
+	for i, run := range runs {
+		if run.RunNo != i+1 {
+			return nil, fmt.Errorf("run %q has run_no %d, want %d", run.RunID, run.RunNo, i+1)
+		}
+		if i > 0 && run.PreviousRunID != runs[i-1].RunID {
+			return nil, fmt.Errorf("run %q does not point at predecessor %q", run.RunID, runs[i-1].RunID)
+		}
+		var decoded []Message
+		if err := json.Unmarshal(run.MessagesJSON, &decoded); err != nil {
+			return nil, fmt.Errorf("decode run %q: %w", run.RunID, err)
+		}
+		switch run.SnapshotKind {
+		case model.SubAgentSnapshotLegacyFull:
+			if i != 0 {
+				return nil, fmt.Errorf("legacy full snapshot %q must be the first run", run.RunID)
+			}
+			if run.BaseMessageCount != 0 {
+				return nil, fmt.Errorf("legacy full snapshot %q must have a zero base count", run.RunID)
+			}
+			if len(decoded) > 0 && decoded[0].Role == "system" {
+				decoded = decoded[1:]
+			}
+			messages = append(messages, decoded...)
+		case model.SubAgentSnapshotDelta:
+			for j, msg := range decoded {
+				if msg.Role == "system" {
+					return nil, fmt.Errorf("delta run %q contains a system message at index %d", run.RunID, j)
+				}
+			}
+			if run.BaseMessageCount != len(messages) {
+				return nil, fmt.Errorf("run %q base count %d does not match stitched length %d", run.RunID, run.BaseMessageCount, len(messages))
+			}
+			messages = append(messages, decoded...)
+		default:
+			return nil, fmt.Errorf("run %q has unknown snapshot kind %q", run.RunID, run.SnapshotKind)
+		}
+		if run.ContextMessageCount != len(messages) {
+			return nil, fmt.Errorf("run %q context count %d does not match stitched length %d", run.RunID, run.ContextMessageCount, len(messages))
+		}
+	}
+	return messages, nil
+}
+
+func (c *spawnCoordinator) saveSnapshot(ctx context.Context, sub Agent, data snapshotData) error {
 	if c.store == nil || SessionIDFromContext(ctx) == "" {
-		return
+		return nil
 	}
 	tracker, ok := sub.(interface{ LastRunMessages() []Message })
 	if !ok {
-		return
+		return nil
 	}
-	messages := append([]Message{{Role: "system", Content: data.systemPrompt}}, tracker.LastRunMessages()...)
-	rawMessages, err := json.Marshal(messages)
+	fullMessages := tracker.LastRunMessages()
+	if len(fullMessages) < len(data.preRunMessages) {
+		return fmt.Errorf("sub-agent run dropped persisted history: got %d messages, want at least %d", len(fullMessages), len(data.preRunMessages))
+	}
+	if len(data.preRunMessages) > 0 && !reflect.DeepEqual(fullMessages[:len(data.preRunMessages)], data.preRunMessages) {
+		return fmt.Errorf("sub-agent run mutated persisted history before its new delta")
+	}
+	delta := fullMessages[len(data.preRunMessages):]
+	rawMessages, err := json.Marshal(delta)
 	if err != nil {
 		logger.FromContext(ctx).Warn("marshal sub-agent snapshot failed", zap.Error(err))
-		return
+		return err
+	}
+	fullContext := append([]Message{{Role: "system", Content: data.instance.SystemPrompt}}, fullMessages...)
+	rawFullContext, err := json.Marshal(fullContext)
+	if err != nil {
+		logger.FromContext(ctx).Warn("marshal sub-agent full context failed", zap.Error(err))
+		return err
 	}
 	rawTools, _ := json.Marshal(data.tools)
+	instance := data.instance
+	instance.ToolsJSON = rawTools
 	run := model.SubAgentRun{
-		SessionID:        SessionIDFromContext(ctx),
-		AgentInstanceID:  data.instanceID,
-		ParentInstanceID: data.parentID,
-		Depth:            data.depth,
-		Name:             data.name,
-		ToolsJSON:        rawTools,
-		Status:           data.status,
-		ResumeEligible:   len(rawMessages) <= c.cfg.MaxSnapshotBytes,
-		MessagesJSON:     rawMessages,
+		SessionID:           instance.SessionID,
+		AgentInstanceID:     instance.AgentInstanceID,
+		RunID:               data.runID,
+		PreviousRunID:       data.previousRunID,
+		RunNo:               data.runNo,
+		ParentInstanceID:    instance.ParentInstanceID,
+		Depth:               instance.Depth,
+		Name:                instance.Name,
+		ToolsJSON:           rawTools,
+		Status:              data.status,
+		SnapshotKind:        model.SubAgentSnapshotDelta,
+		ResumeEligible:      len(rawFullContext) <= c.cfg.MaxSnapshotBytes,
+		BaseMessageCount:    data.baseMessageCount,
+		MessageCount:        len(delta),
+		ContextMessageCount: len(fullMessages),
+		ContextBytes:        len(rawFullContext),
+		MessagesJSON:        rawMessages,
+		StartedAt:           data.startedAt,
+		FinishedAt:          time.Now().UTC(),
 	}
-	if err := c.store.UpsertSubAgentRun(ctx, run); err != nil {
+	if err := c.store.AppendSubAgentRun(ctx, instance, run); err != nil {
 		logger.FromContext(ctx).Warn("save sub-agent snapshot failed", zap.Error(err))
+		return err
 	}
-}
-
-func systemPromptFromSnapshot(messages []Message, fallback string) string {
-	if len(messages) > 0 && messages[0].Role == "system" {
-		return messages[0].Content
-	}
-	return fallback
+	return nil
 }
 
 func newAgentInstanceID() string {

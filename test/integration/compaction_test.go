@@ -140,6 +140,8 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
 		SessionMessages:        sessH.GetSessionMessages,
+		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
+		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,
