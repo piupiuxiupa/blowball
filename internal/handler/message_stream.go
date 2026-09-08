@@ -285,9 +285,13 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// publishing only user_id — this is the single pass-through point, and it
 	// reuses the verified header value rather than any stored copy.
 	rawToken, _ := middleware.BearerToken(c.GetHeader("Authorization"))
-	// trace_id + session_id both ride the context so the raw-capture sink can
-	// attribute every LLM call the orchestrator makes to this session.
-	ctx := skillmarket.WithToken(agent.WithSessionID(trace.WithContext(c.Request.Context(), tid), sessionID), rawToken)
+	// trace_id + session_id + user_id all ride the context so the raw-capture
+	// sink can attribute every LLM call the orchestrator makes to this
+	// session, and the per-user LLM client resolver (user-llm-token) can
+	// pick the requesting user's credential for title generation and
+	// turn-start compaction (Orchestrator.Handle re-injects the same value
+	// for the turn itself).
+	ctx := skillmarket.WithToken(agent.WithUserID(agent.WithSessionID(trace.WithContext(c.Request.Context(), tid), sessionID), userID), rawToken)
 
 	sess, err := h.sessSvc.GetSessionByID(ctx, sessionID)
 	if err != nil {

@@ -36,6 +36,16 @@ var (
 	SessionIDFromContext = reqctx.SessionIDFromContext
 )
 
+// WithUserID / UserIDFromContext alias the per-user identity key maintained
+// by internal/tool/skill (the value Orchestrator.Handle injects for every
+// turn). Aliasing it here keeps handler/service call sites that need to stamp
+// a user onto a context (title generation's detached background context)
+// within the agent package's existing import surface.
+var (
+	WithUserID        = skill.WithUserID
+	UserIDFromContext = skill.UserIDFromContext
+)
+
 // WithAgentName returns a copy of ctx carrying the display name of the agent
 // about to run, so raw capture can attribute the LLM rounds that follow —
 // including the round-cap wrap-up round, which inherits the caller's ctx — to

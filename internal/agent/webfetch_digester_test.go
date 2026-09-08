@@ -47,3 +47,26 @@ func TestNewWebfetchPromptClient_RejectsUnknownModel(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing")
 	assert.Contains(t, err.Error(), "openai.models")
 }
+
+func TestWebfetchPromptClient_PromptUsesUserTokenClient(t *testing.T) {
+	// user-llm-token: digestion runs inside the turn context, which carries
+	// the user identity — so the digest call must resolve through the user's
+	// credential, not the process-global one.
+	cfg := config.OpenAIConfig{
+		Models: []config.ModelCatalogEntry{
+			{Name: "gpt-5", MaxContextTokens: 400000, MaxCompletionTokens: 16384, Thinking: true},
+		},
+	}
+	tokens := &fakeTokenStore{}
+	tokens.set("user-1", "sk-digest-token")
+	factory := &recordingFactory{fake: newFake(fakeResponse{content: "digested"})}
+	resolver := NewClientResolver(newFake(fakeResponse{content: "from fallback"}), cfg, nil, tokens)
+	resolver.SetClientFactory(factory.build)
+
+	promptClient, err := NewWebfetchPromptClient(resolver, cfg, "gpt-5")
+	require.NoError(t, err)
+	out, err := promptClient.Prompt(WithUserID(context.Background(), "user-1"), "digest system", "digest user", 100)
+	require.NoError(t, err)
+	assert.Equal(t, "digested", out)
+	assert.Equal(t, []string{"sk-digest-token"}, factory.apiKeys())
+}

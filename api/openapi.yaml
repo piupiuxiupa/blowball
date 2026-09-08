@@ -894,6 +894,33 @@ components:
         thinking:
           type: boolean
           description: Whether the model supports reasoning (gates non-`none` reasoning_effort values).
+    LLMTokenStatus:
+      type: object
+      required: [configured]
+      description: |
+        Per-user LLM gateway token status (user-llm-token). The raw token is
+        never serialized; `masked_key` is a fixed mask plus the last four
+        characters (omitted entirely when no token is configured, and reduced
+        to just the mask for tokens of eight characters or fewer so the
+        preview can never reconstruct the secret).
+      properties:
+        configured:
+          type: boolean
+          description: Whether the user has a personal gateway token stored.
+        masked_key:
+          type: string
+          description: Unrecoverable preview (`***` + last four characters); present only when configured.
+    LLMTokenPutRequest:
+      type: object
+      required: [api_key]
+      description: |
+        Body for PUT /api/v1/me/llm-token. The token is trimmed server-side
+        and must be non-empty with at most 512 characters.
+      properties:
+        api_key:
+          type: string
+          maxLength: 512
+          description: The user's gateway token (plaintext in the request body; stored plaintext in MySQL, never returned).
     OnlyOfficeConfigResponse:
       type: object
       required: [server_url, edit, view]
@@ -2252,3 +2279,82 @@ paths:
               schema: {$ref: '#/components/schemas/ModelsResponse'}
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/llm-token:
+    get:
+      tags: [Models]
+      summary: Get the caller's LLM gateway token status (user-llm-token).
+      description: |
+        Reports whether the authenticated user has configured a personal LLM
+        gateway token. The token itself is NEVER returned — only
+        `configured` plus, when set, a `masked_key` preview (a fixed mask and
+        the last four characters; tokens of eight characters or fewer show
+        only the mask). Served by the api role only (the agent role does not
+        register this endpoint).
+      responses:
+        '200':
+          description: Token status (masked; never the raw token).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LLMTokenStatus'}
+              examples:
+                configured:
+                  value: {configured: true, masked_key: '***abcd'}
+                unconfigured:
+                  value: {configured: false}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+    put:
+      tags: [Models]
+      summary: Save the caller's LLM gateway token (user-llm-token).
+      description: |
+        Stores (and idempotently overwrites) the authenticated user's LLM
+        gateway token in `user_llm_credentials`. The token replaces the
+        deployment-global `openai.api_key` for every LLM call attributable to
+        the user — the whole chat turn spawn tree, title generation, context
+        compaction summaries, and webfetch digestion — against the SAME
+        `openai.base_url` and model catalog. The value is trimmed, must be
+        non-empty and at most 512 characters, and is never echoed back (only
+        its mask). An invalid configured token fails the user's LLM calls
+        explicitly; there is no silent fallback to the global key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LLMTokenPutRequest'}
+            example: {api_key: 'sk-my-gateway-token'}
+      responses:
+        '200':
+          description: Token stored; the response carries only the mask.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LLMTokenStatus'}
+              example: {configured: true, masked_key: '***abcd'}
+        '400':
+          description: Blank (after trimming) or oversize (>512 chars) token; the stored value is unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+    delete:
+      tags: [Models]
+      summary: Delete the caller's LLM gateway token (user-llm-token).
+      description: |
+        Removes the authenticated user's stored token. Subsequent LLM calls
+        for the user fall back to the deployment-global `openai.api_key`.
+        Deleting an absent token is a success. Served by the api role only.
+      responses:
+        '200':
+          description: Token deleted (or already absent).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LLMTokenStatus'}
+              example: {configured: false}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'

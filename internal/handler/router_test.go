@@ -62,10 +62,13 @@ func routeSet(r *gin.Engine) []string {
 // expectedAPIRoutes is the exact route set the api role registers
 // (RegisterHealthz + RegisterAPIRoutes): health, auth, session CRUD, message
 // history read, workspace file CRUD, the OnlyOffice save callback, skills,
-// and the model catalog list (per-request-model-selection). It must NOT
-// contain the streaming message endpoint or the MCP tool list.
+// the model catalog list (per-request-model-selection), and the per-user LLM
+// token management routes (user-llm-token). It must NOT contain the streaming
+// message endpoint or the MCP tool list.
 var expectedAPIRoutes = []string{
+	"DELETE /api/v1/me/llm-token",
 	"DELETE /api/v1/sessions/:session_id",
+	"GET /api/v1/me/llm-token",
 	"GET /api/v1/sessions",
 	"GET /api/v1/sessions/:session_id",
 	"GET /api/v1/sessions/:session_id/messages",
@@ -82,6 +85,7 @@ var expectedAPIRoutes = []string{
 	"POST /api/v1/workspace/files/*path",
 	"POST /api/v1/workspace/onlyoffice-callback",
 	"POST /api/v1/workspace/upload",
+	"PUT /api/v1/me/llm-token",
 	"PUT /api/v1/workspace/files/*path",
 	"DELETE /api/v1/workspace/files/*path",
 	"GET /healthz",
@@ -209,6 +213,9 @@ func TestAgentPartition_CRUDRoutesReturn404(t *testing.T) {
 		{http.MethodGet, "/api/v1/workspace/search"},
 		{http.MethodGet, "/api/v1/skills"},
 		{http.MethodGet, "/api/v1/models"},
+		{http.MethodGet, "/api/v1/me/llm-token"},
+		{http.MethodPut, "/api/v1/me/llm-token"},
+		{http.MethodDelete, "/api/v1/me/llm-token"},
 	}
 	for _, tc := range targets {
 		req := httptest.NewRequest(tc.method, tc.path, nil)

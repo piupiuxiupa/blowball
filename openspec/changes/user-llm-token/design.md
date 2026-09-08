@@ -38,9 +38,11 @@ CREATE TABLE user_llm_credentials (
 - 明文是明确取舍：不引入密钥管理复杂度；缓解靠 API 不回显 + 日志脱敏不变量。
 - 不加 `user_id` 外键到 `users`：按主键隔离已足够；用户删除时凭据行可随既有用户数据清理策略处理（不在本变更强制）。
 
-### D3. ClientResolver：按 userID 解析并缓存 OpenAIClient
+### D3. ClientResolver：实现 LLMClient 接口，按调用解析凭证
 
-openai-go 的 `Client` 把 API key 烤在 options 里，因此按用户构造独立 `OpenAIClient`：`Resolve(userID) LLMClient`——已配置 token 的用户返回 `NewOpenAIClientWithSink(全局base_url+用户token, rawSink)`，未配置返回进程级全局 client。缓存 keyed by userID、不淘汰：基数=用户数、每项只是一个轻量配置壳，与 `memory.Service` 的 per-user 客户端缓存同一取舍。token 更新/删除时使对应缓存项失效（下一次解析重建）。resolver 读库失败时按 LLM 调用错误显式上抛，不静默降级为全局凭证。
+openai-go 的 `Client` 把 API key 烤在 options 里，因此按用户构造独立 `OpenAIClient`。实现形态：`ClientResolver` 本身实现 `LLMClient` 接口（`StreamChat` 内部按 ctx 解析后委托），userID 从调用 ctx 读取——`Orchestrator.Handle` 已为整个 turn 注入（子 Agent、webfetch 摘要、mid-turn 压缩 round hook 全部继承），流式 handler 在入口为标题生成与 turn-start 压缩补注入。四处调用点因此零签名变更：serve.go 把 resolver 作为原 `LLMClient` 传入即可。
+
+凭证按调用直读 DB（每个 LLM round 一次主键 SELECT，相对多秒的补全调用可忽略），不做进程内长缓存：api 角色处理 PUT/DELETE、agent 角色解析凭证时分进程部署时，本地缓存失效无法跨进程传播，直读是唯一始终满足“token 更新/删除后后续解析使用新凭证”的方案；openai-go Client 是无状态配置壳，按调用构造等价于缓存实例。resolver 读库失败时按 LLM 调用错误显式上抛，不静默降级为全局凭证。
 
 ### D4. 四个调用点全部接入
 

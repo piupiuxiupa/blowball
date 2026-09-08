@@ -74,13 +74,17 @@ func (s *TitleService) GenerateTitle(ctx context.Context, sessionID, firstUserMs
 	// Use a fresh context derived from background so a cancelled HTTP request
 	// does not abort title generation. The trace_id is copied across so logs
 	// stay correlated; session_id + agent name are attached so the raw-capture
-	// sink attributes the title LLM call to the right session and agent.
+	// sink attributes the title LLM call to the right session and agent. The
+	// user id is copied too so the per-user LLM client resolver
+	// (user-llm-token) bills the title call to the same user's credential as
+	// the turn that triggered it.
 	bg := context.Background()
 	if tid := trace.FromContext(ctx); tid != "" {
 		bg = trace.WithContext(bg, tid)
 	}
 	bg = agent.WithSessionID(bg, sessionID)
 	bg = agent.WithAgentName(bg, "title")
+	bg = agent.WithUserID(bg, agent.UserIDFromContext(ctx))
 	s.generate(bg, sessionID, firstUserMsg, currentUserMsg)
 }
 

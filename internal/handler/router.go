@@ -129,6 +129,14 @@ type RouteDeps struct {
 	// the selectable model catalog + default. Required for the api partition;
 	// the agent partition does not register it.
 	ModelsList gin.HandlerFunc
+
+	// LLMTokenGet / LLMTokenPut / LLMTokenDelete handle
+	// GET/PUT/DELETE /api/v1/me/llm-token (user-llm-token): per-user gateway
+	// token management. Required for the api partition; the agent partition
+	// does not register them.
+	LLMTokenGet    gin.HandlerFunc
+	LLMTokenPut    gin.HandlerFunc
+	LLMTokenDelete gin.HandlerFunc
 }
 
 // contentRouteSuffix is the URL suffix that selects the text-content handler
@@ -187,6 +195,9 @@ const onlyOfficeCallbackRoute = "/workspace/onlyoffice-callback"
 //	GET  /api/v1/mcp/tools                        (auth)         [agent]
 //	GET  /api/v1/skills                           (auth)
 //	GET  /api/v1/models                           (auth)
+//	GET  /api/v1/me/llm-token                     (auth)
+//	PUT  /api/v1/me/llm-token                     (auth)
+//	DELETE /api/v1/me/llm-token                   (auth)
 //
 // The auth group is mounted at /api/v1 and gated by deps.AuthMW; /auth/login
 // is registered outside the group.
@@ -281,6 +292,15 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	// it sits in the api partition with the skills list. The agent role does
 	// not register it (frontend model pickers talk to the api port).
 	authed.GET("/models", deps.ModelsList)
+
+	// Per-user LLM token management (user-llm-token): CRUD over the
+	// MySQL-stored credential that replaces openai.api_key for this user's
+	// LLM calls. Pure CRUD — no agent dependency — so it lives in the api
+	// partition next to the model list; the agent role resolves credentials
+	// at call time and never serves these routes.
+	authed.GET("/me/llm-token", deps.LLMTokenGet)
+	authed.PUT("/me/llm-token", deps.LLMTokenPut)
+	authed.DELETE("/me/llm-token", deps.LLMTokenDelete)
 }
 
 // RegisterAgentRoutes mounts the agent-route partition owned by the agent role

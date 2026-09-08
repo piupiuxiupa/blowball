@@ -537,6 +537,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	})
 	skillHandler := handler.NewSkillHandler(rt.fsStore, rt.market)
 	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
+	llmTokenHandler := handler.NewLLMTokenHandler(service.NewLLMTokenService(rt.mysqlStore))
 
 	return handler.RouteDeps{
 		AuthMW:                           middleware.AuthMiddleware(cfg.JWT.Secret),
@@ -565,6 +566,9 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		WorkspaceOnlyOfficeCallback:      workspaceHandler.OnlyOfficeCallback,
 		SkillsList:                       skillHandler.List,
 		ModelsList:                       modelListHandler.List,
+		LLMTokenGet:                      llmTokenHandler.Get,
+		LLMTokenPut:                      llmTokenHandler.Put,
+		LLMTokenDelete:                   llmTokenHandler.Delete,
 	}
 }
 
@@ -658,9 +662,17 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	rawFlusher.Start()
 
 	openAIClient := agent.NewOpenAIClientWithSink(cfg.OpenAI, rawSink)
+	// Per-user LLM credentials (user-llm-token): every LLM call attributed to
+	// a user — the turn's whole spawn tree, title generation, compaction
+	// summaries and webfetch digestion — flows through this resolver. A user
+	// with a stored token hits the shared openai.base_url with their own
+	// credential; everyone else (and any call without a user identity) uses
+	// the global openai.api_key client unchanged. Credential resolution
+	// failures fail the call explicitly — never a silent global-key retry.
+	llmClient := agent.NewClientResolver(openAIClient, cfg.OpenAI, rawSink, rt.mysqlStore)
 	var webfetchDigester webfetch.ContentDigester
 	if cfg.Tools.Webfetch.Digest.Enabled {
-		promptClient, err := agent.NewWebfetchPromptClient(openAIClient, cfg.OpenAI, cfg.Tools.Webfetch.Digest.Model)
+		promptClient, err := agent.NewWebfetchPromptClient(llmClient, cfg.OpenAI, cfg.Tools.Webfetch.Digest.Model)
 		if err != nil {
 			log.Fatal("webfetch digest model resolution failed", zap.Error(err))
 		}
@@ -674,10 +686,11 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	webfetch.RegisterAllWithDigester(reg, cfg.Tools.Webfetch, webfetchDigester)
 
 	// Title generation runs on its own resolved model (openai.title_model or
-	// the default catalog entry) over the shared client.
+	// the default catalog entry) over the shared resolver-wrapped client, so
+	// the title call bills to the triggering user's token.
 	titleCfg := cfg.OpenAI
 	titleCfg.TitleModel = cfg.TitleModelName()
-	titleSvc := service.NewTitleService(openAIClient, rt.mysqlStore, titleCfg)
+	titleSvc := service.NewTitleService(llmClient, rt.mysqlStore, titleCfg)
 
 	// Context-compaction service (context-compaction capability): reuses the
 	// shared OpenAI client (summary calls land in llm_raw_log). The summary
@@ -691,7 +704,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	}
 	compSvc := service.NewCompactionService(
 		service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: fsStore},
-		openAIClient,
+		llmClient,
 		cfg.DefaultModelName(),
 		defaultMaxContext,
 	)
@@ -723,7 +736,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	wsFn := func(userID string) string {
 		return fsStore.UserWorkspace(userID)
 	}
-	orch, err := agent.NewOrchestrator(openAIClient, cfg, reg, serverTools, skillLoader, wsFn, rt.mysqlStore)
+	orch, err := agent.NewOrchestrator(llmClient, cfg, reg, serverTools, skillLoader, wsFn, rt.mysqlStore)
 	if err != nil {
 		log.Fatal("orchestrator init failed", zap.Error(err))
 	}
