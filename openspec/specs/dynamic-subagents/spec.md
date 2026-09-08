@@ -86,11 +86,11 @@
 - **THEN** 该派发返回预算错误 tool result，主 Agent 循环继续
 
 ### Requirement: Resume with persisted history
-系统 SHALL 为每个子 Agent 实例持久化完整消息历史快照（Run 结束时写入），作为续跑的权威历史；流事件行继续服务展示。携带 `resume_agent_id` 的 spawn SHALL 以目标实例的历史快照为起点追加新任务消息继续执行，目标实例不存在、不属于当前会话或快照不可读时以 bad_args 失败。续跑 SHALL 分配新的 run 身份但沿用同一 `agent_instance_id`；已折叠进历史的孙 Agent 派发 SHALL NOT 复活，续跑实例可在剩余深度与预算内派发新的孙 Agent。
+系统 SHALL 为每个子 Agent 实例持久化稳定元数据与线性 per-run 消息 delta 链，作为续跑的权威历史；每次 run 的 `messages_json` SHALL 只保存该次执行新增的消息。携带 `resume_agent_id` 的 spawn SHALL 以目标实例的 system prompt 与按序拼接的 run delta 为起点追加新任务消息继续执行；目标实例不存在、不属于当前会话、run 链不可读或拼接后的上下文超过续跑限制时 SHALL 以 bad_args 失败。续跑 SHALL 分配新的 run 身份但沿用同一 `agent_instance_id`；已折叠进历史的孙 Agent 派发 SHALL NOT 复活，续跑实例可在剩余深度与预算内派发新的孙 Agent。
 
-#### Scenario: Resume continues from snapshot
+#### Scenario: Resume continues from stitched history
 - **WHEN** spawn 携带先前返回的 `resume_agent_id` 与新 `task`
-- **THEN** 子 Agent 的初始消息列表为持久化历史快照 + 新任务 user message
+- **THEN** 子 Agent 的初始消息列表为实例 system prompt、按顺序拼接的所有历史 run delta 与新任务 user message
 
 #### Scenario: Same instance across resume
 - **WHEN** 同一实例被续跑
@@ -100,9 +100,13 @@
 - **WHEN** `resume_agent_id` 指向不存在或跨会话的实例
 - **THEN** 派发以 bad_args 失败并返回错误文本
 
+#### Scenario: Oversized stitched context rejected
+- **WHEN** 拼接目标实例的完整模型上下文超过配置的子 Agent 快照大小限制
+- **THEN** 派发以 bad_args 失败，且不发起子 Agent LLM 调用
+
 #### Scenario: Grandchildren are not revived
 - **WHEN** 被续跑实例的历史中含已完成的孙 Agent 派发
-- **THEN** 续跑不重新执行这些孙 Agent；其结果以 tool result 形式保留在历史中
+- **THEN** 续跑不重新执行这些孙 Agent；其结果以 tool result 形式保留在历史 delta 中
 
 ### Requirement: Full isolation between sub-agents
 子 Agent 之间 SHALL 完全隔离：系统 SHALL NOT 提供子 Agent 间直接通信通道（mailbox、兄弟互发、共享黑板）；一切协调 SHALL 经父 Agent 中转——父通过任务 prompt 下发信息，子通过最终结果回报。子 Agent SHALL NOT 获得引用其他实例上下文的机制。
