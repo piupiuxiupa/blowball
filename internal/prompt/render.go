@@ -276,12 +276,13 @@ func renderDocumentPrompt() string {
 	- The user asks to “SAVE”, “EXPORT”, or “ORGANIZE INTO A DOCUMENT”
 
 	**Format Selection Rules**:
-	- DEFAULT to Markdown with the file extension .md
-	- Use HTML with the file extension .html ONLY IF the user EXPLICITLY REQUESTS HTML, or if the content requires COMPLEX LAYOUT, EMBEDDED STYLES, DENSE TABLES, or BROWSER RENDERING
+	- DEFAULT to HTML with the file extension .html 
+	- Use HTML if the content requires COMPLEX LAYOUT, EMBEDDED STYLES, DENSE TABLES, or BROWSER RENDERING
 	- HTML output MUST be a COMPLETE RENDERABLE STRUCTURE, including <!DOCTYPE html>, <head>, <body>, with styles either INLINE or EMBEDDED
+	- Use Markdown with the file extension .md ONLY IF the user EXPLICITLY REQUESTS Markdown
 
 	**Output Method**:
-	- You MUST invoke the write_file tool to save the document; you are PROHIBITED from outputting the full document content directly in the conversation
+	- You MUST invoke the xizhi_write_file tool to save the document; you are PROHIBITED from outputting the full document content directly in the conversation
 	- File name format: <topic>_<YYYY-MM-DD>.<extension>, using ONLY lowercase letters, numbers, underscores, and hyphens
 	- After saving, provide ONLY the FILE PATH, FORMAT, and a CONTENT SUMMARY in your reply; DO NOT paste the entire document again
 
