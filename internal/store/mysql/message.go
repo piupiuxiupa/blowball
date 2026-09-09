@@ -164,18 +164,87 @@ INNER JOIN
 `
 
 // listMessagesPagedDescSQL returns messages before the cursor ordered by
-// (msg_time, msg_index, id) descending.
+// (msg_time, msg_index, id) descending. The STRAIGHT_JOIN forces the
+// materialized subselect to drive the join so its ORDER BY survives as the
+// output order — a plain INNER JOIN lets the optimizer flip the join (reading
+// the outer table first) and silently lose the descending order on MySQL 9.x.
 const listMessagesPagedDescSQL = `
 SELECT msg.id as id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
-FROM messages msg
-INNER JOIN 
+FROM
 (
 	SELECT id FROM messages
 	WHERE session_id = ?
 		AND (msg_time, msg_index, id) > (?, ?, ?)
 	ORDER BY msg_time DESC, msg_index DESC, id DESC
 	LIMIT ?
+) AS sub STRAIGHT_JOIN messages msg ON msg.id = sub.id
+`
+
+// subagentPlaceholderFilter restricts a message listing to the placeholder
+// sub-agent view (unique-subagent-message-placeholders capability, applied
+// inside the inner subselect so filtering happens BEFORE pagination):
+//   - rows with no dynamic instance identity stay visible (main-agent output,
+//     user messages, and pre-dynamic-subagent legacy rows);
+//   - for rows carrying a dynamic instance identity only the lifecycle markers
+//     (agent_start / agent_end / agent_error) stay visible as placeholders —
+//     token / reasoning / tool_call / tool_result payload rows are omitted;
+//   - the parent's spawn_subagent tool_result row (which duplicates the
+//     sub-agent's final output) is omitted by matching its JSON-serialized
+//     tool_call_id against subagent_runs.run_id — the parent tool_call row
+//     itself stays visible.
+//
+// The EXISTS leg correlates on messages.session_id so the parent-result
+// omission never crosses sessions, and legacy `legacy:<instance>` run ids
+// cannot collide with real parent tool_call ids. The JSON_VALID guard keeps
+// plain-text legacy tool_result rows (pre-JSON content shapes) visible — and
+// the whole read from erroring — instead of failing the query in
+// JSON_EXTRACT.
+const subagentPlaceholderFilter = `
+		AND (
+			agent_instance_id IS NULL
+			OR event_type IN ('agent_start', 'agent_end', 'agent_error')
+		)
+		AND NOT (
+			event_type = 'tool_result'
+			AND agent_instance_id IS NULL
+			AND JSON_VALID(messages.content)
+			AND EXISTS (
+				SELECT 1 FROM subagent_runs sr
+				WHERE sr.session_id = messages.session_id
+					AND sr.run_id = JSON_UNQUOTE(JSON_EXTRACT(messages.content, '$.tool_call_id'))
+			)
+		)
+`
+
+// listMessagesPagedPlaceholderAscSQL is the placeholder-view twin of
+// listMessagesPagedAscSQL.
+const listMessagesPagedPlaceholderAscSQL = `
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+FROM messages msg
+INNER JOIN
+(
+	SELECT id FROM messages
+	WHERE session_id = ?
+		AND (msg_time, msg_index, id) > (?, ?, ?)
+` + subagentPlaceholderFilter + `
+	ORDER BY msg_time ASC, msg_index ASC, id ASC
+	LIMIT ?
 ) AS sub ON msg.id = sub.id
+`
+
+// listMessagesPagedPlaceholderDescSQL is the placeholder-view twin of
+// listMessagesPagedDescSQL.
+const listMessagesPagedPlaceholderDescSQL = `
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+FROM
+(
+	SELECT id FROM messages
+	WHERE session_id = ?
+		AND (msg_time, msg_index, id) > (?, ?, ?)
+` + subagentPlaceholderFilter + `
+	ORDER BY msg_time DESC, msg_index DESC, id DESC
+	LIMIT ?
+) AS sub STRAIGHT_JOIN messages msg ON msg.id = sub.id
 `
 
 // ListMessages returns every message for sessionID in (msg_time, msg_index)
@@ -192,14 +261,20 @@ func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Mes
 
 // ListMessagesPaged returns a page of messages for sessionID ordered by
 // (msg_time, msg_index, id). order must be "asc" or "desc"; any other value
-// defaults to "asc". pageSize is clamped to [1, 200]. An empty cursor requests
+// defaults to "asc". pageSize is clamped to [1, 5000]. An empty cursor requests
 // the first page. The returned nextCursor is empty when no further pages exist.
-func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
+// subagentContent selects the sub-agent history view: model.SubagentContentFull
+// (or any unknown value — the handler validates the query param before calling)
+// is the legacy unfiltered view; model.SubagentContentPlaceholder applies the
+// placeholder filter before pagination (see subagentPlaceholderFilter). The
+// cursor semantics are unchanged: the next cursor is built from the last
+// RETURNED row of the filtered page.
+func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
 	if pageSize < 1 {
 		pageSize = 1
 	}
-	if pageSize > 200 {
-		pageSize = 200
+	if pageSize > 5000 {
+		pageSize = 5000
 	}
 
 	cur, err := cursor.Decode(cursorStr)
@@ -208,8 +283,12 @@ func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr stri
 	}
 
 	var query string
-	switch order {
-	case "desc":
+	switch {
+	case subagentContent == model.SubagentContentPlaceholder && order == "desc":
+		query = listMessagesPagedPlaceholderDescSQL
+	case subagentContent == model.SubagentContentPlaceholder:
+		query = listMessagesPagedPlaceholderAscSQL
+	case order == "desc":
 		query = listMessagesPagedDescSQL
 	default:
 		query = listMessagesPagedAscSQL

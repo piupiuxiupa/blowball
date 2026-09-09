@@ -222,8 +222,11 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID st
 // GetSessionMessages returns a paginated slice of messages for sessionID from
 // MySQL, ordered by (msg_time, msg_index, id). It is a thin wrapper over the
 // store so the handler does not need to import the cursor package.
-func (s *SessionService) GetSessionMessages(ctx context.Context, sessionID, cursor string, pageSize int, order string) ([]model.Message, string, error) {
-	return s.mysql.ListMessagesPaged(ctx, sessionID, cursor, pageSize, order)
+// subagentContent selects the sub-agent history view (model.SubagentContentFull
+// or model.SubagentContentPlaceholder); the placeholder view filters before
+// pagination inside the store.
+func (s *SessionService) GetSessionMessages(ctx context.Context, sessionID, cursor string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
+	return s.mysql.ListMessagesPaged(ctx, sessionID, cursor, pageSize, order, subagentContent)
 }
 
 // ListSessions returns the caller's sessions most-recently-updated first. Each

@@ -491,7 +491,7 @@ func TestOrchestrator_ConfuciusPromptIncludesDispatchDiscipline(t *testing.T) {
 		Agents: config.AgentsConfig{
 			Confucius: config.AgentConfig{
 				Name:         "Confucius",
-				SystemPrompt: "you are confucius\n\nDispatch Discipline\n- A sub-agent sees only the task prompt you send it.\n- Emit independent spawn_subagent calls together in one assistant turn.\n- Small, bounded, unambiguous tasks are often faster to complete yourself.\n- Keep write sets disjoint when dispatching parallel sub-agents.\n- A result marked `status: capped` can be continued through resume_agent_id.",
+				SystemPrompt: "you are confucius\n\nDispatch Discipline\n- A sub-agent sees only the task prompt you send it.\n- Emit independent spawn_subagent calls together in one assistant turn.\n- Small, bounded, unambiguous tasks are often faster to complete yourself.\n- Keep write sets disjoint when dispatching parallel sub-agents.\n- A result marked `status: capped` is continued with a fresh spawn_subagent call carrying the needed context.",
 			},
 			Subagent: config.SubAgentConfig{
 				AgentConfig:      config.AgentConfig{Name: "Chongzhi", SystemPrompt: "you are chongzhi"},
@@ -516,5 +516,6 @@ func TestOrchestrator_ConfuciusPromptIncludesDispatchDiscipline(t *testing.T) {
 	assert.Contains(t, prompt, "sees only the task prompt")
 	assert.Contains(t, prompt, "one assistant turn")
 	assert.Contains(t, prompt, "write sets disjoint")
-	assert.Contains(t, prompt, "resume_agent_id")
+	assert.Contains(t, prompt, "fresh spawn_subagent call")
+	assert.NotContains(t, prompt, "resume_agent_id")
 }

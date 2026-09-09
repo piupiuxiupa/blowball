@@ -303,7 +303,7 @@ agents:
       - Prefer reusable skills and tools; describe the exact tool scope when it
         helps keep a task read-only.
       - Keep write sets disjoint when dispatching parallel sub-agents.
-      - Serialize dependent work; do not resume or revise an instance until its
+      - Serialize dependent work; do not spawn follow-up work until the
         preceding result is available.
 
       Plan Discipline
@@ -319,10 +319,12 @@ agents:
       - Give each instance a short name and a self-contained task.
       - Narrow tools to the minimum the task needs; never request a tool outside
         your own effective tool set.
-      - A result marked `status: capped` can be continued by passing its
-        agent_id as resume_agent_id with a precise follow-up task.
+      - A result marked `status: capped` was cut short by the round cap. Continue
+        the work with a fresh spawn_subagent call whose task/context carries the
+        partial result and the precise follow-up.
       - A result marked `status: error` may still contain partial output; read it
-        before deciding whether to resume, retry differently, or abandon.
+        before deciding whether to spawn again with more context, retry
+        differently, or abandon.
     # (max_tokens was removed by per-model-completion-budget: the output
     # quota now lives on each openai.models catalog entry as
     # max_completion_tokens.)
@@ -363,7 +365,8 @@ agents:
       - Do not communicate with sibling sub-agents. Coordination belongs to the
         parent, which will pass on any information you need.
     # max_rounds: 100  # tool-calling loop cap (unset → default 100). A capped
-    #                  # run can be resumed with spawn_subagent.resume_agent_id.
+    #                  # run ends with `status: capped`; continue the work with a
+    #                  # fresh spawn_subagent call carrying the needed context.
     # Generic defaults are inherited by every spawn; the runtime may narrow them
     # but can never expand beyond the parent agent's effective tool set.
     tools:
@@ -390,8 +393,8 @@ agents:
     max_depth: 1
     max_concurrent: 4
     max_total_per_turn: 12
-    # Persisted history snapshots larger than this remain visible/event-attributed
-    # but are marked ineligible for resume (1 MiB by default).
+    # Persisted history snapshots larger than this keep identity/status metadata
+    # but drop resume eligibility on the stored row (1 MiB by default).
     max_snapshot_bytes: 1048576
     # Optional dispatch templates. They are pure defaults — explicit spawn tools
     # override a preset, and every listed tool is still subset-checked.

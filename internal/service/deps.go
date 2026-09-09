@@ -31,7 +31,10 @@ type MySQLStore interface {
 	// relies on the same idempotency the background flusher does.
 	AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error)
 	ListMessages(ctx context.Context, sessionID string) ([]model.Message, error)
-	ListMessagesPaged(ctx context.Context, sessionID, cursor string, pageSize int, order string) ([]model.Message, string, error)
+	// ListMessagesPaged returns one cursor page in the selected sub-agent
+	// content view (model.SubagentContentFull/Placeholder); the placeholder
+	// view is filtered before pagination inside the store.
+	ListMessagesPaged(ctx context.Context, sessionID, cursor string, pageSize int, order, subagentContent string) ([]model.Message, string, error)
 	SaveTurnUsage(ctx context.Context, tu model.TurnUsage) error
 	// Compaction storage (context-compaction capability): append-only
 	// compaction records, the sessions.context_compacted stitching gate, and

@@ -329,7 +329,7 @@ const (
 func SpawnSubagentSchema() []byte { return append([]byte(nil), spawnArgsSchema...) }
 
 // SpawnSubagentDescription is attached to the synthetic spawn_subagent tool.
-const SpawnSubagentDescription = "Spawn an isolated generic sub-agent with a fresh context. The task prompt must be self-contained; tools may only narrow the caller's available tools. Use resume_agent_id to continue a capped or failed instance."
+const SpawnSubagentDescription = "Spawn an isolated generic sub-agent with a fresh context. The task prompt must be self-contained; tools may only narrow the caller's available tools. Every dispatch creates a new instance; continue prior work by spawning a fresh sub-agent whose task carries the needed context."
 
 // IsInvokeTool reports whether name is the sub-agent dispatch tool recognized
 // by Confucius and depth-eligible generic sub-agents.
@@ -401,10 +401,6 @@ const spawnArgsSchemaJSON = `{
     "preset": {
       "type": "string",
       "description": "Optional named configuration template."
-    },
-    "resume_agent_id": {
-      "type": "string",
-      "description": "Stable agent_instance_id of a prior capped/error result to continue."
     }
   },
   "required": ["task"],
@@ -414,12 +410,12 @@ const spawnArgsSchemaJSON = `{
 var spawnArgsSchema = []byte(spawnArgsSchemaJSON)
 
 // SpawnToolArgs decodes the arguments emitted for spawn_subagent. Every field
-// except task is optional.
+// except task is optional. Argument decoding rejects unknown fields, so the
+// removed resume_agent_id fails as bad_args at the parse boundary.
 type SpawnToolArgs struct {
-	Task          string   `json:"task"`
-	Context       string   `json:"context"`
-	Name          string   `json:"name"`
-	Tools         []string `json:"tools"`
-	Preset        string   `json:"preset"`
-	ResumeAgentID string   `json:"resume_agent_id"`
+	Task    string   `json:"task"`
+	Context string   `json:"context"`
+	Name    string   `json:"name"`
+	Tools   []string `json:"tools"`
+	Preset  string   `json:"preset"`
 }

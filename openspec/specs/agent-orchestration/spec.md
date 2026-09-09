@@ -13,7 +13,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，子 Agent
 
 #### Scenario: Confucius receives function call
 - **WHEN** OpenAI 返回包含 tool_calls 的响应，function name 为 spawn_subagent
-- **THEN** 系统解析 parameters 中的 task、context、name、tools、preset、resume_agent_id，创建通用子 Agent 执行任务
+- **THEN** 系统解析 parameters 中的 task、context、name、tools、preset，创建通用子 Agent 执行任务
 
 #### Scenario: Tool call result returned to Confucius
 - **WHEN** 子 Agent 执行完成（成功或失败）
@@ -55,15 +55,15 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，子 Agent
 - **THEN** 失败信息作为错误 StreamEvent 流式通知，其他 Agent 继续执行，失败结果返回 Confucius 决策
 
 ### Requirement: Independent agent context
-子 Agent SHALL 在独立上下文中运行。全新派发只接收 Confucius 传递的 task description 与 context；续跑派发（`resume_agent_id`）以该实例的持久化历史快照为起点追加新任务消息（见 dynamic-subagents 能力）。
+子 Agent SHALL 在独立上下文中运行，并只接收父 Agent 传递的 self-contained task description 与 context。每次派发 SHALL 创建新的隔离实例；系统 SHALL NOT 提供模型驱动的子 Agent 实例续跑机制。
 
 #### Scenario: Sub-agent receives isolated context
-- **WHEN** Confucius 全新派发一个子 Agent
+- **WHEN** Confucius 派发一个子 Agent
 - **THEN** 子 Agent 的消息列表仅包含：自身 system_prompt + 一条 user message（内容为 task + context），不包含用户的完整历史对话
 
-#### Scenario: Resumed sub-agent starts from snapshot
-- **WHEN** Confucius 续跑一个既有子 Agent 实例
-- **THEN** 子 Agent 的消息列表为该实例持久化历史快照 + 新任务 user message，仍不包含用户完整历史对话
+#### Scenario: Additional work uses a fresh dispatch
+- **WHEN** 先前子 Agent 的结果不足，需要补充执行
+- **THEN** Confucius 发起一个新的 `spawn_subagent` 调用，并在 task/context 中显式携带必要的先前结果；系统不加载旧实例上下文
 
 ### Requirement: Streaming passthrough
 子 Agent 的响应 SHALL 通过共享 StreamEvent channel 透传到 SSE 输出。

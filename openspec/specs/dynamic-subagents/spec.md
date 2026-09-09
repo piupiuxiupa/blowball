@@ -2,35 +2,39 @@
 
 ## Purpose
 
-定义通用子 Agent 派发契约：主 Agent 通过单一 spawn_subagent 工具按任务需要动态创建任意多个通用子 Agent，子 Agent 能力来自父 Agent 派发时写的任务 prompt 与工具收窄，而非预定义角色；覆盖授权边界、全树预算、历史快照与续跑、子 Agent 间完全隔离。
+定义通用子 Agent 派发契约：主 Agent 通过单一 spawn_subagent 工具按任务需要动态创建任意多个通用子 Agent，子 Agent 能力来自父 Agent 派发时写的任务 prompt 与工具收窄，而非预定义角色；覆盖授权边界、全树预算、per-run 历史持久化、子 Agent 间完全隔离。
 
 ## Requirements
 
 ### Requirement: Single spawn_subagent dispatch tool
-主 Agent SHALL 通过唯一的 `spawn_subagent` function-calling 工具派发子 Agent，取代固定角色的 `invoke_chongzhi` / `invoke_liang`。工具参数 SHALL 为：`task`（必填字符串）、`context`（可选字符串）、`name`（可选归因标签）、`tools`（可选工具名数组）、`preset`（可选配置模板名）、`resume_agent_id`（可选续跑目标）。缺少 `task` 或 `task` 为空白时，派发 SHALL 以参数错误（bad_args）失败并将错误文本作为 tool result 返回主 Agent，不中断主 Agent 循环。
+主 Agent SHALL 通过唯一的 `spawn_subagent` function-calling 工具派发子 Agent，取代固定角色的 `invoke_chongzhi` / `invoke_liang`。工具参数 SHALL 为：`task`（必填字符串）、`context`（可选字符串）、`name`（可选归因标签）、`tools`（可选工具名数组）、`preset`（可选配置模板名）。每次 accepted dispatch SHALL 创建新的 `agent_instance_id` 与新的唯一归因名；工具契约 SHALL NOT 包含或接受 `resume_agent_id`。缺少 `task`、`task` 为空白，或参数包含 `resume_agent_id` 时，派发 SHALL 以参数错误（bad_args）失败并将错误文本作为 tool result 返回主 Agent，不中断主 Agent 循环。
 
 #### Scenario: Spawn with task only
 - **WHEN** 主 Agent 调用 `spawn_subagent` 且参数仅含非空 `task`
-- **THEN** 系统创建一个通用子 Agent 执行该任务并返回结构化结果
+- **THEN** 系统创建一个全新通用子 Agent 实例执行该任务并返回结构化结果
 
 #### Scenario: Missing task rejected
 - **WHEN** `spawn_subagent` 调用缺少 `task` 或 `task` 为空白
 - **THEN** 该 tool call 返回 `isError` 为 true 的 bad_args 结果，主 Agent 循环继续
+
+#### Scenario: Resume argument rejected
+- **WHEN** `spawn_subagent` 参数包含 `resume_agent_id`
+- **THEN** 该 tool call 返回 bad_args 结果，不加载既有实例，也不创建子 Agent LLM 调用
 
 #### Scenario: Legacy invoke tools no longer exist
 - **WHEN** 主 Agent 的工具列表被构建
 - **THEN** 列表包含 `spawn_subagent` 且不包含 `invoke_chongzhi` / `invoke_liang`
 
 ### Requirement: Structured spawn result contract
-每次 spawn 派发 SHALL 返回结构化结果：最终回答文本、系统分配的 `agent_instance_id`（稳定实例标识，跨续跑不变）、以及 `status`（`completed` / `capped` / `error`）。结果内容 SHALL 末尾附带机器可读的状态标记（agent id 与 status），使主 Agent 能在后续轮次引用该实例续跑。`capped` SHALL 表示子 Agent 因 round 上限未自然完成、可通过 `resume_agent_id` 继续；`error` 结果 SHALL 保持「错误文本 + 已积累部分输出」的既有合并语义并同样附带 agent id（若已分配）。
+每次 spawn 派发 SHALL 返回结构化结果：最终回答文本与 `status`（`completed` / `capped` / `error`）。结果内容 SHALL NOT 向模型暴露 `agent_instance_id` 或其他可用于续跑既有实例的身份标记。`capped` SHALL 表示该次隔离执行因 round 上限未自然完成；需要继续工作时，主 Agent SHALL 发起一个包含必要上下文的全新 spawn。`error` 结果 SHALL 保持「错误文本 + 已积累部分输出」的合并语义。
 
-#### Scenario: Completed result carries instance identity
+#### Scenario: Completed result carries status only
 - **WHEN** 子 Agent 自然完成并产出最终回答
-- **THEN** tool result content 为回答文本 + `agent_instance_id` 与 `status: completed` 标记
+- **THEN** tool result content 为回答文本 + `status: completed` 标记，且不包含 `agent_id`
 
-#### Scenario: Capped result is marked resumable
+#### Scenario: Capped result is not model-resumable
 - **WHEN** 子 Agent 命中 max_rounds 上限受控终止
-- **THEN** tool result 携带 `status: capped` 与 `agent_instance_id`，主 Agent 可据此发起续跑
+- **THEN** tool result 携带 `status: capped`，但不携带可传回 `spawn_subagent` 的实例身份
 
 #### Scenario: Failed result keeps partial output semantics
 - **WHEN** 子 Agent 执行失败被放弃
@@ -84,29 +88,6 @@
 #### Scenario: Total budget exhausted
 - **WHEN** 本回合全树派生总数达到 `max_total_per_turn` 后再次 spawn
 - **THEN** 该派发返回预算错误 tool result，主 Agent 循环继续
-
-### Requirement: Resume with persisted history
-系统 SHALL 为每个子 Agent 实例持久化稳定元数据与线性 per-run 消息 delta 链，作为续跑的权威历史；每次 run 的 `messages_json` SHALL 只保存该次执行新增的消息。携带 `resume_agent_id` 的 spawn SHALL 以目标实例的 system prompt 与按序拼接的 run delta 为起点追加新任务消息继续执行；目标实例不存在、不属于当前会话、run 链不可读或拼接后的上下文超过续跑限制时 SHALL 以 bad_args 失败。续跑 SHALL 分配新的 run 身份但沿用同一 `agent_instance_id`；已折叠进历史的孙 Agent 派发 SHALL NOT 复活，续跑实例可在剩余深度与预算内派发新的孙 Agent。
-
-#### Scenario: Resume continues from stitched history
-- **WHEN** spawn 携带先前返回的 `resume_agent_id` 与新 `task`
-- **THEN** 子 Agent 的初始消息列表为实例 system prompt、按顺序拼接的所有历史 run delta 与新任务 user message
-
-#### Scenario: Same instance across resume
-- **WHEN** 同一实例被续跑
-- **THEN** 两次执行的流事件携带不同 run 身份但相同 `agent_instance_id`
-
-#### Scenario: Unknown resume target rejected
-- **WHEN** `resume_agent_id` 指向不存在或跨会话的实例
-- **THEN** 派发以 bad_args 失败并返回错误文本
-
-#### Scenario: Oversized stitched context rejected
-- **WHEN** 拼接目标实例的完整模型上下文超过配置的子 Agent 快照大小限制
-- **THEN** 派发以 bad_args 失败，且不发起子 Agent LLM 调用
-
-#### Scenario: Grandchildren are not revived
-- **WHEN** 被续跑实例的历史中含已完成的孙 Agent 派发
-- **THEN** 续跑不重新执行这些孙 Agent；其结果以 tool result 形式保留在历史 delta 中
 
 ### Requirement: Full isolation between sub-agents
 子 Agent 之间 SHALL 完全隔离：系统 SHALL NOT 提供子 Agent 间直接通信通道（mailbox、兄弟互发、共享黑板）；一切协调 SHALL 经父 Agent 中转——父通过任务 prompt 下发信息，子通过最终结果回报。子 Agent SHALL NOT 获得引用其他实例上下文的机制。

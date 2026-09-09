@@ -222,12 +222,32 @@ func TestGetSessionMessages_PassesThrough(t *testing.T) {
 	m := &fakeMySQLStore{listMessagesRows: want}
 	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, &fakeFSStore{}))
 
-	msgs, next, err := svc.GetSessionMessages(context.Background(), sessionID, "", 10, "asc")
+	msgs, next, err := svc.GetSessionMessages(context.Background(), sessionID, "", 10, "asc", model.SubagentContentFull)
 	require.NoError(t, err)
 	require.Len(t, msgs, 2)
 	assert.Equal(t, "a", msgs[0].Content)
 	assert.Equal(t, "b", msgs[1].Content)
 	assert.Empty(t, next)
+}
+
+// TestGetSessionMessages_ThreadsSubagentContent verifies the service hands the
+// handler-validated subagent_content mode to the store unchanged
+// (unique-subagent-message-placeholders): the placeholder filter itself lives
+// in the store layer, so the service must be a transparent pass-through.
+func TestGetSessionMessages_ThreadsSubagentContent(t *testing.T) {
+	const sessionID = "s-11"
+	m := &fakeMySQLStore{listMessagesRows: []model.Message{
+		{ID: 1, SessionID: sessionID, Content: "a"},
+	}}
+	svc := NewSessionService(newDeps(m, &fakeRedisStore{}, &fakeFSStore{}))
+
+	for _, mode := range []string{model.SubagentContentFull, model.SubagentContentPlaceholder} {
+		_, _, err := svc.GetSessionMessages(context.Background(), sessionID, "", 10, "asc", mode)
+		require.NoError(t, err)
+	}
+	assert.Equal(t,
+		[]string{model.SubagentContentFull, model.SubagentContentPlaceholder},
+		m.listMessagesPagedSubagentContents)
 }
 
 func TestCreateSession_Success(t *testing.T) {

@@ -86,9 +86,10 @@ func (h *SessionHandler) CreateSession(c *gin.Context) {
 // getSessionMessagesRequest captures the query parameters for
 // GET /api/v1/sessions/:session_id/messages.
 type getSessionMessagesRequest struct {
-	PageToken string `form:"page_token"`
-	PageSize  int    `form:"page_size"`
-	Order     string `form:"order"`
+	PageToken       string `form:"page_token"`
+	PageSize        int    `form:"page_size"`
+	Order           string `form:"order"`
+	SubagentContent string `form:"subagent_content"`
 }
 
 const (
@@ -115,6 +116,20 @@ func (h *SessionHandler) GetSessionMessages(c *gin.Context) {
 	var req getSessionMessagesRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
+		return
+	}
+
+	// Validate the sub-agent history view before any session/pagination read:
+	// an unknown mode is a 400 with zero message-store I/O. An omitted value
+	// defaults to the legacy full view (zero behavior change for old clients).
+	subagentContent := model.SubagentContentFull
+	switch req.SubagentContent {
+	case "", model.SubagentContentFull:
+		// full view
+	case model.SubagentContentPlaceholder:
+		subagentContent = model.SubagentContentPlaceholder
+	default:
+		c.JSON(http.StatusBadRequest, errorBody("INVALID_SUBAGENT_CONTENT", "subagent_content must be full or placeholder"))
 		return
 	}
 
@@ -146,7 +161,7 @@ func (h *SessionHandler) GetSessionMessages(c *gin.Context) {
 		order = "asc"
 	}
 
-	messages, nextCursor, err := h.sessSvc.GetSessionMessages(ctx, sessionID, req.PageToken, pageSize, order)
+	messages, nextCursor, err := h.sessSvc.GetSessionMessages(ctx, sessionID, req.PageToken, pageSize, order, subagentContent)
 	if err != nil {
 		logger.L().Error("list session messages failed",
 			zap.String("op", "handler.get_session_messages"),

@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -102,138 +100,58 @@ func TestDynamicSubagents_ToolNarrowingAndDefaultDepth(t *testing.T) {
 		"a child at default depth gets only the narrowed tool and no spawn tool")
 }
 
-func TestDynamicSubagents_ResumeEndToEnd(t *testing.T) {
+func TestDynamicSubagents_ResumeArgumentRejectedEndToEnd(t *testing.T) {
 	llm := newScriptedLLMClient(
-		// Initial dispatch.
-		scriptedLLMResponse{
-			finishReason: "tool_calls",
-			toolCalls: []agent.ToolCall{{
-				ID: "initial_call",
-				Function: agent.ToolCallFunction{
-					Name:      agent.SpawnSubagentTool,
-					Arguments: `{"task":"start work","name":"Worker"}`,
-				},
-			}},
-		},
-		// MaxRounds=1: this tool-calling round consumes the cap.
-		scriptedLLMResponse{
-			finishReason: "tool_calls",
-			toolCalls: []agent.ToolCall{{
-				ID: "child_call",
-				Function: agent.ToolCallFunction{
-					Name: "unknown_tool", Arguments: `{}`,
-				},
-			}},
-		},
-		// Tool-disabled wrap-up succeeds, so the spawn result is capped/resumable.
-		scriptedLLMResponse{content: "partial result", finishReason: "stop"},
-		scriptedLLMResponse{content: "first summary", finishReason: "stop"},
-
-		// Second turn: resume the same instance.
+		// The model tries to resume an instance — the argument is no longer part
+		// of the tool contract and must be rejected as bad_args without any
+		// sub-agent LLM call or persisted instance.
 		scriptedLLMResponse{
 			finishReason: "tool_calls",
 			toolCalls: []agent.ToolCall{{
 				ID: "resume_call",
 				Function: agent.ToolCallFunction{
 					Name:      agent.SpawnSubagentTool,
-					Arguments: `{"task":"continue work","resume_agent_id":"PLACEHOLDER"}`,
+					Arguments: `{"task":"continue work","resume_agent_id":"w-legacy"}`,
 				},
 			}},
 		},
-		scriptedLLMResponse{content: "continued result", finishReason: "stop"},
-		scriptedLLMResponse{content: "second summary", finishReason: "stop"},
+		scriptedLLMResponse{content: "summary", finishReason: "stop"},
 	)
-	agents := dynamicAgentsForTest(func(sub *config.SubAgentConfig) {
-		sub.MaxRounds = 1
-	})
-	env := newTestEnvWithAgents(t, llm, agents)
-	token := authToken(t, defaultUserID)
+	env := newTestEnv(t, llm)
 
-	w1 := env.postMessage(`{"content":"start"}`, token)
-	require.Equal(t, http.StatusOK, w1.Code, "body: %s", w1.Body.String())
-	env.waitForPersistedTurn(t, defaultSessionID, 5)
+	w := env.postMessage(`{"content":"continue"}`, authToken(t, defaultUserID))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	env.waitForPersistedTurn(t, defaultSessionID, 3)
 
-	var agentID string
+	var sawResult bool
 	for _, msg := range env.mysqlFake.messagesFor(defaultSessionID) {
-		if msg.Agent == stream.AgentConfucius && msg.EventType == model.EventTypeToolResult &&
-			strings.Contains(msg.Content, "status: capped") {
-			m := regexp.MustCompile(`agent_id: (w-[a-z0-9]+)`).FindStringSubmatch(msg.Content)
-			require.NotNil(t, m, "capped result must expose agent_id in %q", msg.Content)
-			agentID = m[1]
+		if msg.Agent == stream.AgentConfucius && msg.EventType == model.EventTypeToolResult {
+			sawResult = true
+			assert.Contains(t, msg.Content, "resume_agent_id", "the rejection explains the unknown field")
 		}
+		// A rejected dispatch must never create a sub-agent LLM call, so no
+		// sub-agent rows (which would carry a dynamic instance identity)
+		// may appear.
+		assert.Empty(t, msg.AgentInstanceID, "no sub-agent row may be persisted: %+v", msg)
 	}
-	require.NotEmpty(t, agentID, "capped result must be persisted")
+	require.True(t, sawResult, "the bad_args tool result must be persisted")
 
-	// Patch the queued resume arguments now that the stable id is known.
 	llm.mu.Lock()
-	for i := range llm.responses {
-		for j := range llm.responses[i].toolCalls {
-			llm.responses[i].toolCalls[j].Function.Arguments = strings.ReplaceAll(
-				llm.responses[i].toolCalls[j].Function.Arguments, "PLACEHOLDER", agentID)
-		}
-	}
-	llm.mu.Unlock()
-
-	w2 := env.postMessage(`{"content":"continue"}`, token)
-	require.Equal(t, http.StatusOK, w2.Code, "body: %s", w2.Body.String())
-	llm.mu.Lock()
-	var resumeMessages []agent.Message
+	defer llm.mu.Unlock()
 	for _, call := range llm.calls {
-		if len(call.Messages) > 1 && strings.Contains(call.Messages[len(call.Messages)-1].Content, "continue work") {
-			resumeMessages = call.Messages
-			break
+		for _, m := range call.Messages {
+			require.NotContains(t, m.Content, "continue work",
+				"the rejected dispatch must not reach a sub-agent LLM call")
 		}
 	}
-	llm.mu.Unlock()
-	require.NotEmpty(t, resumeMessages, "the resumed sub-agent LLM call must be recorded")
-	require.GreaterOrEqual(t, len(resumeMessages), 3, "system + persisted history + new follow-up")
-	assert.Equal(t, "system", resumeMessages[0].Role)
-	assert.Equal(t, "start work", resumeMessages[1].Content)
-	assert.Equal(t, "continue work", resumeMessages[len(resumeMessages)-1].Content)
-
-	history, ok, err := env.mysqlFake.GetSubAgentHistory(context.Background(), defaultSessionID, agentID)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Len(t, history.Runs, 2)
-	run := history.Runs[1]
-	assert.Equal(t, "resume_call", run.RunID)
-	assert.Equal(t, "initial_call", run.PreviousRunID)
-	assert.Equal(t, model.SubAgentStatusCompleted, run.Status)
-	assert.Contains(t, string(run.MessagesJSON), "continue work")
-	assert.NotContains(t, string(run.MessagesJSON), "start work", "a run row stores only its delta")
-
-	listURL := fmt.Sprintf("/api/v1/sessions/%s/subagents/%s/runs", defaultSessionID, agentID)
-	req := httptest.NewRequest(http.MethodGet, listURL, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	listW := httptest.NewRecorder()
-	env.engine.ServeHTTP(listW, req)
-	require.Equal(t, http.StatusOK, listW.Code, listW.Body.String())
-	assert.NotContains(t, listW.Body.String(), "messages_json")
-	assert.NotContains(t, listW.Body.String(), "system_prompt")
-
-	detailURL := listURL + "/resume_call"
-	req = httptest.NewRequest(http.MethodGet, detailURL, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	detailW := httptest.NewRecorder()
-	env.engine.ServeHTTP(detailW, req)
-	require.Equal(t, http.StatusOK, detailW.Code, detailW.Body.String())
-	assert.Contains(t, detailW.Body.String(), "continue work")
-	assert.NotContains(t, detailW.Body.String(), "start work")
 }
 
-func TestDynamicSubagents_LegacyFullSnapshotResumeAndDetail(t *testing.T) {
+func TestDynamicSubagents_LegacyFullSnapshotStaysReadable(t *testing.T) {
+	// A pre-change legacy_full row (no persisted message rows in `messages`,
+	// only the snapshot) must remain readable through the per-run transcript
+	// APIs — resume was removed, history retention was not. See the REMOVED
+	// "Resume with persisted history" migration note in the spec delta.
 	llm := newScriptedLLMClient(
-		scriptedLLMResponse{
-			finishReason: "tool_calls",
-			toolCalls: []agent.ToolCall{{
-				ID: "resume_legacy",
-				Function: agent.ToolCallFunction{
-					Name:      agent.SpawnSubagentTool,
-					Arguments: `{"task":"continue legacy","resume_agent_id":"w-legacy"}`,
-				},
-			}},
-		},
-		scriptedLLMResponse{content: "continued legacy result", finishReason: "stop"},
 		scriptedLLMResponse{content: "legacy summary", finishReason: "stop"},
 	)
 	env := newTestEnvWithAgents(t, llm, agentConfig())
@@ -257,33 +175,29 @@ func TestDynamicSubagents_LegacyFullSnapshotResumeAndDetail(t *testing.T) {
 	}
 	require.NoError(t, env.mysqlFake.AppendSubAgentRun(context.Background(), instance, legacyRun))
 
-	w := env.postMessage(`{"content":"continue old instance"}`, token)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-
 	history, ok, err := env.mysqlFake.GetSubAgentHistory(context.Background(), defaultSessionID, "w-legacy")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Len(t, history.Runs, 2)
+	require.Len(t, history.Runs, 1)
 	assert.Equal(t, model.SubAgentSnapshotLegacyFull, history.Runs[0].SnapshotKind)
-	assert.Equal(t, model.SubAgentSnapshotDelta, history.Runs[1].SnapshotKind)
-	assert.Contains(t, string(history.Runs[1].MessagesJSON), "continue legacy")
-	assert.NotContains(t, string(history.Runs[1].MessagesJSON), "old task")
 
-	base := "/api/v1/sessions/" + defaultSessionID + "/subagents/w-legacy/runs"
-	for _, tc := range []struct {
-		runID, contains, omit string
-	}{
-		{"legacy-call", "old task", "continue legacy"},
-		{"resume_legacy", "continue legacy", "old task"},
-	} {
-		req := httptest.NewRequest(http.MethodGet, base+"/"+tc.runID, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		rec := httptest.NewRecorder()
-		env.engine.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), tc.contains)
-		assert.NotContains(t, rec.Body.String(), tc.omit)
-	}
+	listURL := "/api/v1/sessions/" + defaultSessionID + "/subagents/w-legacy/runs"
+	req := httptest.NewRequest(http.MethodGet, listURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	listW := httptest.NewRecorder()
+	env.engine.ServeHTTP(listW, req)
+	require.Equal(t, http.StatusOK, listW.Code, listW.Body.String())
+	assert.NotContains(t, listW.Body.String(), "messages_json")
+	assert.NotContains(t, listW.Body.String(), "system_prompt")
+
+	detailURL := listURL + "/legacy-call"
+	req = httptest.NewRequest(http.MethodGet, detailURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	detailW := httptest.NewRecorder()
+	env.engine.ServeHTTP(detailW, req)
+	require.Equal(t, http.StatusOK, detailW.Code, detailW.Body.String())
+	assert.Contains(t, detailW.Body.String(), "old task")
+	assert.Contains(t, detailW.Body.String(), "old result")
 }
 
 func TestAgentPlanState_EndToEnd(t *testing.T) {
@@ -403,6 +317,185 @@ func TestAgentPlanState_EndToEnd(t *testing.T) {
 	assert.Contains(t, planRows[1].Content, `"revision":2`)
 	assert.Contains(t, planRows[1].Content, `"status":"completed"`)
 	assert.Contains(t, planRows[2].Content, `"revision":1`)
+}
+
+// TestDynamicSubagents_UniqueNamesAndPlaceholderHistoryEndToEnd is the
+// change-defining e2e (unique-subagent-message-placeholders): two same-name
+// spawns produce two DISTINCT instances (unique suffixed names, both run_no=1),
+// and the placeholder history view over HTTP retains the lifecycle markers and
+// parent rows while omitting the children payload rows and the duplicated
+// parent spawn tool_result — with the full transcript still lazy-loadable via
+// the per-run detail API.
+func TestDynamicSubagents_UniqueNamesAndPlaceholderHistoryEndToEnd(t *testing.T) {
+	llm := newScriptedLLMClient(
+		// Turn: Confucius dispatches two same-name spawns in parallel, then
+		// answers. The scripted client replies identically to every sub-agent
+		// call (one content response per dispatch).
+		scriptedLLMResponse{
+			finishReason: "tool_calls",
+			toolCalls: []agent.ToolCall{
+				{ID: "spawn-a", Function: agent.ToolCallFunction{
+					Name:      agent.SpawnSubagentTool,
+					Arguments: `{"task":"draft the intro","name":"Writer"}`,
+				}},
+				{ID: "spawn-b", Function: agent.ToolCallFunction{
+					Name:      agent.SpawnSubagentTool,
+					Arguments: `{"task":"draft the outro","name":"Writer"}`,
+				}},
+			},
+		},
+		scriptedLLMResponse{content: "child draft", finishReason: "stop"},
+		scriptedLLMResponse{content: "child draft", finishReason: "stop"},
+		scriptedLLMResponse{content: "merged answer", finishReason: "stop"},
+	)
+	env := newTestEnv(t, llm)
+	token := authToken(t, defaultUserID)
+
+	w := env.postMessage(`{"content":"write both halves"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	types, payloads := parseSSEBody(t, w.Body.String())
+	require.Contains(t, types, stream.EventDone)
+
+	// The model-visible spawn results expose status only — no instance identity.
+	var spawnResults []string
+	for i, ty := range types {
+		if ty != stream.EventToolResult {
+			continue
+		}
+		content, _ := payloads[i]["content"].(string)
+		if strings.Contains(content, "subagent_result") {
+			spawnResults = append(spawnResults, content)
+		}
+	}
+	require.Len(t, spawnResults, 2, "both spawn dispatches must answer with a tool_result")
+	for _, res := range spawnResults {
+		assert.NotContains(t, res, "agent_id", "spawn results carry no instance identity")
+		assert.NotContains(t, res, "agent_instance_id")
+	}
+
+	// Two distinct instances with unique names, each with a single run_no=1 run
+	// keyed by its parent spawn tool_call id.
+	env.waitForPersistedTurn(t, defaultSessionID, 8)
+	instances := env.mysqlFake.snapshotSubAgentInstances(defaultSessionID)
+	require.Len(t, instances, 2, "two spawns produce exactly two instances")
+	names := map[string]bool{}
+	for _, inst := range instances {
+		names[inst.Name] = true
+	}
+	require.Len(t, names, 2, "same-name spawns get unique display names: %v", instances)
+	runsByID := env.mysqlFake.snapshotSubAgentRuns(defaultSessionID)
+	require.Len(t, runsByID, 2, "two spawns produce exactly two runs")
+	runA, ok := runsByID["spawn-a"]
+	require.True(t, ok, "a run keyed by the spawn-a tool_call id must exist")
+	runB, ok := runsByID["spawn-b"]
+	require.True(t, ok, "a run keyed by the spawn-b tool_call id must exist")
+	assert.Equal(t, 1, runA.RunNo)
+	assert.Equal(t, 1, runB.RunNo)
+	require.NotEqual(t, runA.AgentInstanceID, runB.AgentInstanceID)
+
+	// Full history over HTTP: every persisted row is visible.
+	fullW := env.getSessionMessages(defaultSessionID, "", token)
+	require.Equal(t, http.StatusOK, fullW.Code, fullW.Body.String())
+	full := decodeMessagesPage(t, fullW)
+	require.NotEmpty(t, full.Messages)
+
+	// Placeholder history over HTTP: the children payload rows and both
+	// duplicated parent spawn tool_result rows are omitted; the parent
+	// tool_call rows, the lifecycle markers, the user row, and Confucius's
+	// final answer stay.
+	phW := env.getSessionMessages(defaultSessionID, "?subagent_content=placeholder", token)
+	require.Equal(t, http.StatusOK, phW.Code, phW.Body.String())
+	ph := decodeMessagesPage(t, phW)
+	require.NotEmpty(t, ph.Messages)
+
+	spawnToolCallSeen := map[string]bool{"spawn-a": false, "spawn-b": false}
+	var sawUser bool
+	var childStarts, childEnds int
+	var sawConfuciusStart, sawConfuciusEnd bool
+	for _, m := range ph.Messages {
+		if m.AgentInstanceID != "" {
+			assert.Contains(t,
+				[]string{model.EventTypeAgentStart, model.EventTypeAgentEnd, model.EventTypeAgentError},
+				m.EventType,
+				"instance-attributed placeholder rows are lifecycle markers only: %+v", m)
+		}
+		switch m.EventType {
+		case model.EventTypeAgentStart:
+			if m.AgentInstanceID != "" {
+				childStarts++
+			} else if m.Agent == stream.AgentConfucius {
+				sawConfuciusStart = true
+			}
+		case model.EventTypeAgentEnd:
+			if m.AgentInstanceID != "" {
+				childEnds++
+			} else if m.Agent == stream.AgentConfucius {
+				sawConfuciusEnd = true
+			}
+		case model.EventTypeMessage:
+			sawUser = true
+		case model.EventTypeToolCall:
+			var payload struct {
+				ToolCallID string `json:"tool_call_id"`
+			}
+			if json.Unmarshal([]byte(m.Content), &payload) == nil {
+				if _, ok := spawnToolCallSeen[payload.ToolCallID]; ok {
+					spawnToolCallSeen[payload.ToolCallID] = true
+				}
+			}
+		case model.EventTypeToolResult:
+			assert.NotContains(t, m.Content, "subagent_result",
+				"the duplicated parent spawn result must be omitted")
+		}
+	}
+	assert.Equal(t, 2, childStarts, "both children's agent_start markers stay visible")
+	assert.Equal(t, 2, childEnds, "both children's agent_end markers stay visible")
+	assert.True(t, sawConfuciusStart && sawConfuciusEnd, "the parent's lifecycle markers stay visible")
+	assert.True(t, sawUser, "the user row stays visible")
+	assert.True(t, spawnToolCallSeen["spawn-a"] && spawnToolCallSeen["spawn-b"],
+		"the parent spawn tool_call rows stay visible")
+
+	// Placeholder mode must strictly shrink the view.
+	assert.Less(t, len(ph.Messages), len(full.Messages))
+
+	// An unknown mode is a 400 before any pagination read.
+	badW := env.getSessionMessages(defaultSessionID, "?subagent_content=bogus", token)
+	assert.Equal(t, http.StatusBadRequest, badW.Code)
+	assert.Contains(t, badW.Body.String(), "INVALID_SUBAGENT_CONTENT")
+
+	// The detail the placeholder view hides stays lazy-loadable per run.
+	for _, r := range []model.SubAgentRun{runA, runB} {
+		listURL := "/api/v1/sessions/" + defaultSessionID + "/subagents/" + r.AgentInstanceID + "/runs"
+		req := httptest.NewRequest(http.MethodGet, listURL, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		lw := httptest.NewRecorder()
+		env.engine.ServeHTTP(lw, req)
+		require.Equal(t, http.StatusOK, lw.Code, lw.Body.String())
+		assert.NotContains(t, lw.Body.String(), "messages_json", "the list stays a summary")
+
+		detailURL := listURL + "/" + r.RunID
+		req = httptest.NewRequest(http.MethodGet, detailURL, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		dw := httptest.NewRecorder()
+		env.engine.ServeHTTP(dw, req)
+		require.Equal(t, http.StatusOK, dw.Code, dw.Body.String())
+		assert.Contains(t, dw.Body.String(), "child draft", "the run detail lazy-loads the full transcript")
+	}
+}
+
+// decodeMessagesPage parses the getSessionMessagesResponse body.
+func decodeMessagesPage(t *testing.T, w *httptest.ResponseRecorder) struct {
+	Messages      []model.Message `json:"messages"`
+	NextPageToken string          `json:"next_page_token"`
+} {
+	t.Helper()
+	var page struct {
+		Messages      []model.Message `json:"messages"`
+		NextPageToken string          `json:"next_page_token"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	return page
 }
 
 func TestDynamicSubagents_TotalBudgetExhaustionEndToEnd(t *testing.T) {

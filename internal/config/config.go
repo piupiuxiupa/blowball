@@ -896,11 +896,11 @@ type SubAgentConfig struct {
 	// MaxConcurrent bounds simultaneously running dispatches across the whole
 	// tree, including ancestors that are waiting on descendants.
 	MaxConcurrent int `yaml:"max_concurrent"`
-	// MaxTotalPerTurn bounds all dispatches in one turn, including retries
-	// started through resume_agent_id.
+	// MaxTotalPerTurn bounds all dispatches in one turn. Every dispatch is a
+	// fresh instance; there is no model-driven resume path.
 	MaxTotalPerTurn int `yaml:"max_total_per_turn"`
 	// MaxSnapshotBytes bounds one persisted messages_json snapshot. Larger
-	// snapshots retain identity/status but are marked ineligible for resume.
+	// snapshots retain identity/status but are stored as resume-ineligible.
 	MaxSnapshotBytes int                             `yaml:"max_snapshot_bytes"`
 	Presets          map[string]SubAgentPresetConfig `yaml:"presets"`
 }

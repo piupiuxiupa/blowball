@@ -515,11 +515,50 @@ func (m *memoryMySQL) GetSubAgentHistory(_ context.Context, sessionID, instanceI
 	}, true, nil
 }
 
-func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
+func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rows := make([]model.Message, len(m.messages[sessionID]))
 	copy(rows, m.messages[sessionID])
+
+	if subagentContent == model.SubagentContentPlaceholder {
+		// Mirror the production placeholder filter (see subagentPlaceholderFilter
+		// in internal/store/mysql/message.go), applied BEFORE cursor/limit
+		// pagination: keep rows with no dynamic instance identity; for
+		// instance-attributed rows keep only the lifecycle markers; drop the
+		// parent's spawn tool_result rows whose tool_call_id matches a
+		// subagent_runs.run_id of this session (the parent tool_call row stays).
+		runIDs := make(map[string]struct{})
+		for key, runs := range m.subagentRuns {
+			if !strings.HasPrefix(key, sessionID+"\x00") {
+				continue
+			}
+			for _, run := range runs {
+				runIDs[run.RunID] = struct{}{}
+			}
+		}
+		kept := rows[:0]
+		for _, msg := range rows {
+			if msg.AgentInstanceID != "" &&
+				msg.EventType != model.EventTypeAgentStart &&
+				msg.EventType != model.EventTypeAgentEnd &&
+				msg.EventType != model.EventTypeAgentError {
+				continue
+			}
+			if msg.AgentInstanceID == "" && msg.EventType == model.EventTypeToolResult && len(runIDs) > 0 {
+				var payload struct {
+					ToolCallID string `json:"tool_call_id"`
+				}
+				if err := json.Unmarshal([]byte(msg.Content), &payload); err == nil {
+					if _, dup := runIDs[payload.ToolCallID]; dup {
+						continue
+					}
+				}
+			}
+			kept = append(kept, msg)
+		}
+		rows = kept
+	}
 
 	less := func(i, j int) bool {
 		if rows[i].MsgTime.Equal(rows[j].MsgTime) {
@@ -588,6 +627,38 @@ func (m *memoryMySQL) messagesFor(sessionID string) []model.Message {
 	defer m.mu.Unlock()
 	out := make([]model.Message, len(m.messages[sessionID]))
 	copy(out, m.messages[sessionID])
+	return out
+}
+
+// snapshotSubAgentInstances returns the instances persisted for sessionID.
+// Test helper (unique-subagent-message-placeholders e2e).
+func (m *memoryMySQL) snapshotSubAgentInstances(sessionID string) []model.SubAgentInstance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []model.SubAgentInstance
+	for key, inst := range m.subagentInstances {
+		if strings.HasPrefix(key, sessionID+"\x00") {
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
+// snapshotSubAgentRuns returns the runs persisted for sessionID keyed by
+// run_id (the parent spawn tool_call id). Test helper
+// (unique-subagent-message-placeholders e2e).
+func (m *memoryMySQL) snapshotSubAgentRuns(sessionID string) map[string]model.SubAgentRun {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]model.SubAgentRun{}
+	for key, runs := range m.subagentRuns {
+		if !strings.HasPrefix(key, sessionID+"\x00") {
+			continue
+		}
+		for _, run := range runs {
+			out[run.RunID] = run
+		}
+	}
 	return out
 }
 
@@ -1100,6 +1171,17 @@ func (e *testEnv) postMessage(body, token string) *httptest.ResponseRecorder {
 		"/api/v1/sessions/"+defaultSessionID+"/messages",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	return w
+}
+
+// getSessionMessages GETs the session's message history with an optional raw
+// query string (e.g. "?subagent_content=placeholder").
+func (e *testEnv) getSessionMessages(sessionID, query, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/"+sessionID+"/messages"+query, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	e.engine.ServeHTTP(w, req)

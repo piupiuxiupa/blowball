@@ -19,6 +19,15 @@ const (
 	AgentLiang     = "Liang"
 )
 
+// Sub-agent content view modes for the message history endpoint
+// (unique-subagent-message-placeholders capability). Full is the legacy
+// behavior; Placeholder filters the dynamic sub-agent payload rows before
+// pagination, retaining only lifecycle markers for sub-agent rows.
+const (
+	SubagentContentFull        = "full"
+	SubagentContentPlaceholder = "placeholder"
+)
+
 // Event type values. These match the `event_type` column on the messages table.
 const (
 	EventTypeMessage     = "message"

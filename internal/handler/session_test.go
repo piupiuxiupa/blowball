@@ -145,9 +145,14 @@ type handlerFakeMySQL struct {
 	appendMessagesErrFirst int
 	listMessagesRows       []model.Message
 	listMessagesErr        error
-	saveTurnUsageCalls     int
-	saveTurnUsageArg       model.TurnUsage
-	saveTurnUsageErr       error
+	// listMessagesPagedCalls records every ListMessagesPaged call so tests can
+	// verify the validated subagent_content mode is threaded through (and that
+	// an invalid mode never reaches the store).
+	listMessagesPagedCalls            int
+	listMessagesPagedSubagentContents []string
+	saveTurnUsageCalls                int
+	saveTurnUsageArg                  model.TurnUsage
+	saveTurnUsageErr                  error
 
 	// Compaction-storage recording (context-compaction capability).
 	compactions                 []model.ContextCompaction
@@ -250,9 +255,11 @@ func (m *handlerFakeMySQL) ListMessages(_ context.Context, _ string) ([]model.Me
 	return out, nil
 }
 
-func (m *handlerFakeMySQL) ListMessagesPaged(_ context.Context, _, cursorStr string, pageSize int, order string) ([]model.Message, string, error) {
+func (m *handlerFakeMySQL) ListMessagesPaged(_ context.Context, _, cursorStr string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.listMessagesPagedCalls++
+	m.listMessagesPagedSubagentContents = append(m.listMessagesPagedSubagentContents, subagentContent)
 	if m.listMessagesErr != nil {
 		return nil, "", m.listMessagesErr
 	}
@@ -1163,6 +1170,62 @@ func TestGetSessionMessages_WrongOwner_404(t *testing.T) {
 	env.engine.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}
+
+// TestGetSessionMessages_SubagentContentMode verifies the subagent_content
+// query-param contract (unique-subagent-message-placeholders): the default and
+// the explicit "full" resolve to the full view, "placeholder" resolves to the
+// placeholder view, and the validated value is threaded verbatim into the
+// store's pagination call.
+func TestGetSessionMessages_SubagentContentMode(t *testing.T) {
+	cases := []struct {
+		name      string
+		query     string
+		wantStore string
+	}{
+		{name: "default is full", query: "", wantStore: model.SubagentContentFull},
+		{name: "explicit full", query: "?subagent_content=full", wantStore: model.SubagentContentFull},
+		{name: "placeholder", query: "?subagent_content=placeholder", wantStore: model.SubagentContentPlaceholder},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSessionHandlerEnv(t, nil)
+			env.mysql.listMessagesRows = []model.Message{
+				{ID: 1, SessionID: "sess-1", MsgTime: time.Unix(1_700_000_000, 0).UTC(), MsgIndex: 0, Content: "row"},
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1/messages"+tc.query, nil)
+			w := httptest.NewRecorder()
+			env.engine.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			env.mysql.mu.Lock()
+			defer env.mysql.mu.Unlock()
+			require.Equal(t, 1, env.mysql.listMessagesPagedCalls)
+			assert.Equal(t, []string{tc.wantStore}, env.mysql.listMessagesPagedSubagentContents)
+		})
+	}
+}
+
+// TestGetSessionMessages_SubagentContentInvalid verifies an unknown
+// subagent_content value is rejected with 400 INVALID_SUBAGENT_CONTENT before
+// any store read happens — the validation precedes the session-ownership read
+// and pagination (spec: an invalid value must not read pagination data).
+func TestGetSessionMessages_SubagentContentInvalid(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	env.mysql.listMessagesRows = []model.Message{
+		{ID: 1, SessionID: "sess-1", MsgTime: time.Unix(1_700_000_000, 0).UTC(), MsgIndex: 0, Content: "row"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1/messages?subagent_content=bogus", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "INVALID_SUBAGENT_CONTENT")
+	env.mysql.mu.Lock()
+	defer env.mysql.mu.Unlock()
+	assert.Zero(t, env.mysql.listMessagesPagedCalls, "an invalid subagent_content must not reach the store")
 }
 
 // TestSendMessage_FirstTurnFiresTitle verifies that the first user message

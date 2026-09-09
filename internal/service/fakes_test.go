@@ -73,6 +73,10 @@ type fakeMySQLStore struct {
 
 	listMessagesRows []model.Message
 	listMessagesErr  error
+	// listMessagesPagedSubagentContents records the subagent_content mode of
+	// every ListMessagesPaged call so tests can verify the service threads the
+	// validated value through unchanged.
+	listMessagesPagedSubagentContents []string
 }
 
 func (f *fakeMySQLStore) CreateSession(_ context.Context, sess model.Session) error {
@@ -206,9 +210,10 @@ func (f *fakeMySQLStore) ListMessages(_ context.Context, sessionID string) ([]mo
 	return out, nil
 }
 
-func (f *fakeMySQLStore) ListMessagesPaged(_ context.Context, sessionID, cursor string, pageSize int, order string) ([]model.Message, string, error) {
+func (f *fakeMySQLStore) ListMessagesPaged(_ context.Context, sessionID, cursor string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listMessagesPagedSubagentContents = append(f.listMessagesPagedSubagentContents, subagentContent)
 	if f.listMessagesErr != nil {
 		return nil, "", f.listMessagesErr
 	}
