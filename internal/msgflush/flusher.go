@@ -4,23 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/pkg/flush"
 	"github.com/lush/blowball/internal/pkg/logger"
 )
 
-// Flusher pacing constants. errorBackoff and finalDrainTimeout are
-// deliberately not configurable (mirroring internal/llmraw); the interval and
+// Flusher pacing constants, deliberately not configurable; the interval and
 // batch size are config-driven via Config.
 const (
-	// errorBackoff parks the loop briefly after a Redis/MySQL failure so a
-	// dead dependency is retried at a calm pace instead of hot-looping.
-	errorBackoff = 1 * time.Second
 	// finalDrainTimeout bounds the drain attempt Close makes on shutdown.
 	finalDrainTimeout = 5 * time.Second
 	// drainBatchSize caps the claim chunk used by the package-level Drain
@@ -53,18 +48,9 @@ type Flusher struct {
 	interval  time.Duration
 	batchSize int
 
-	stopOnce sync.Once
-	stop     chan struct{}
-	done     chan struct{}
-	// started guards Close against waiting on done for a loop that never
-	// launched (Close-without-Start must be a bounded no-op, not a hang).
-	started atomic.Bool
-
-	// notify is the producer-side wakeup channel (shared with the
-	// SessionService write path); when non-nil a signal selects the
-	// flush-now path once the queue has crossed batchSize. A nil channel
-	// disables the nudge (select on nil never fires).
-	notify chan struct{}
+	// pump owns the pacing loop (ticker + producer nudge + final drain);
+	// flushAll is its Flush callback.
+	pump *flush.Pump
 
 	// pending is the stuck batch: claimed (still parked in msgs:processing)
 	// but not yet fully inserted and acked. It is retried head-of-line at the
@@ -87,81 +73,41 @@ func NewFlusher(buf Buffer, store MessageStore, cfg Config, notify chan struct{}
 	if batchSize <= 0 {
 		batchSize = DefaultFlushBatchSize
 	}
-	return &Flusher{
-		buf:       buf,
-		store:     store,
-		interval:  interval,
-		batchSize: batchSize,
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		notify:    notify,
-	}
+	f := &Flusher{buf: buf, store: store, interval: interval, batchSize: batchSize}
+	// notify (optional) is the producer-side wakeup channel (shared with the
+	// SessionService write path); a signal flushes early once the queue
+	// crosses batchSize. A nil channel disables the nudge.
+	f.pump = flush.New(flush.Params{
+		Name:         "msgflush",
+		Interval:     interval,
+		BatchSize:    batchSize,
+		DrainTimeout: finalDrainTimeout,
+		QueueLen:     buf.LenMessageBuffer,
+		Flush:        f.flushAll,
+		OnStart:      f.recover,
+		Notify:       notify,
+	})
+	return f
 }
 
 // Start performs the startup crash recovery (requeue any msgs:processing
 // residue from a previous process back onto the buffer head) and launches the
 // flush loop goroutine. Callers MUST call Close when done. Starting twice is
-// a no-op. A recovery failure is logged but not fatal: the loop still runs,
-// and the residue is requeued by the next process start.
-func (f *Flusher) Start() {
-	if f.started.CompareAndSwap(false, true) {
-		if err := f.buf.RecoverProcessingToBuffer(context.Background()); err != nil {
-			logger.L().Error("msgflush startup recovery failed; processing residue stays parked until the next restart",
-				zap.Error(err))
-		} else {
-			logger.L().Info("msgflush flusher started",
-				zap.Duration("interval", f.interval),
-				zap.Int("batch_size", f.batchSize))
-		}
-		go f.loop()
+// a no-op.
+func (f *Flusher) Start() { f.pump.Start() }
+
+// recover is the pump's OnStart hook. A recovery failure is logged but not
+// fatal: the loop still runs, and the residue is requeued by the next process
+// start.
+func (f *Flusher) recover() {
+	if err := f.buf.RecoverProcessingToBuffer(context.Background()); err != nil {
+		logger.L().Error("msgflush startup recovery failed; processing residue stays parked until the next restart",
+			zap.Error(err))
+		return
 	}
-}
-
-// loop is the main flush cycle: wake on ticker, producer nudge, or stop; on
-// wake, flush. Errors back off briefly rather than tearing the loop down —
-// messages must never be dropped, so the queue simply grows and the loop
-// keeps retrying (with WARN logs carrying the queue length for the operator).
-func (f *Flusher) loop() {
-	defer close(f.done)
-
-	ticker := time.NewTicker(f.interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-f.stop:
-			return
-		case <-ticker.C:
-			f.runRound()
-		case <-f.notify:
-			// The nudge only triggers an immediate flush when the queue has
-			// crossed the batch threshold; below it the ticker path owns
-			// flushing (not every write means not every push flushes).
-			n, err := f.buf.LenMessageBuffer(context.Background())
-			if err != nil {
-				logger.L().Warn("msgflush length check failed", zap.Error(err))
-				time.Sleep(errorBackoff)
-				continue
-			}
-			if n < int64(f.batchSize) {
-				continue
-			}
-			f.runRound()
-		}
-	}
-}
-
-// runRound runs one flushAll and logs (with queue length) + backs off on
-// failure.
-func (f *Flusher) runRound() {
-	if err := f.flushAll(context.Background()); err != nil {
-		fields := []zap.Field{zap.Error(err)}
-		if n, lerr := f.buf.LenMessageBuffer(context.Background()); lerr == nil {
-			fields = append(fields, zap.Int64("queue_len", n))
-		}
-		logger.L().Warn("msgflush flush failed; backing off and retrying", fields...)
-		time.Sleep(errorBackoff)
-	}
+	logger.L().Info("msgflush flusher started",
+		zap.Duration("interval", f.interval),
+		zap.Int("batch_size", f.batchSize))
 }
 
 // flushAll drains the queue in batch-size chunks until empty (or ctx ends):
@@ -362,23 +308,8 @@ func (f *Flusher) refreshSessionTimes(ctx context.Context, batch []claimedMsg) {
 // Close stops the loop and performs one final bounded drain so a graceful
 // shutdown does not leave the tail of the queue unflushed. It is idempotent
 // and safe on a flusher that was never Start-ed (a bounded no-op drain).
-func (f *Flusher) Close() {
-	f.stopOnce.Do(func() {
-		close(f.stop)
-	})
-	// Wait for the loop to exit before draining, so the final flush is the
-	// only thing touching the queue.
-	if f.started.Load() {
-		<-f.done
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), finalDrainTimeout)
-	defer cancel()
-	if err := f.flushAll(ctx); err != nil {
-		logger.L().Warn("msgflush final drain failed; tail stays queued for the next process",
-			zap.Error(err))
-	}
-}
+// On failure the tail stays queued for the next process.
+func (f *Flusher) Close() { f.pump.Close() }
 
 // Drain is the synchronous drain primitive shared by the session-delete flow
 // and the read-miss recovery path: it requeues any processing residue (an

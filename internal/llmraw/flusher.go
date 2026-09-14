@@ -3,13 +3,12 @@ package llmraw
 import (
 	"context"
 	"encoding/json"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/pkg/flush"
 	"github.com/lush/blowball/internal/pkg/logger"
 )
 
@@ -22,9 +21,6 @@ const (
 	// flushBatchSize is the queue-length trigger (and the pop chunk size):
 	// once the buffer holds this many records the sink's nudge flushes early.
 	flushBatchSize = 50
-	// errorBackoff parks the loop briefly after a Redis/MySQL failure so a
-	// dead dependency is retried at a calm pace instead of hot-looping.
-	errorBackoff = 1 * time.Second
 	// finalFlushTimeout bounds the drain attempt Close makes on shutdown.
 	finalFlushTimeout = 3 * time.Second
 )
@@ -38,76 +34,31 @@ type Flusher struct {
 	buf   Buffer
 	store RawLogStore
 
-	stopOnce sync.Once
-	stop     chan struct{}
-	done     chan struct{}
-	// started guards Close against waiting on done for a loop that never
-	// launched (Close-without-Start must be a bounded no-op, not a hang).
-	started atomic.Bool
-
-	// notify is the sink's wakeup channel; when non-nil a signal selects the
-	// flush-now path (only when the queue has crossed flushBatchSize).
-	notify chan struct{}
+	// pump owns the pacing loop (ticker + sink nudge + final drain);
+	// flushAll is its Flush callback.
+	pump *flush.Pump
 }
 
 // NewFlusher builds a Flusher over buf and store. notify (optional, shared
 // with the Sink) wakes the loop between ticks so a burst can trigger an early
-// flush.
+// flush once the queue has crossed flushBatchSize.
 func NewFlusher(buf Buffer, store RawLogStore, notify chan struct{}) *Flusher {
-	return &Flusher{
-		buf:    buf,
-		store:  store,
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
-		notify: notify,
-	}
+	f := &Flusher{buf: buf, store: store}
+	f.pump = flush.New(flush.Params{
+		Name:         "llmraw",
+		Interval:     flushInterval,
+		BatchSize:    flushBatchSize,
+		DrainTimeout: finalFlushTimeout,
+		QueueLen:     buf.LenRawLogs,
+		Flush:        f.flushAll,
+		Notify:       notify,
+	})
+	return f
 }
 
 // Start launches the flush loop goroutine. Callers MUST call Close when done.
 // Starting twice is a no-op.
-func (f *Flusher) Start() {
-	if f.started.CompareAndSwap(false, true) {
-		go f.loop()
-	}
-}
-
-// loop is the main flush cycle: wake on ticker, sink nudge, or stop; on wake,
-// flush early when the queue has crossed the batch threshold, otherwise only
-// on the interval tick. Errors back off briefly rather than tearing the loop
-// down — raw capture is best-effort, the server is not.
-func (f *Flusher) loop() {
-	defer close(f.done)
-
-	ticker := time.NewTicker(flushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-f.stop:
-			return
-		case <-ticker.C:
-			if err := f.flushAll(context.Background()); err != nil {
-				time.Sleep(errorBackoff)
-			}
-		case <-f.notify:
-			// The nudge only triggers an immediate flush when the queue has
-			// crossed the batch threshold; below it the ticker path owns
-			// flushing (not every record means not every push flushes).
-			n, err := f.buf.LenRawLogs(context.Background())
-			if err != nil {
-				logger.L().Warn("llmraw flusher length check failed", zap.Error(err))
-				time.Sleep(errorBackoff)
-				continue
-			}
-			if n < flushBatchSize {
-				continue
-			}
-			if err := f.flushAll(context.Background()); err != nil {
-				time.Sleep(errorBackoff)
-			}
-		}
-	}
-}
+func (f *Flusher) Start() { f.pump.Start() }
 
 // flushAll drains the buffer in batch-size chunks until empty (or ctx ends).
 // Each chunk is popped atomically, decoded, and inserted; a decode failure
@@ -163,19 +114,4 @@ func (f *Flusher) flushAll(ctx context.Context) error {
 // Close stops the loop and performs one final bounded drain so a graceful
 // shutdown does not leave the tail of the buffer unflushed. It is idempotent
 // and safe on a flusher that was never Start-ed (a bounded no-op drain).
-func (f *Flusher) Close() {
-	f.stopOnce.Do(func() {
-		close(f.stop)
-	})
-	// Wait for the loop to exit before draining, so the final flush is the
-	// only thing touching the buffer.
-	if f.started.Load() {
-		<-f.done
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), finalFlushTimeout)
-	defer cancel()
-	if err := f.flushAll(ctx); err != nil {
-		logger.L().Warn("llmraw final flush failed", zap.Error(err))
-	}
-}
+func (f *Flusher) Close() { f.pump.Close() }
