@@ -2,13 +2,11 @@
 //
 // A page_token encodes the tuple (msg_time, msg_index, id) of the last message
 // on the current page. Clients pass the token back to retrieve the next page.
-// The encoded form is a JSON object compressed with gzip and encoded as
-// URL-safe base64, making the token opaque, compact, and safe to pass in URLs.
+// The encoded form is the JSON object in URL-safe base64, making the token
+// opaque and safe to pass in URLs.
 package cursor
 
 import (
-	"bytes"
-	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -34,18 +32,7 @@ func Encode(c Cursor) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cursor encode marshal: %w", err)
 	}
-
-	var buf bytes.Buffer
-	w := gzip.NewWriter(&buf)
-	if _, err := w.Write(jsonBytes); err != nil {
-		_ = w.Close()
-		return "", fmt.Errorf("cursor encode gzip: %w", err)
-	}
-	if err := w.Close(); err != nil {
-		return "", fmt.Errorf("cursor encode gzip close: %w", err)
-	}
-
-	return base64.URLEncoding.EncodeToString(buf.Bytes()), nil
+	return base64.URLEncoding.EncodeToString(jsonBytes), nil
 }
 
 // Decode parses an opaque token back into a Cursor. An empty token returns a
@@ -60,14 +47,8 @@ func Decode(token string) (Cursor, error) {
 		return Cursor{}, fmt.Errorf("cursor decode base64: %w", err)
 	}
 
-	r, err := gzip.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		return Cursor{}, fmt.Errorf("cursor decode gzip: %w", err)
-	}
-	defer r.Close()
-
 	var c Cursor
-	if err := json.NewDecoder(r).Decode(&c); err != nil {
+	if err := json.Unmarshal(raw, &c); err != nil {
 		return Cursor{}, fmt.Errorf("cursor decode json: %w", err)
 	}
 	return c, nil

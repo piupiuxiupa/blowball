@@ -41,7 +41,7 @@ func TestDecode_InvalidBase64_ReturnsError(t *testing.T) {
 }
 
 func TestDecode_InvalidJSON_ReturnsError(t *testing.T) {
-	// Valid base64 of ungzipped JSON.
-	_, err := Decode("eyJmb28iOiJiYXIifQ==")
+	// Valid base64 of non-JSON bytes.
+	_, err := Decode("bm90IGpzb24=")
 	require.Error(t, err)
 }
