@@ -1,54 +1,71 @@
 // Package main is the blowball unified CLI entry point.
 //
-// The cobra root exposes `serve` and `seed` subcommands and two persistent flags
-// inherited by both:
+// The binary exposes `serve` and `seed` subcommands; both accept the shared
+// flags:
 //
 //	-f, --config   path to config.yaml (default "config.yaml")
 //	-d, --data-dir runtime data root holding data/, logs/, skills/ (default ".")
 //
-// Running the binary with no subcommand prints help and exits non-zero. Each
-// subcommand parses the same persistent flags; `serve` runs the HTTP server and `seed`
-// creates a user.
+// Running the binary with no subcommand prints help and exits non-zero.
 package main
 
 import (
+	"errors"
+	"flag"
+	"fmt"
 	"os"
-
-	"github.com/spf13/cobra"
 )
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(1)
+	}
+
+	var err error
+	switch os.Args[1] {
+	case "serve":
+		err = serveCmd(os.Args[2:])
+	case "seed":
+		err = seedCmd(os.Args[2:])
+	case "-h", "--help", "help":
+		usage()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n", os.Args[1])
+		usage()
+		os.Exit(1)
+	}
+
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		// -h/--help on a subcommand: the flag package already printed usage.
+	case err != nil:
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-// newRootCmd builds the root cobra command with the persistent flags and subcommands.
-func newRootCmd() *cobra.Command {
-	root := &cobra.Command{
-		Use:   "blowball",
-		Short: "Blowball multi-agent chat workspace backend",
-		Long: "Blowball is the multi-agent chat workspace backend.\n\n" +
-			"Pick a subcommand to continue. Both subcommands accept the shared\n" +
-			"-f/--config and -d/--data-dir flags.",
-		// A bare invocation (no subcommand) prints help and exits non-zero so the
-		// process never silently does nothing. --help is intercepted by cobra first and
-		// exits zero. Using Run (not RunE) and os.Exit keeps cobra from echoing an
-		// "Error:" line on top of the help.
-		Run: func(cmd *cobra.Command, _ []string) {
-			_ = cmd.Help()
-			os.Exit(1)
-		},
-		// Disable cobra's auto-generated `completion` command; this is a backend
-		// server, not a shell-driven CLI.
-		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
-	}
+func usage() {
+	fmt.Fprint(os.Stderr, `Blowball is the multi-agent chat workspace backend.
 
-	root.PersistentFlags().StringP("config", "f", "config.yaml", "path to config.yaml")
-	root.PersistentFlags().StringP("data-dir", "d", ".", "runtime data root (holds data/, logs/, skills/)")
+Usage:
+  blowball serve [flags]   Run the HTTP server
+  blowball seed [flags]    Create a user with a bcrypt-hashed password
 
-	root.AddCommand(newServeCmd())
-	root.AddCommand(newSeedCmd())
+Shared flags:
+  -f, --config    path to config.yaml (default "config.yaml")
+  -d, --data-dir  runtime data root holding data/, logs/, skills/ (default ".")
 
-	return root
+Run "blowball <subcommand> -h" for subcommand-specific flags.
+`)
+}
+
+// sharedFlags registers the -f/--config and -d/--data-dir flags every
+// subcommand accepts. The short and long forms write the same variable.
+func sharedFlags(fs *flag.FlagSet) (configPath, dataDir *string) {
+	configPath = fs.String("config", "config.yaml", "path to config.yaml")
+	fs.StringVar(configPath, "f", "config.yaml", "shorthand for --config")
+	dataDir = fs.String("data-dir", ".", "runtime data root (holds data/, logs/, skills/)")
+	fs.StringVar(dataDir, "d", ".", "shorthand for --data-dir")
+	return configPath, dataDir
 }

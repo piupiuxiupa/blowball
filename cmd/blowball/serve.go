@@ -1,12 +1,13 @@
 // Package main is the blowball unified CLI entry point.
 //
-// The cobra root exposes `serve` and `seed` subcommands and persistent `-f`/`--config` and
+// The binary exposes `serve` and `seed` subcommands with shared `-f`/`--config` and
 // `-d`/`--data-dir` flags. See main.go for the command wiring; this file holds the
 // `serve` subcommand (HTTP server bootstrap) and seed.go holds the `seed` subcommand.
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -19,7 +20,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/agent"
@@ -63,27 +63,27 @@ const ShutdownTimeout = 10 * time.Second
 // partitioned process roles (see the service-roles spec).
 var validRoles = []string{"all", "api", "agent"}
 
-// newServeCmd builds the `serve` cobra subcommand. It runs the HTTP server
-// bootstrap, deriving the runtime data root from the persistent -d flag, the
-// config path from -f, and the process role from --role.
-func newServeCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:          "serve",
-		Short:        "Run the blowball HTTP server",
-		Long:         "Run the blowball HTTP server (Gin) with graceful shutdown on SIGINT/SIGTERM.",
-		SilenceUsage: true,
-		RunE:         serveRun,
+// serveCmd parses the serve flags and runs the server bootstrap. --role
+// selects which route partition this process serves. "all" (default) is the
+// rollback path: one process, full route set, single listener on server.port
+// — identical to the pre-split monolith.
+func serveCmd(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	role := fs.String("role", "all", "process role: all|api|agent")
+	configPath, dataRoot := sharedFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	// --role selects which route partition this process serves. "all" (default)
-	// is the rollback path: one process, full route set, single listener on
-	// server.port — identical to the pre-split monolith.
-	cmd.Flags().String("role", "all", "process role: all|api|agent")
-	return cmd
+	// Validate --role before any setup so a bad value exits non-zero without
+	// touching the filesystem or opening connections.
+	if err := validateRole(*role); err != nil {
+		return err
+	}
+	return serve(*configPath, *dataRoot, *role)
 }
 
-// serveRun is the server bootstrap. Bootstrap order (see design.md D3):
+// serve is the server bootstrap. Bootstrap order (see design.md D3):
 //
-//  0. resolve --role, -f, -d from cobra flags
 //  1. shared setup (setupRuntime): config → runtime dirs → logger (role-aware
 //     filename) → MySQL/Redis/FS → skills/tools dirs → Landlock. Plus the
 //     role-aware openai.api_key requirement.
@@ -91,18 +91,7 @@ func newServeCmd() *cobra.Command {
 //  3. build the engine (Recovery → Trace → CORS) and mount /healthz
 //  4. register routes by role: wireAPI (CRUD) and/or wireAgent (streaming + MCP)
 //  5. per-role HTTP listener + graceful shutdown
-func serveRun(cmd *cobra.Command, _ []string) error {
-	// Validate --role before any setup so a bad value exits non-zero without
-	// touching the filesystem or opening connections.
-	role, err := resolveRole(cmd)
-	if err != nil {
-		return err
-	}
-	configPath, dataRoot, err := persistentFlags(cmd)
-	if err != nil {
-		return err
-	}
-
+func serve(configPath, dataRoot, role string) error {
 	// 1. Shared setup (runs for every role).
 	rt, err := setupRuntime(configPath, dataRoot, role)
 	if err != nil {
@@ -312,7 +301,7 @@ type appRuntime struct {
 // role-scoped log filename and the relaxed openai-key check for the api role.
 //
 // Store-init failures use log.Fatal (as before) so a bad DSN or unreachable
-// Redis aborts startup with a clear message rather than a generic cobra error.
+// Redis aborts startup with a clear message rather than a generic CLI error.
 func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -776,15 +765,11 @@ func newEngine() *gin.Engine {
 
 // resolveRole reads and validates the --role flag, rejecting unknown values
 // before any setup runs so the process exits non-zero without side effects.
-func resolveRole(cmd *cobra.Command) (string, error) {
-	role, err := cmd.Flags().GetString("role")
-	if err != nil {
-		return "", fmt.Errorf("read --role: %w", err)
-	}
+func validateRole(role string) error {
 	if !slices.Contains(validRoles, role) {
-		return "", fmt.Errorf("invalid --role %q (want %s)", role, strings.Join(validRoles, "|"))
+		return fmt.Errorf("invalid --role %q (want %s)", role, strings.Join(validRoles, "|"))
 	}
-	return role, nil
+	return nil
 }
 
 // openAIKeyRequired reports whether the role needs a configured openai.api_key
@@ -839,17 +824,4 @@ func toServerToolSet(serverTools map[string][]string) map[string]map[string]stru
 		out[serverName] = set
 	}
 	return out
-}
-
-// persistentFlags resolves the shared -f/--config and -d/--data-dir persistent flags from cmd.
-func persistentFlags(cmd *cobra.Command) (configPath, dataRoot string, err error) {
-	configPath, err = cmd.Flags().GetString("config")
-	if err != nil {
-		return "", "", fmt.Errorf("read --config: %w", err)
-	}
-	dataRoot, err = cmd.Flags().GetString("data-dir")
-	if err != nil {
-		return "", "", fmt.Errorf("read --data-dir: %w", err)
-	}
-	return configPath, dataRoot, nil
 }

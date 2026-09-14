@@ -2,8 +2,6 @@ package main
 
 import (
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 // TestOpenAIKeyRequired verifies the role-aware openai.api_key requirement.
@@ -55,38 +53,25 @@ func TestRouteGroups(t *testing.T) {
 	}
 }
 
-// TestResolveRole_ValidatesValues exercises the --role flag parsing: accepted
-// values resolve to themselves; an unknown value returns an error (which the
-// cobra RunE surfaces as a non-zero exit before any setup runs).
-func TestResolveRole_ValidatesValues(t *testing.T) {
+// TestValidateRole_ValidatesValues exercises --role validation: accepted
+// values pass; an unknown value returns an error (surfaced as a non-zero exit
+// before any setup runs).
+func TestValidateRole_ValidatesValues(t *testing.T) {
 	cases := []struct {
 		role    string
-		want    string
 		wantErr bool
 	}{
-		{"all", "all", false},
-		{"api", "api", false},
-		{"agent", "agent", false},
-		{"foo", "", true},
-		{"", "", true}, // empty is not one of the valid roles
+		{"all", false},
+		{"api", false},
+		{"agent", false},
+		{"foo", true},
+		{"", true}, // empty is not one of the valid roles
 	}
 	for _, tc := range cases {
 		t.Run(tc.role, func(t *testing.T) {
-			cmd := &cobra.Command{}
-			cmd.Flags().String("role", "all", "process role")
-			_ = cmd.Flags().Set("role", tc.role)
-			got, err := resolveRole(cmd)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("resolveRole(%q): expected error, got nil (%q)", tc.role, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("resolveRole(%q): unexpected error: %v", tc.role, err)
-			}
-			if got != tc.want {
-				t.Errorf("resolveRole(%q) = %q, want %q", tc.role, got, tc.want)
+			err := validateRole(tc.role)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateRole(%q) err = %v, wantErr %v", tc.role, err, tc.wantErr)
 			}
 		})
 	}
