@@ -1,15 +1,15 @@
 // Package artifact implements the turn-artifacts capability: at the end of
 // each turn it detects the files the turn produced (deliverables written
 // anywhere in the workspace by ANY tool path — xizhi_* or the bash sandbox),
-// snapshots their content into a server-side version store, and records the
-// version in a MySQL index so historical references can always open the
+// snapshots their content into the office-vers version store, and records
+// the version in a MySQL index so historical references can always open the
 // content as it was at that turn's end.
 //
 // Detection is mtime-based (files modified since turn start) and excludes the
 // scratch area (tmp/), the reserved .blowball/ namespace, and hidden entries
 // at any depth — mirroring the prompt's deliverable-vs-scratch convention.
-// Snapshots live outside the user workspace, so neither xizhi_* nor the bash
-// sandbox can reach the version store.
+// Snapshots live in office-vers (outside the user workspace), so neither
+// xizhi_* nor the bash sandbox can reach the version store.
 package artifact
 
 import (
@@ -24,8 +24,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/lush/blowball/internal/model"
 )
@@ -68,18 +66,20 @@ type Index interface {
 	VersionByID(ctx context.Context, versionID string) (*model.FileVersion, error)
 }
 
-// Service ties the blob store and index together and exposes the turn-end
+// Service ties the version store and index together and exposes the turn-end
 // finalization plus the read paths behind the HTTP endpoints.
 type Service struct {
-	blobs    *BlobStore
+	store    VersionStore
 	index    Index
 	maxBytes int64
 }
 
-// NewService wires the artifact service. maxBytes <= 0 disables the size cap
-// (not recommended; the config layer defaults it to 200MB).
-func NewService(blobs *BlobStore, index Index, maxBytes int64) *Service {
-	return &Service{blobs: blobs, index: index, maxBytes: maxBytes}
+// NewService wires the artifact service. A nil store disables snapshotting
+// (office-vers unconfigured): artifacts are still detected and announced,
+// just without a version_id. maxBytes <= 0 disables the size cap (not
+// recommended; the config layer defaults it to 200MB).
+func NewService(store VersionStore, index Index, maxBytes int64) *Service {
+	return &Service{store: store, index: index, maxBytes: maxBytes}
 }
 
 // Detect returns the workspace-relative slash-separated paths of regular,
@@ -175,6 +175,9 @@ func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) A
 		a.Op = OpUpdate
 	}
 
+	if s.store == nil {
+		return a // version store unconfigured: announce without snapshot
+	}
 	if s.maxBytes > 0 && a.Size > s.maxBytes {
 		return a
 	}
@@ -190,25 +193,23 @@ func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) A
 	}
 	if latest != nil && latest.SHA256 == digest {
 		// Byte-identical to the latest version (mtime touched only): reuse
-		// the existing version_id instead of minting a duplicate snapshot.
+		// the existing version_id instead of storing a duplicate snapshot
+		// (office-vers creates a new version per POST — dedup is our job).
 		a.VersionID = latest.VersionID
 		return a
 	}
 
-	vid, err := uuid.NewV7()
+	vid, err := s.store.Put(ctx, userID, rel, data)
 	if err != nil {
 		return a
 	}
 	rec := model.FileVersion{
 		UserID:    userID,
 		Path:      rel,
-		VersionID: vid.String(),
+		VersionID: vid,
 		Size:      a.Size,
 		Mime:      a.Mime,
 		SHA256:    digest,
-	}
-	if err := s.blobs.Write(userID, rel, rec.VersionID, data); err != nil {
-		return a
 	}
 	if err := s.index.InsertVersion(ctx, rec); err != nil {
 		// The blob is orphaned (harmless); without the index row the version
@@ -230,18 +231,6 @@ func (s *Service) Resolve(ctx context.Context, userID, path string, before time.
 	return s.index.VersionAsOf(ctx, userID, path, before)
 }
 
-// GetVersionForUser returns the version record when it exists AND belongs to
-// userID, without reading the blob — the ownership check behind endpoints
-// that embed the version id (e.g. the OnlyOffice version config) rather than
-// serve bytes. (nil, nil) means unknown or cross-user.
-func (s *Service) GetVersionForUser(ctx context.Context, userID, versionID string) (*model.FileVersion, error) {
-	rec, err := s.index.VersionByID(ctx, versionID)
-	if err != nil || rec == nil || rec.UserID != userID {
-		return nil, err
-	}
-	return rec, nil
-}
-
 // OpenVersion returns the record and content bytes for versionID. Ownership
 // is enforced here: a version belonging to another user returns (nil, nil,
 // nil) so callers map it to 404 without revealing existence.
@@ -250,9 +239,12 @@ func (s *Service) OpenVersion(ctx context.Context, userID, versionID string) (*m
 	if err != nil || rec == nil || rec.UserID != userID {
 		return nil, nil, err
 	}
-	data, err := s.blobs.Read(rec.UserID, rec.Path, rec.VersionID)
+	if s.store == nil {
+		return nil, nil, fmt.Errorf("artifact: version store not configured")
+	}
+	data, err := s.store.Get(ctx, rec.UserID, rec.Path, rec.VersionID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("artifact: read version blob %q: %w", versionID, err)
+		return nil, nil, fmt.Errorf("artifact: read version %q: %w", versionID, err)
 	}
 	return rec, data, nil
 }

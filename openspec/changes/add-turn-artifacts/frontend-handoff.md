@@ -76,7 +76,7 @@ data: {"type":"done","meta":{"usage":{…},
 
 | 类型 | 扩展名 | 当前版本（versionId 为空） | 历史版本（有 versionId） |
 |---|---|---|---|
-| Office | doc docx xls xlsx ppt pptx csv | `GET /api/v1/workspace/files/{path}/onlyoffice-config` → 用响应里的 **`view`** 配置初始化 OnlyOffice | `GET /api/v1/workspace/versions/{versionId}/onlyoffice-config` → 初始化 OnlyOffice（本就只读） |
+| Office | doc docx xls xlsx ppt pptx csv | `GET /api/v1/workspace/files/{path}/onlyoffice-config` → 用响应里的 **`view`** 配置初始化 OnlyOffice | `GET /api/v1/workspace/files/{path}/onlyoffice-version-config?versionId={vid}` → 初始化 OnlyOffice（既有端点，本就只读） |
 | PDF | pdf | iframe/embed 指向 `GET /api/v1/workspace/files/download/{path}?token=<jwt>` | iframe 指向 `GET /api/v1/workspace/versions/{versionId}/content?token=<jwt>` |
 | 图片 | png jpg jpeg gif webp svg | 同上，`<img>` | 同上 |
 | 文本/代码 | md txt json go py … | `GET /api/v1/workspace/files/{path}/content`（Bearer）→ 应用内查看器 | `GET /api/v1/workspace/versions/{versionId}/content`（Bearer）→ 同一查看器 |
@@ -85,6 +85,7 @@ data: {"type":"done","meta":{"usage":{…},
 要点：
 
 - **office 默认预览**：现有 onlyoffice-config 响应已同时返回 `edit` 和 `view` 两套签名配置，默认用 `view` 即可；是否提供"切换到编辑"按钮由产品决定。
+- **office 历史版本**：走既有的 `onlyoffice-version-config` 端点（office-vers 背书），需要 `path` + `versionId` 两个参数——产物事件里两者都有。响应只有 `view` 一套配置。
 - OnlyOffice 初始化：用响应的 `server_url` + config + token 调 Docs API（与现有工作区打开文件的逻辑完全相同，只是默认模式不同）。
 - `?token=` 形式用于无法带 Authorization 头的浏览器上下文（`<img>`/iframe/OnlyOffice document.url），token 即用户 JWT。
 
@@ -109,6 +110,7 @@ data: {"type":"done","meta":{"usage":{…},
 |---|---|---|
 | 链接/版本 404 | 文件被删或无此版本 | toast"文件不存在或已被删除" |
 | onlyoffice-config 503 | 部署未配置 OnlyOffice | 降级为下载 |
+| 历史版本只有 vid 没有预览 | 同上 | 降级为 `GET /versions/{vid}/content?token=` 预览/下载 |
 | 流式渲染中途遇到链接 | 产物尚未出现在 done 摘要 | 先按"当前版本"渲染，done 到达后用 artifacts 重新钉版 |
 | SSE 断线重连 | 事件重放 | artifact 事件按 `(path)` 去重 |
 | 链接指向 tmp/ 或越界路径 | 后端接口会 403/404 | 按 404 处理即可 |

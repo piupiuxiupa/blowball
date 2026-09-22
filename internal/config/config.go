@@ -469,16 +469,13 @@ func (o *OnlyOfficeConfig) applyDefaults() {
 const DefaultArtifactMaxSnapshotBytes int64 = 200 << 20
 
 // ArtifactConfig groups the turn-artifacts capability settings (see the
-// turn-artifacts spec). VersionStoreRoot is the server-side blob store root
-// for artifact version snapshots; empty means the wiring default
-// ({-d root}/versions, a sibling of the data/ tree). It MUST live outside
-// every user's workspace tree so
-// neither the xizhi_* tools nor the bash sandbox can reach it.
+// turn-artifacts spec). Version snapshots live in the office-vers service
+// (onlyoffice.version_service_url); when that URL is empty the capability
+// degrades to announcing artifacts without version pins.
 // MaxSnapshotBytes caps per-file snapshot size; non-positive after defaults
 // is rejected.
 type ArtifactConfig struct {
-	VersionStoreRoot string `yaml:"version_store_root"`
-	MaxSnapshotBytes int64  `yaml:"max_snapshot_bytes"`
+	MaxSnapshotBytes int64 `yaml:"max_snapshot_bytes"`
 }
 
 // applyDefaults fills the MaxSnapshotBytes default when omitted. An explicit

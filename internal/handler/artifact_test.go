@@ -19,6 +19,23 @@ import (
 	"github.com/lush/blowball/internal/model"
 )
 
+// artifactFakeStore is an in-memory artifact.VersionStore.
+type artifactFakeStore struct {
+	blobs map[string][]byte
+	n     int
+}
+
+func (f *artifactFakeStore) Put(_ context.Context, userID, path string, data []byte) (string, error) {
+	f.n++
+	vid := "v-" + string(rune('0'+f.n))
+	f.blobs[userID+"/"+path+"/"+vid] = data
+	return vid, nil
+}
+
+func (f *artifactFakeStore) Get(_ context.Context, userID, path, versionID string) ([]byte, error) {
+	return f.blobs[userID+"/"+path+"/"+versionID], nil
+}
+
 // artifactFakeIndex is an in-memory artifact.Index for handler tests.
 type artifactFakeIndex struct {
 	recs []model.FileVersion
@@ -71,19 +88,13 @@ type artifactTestEnv struct {
 	wsRoot string
 }
 
-func newArtifactTestEnv(t *testing.T, ooSecret string) *artifactTestEnv {
+func newArtifactTestEnv(t *testing.T) *artifactTestEnv {
 	t.Helper()
-	blobs, err := artifact.NewBlobStore(t.TempDir())
-	require.NoError(t, err)
 	idx := &artifactFakeIndex{}
-	svc := artifact.NewService(blobs, idx, 0)
+	svc := artifact.NewService(&artifactFakeStore{blobs: map[string][]byte{}}, idx, 0)
 	wsRoot := t.TempDir()
 
-	h := NewArtifactHandler(svc, OnlyOfficeSettings{
-		Secret:          ooSecret,
-		ServerURL:       "http://oo.local",
-		InternalBackend: "http://backend.local",
-	})
+	h := NewArtifactHandler(svc)
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -93,7 +104,6 @@ func newArtifactTestEnv(t *testing.T, ooSecret string) *artifactTestEnv {
 	})
 	r.GET("/api/v1/workspace/versions/resolve", h.Resolve)
 	r.GET("/api/v1/workspace/versions/:vid/content", h.VersionContent)
-	r.GET("/api/v1/workspace/versions/:vid/onlyoffice-config", h.VersionOnlyOfficeConfig)
 	return &artifactTestEnv{engine: r, svc: svc, idx: idx, wsRoot: wsRoot}
 }
 
@@ -123,7 +133,7 @@ func writeWorkspaceFile(t *testing.T, root, rel, content string) {
 }
 
 func TestArtifactResolve_Latest(t *testing.T) {
-	env := newArtifactTestEnv(t, "")
+	env := newArtifactTestEnv(t)
 	a := env.seed(t, "reports/a.md", "v1")
 
 	w := env.get(t, "/api/v1/workspace/versions/resolve?path=reports/a.md")
@@ -135,24 +145,24 @@ func TestArtifactResolve_Latest(t *testing.T) {
 }
 
 func TestArtifactResolve_MissingPathAndNeverVersioned(t *testing.T) {
-	env := newArtifactTestEnv(t, "")
+	env := newArtifactTestEnv(t)
 	assert.Equal(t, http.StatusBadRequest, env.get(t, "/api/v1/workspace/versions/resolve").Code)
 	assert.Equal(t, http.StatusNotFound, env.get(t, "/api/v1/workspace/versions/resolve?path=nope.md").Code)
 }
 
 func TestArtifactResolve_RejectsTraversal(t *testing.T) {
-	env := newArtifactTestEnv(t, "")
+	env := newArtifactTestEnv(t)
 	assert.Equal(t, http.StatusForbidden, env.get(t, "/api/v1/workspace/versions/resolve?path=../x").Code)
 	assert.Equal(t, http.StatusForbidden, env.get(t, "/api/v1/workspace/versions/resolve?path=/abs").Code)
 }
 
 func TestArtifactResolve_BadBefore(t *testing.T) {
-	env := newArtifactTestEnv(t, "")
+	env := newArtifactTestEnv(t)
 	assert.Equal(t, http.StatusBadRequest, env.get(t, "/api/v1/workspace/versions/resolve?path=a.md&before=not-a-time").Code)
 }
 
 func TestArtifactVersionContent_ServesBytes(t *testing.T) {
-	env := newArtifactTestEnv(t, "")
+	env := newArtifactTestEnv(t)
 	a := env.seed(t, "notes/hello.txt", "hello-version")
 
 	w := env.get(t, "/api/v1/workspace/versions/"+a.VersionID+"/content")
@@ -162,7 +172,7 @@ func TestArtifactVersionContent_ServesBytes(t *testing.T) {
 }
 
 func TestArtifactVersionContent_UnknownAndCrossUser404(t *testing.T) {
-	env := newArtifactTestEnv(t, "")
+	env := newArtifactTestEnv(t)
 	a := env.seed(t, "a.txt", "mine")
 
 	assert.Equal(t, http.StatusNotFound, env.get(t, "/api/v1/workspace/versions/does-not-exist/content").Code)
@@ -170,50 +180,4 @@ func TestArtifactVersionContent_UnknownAndCrossUser404(t *testing.T) {
 	// Cross-user: move ownership of the record; the endpoint must 404.
 	env.idx.recs[0].UserID = "user-2"
 	assert.Equal(t, http.StatusNotFound, env.get(t, "/api/v1/workspace/versions/"+a.VersionID+"/content").Code)
-}
-
-func TestArtifactVersionOnlyOfficeConfig_DisabledWithoutSecret(t *testing.T) {
-	env := newArtifactTestEnv(t, "")
-	a := env.seed(t, "doc.xlsx", "x")
-	w := env.get(t, "/api/v1/workspace/versions/"+a.VersionID+"/onlyoffice-config")
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-}
-
-func TestArtifactVersionOnlyOfficeConfig_ViewConfig(t *testing.T) {
-	env := newArtifactTestEnv(t, "oo-secret")
-	a := env.seed(t, "doc.xlsx", "x")
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/versions/"+a.VersionID+"/onlyoffice-config", nil)
-	req.Header.Set("Authorization", "Bearer jwt-123")
-	w := httptest.NewRecorder()
-	env.engine.ServeHTTP(w, req)
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var body struct {
-		ServerURL string `json:"server_url"`
-		View      struct {
-			Config map[string]any `json:"config"`
-			Token  string         `json:"token"`
-		} `json:"view"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-	assert.Equal(t, "http://oo.local", body.ServerURL)
-	assert.NotEmpty(t, body.View.Token)
-
-	doc := body.View.Config["document"].(map[string]any)
-	assert.Equal(t, "xlsx", doc["fileType"])
-	docURL := doc["url"].(string)
-	assert.Contains(t, docURL, "http://backend.local/api/v1/workspace/versions/"+a.VersionID+"/content?token=jwt-123")
-	editor := body.View.Config["editorConfig"].(map[string]any)
-	assert.Equal(t, "view", editor["mode"])
-	_, hasCallback := editor["callbackUrl"]
-	assert.False(t, hasCallback, "immutable version must not carry a save callback")
-
-	// Cross-user: 404.
-	env.idx.recs[0].UserID = "user-2"
-	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/versions/"+a.VersionID+"/onlyoffice-config", nil)
-	req2.Header.Set("Authorization", "Bearer jwt-123")
-	w2 := httptest.NewRecorder()
-	env.engine.ServeHTTP(w2, req2)
-	assert.Equal(t, http.StatusNotFound, w2.Code)
 }

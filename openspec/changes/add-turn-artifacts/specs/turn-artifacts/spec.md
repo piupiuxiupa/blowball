@@ -37,11 +37,11 @@
 - **THEN** 该文件不出现在本轮产物集合中
 
 ### Requirement: 产物版本快照
-系统 SHALL 在 turn 结束时为本轮每个产物创建版本快照：将文件内容复制到服务端版本库（位于用户工作空间之外），生成时间有序的 `version_id`，并在版本索引中记录 `(user_id, path, version_id, size, mime, created_at)`。同一 `path` 的新快照内容与该 path 最新版本完全一致时 SHALL 复用既有 `version_id` 而不产生新记录。
+系统 SHALL 在 turn 结束时为本轮每个产物创建版本快照：将文件内容上传至 office-vers 服务（`POST /documents/{user_id}/{path}`，位于用户工作空间之外），记录其返回的 `version_id`，并在版本索引中记录 `(user_id, path, version_id, size, mime, created_at)`。同一 `path` 的新快照内容与该 path 最新版本完全一致时 SHALL 复用既有 `version_id` 而不上传（去重在本服务侧完成）。未配置版本服务时 SHALL 降级为仅发产物事件、不携带 version_id。
 
 #### Scenario: Snapshot created for new artifact
 - **WHEN** turn 结束且产物 `reports/a.docx` 是首次产出
-- **THEN** 版本库写入该文件内容，索引新增一条记录，`version_id` 单调递增（时间有序）
+- **THEN** 文件内容上传至 office-vers，索引新增一条记录携带其返回的 `version_id`
 
 #### Scenario: Overwrite produces new version
 - **WHEN** 后续 turn 覆盖了 `reports/a.docx` 且内容发生变化
@@ -53,7 +53,11 @@
 
 #### Scenario: Version store is outside the workspace
 - **WHEN** 版本快照被写入
-- **THEN** 快照内容不在用户工作空间目录树内，agent 无法通过 `xizhi_*` 或 bash 沙箱读写版本库
+- **THEN** 快照内容存储于 office-vers 服务（不在用户工作空间目录树内），agent 无法通过 `xizhi_*` 或 bash 沙箱读写版本库
+
+#### Scenario: Version store unconfigured degrades gracefully
+- **WHEN** `onlyoffice.version_service_url` 未配置且 turn 产出了文件
+- **THEN** artifact 事件照常发出但不携带 version_id，不产生快照
 
 ### Requirement: artifact 流事件
 系统 SHALL 在 turn 末、done 事件之前为本轮每个产物向事件流发出一个 `artifact` 事件，事件 content 为 JSON，包含 `path`、`version_id`、`size`、`mime`、`op`（`create`|`update`）。`artifact` 事件 SHALL 随现有事件持久化管道落库，供历史消息重建时还原产物列表。done 事件的 meta SHALL 附带本轮产物摘要数组（与 artifact 事件同构），该摘要仅用于实时流，不要求持久化。产物集合为空时 SHALL NOT 发出 artifact 事件，done 摘要为空数组。
@@ -95,17 +99,6 @@
 #### Scenario: Unknown version
 - **WHEN** versionId 不存在
 - **THEN** 返回 HTTP 404
-
-### Requirement: 版本 OnlyOffice 只读预览配置接口
-系统 SHALL 提供 `GET /api/v1/workspace/versions/{versionId}/onlyoffice-config`，返回已签名的 OnlyOffice 只读（view）配置：`document.url` 指向本服务的版本内容接口（携带查询 token），`document.key` 由 `(path, version_id)` 确定性派生，配置不含 callbackUrl（不可变版本无保存语义）。OnlyOffice 未配置 secret 时 SHALL 返回 503。
-
-#### Scenario: Signed view config for a version
-- **WHEN** 属主请求某 office 文件版本的 onlyoffice-config
-- **THEN** 返回签名后的 view 配置，document.url 指向版本内容接口，无 callbackUrl
-
-#### Scenario: OnlyOffice disabled
-- **WHEN** OnlyOffice secret 未配置
-- **THEN** 返回 HTTP 503
 
 ### Requirement: 版本解析接口
 系统 SHALL 提供 `GET /api/v1/workspace/versions/resolve?path=<rel>`，返回该路径最新版本的 `version_id`；携带 `before=<RFC3339>` 时返回不晚于该时间的最新版本。路径解析越出工作空间时 SHALL 返回 403；该路径从无版本记录时 SHALL 返回 404。

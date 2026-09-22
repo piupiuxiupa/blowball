@@ -13,6 +13,31 @@ import (
 	"github.com/lush/blowball/internal/model"
 )
 
+// fakeStore is an in-memory VersionStore: each Put mints a sequential
+// version id and keeps the bytes.
+type fakeStore struct {
+	blobs map[string][]byte
+	n     int
+	err   error
+}
+
+func (f *fakeStore) Put(_ context.Context, userID, path string, data []byte) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	f.n++
+	vid := "v-" + string(rune('0'+f.n))
+	f.blobs[userID+"/"+path+"/"+vid] = data
+	return vid, nil
+}
+
+func (f *fakeStore) Get(_ context.Context, userID, path, versionID string) ([]byte, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.blobs[userID+"/"+path+"/"+versionID], nil
+}
+
 // fakeIndex is an in-memory artifact.Index for service tests.
 type fakeIndex struct {
 	recs []model.FileVersion
@@ -109,11 +134,10 @@ func TestDetect_ExcludesTmpHiddenAndStale(t *testing.T) {
 	assert.Equal(t, []string{"keep.txt"}, got)
 }
 
-func newService(t *testing.T, idx Index) (*Service, *BlobStore) {
+func newService(t *testing.T, idx Index) (*Service, *fakeStore) {
 	t.Helper()
-	blobs, err := NewBlobStore(t.TempDir())
-	require.NoError(t, err)
-	return NewService(blobs, idx, 0), blobs
+	store := &fakeStore{blobs: map[string][]byte{}}
+	return NewService(store, idx, 0), store
 }
 
 func TestFinalizeTurn_SnapshotsNewArtifact(t *testing.T) {
@@ -172,9 +196,7 @@ func TestFinalizeTurn_OverCapSkipsSnapshotButAnnounces(t *testing.T) {
 	ws := t.TempDir()
 	writeFile(t, ws, "big.bin", "0123456789")
 	idx := &fakeIndex{}
-	blobs, err := NewBlobStore(t.TempDir())
-	require.NoError(t, err)
-	svc := NewService(blobs, idx, 4) // cap 4 bytes
+	svc := NewService(&fakeStore{blobs: map[string][]byte{}}, idx, 4) // cap 4 bytes
 
 	arts, err := svc.FinalizeTurn(context.Background(), "u1", ws, time.Now().Add(-time.Minute))
 	require.NoError(t, err)
@@ -231,4 +253,16 @@ func TestOpenVersion_CrossUserDenied(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, rec)
 	assert.Nil(t, data)
+}
+
+func TestFinalizeTurn_NilStoreAnnouncesWithoutVersion(t *testing.T) {
+	ws := t.TempDir()
+	writeFile(t, ws, "a.md", "v1")
+	svc := NewService(nil, &fakeIndex{}, 0)
+
+	arts, err := svc.FinalizeTurn(context.Background(), "u1", ws, time.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.Len(t, arts, 1)
+	assert.Equal(t, "a.md", arts[0].Path)
+	assert.Empty(t, arts[0].VersionID, "no store configured: announce only")
 }

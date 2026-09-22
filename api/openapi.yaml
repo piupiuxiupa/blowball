@@ -2281,11 +2281,15 @@ paths:
       tags: [Workspace]
       summary: Read an artifact version's content.
       description: |
-        Turn-artifacts capability. Serves the immutable snapshot bytes with the
-        MIME type recorded at snapshot time. Auth accepts EITHER the Bearer
-        header OR a `?token=` query JWT so browser-native contexts (<img>,
-        iframe, OnlyOffice document.url) can load it. Unknown ids and ids
-        belonging to another user both return 404 (existence is not leaked).
+        Turn-artifacts capability. Serves the immutable snapshot bytes (stored
+        in the office-vers service) with the MIME type recorded at snapshot
+        time; the backend proxies the read so office-vers itself is never
+        exposed to clients. Auth accepts EITHER the Bearer header OR a
+        `?token=` query JWT so browser-native contexts (<img>, iframe) can
+        load it. Unknown ids and ids belonging to another user both return
+        404 (existence is not leaked). Office-file version previews use the
+        existing `.../files/{path}/onlyoffice-version-config?versionId=`
+        endpoint instead (office-vers backed).
       parameters:
         - name: versionId
           in: path
@@ -2311,46 +2315,6 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
               examples:
                 notFound: {value: {error: {code: NOT_FOUND, message: "version not found"}}}
-  /api/v1/workspace/versions/{versionId}/onlyoffice-config:
-    get:
-      tags: [Workspace]
-      summary: Build and sign an OnlyOffice view config for an artifact version.
-      description: |
-        Turn-artifacts counterpart of `.../files/{path}/onlyoffice-version-config`:
-        a signed VIEW-only DocEditor config whose `document.url` points at this
-        service's own version content endpoint (`.../versions/{versionId}/content`
-        with the caller's JWT as query `token`; the DocumentServer reaches the
-        backend over the configured internal origin). `document.key` is derived
-        deterministically from `(path, versionId)` (base32(sha256(path + ":" +
-        versionId))) so OnlyOffice caches and shares the conversion; the config
-        carries no `callbackUrl` (an immutable version has no save semantics).
-        Response shape mirrors the office-vers endpoint: `{server_url, view:
-        {config, token}}`. Returns 503 when OnlyOffice is not configured.
-      parameters:
-        - name: versionId
-          in: path
-          required: true
-          schema: {type: string}
-      responses:
-        '200':
-          description: Signed view-only DocEditor config for the version.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/OnlyOfficeVersionConfigResponse'}
-        '404':
-          description: Unknown or cross-user version id.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Error'}
-              examples:
-                notFound: {value: {error: {code: NOT_FOUND, message: "version not found"}}}
-        '503':
-          description: OnlyOffice is not configured (empty secret).
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Error'}
-              examples:
-                disabled: {value: {error: {code: ONLYOFFICE_DISABLED, message: "onlyoffice is not configured"}}}
   /api/v1/workspace/onlyoffice-callback:
     post:
       tags: [Workspace]

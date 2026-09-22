@@ -289,10 +289,9 @@ onlyoffice:
   version_service_url: ${ONLYOFFICE_VERSION_SERVICE_URL:}
 
 artifact:
-  # Server-side blob store root for per-turn artifact version snapshots
-  # (turn-artifacts capability). MUST be outside every user's workspace tree.
-  # Empty -> {-d root}/versions (sibling of the data/ tree).
-  version_store_root: ${ARTIFACT_VERSION_STORE_ROOT:}
+  # Turn-artifacts capability. Version snapshots are stored in the office-vers
+  # service (onlyoffice.version_service_url above); when that is empty,
+  # artifacts are still announced but carry no version pin.
   # Per-file snapshot size cap in bytes. Files larger than this are still
   # announced as artifacts but not snapshotted (no version_id). Default 200MB.
   max_snapshot_bytes: ${ARTIFACT_MAX_SNAPSHOT_BYTES:209715200}

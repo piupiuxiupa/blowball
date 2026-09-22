@@ -11,7 +11,6 @@ import (
 
 	"github.com/lush/blowball/internal/artifact"
 	"github.com/lush/blowball/internal/middleware"
-	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
 
@@ -19,20 +18,18 @@ import (
 )
 
 // ArtifactHandler serves the turn-artifacts version endpoints: per-version
-// content reads, OnlyOffice view configs for versions, and path→version
-// resolution. All lookups key off opaque version ids or validated
+// content reads and path→version resolution. (Office-file version previews go
+// through the existing office-vers-backed .../onlyoffice-version-config
+// endpoint on WorkspaceHandler.) All lookups key off opaque version ids or validated
 // workspace-relative paths; ownership is enforced by the service layer
 // (cross-user version ids resolve to 404).
 type ArtifactHandler struct {
 	svc *artifact.Service
-	oo  OnlyOfficeSettings
 }
 
-// NewArtifactHandler wires the handler. oo carries the OnlyOffice signing
-// config; when its Secret is empty the onlyoffice-config endpoint returns
-// 503 (same contract as the workspace OnlyOffice endpoints).
-func NewArtifactHandler(svc *artifact.Service, oo OnlyOfficeSettings) *ArtifactHandler {
-	return &ArtifactHandler{svc: svc, oo: oo}
+// NewArtifactHandler wires the handler.
+func NewArtifactHandler(svc *artifact.Service) *ArtifactHandler {
+	return &ArtifactHandler{svc: svc}
 }
 
 // Resolve handles GET /api/v1/workspace/versions/resolve?path=<rel>[&before=<RFC3339>].
@@ -123,84 +120,4 @@ func (h *ArtifactHandler) VersionContent(c *gin.Context) {
 	// browsers render pdf/image previews directly.
 	c.Header("Content-Disposition", "inline; filename*=UTF-8''"+url.PathEscape(filepath.Base(rec.Path)))
 	c.Data(http.StatusOK, mimeType, data)
-}
-
-// VersionOnlyOfficeConfig handles GET /api/v1/workspace/versions/:vid/onlyoffice-config.
-// It returns a signed view-only DocEditor config whose document.url points at
-// THIS service's version content endpoint (query-token authed, reachable via
-// the OnlyOffice InternalBackend origin) — the turn-artifacts counterpart of
-// the office-vers-backed WorkspaceOnlyOfficeVersionConfig. document.key is
-// derived deterministically from (path, version id) so OnlyOffice caches and
-// shares the conversion (versions are immutable); there is no callbackUrl.
-//
-// 503 when OnlyOffice is not configured; 404 for unknown or cross-user ids.
-func (h *ArtifactHandler) VersionOnlyOfficeConfig(c *gin.Context) {
-	if !h.oo.configured() {
-		c.JSON(http.StatusServiceUnavailable, errorBody("ONLYOFFICE_DISABLED", "onlyoffice is not configured"))
-		return
-	}
-	userID := middleware.UserIDFromCtx(c)
-	tid := middleware.TraceIDFromCtx(c)
-	ctx := trace.WithContext(c.Request.Context(), tid)
-
-	vid := strings.TrimSpace(c.Param("vid"))
-	if vid == "" {
-		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "version id is required"))
-		return
-	}
-
-	// Ownership check without reading the blob: the config embeds only the
-	// id, and the DocumentServer fetches bytes via the content endpoint.
-	rec, err := h.svc.GetVersionForUser(ctx, userID, vid)
-	if err != nil {
-		logger.FromContext(ctx).Error("artifact version config lookup failed",
-			zap.String("op", "handler.artifact_oo_config"), zap.String("user_id", userID), zap.Error(err))
-		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "lookup version failed"))
-		return
-	}
-	if rec == nil {
-		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "version not found"))
-		return
-	}
-
-	userJWT := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
-	docURL := h.oo.InternalBackend + "/api/v1/workspace/versions/" + url.PathEscape(vid) + "/content?token=" + url.QueryEscape(userJWT)
-
-	cfg := buildArtifactVersionConfig(rec.Path, rec.VersionID, docURL)
-	token, err := jwt.SignClaims(h.oo.Secret, cfg)
-	if err != nil {
-		logger.FromContext(ctx).Error("artifact version config sign failed",
-			zap.String("op", "handler.artifact_oo_config"), zap.String("user_id", userID), zap.Error(err))
-		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "sign editor config failed"))
-		return
-	}
-
-	c.JSON(http.StatusOK, onlyOfficeVersionConfigResponse{
-		ServerURL: h.oo.ServerURL,
-		View:      onlyOfficeModeConfig{Config: cfg, Token: token},
-	})
-}
-
-// buildArtifactVersionConfig mirrors WorkspaceHandler.buildOnlyOfficeVersionConfig
-// for turn-artifact versions: view-only, deterministic key, no callbackUrl.
-func buildArtifactVersionConfig(rel, versionID, docURL string) map[string]any {
-	title := filepath.Base(rel)
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(rel), "."))
-	return map[string]any{
-		"documentType": onlyOfficeDocumentType(ext),
-		"document": gin.H{
-			"fileType": ext,
-			"key":      deriveOnlyOfficeVersionKey(rel, versionID),
-			"title":    title,
-			"url":      docURL,
-			"permissions": gin.H{
-				"edit":     false,
-				"download": true,
-			},
-		},
-		"editorConfig": gin.H{
-			"mode": "view",
-			"user": gin.H{"id": "blowball", "name": "blowball"},
-		},
-	}
 }

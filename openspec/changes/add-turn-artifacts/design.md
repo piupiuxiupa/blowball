@@ -9,7 +9,7 @@ blowball 已有完整的每用户工作空间文件服务（List/Search/Download
 - **office 交付物主要由 bash 产出**：`.docx/.xlsx` 等二进制文件是 bash 沙箱里跑 python 脚本生成的，不经过 `xizhi_*` 写工具——写路径钩子无法覆盖全部产物来源。
 - **持久化是事件流**：消息按事件行持久化（token/tool_call/tool_result…），`done` 事件本身**不持久化**（仅实时流）。因此 version_id 必须放在可持久化的事件里。
 - **OnlyOffice config 接口已同时返回 Edit/View 两套签名配置**："点击默认预览"是前端选择 View 的问题，后端零改动。
-- **office-vers 是外部服务**（MinIO 背书，无鉴权），只覆盖 OnlyOffice 编辑路径产生的版本；agent 直接写盘不经过它。本设计的版本库为 blowball 自建，与 office-vers 并存。
+- **office-vers 是外部服务**（MinIO 背书，无鉴权），提供完整版本读写 API（`POST /documents/{uuid}/{path}` 上传新版本，`?action=version&versionId=` 读指定版本）。本设计用它做唯一版本存储，与 OnlyOffice 编辑路径共用同一版本空间。
 
 ## Goals / Non-Goals
 
@@ -80,17 +80,18 @@ turn 开始时记录 `turnStart`；turn 结束时遍历用户工作空间，收�
 - 挂载点：`TurnHooks` 新增 `FinalizeTurn(ctx) []stream.ArtifactInfo`（由 message_stream 构建的闭包，捕获 userID/workspaceRoot/turnStart）。实现在 **orchestratorAdapter 的 done 分支**注入：收到 done 后先调 FinalizeTurn，artifact 事件先于 done 进入外层 hub（实时流/运行日志）并追加进持久化事件切片，done.Meta 附摘要。agent 包零改动，不感知文件系统。
 - 消息重建（`MessagesToAgentMessages`）跳过 artifact 事件类型，不进 LLM 上下文。
 
-### D5: 版本库存储 = 本地文件系统 blob + MySQL 索引
+### D5: 版本库存储 = office-vers 服务 + MySQL 索引（修订：曾用本地盘 blob，已删）
 
-- blob：`<dataDir>/versions/<userID>/<url-escape(path)>/<vid>`（工作空间之外，agent 不可达；`.blowball/` 不放——那是用户可浏览区）。
-- 索引：新表 `file_versions(id PK, user_id, path, version_id(uuidv7), size, mime, sha256, created_at)`，唯一键 `(user_id, path, version_id)`，索引 `(user_id, path, created_at)` 支撑 resolve。
-- 去重：同 path 新快照 sha256 等于最新版本则复用 vid（mtime 变了内容没变的场景）。
-- vid 用 uuidv7：时间有序，as-of 解析可直接按 vid/created_at 排序，与现有 id 惯例一致。
+- 存储：`POST {version_service_url}/documents/{userID}/{path}`（裸字节）→ office-vers 返回 MinIO version id。复用现有 `onlyoffice.version_service_url` 配置，无新配置项、无新存储系统。
+- 索引：新表 `file_versions(id PK, user_id, path, version_id, size, mime, sha256, create_time)`——ownership、as-of 解析（按 create_time 排序，不依赖 vid 有序）、sha256 去重都由它承担；office-vers 只是字节仓库。
+- 去重在我们侧：office-vers 每次 POST 都生成新版本，所以 sha256 与索引最新版一致时不上传。
+- 未配置 version_service_url → store 为 nil，产物照常发事件但无 vid（与 OnlyOffice 未配置的 503 降级语义一致）。
+- office-vers 无鉴权（其文档明示）：只允许内网服务到服务访问；前端永远拿不到 office-vers URL，非 office 读取由 blowball 代理。
 
 ### D6: 版本读取与预览接口复用既有模式
 
-- `GET /api/v1/workspace/versions/{vid}/content`：Bearer 或 `?token=` 鉴权（复用 QueryTokenAuthMW 模式，供 `<img>`/iframe/OnlyOffice document.url 使用）。
-- `GET /api/v1/workspace/versions/{vid}/onlyoffice-config`：签名 view 配置，document.url 指向上面接口；document.key 复用 `deriveOnlyOfficeVersionKey(path, vid)` 的 base32(sha256) 派生；无 callbackUrl。
+- `GET /api/v1/workspace/versions/{vid}/content`：Bearer 或 `?token=` 鉴权，后端代理从 office-vers 取字节（供 `<img>`/iframe/非 office 预览与下载）。
+- office 历史版本预览：**零新增**——直接复用现有 `GET /api/v1/workspace/files/*path/onlyoffice-version-config?versionId=`（其 document.url 本就指向 office-vers，版本入库后它自然可用）。
 - vid→(user,path) 绑定只从索引查，路径遍历攻击面为零（vid 是不透明 id）。
 
 ### D7: office 点击默认预览 = 前端默认消费 View 配置
@@ -102,18 +103,17 @@ turn 开始时记录 `turnStart`；turn 结束时遍历用户工作空间，收�
 - [mtime 检测漏掉保留时间戳的写入] → 文档化为已知限制；prompt 不引导此类操作；后续可加写入工具层的实时事件补盲。
 - [模型不写约定链接（依从性）] → artifact 事件/产物面板不依赖文本链接，是确定性兜底；链接依从性问题只影响叙事内联体验，不影响产物可发现性。
 - [turn 末扫描+快照增加 turn 尾延迟] → 仅在有产物时发生；快照为本地文件复制，设单文件大小上限（配置项，默认 200MB），超限跳过该文件快照（事件仍发，vid 缺省，前端按当前版本处理）。
-- [版本库无界增长] → v1 记录为后续治理项（按 path 保留最近 N 版/按容量 LRU）；uuidv7 时间有序使清理策略简单。
+- [版本库无界增长] → office-vers 侧按桶生命周期/保留策略治理（S3 版本治理是成熟能力），blowball 不管。
 - [artifact 事件进 LLM 上下文污染对话] → D4 明确重建跳过。
 
 ## Migration Plan
 
 1. 新 migration：`file_versions` 表。
-2. 新增配置项（版本库根目录、单文件快照上限），`config.example.yaml` 同步。
+2. 新增配置项（单文件快照上限），`config.example.yaml` 同步；版本库复用 `onlyoffice.version_service_url`。
 3. 后端实现（见 tasks.md），`api/openapi.yaml` 同步新接口。
 4. 前端按 frontend-handoff.md 接入。
 5. 回滚：功能无侵入存量接口，下线新路由+回滚 migration 即可；已产出的版本库目录可保留。
 
 ## Open Questions
 
-- office-vers 与自建版本库未来是否合并（涉及外部服务的写入 API 能力，需要其接口文档）。
 - 产物面板在会话维度的聚合视图（跨 turn "本会话全部产物"）是否值得做，v1 仅按 turn。

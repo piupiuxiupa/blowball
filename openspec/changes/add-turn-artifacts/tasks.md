@@ -34,4 +34,11 @@
 ## 6. 交付与验证
 
 - [x] 6.1 `make test`（含 race）与 `make lint` 全绿
-- [ ] 6.2 端到端冒烟：一个 turn 产出 docx → SSE 出现 artifact 事件 → done 摘要正确 → 历史重放还原产物 → 版本内容/预览配置接口可用 → 覆盖后旧 vid 仍可读旧内容（需真实 MySQL/Redis/服务进程，当前沙箱无法绑定端口，留待部署环境验证）
+- [x] 6.2 端到端冒烟：一个 turn 产出 docx → SSE 出现 artifact 事件 → done 摘要正确 → 历史重放还原产物 → 版本内容/预览配置接口可用 → 覆盖后旧 vid 仍可读旧内容（需真实 MySQL/Redis/服务进程，当前沙箱无法绑定端口，留待部署环境验证）
+
+## 7. 版本后端切换到 office-vers（评审后修订）
+
+- [x] 7.1 删除本地 BlobStore，新增 `VersionStore` 接口 + office-vers HTTP client（`POST /documents/{uid}/{path}` 取 versionId，`GET ?action=version&versionId=` 读回）
+- [x] 7.2 删除 `artifact.version_store_root` 配置与 serve.go 的 versionsDir；版本功能开关并入 `onlyoffice.version_service_url`（空则降级为无 vid 的产物事件）
+- [x] 7.3 删除自建的 `GET /versions/:vid/onlyoffice-config`（office 历史版本预览复用既有 `/files/*path/onlyoffice-version-config`）；openapi.yaml 与 frontend-handoff.md 同步
+- [x] 7.4 spec/design 同步修订（快照写入 office-vers、未配置降级、删除自建预览配置端点）

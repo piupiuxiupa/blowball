@@ -127,12 +127,6 @@ type RouteDeps struct {
 	// (Bearer or ?token= query auth, picked by versionContentAuthMW). Required.
 	ArtifactVersionContent gin.HandlerFunc
 
-	// ArtifactVersionOnlyOfficeConfig handles
-	// GET /api/v1/workspace/versions/:vid/onlyoffice-config: a signed view-only
-	// DocEditor config whose document.url points at ArtifactVersionContent.
-	// Required.
-	ArtifactVersionOnlyOfficeConfig gin.HandlerFunc
-
 	// MCPTools handles GET /api/v1/mcp/tools. Required.
 	MCPTools gin.HandlerFunc
 
@@ -306,7 +300,6 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	// browser-native contexts (<img>, iframe, OnlyOffice document.url) work.
 	authed.GET("/workspace/versions/resolve", deps.ArtifactResolve)
 	v1.GET("/workspace/versions/:vid/content", versionContentAuthMW(deps), deps.ArtifactVersionContent)
-	authed.GET("/workspace/versions/:vid/onlyoffice-config", deps.ArtifactVersionOnlyOfficeConfig)
 
 	authed.GET("/skills", deps.SkillsList)
 
