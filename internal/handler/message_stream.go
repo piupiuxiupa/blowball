@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/artifact"
 	"github.com/lush/blowball/internal/memory"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
@@ -56,6 +57,10 @@ type MessageStreamHandler struct {
 	// of running turns.
 	runs    *run.Manager
 	dataDir string
+	// artifacts is the turn-artifacts capability service (nil-safe): when
+	// set, each turn end snapshots the turn's deliverables into the version
+	// store and announces them via artifact events (see TurnHooks.FinalizeTurn).
+	artifacts *artifact.Service
 	// maxInputTokens caps the estimated token count of a user message
 	// (add-input-token-limit), the config-resolved value of
 	// messages.max_input_tokens. The estimate uses the CJK-aware heuristic in
@@ -109,6 +114,14 @@ func NewMessageStreamHandler(
 	}
 	h.newHub = func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) }
 	h.writeRunEvents = writeRunEventStream
+	return h
+}
+
+// WithArtifactService wires the turn-artifacts capability (nil disables it,
+// preserving pre-capability behavior). Separate from the constructor so the
+// many existing wiring/test call sites stay untouched.
+func (h *MessageStreamHandler) WithArtifactService(s *artifact.Service) *MessageStreamHandler {
+	h.artifacts = s
 	return h
 }
 
@@ -568,6 +581,36 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")
 	skillsDir := filepath.Join(h.dataDir, userID, "skills")
+
+	// Turn-artifacts capability: the turn-end finalization closure. The
+	// adapter invokes it just before the done event; userMsgTime (request
+	// arrival) is the turn-start watermark for mtime detection — anything the
+	// turn wrote is newer by construction.
+	if h.artifacts != nil {
+		svc := h.artifacts
+		hooks.FinalizeTurn = func(ctx context.Context) []stream.ArtifactInfo {
+			arts, err := svc.FinalizeTurn(ctx, userID, workspaceRoot, userMsgTime)
+			if err != nil {
+				logger.FromContext(ctx).Warn("artifact finalization failed; turn completes without artifact events",
+					zap.String("op", "handler.artifact_finalize"),
+					zap.String("user_id", userID),
+					zap.Error(err))
+				return nil
+			}
+			infos := make([]stream.ArtifactInfo, 0, len(arts))
+			for _, a := range arts {
+				infos = append(infos, stream.ArtifactInfo{
+					Path:      a.Path,
+					VersionID: a.VersionID,
+					Size:      a.Size,
+					Mime:      a.Mime,
+					Op:        a.Op,
+				})
+			}
+			return infos
+		}
+	}
+
 	hub := h.newHub()
 
 	// The drainer is the hub's single consumer: it appends every event to

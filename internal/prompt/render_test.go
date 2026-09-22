@@ -77,6 +77,12 @@ func TestRenderSystemPrompt_FileOutputConvention(t *testing.T) {
 	// Coexists with the pre-existing relative-path / tmp-mapping guidance.
 	assert.Contains(t, out, "All `xizhi_*` paths must be relative to the workspace root")
 	assert.Contains(t, out, "sandbox's `/tmp` is mapped")
+	// (e) artifact link syntax (turn-artifacts capability): deliverables are
+	// referenced as blowball://workspace/ markdown links; links never carry
+	// query parameters and never point into tmp/ or .blowball/.
+	assert.Contains(t, out, "](blowball://workspace/")
+	assert.Contains(t, out, "never append query parameters")
+	assert.Contains(t, out, "never for `tmp/` scratch files, never for `.blowball/` paths")
 }
 
 func TestRenderSystemPrompt_Tools(t *testing.T) {

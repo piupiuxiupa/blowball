@@ -19,6 +19,12 @@ const (
 	EventAgentEnd    = "agent_end"
 	EventAgentError  = "agent_error"
 	EventDone        = "done"
+	// EventArtifact announces one turn deliverable (turn-artifacts
+	// capability): emitted at turn end just before done, one per artifact,
+	// with Content carrying the JSON-marshaled ArtifactInfo. Unlike done,
+	// artifact events are persisted, so historical messages can re-resolve
+	// their deliverables' version_ids.
+	EventArtifact = "artifact"
 	// EventMessage is a sentinel used for user message rows persisted to the
 	// messages table; it is never emitted as an SSE event.
 	EventMessage = "message"
@@ -41,6 +47,11 @@ const (
 	MetaDetail     = "error_detail"
 	MetaToolCallID = "tool_call_id"
 	MetaRevision   = "revision"
+	// MetaArtifacts keys the done event's turn-artifact summary
+	// ([]ArtifactInfo-shaped objects): a live-stream convenience copy of the
+	// turn's artifact events. done is not persisted; the artifact events are
+	// the durable record.
+	MetaArtifacts = "artifacts"
 )
 
 // StreamEvent is the unit of data exchanged between agents and the SSE consumer.
@@ -143,4 +154,29 @@ func DoneEvent(usage map[string]any) StreamEvent {
 		e.Meta[MetaUsage] = usage
 	}
 	return e
+}
+
+// ArtifactInfo is the wire shape of one turn artifact (turn-artifacts
+// capability). VersionID is empty when the file was announced but not
+// snapshotted (over the size cap or a snapshot failure): the frontend then
+// opens the current file instead of a pinned version.
+type ArtifactInfo struct {
+	Path      string `json:"path"`
+	VersionID string `json:"version_id,omitempty"`
+	Size      int64  `json:"size"`
+	Mime      string `json:"mime"`
+	Op        string `json:"op"` // create | update
+}
+
+// ArtifactEvent builds one turn-end artifact announcement. The agent field is
+// left to the caller: top-level turns emit with an empty agent (matching the
+// done event), since artifacts are attributed to the turn, not to one agent.
+func ArtifactEvent(agent string, a ArtifactInfo) StreamEvent {
+	b, err := json.Marshal(a)
+	if err != nil {
+		// ArtifactInfo is all plain JSON-marshalable fields; this cannot
+		// fail, but never let a marshal bug kill a turn.
+		return StreamEvent{Type: EventArtifact, Agent: agent, Content: "{}"}
+	}
+	return StreamEvent{Type: EventArtifact, Agent: agent, Content: string(b)}
 }

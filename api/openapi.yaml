@@ -577,6 +577,33 @@ components:
             parent_tool_call_id: {type: string, description: Present only on sub-agent events; the parent spawn_subagent tool_call id (run identity).}
             agent_instance_id: {type: string, description: Stable sub-agent instance identity; survives resume and groups threads across parent_tool_call_id values.}
             run_id: {type: string, description: The owning turn run id; present on every event frame (turn-detach-resume).}
+    ArtifactInfo:
+      type: object
+      required: [path, size, mime, op]
+      description: |
+        One turn deliverable. `version_id` pins the immutable snapshot taken at
+        turn end; it is absent when the file was announced but not snapshotted
+        (over the size cap or a snapshot failure) — open the current file then.
+      properties:
+        path: {type: string, description: Workspace-relative slash-separated path.}
+        version_id: {type: string, description: UUID v7 of the version snapshot.}
+        size: {type: integer, format: int64}
+        mime: {type: string}
+        op: {type: string, enum: [create, update], description: create = path had no prior version; update = path was versioned before.}
+    SSEArtifact:
+      type: object
+      required: [type, agent, content]
+      description: |
+        Turn-end artifact announcement (turn-artifacts capability): emitted once
+        per deliverable just before `done`. `content` is the JSON-marshaled
+        ArtifactInfo. Unlike done, artifact events ARE persisted as message rows
+        (event_type="artifact"), so historical turns re-resolve their
+        deliverables' version pins from them. `agent` is empty: artifacts are
+        attributed to the turn, not to one agent.
+      properties:
+        type: {type: string, enum: [artifact]}
+        agent: {type: string}
+        content: {type: string, description: JSON-marshaled ArtifactInfo.}
     SSEDone:
       type: object
       required: [type, meta]
@@ -586,6 +613,17 @@ components:
           type: object
           required: [usage]
           properties:
+            artifacts:
+              type: array
+              description: |
+                Turn-artifact summary (turn-artifacts capability): one entry per
+                deliverable the turn produced, mirroring the `artifact` events that
+                precede this done event. Live-stream convenience copy — done is NOT
+                persisted, so history reloads must rebuild the list from the
+                persisted `artifact` event rows. Empty array when the turn produced
+                no deliverables. Absent entirely when the capability is unwired.
+              items:
+                $ref: '#/components/schemas/ArtifactInfo'
             usage:
               description: |
                 Per-turn token-usage breakdown. Authoritative shape (turn-cost-tracking
@@ -1447,6 +1485,7 @@ paths:
                   - $ref: '#/components/schemas/SSEPlanUpdated'
                   - $ref: '#/components/schemas/SSEAgentEnd'
                   - $ref: '#/components/schemas/SSEAgentError'
+                  - $ref: '#/components/schemas/SSEArtifact'
                   - $ref: '#/components/schemas/SSEDone'
         '400':
           description: |
@@ -1584,6 +1623,7 @@ paths:
                   - $ref: '#/components/schemas/SSEToken'
                   - $ref: '#/components/schemas/SSEPlanUpdated'
                   - $ref: '#/components/schemas/SSEAgentError'
+                  - $ref: '#/components/schemas/SSEArtifact'
                   - $ref: '#/components/schemas/SSEDone'
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -2185,6 +2225,127 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '503':
           description: OnlyOffice is not configured (`secret` or `version_service_url` empty).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                disabled: {value: {error: {code: ONLYOFFICE_DISABLED, message: "onlyoffice is not configured"}}}
+  /api/v1/workspace/versions/resolve:
+    get:
+      tags: [Workspace]
+      summary: Resolve a workspace path to its artifact version.
+      description: |
+        Turn-artifacts capability. Returns the newest version record for the
+        workspace-relative `path`, or the newest record created at or before
+        `before` when given (RFC3339) — the fallback for pinning artifact links
+        that reference files produced by earlier turns. Version snapshots are
+        taken per turn at turn end; paths never produced as artifacts have no
+        versions and resolve to 404.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: {type: string}
+          description: Workspace-relative slash-separated path.
+          example: reports/q3.docx
+        - name: before
+          in: query
+          required: false
+          schema: {type: string, format: date-time}
+          description: As-of bound; the newest version at or before this time wins.
+      responses:
+        '200':
+          description: The resolved version record.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactInfo'}
+        '400':
+          description: Missing path or malformed before.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                missingPath: {value: {error: {code: BAD_REQUEST, message: "path is required"}}}
+                badBefore:   {value: {error: {code: BAD_REQUEST, message: "before must be RFC3339"}}}
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The path was never versioned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                noVersion: {value: {error: {code: NOT_FOUND, message: "path has no versions"}}}
+  /api/v1/workspace/versions/{versionId}/content:
+    get:
+      tags: [Workspace]
+      summary: Read an artifact version's content.
+      description: |
+        Turn-artifacts capability. Serves the immutable snapshot bytes with the
+        MIME type recorded at snapshot time. Auth accepts EITHER the Bearer
+        header OR a `?token=` query JWT so browser-native contexts (<img>,
+        iframe, OnlyOffice document.url) can load it. Unknown ids and ids
+        belonging to another user both return 404 (existence is not leaked).
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: token
+          in: query
+          required: false
+          schema: {type: string}
+          description: JWT query token; alternative to the Authorization header.
+      responses:
+        '200':
+          description: The snapshot bytes.
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Unknown or cross-user version id.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                notFound: {value: {error: {code: NOT_FOUND, message: "version not found"}}}
+  /api/v1/workspace/versions/{versionId}/onlyoffice-config:
+    get:
+      tags: [Workspace]
+      summary: Build and sign an OnlyOffice view config for an artifact version.
+      description: |
+        Turn-artifacts counterpart of `.../files/{path}/onlyoffice-version-config`:
+        a signed VIEW-only DocEditor config whose `document.url` points at this
+        service's own version content endpoint (`.../versions/{versionId}/content`
+        with the caller's JWT as query `token`; the DocumentServer reaches the
+        backend over the configured internal origin). `document.key` is derived
+        deterministically from `(path, versionId)` (base32(sha256(path + ":" +
+        versionId))) so OnlyOffice caches and shares the conversion; the config
+        carries no `callbackUrl` (an immutable version has no save semantics).
+        Response shape mirrors the office-vers endpoint: `{server_url, view:
+        {config, token}}`. Returns 503 when OnlyOffice is not configured.
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Signed view-only DocEditor config for the version.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OnlyOfficeVersionConfigResponse'}
+        '404':
+          description: Unknown or cross-user version id.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                notFound: {value: {error: {code: NOT_FOUND, message: "version not found"}}}
+        '503':
+          description: OnlyOffice is not configured (empty secret).
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}

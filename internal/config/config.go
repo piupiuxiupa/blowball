@@ -30,6 +30,7 @@ type Config struct {
 	Landlock    LandlockConfig    `yaml:"landlock"`
 	Logging     LoggingConfig     `yaml:"logging"`
 	OnlyOffice  OnlyOfficeConfig  `yaml:"onlyoffice"`
+	Artifact    ArtifactConfig    `yaml:"artifact"`
 	Storage     StorageConfig     `yaml:"storage"`
 	Messages    MessagesConfig    `yaml:"messages"`
 	Memory      MemoryConfig      `yaml:"memory"`
@@ -459,6 +460,42 @@ func (o *OnlyOfficeConfig) applyDefaults() {
 	if strings.TrimSpace(o.ServerURL) == "" {
 		o.ServerURL = "http://localhost"
 	}
+}
+
+// DefaultArtifactMaxSnapshotBytes is the per-file snapshot size cap applied
+// when artifact.max_snapshot_bytes is omitted (200MB). Artifacts larger than
+// the cap are still announced (artifact event, no version_id) but not
+// snapshotted into the version store.
+const DefaultArtifactMaxSnapshotBytes int64 = 200 << 20
+
+// ArtifactConfig groups the turn-artifacts capability settings (see the
+// turn-artifacts spec). VersionStoreRoot is the server-side blob store root
+// for artifact version snapshots; empty means the wiring default
+// ({-d root}/versions, a sibling of the data/ tree). It MUST live outside
+// every user's workspace tree so
+// neither the xizhi_* tools nor the bash sandbox can reach it.
+// MaxSnapshotBytes caps per-file snapshot size; non-positive after defaults
+// is rejected.
+type ArtifactConfig struct {
+	VersionStoreRoot string `yaml:"version_store_root"`
+	MaxSnapshotBytes int64  `yaml:"max_snapshot_bytes"`
+}
+
+// applyDefaults fills the MaxSnapshotBytes default when omitted. An explicit
+// zero in YAML is indistinguishable from omission (yaml v3), so zero also
+// yields the default; disable snapshots by leaving the capability unwired.
+func (a *ArtifactConfig) applyDefaults() {
+	if a.MaxSnapshotBytes == 0 {
+		a.MaxSnapshotBytes = DefaultArtifactMaxSnapshotBytes
+	}
+}
+
+// validate rejects a negative snapshot cap.
+func (a ArtifactConfig) validate() error {
+	if a.MaxSnapshotBytes < 0 {
+		return fmt.Errorf("artifact.max_snapshot_bytes must be >= 0")
+	}
+	return nil
 }
 
 // DefaultServerPort is the listen port used for the api and all roles when
@@ -1603,6 +1640,7 @@ func Load(path string) (*Config, error) {
 	cfg.OpenAI.applyDefaults()
 	cfg.Logging.applyDefaults()
 	cfg.OnlyOffice.applyDefaults()
+	cfg.Artifact.applyDefaults()
 	cfg.Server.applyDefaults()
 	cfg.Storage.Workspace.applyDefaults()
 	cfg.Landlock.applyDefaults()
@@ -1646,6 +1684,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.SkillMarket.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Artifact.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.MCP.validate(); err != nil {

@@ -119,6 +119,20 @@ type RouteDeps struct {
 	// auth, like token-download). Required.
 	WorkspaceOnlyOfficeCallback gin.HandlerFunc
 
+	// ArtifactResolve handles GET /api/v1/workspace/versions/resolve
+	// (turn-artifacts): path -> latest/as-of version_id. Required.
+	ArtifactResolve gin.HandlerFunc
+
+	// ArtifactVersionContent handles GET /api/v1/workspace/versions/:vid/content
+	// (Bearer or ?token= query auth, picked by versionContentAuthMW). Required.
+	ArtifactVersionContent gin.HandlerFunc
+
+	// ArtifactVersionOnlyOfficeConfig handles
+	// GET /api/v1/workspace/versions/:vid/onlyoffice-config: a signed view-only
+	// DocEditor config whose document.url points at ArtifactVersionContent.
+	// Required.
+	ArtifactVersionOnlyOfficeConfig gin.HandlerFunc
+
 	// MCPTools handles GET /api/v1/mcp/tools. Required.
 	MCPTools gin.HandlerFunc
 
@@ -286,6 +300,14 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	// handler, which replies with OnlyOffice's {"error": N} convention.
 	v1.POST(onlyOfficeCallbackRoute, deps.QueryTokenAuthMW, deps.WorkspaceOnlyOfficeCallback)
 
+	// Turn-artifact version endpoints (turn-artifacts capability). Static
+	// "resolve" forks cleanly from the ":vid" param at the same node in gin's
+	// tree; the content endpoint accepts either Bearer or ?token= auth so
+	// browser-native contexts (<img>, iframe, OnlyOffice document.url) work.
+	authed.GET("/workspace/versions/resolve", deps.ArtifactResolve)
+	v1.GET("/workspace/versions/:vid/content", versionContentAuthMW(deps), deps.ArtifactVersionContent)
+	authed.GET("/workspace/versions/:vid/onlyoffice-config", deps.ArtifactVersionOnlyOfficeConfig)
+
 	authed.GET("/skills", deps.SkillsList)
 
 	// Model catalog list (per-request-model-selection): pure config echo, so
@@ -331,6 +353,20 @@ func workspaceFileAuthMW(deps RouteDeps) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := strings.TrimPrefix(c.Param("path"), "/")
 		if raw == tokenDownloadPath || strings.HasPrefix(raw, tokenDownloadPath+"/") {
+			deps.QueryTokenAuthMW(c)
+			return
+		}
+		deps.AuthMW(c)
+	}
+}
+
+// versionContentAuthMW picks the auth middleware for the artifact version
+// content endpoint: a "token" query parameter selects QueryTokenAuthMW
+// (browser-native contexts that cannot set headers); otherwise the Bearer
+// header middleware applies.
+func versionContentAuthMW(deps RouteDeps) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Query("token") != "" {
 			deps.QueryTokenAuthMW(c)
 			return
 		}

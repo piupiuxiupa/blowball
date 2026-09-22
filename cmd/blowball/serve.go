@@ -23,6 +23,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/artifact"
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/llmraw"
@@ -274,17 +275,21 @@ func serve(configPath, dataRoot, role string) error {
 // because they are constructed once at startup and closed via deferred Close in
 // serveRun.
 type appRuntime struct {
-	cfg        *config.Config
-	role       string
-	dataDir    string
-	logDir     string
-	skillsDir  string
-	toolsDir   string
-	marketDir  string
-	log        *zap.Logger
-	mysqlStore *mysql.Store
-	redisStore *redis.Store
-	fsStore    *fs.Store
+	cfg       *config.Config
+	role      string
+	dataDir   string
+	logDir    string
+	skillsDir string
+	toolsDir  string
+	marketDir string
+	// versionsDir is the artifact version blob store root
+	// ({dataRoot}/versions): a sibling of data/, NOT under it, so no user_id
+	// can ever collide with the store directory.
+	versionsDir string
+	log         *zap.Logger
+	mysqlStore  *mysql.Store
+	redisStore  *redis.Store
+	fsStore     *fs.Store
 	// market is the skill-market client (skill-market capability), nil when
 	// the skill_market config block is off. Constructed here in the shared
 	// setup because BOTH roles consume it: the api role for the skills list
@@ -314,6 +319,7 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	skillsDir := filepath.Join(dataRoot, "skills")
 	toolsDir := filepath.Join(dataRoot, "tools")
 	marketDir := filepath.Join(dataRoot, "skills-market")
+	versionsDir := filepath.Join(dataRoot, "versions")
 
 	// Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -340,14 +346,15 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	}
 
 	rt := &appRuntime{
-		cfg:       cfg,
-		role:      role,
-		dataDir:   dataDir,
-		logDir:    logDir,
-		skillsDir: skillsDir,
-		toolsDir:  toolsDir,
-		marketDir: marketDir,
-		log:       log,
+		cfg:         cfg,
+		role:        role,
+		dataDir:     dataDir,
+		logDir:      logDir,
+		skillsDir:   skillsDir,
+		toolsDir:    toolsDir,
+		marketDir:   marketDir,
+		versionsDir: versionsDir,
+		log:         log,
 	}
 
 	// Skill-market client (skill-market capability): nil for a disabled
@@ -492,6 +499,22 @@ func sandboxMountTargets(mounts []config.MountSpec) []string {
 // populated with only the API-route handlers plus the auth middleware; the
 // agent-partition fields (SendMessage, MCPTools) are left nil.
 //
+// newArtifactService builds the turn-artifacts service: a server-side blob
+// store (default {data-dir}/versions, outside every user's workspace) plus
+// the MySQL version index. Construction failures are fatal at startup — the
+// blob root must be creatable for the capability to be honest.
+func newArtifactService(rt *appRuntime) *artifact.Service {
+	root := rt.cfg.Artifact.VersionStoreRoot
+	if root == "" {
+		root = rt.versionsDir
+	}
+	blobs, err := artifact.NewBlobStore(root)
+	if err != nil {
+		rt.log.Fatal("artifact version store init failed", zap.Error(err))
+	}
+	return artifact.NewService(blobs, rt.mysqlStore, rt.cfg.Artifact.MaxSnapshotBytes)
+}
+
 // Fault isolation: wireAPI does NOT construct the orchestrator, OpenAI client,
 // tool registry, or MCP manager. The api role's TitleService is built with a
 // nil LLM client — SetManualTitle never calls the LLM, so the api role needs no
@@ -527,6 +550,11 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	skillHandler := handler.NewSkillHandler(rt.fsStore, rt.market)
 	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
 	llmTokenHandler := handler.NewLLMTokenHandler(service.NewLLMTokenService(rt.mysqlStore))
+	artifactHandler := handler.NewArtifactHandler(newArtifactService(rt), handler.OnlyOfficeSettings{
+		Secret:          cfg.OnlyOffice.Secret,
+		ServerURL:       cfg.OnlyOffice.ServerURL,
+		InternalBackend: cfg.OnlyOffice.InternalBackend,
+	})
 
 	return handler.RouteDeps{
 		AuthMW:                           middleware.AuthMiddleware(cfg.JWT.Secret),
@@ -553,6 +581,9 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		WorkspaceOnlyOfficeConfig:        workspaceHandler.OnlyOfficeConfig,
 		WorkspaceOnlyOfficeVersionConfig: workspaceHandler.OnlyOfficeVersionConfig,
 		WorkspaceOnlyOfficeCallback:      workspaceHandler.OnlyOfficeCallback,
+		ArtifactResolve:                  artifactHandler.Resolve,
+		ArtifactVersionContent:           artifactHandler.VersionContent,
+		ArtifactVersionOnlyOfficeConfig:  artifactHandler.VersionOnlyOfficeConfig,
 		SkillsList:                       skillHandler.List,
 		ModelsList:                       modelListHandler.List,
 		LLMTokenGet:                      llmTokenHandler.Get,
@@ -738,7 +769,8 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	// registry is returned so serveRun can cancel all running turns within
 	// the bounded graceful-shutdown window.
 	runMgr := run.NewManager(rt.redisStore.RunStore(), run.NewRegistry())
-	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit())
+	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit()).
+		WithArtifactService(newArtifactService(rt))
 	turnRunHandler := handler.NewTurnRunHandler(runMgr)
 	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn)
 

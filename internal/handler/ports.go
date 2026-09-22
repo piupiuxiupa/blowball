@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/stream"
@@ -45,7 +46,8 @@ type OrchestratorRunner interface {
 }
 
 // TurnHooks bundles the per-turn optional seams handed to OrchestratorRunner.
-// Both fields are nil unless context compaction is configured.
+// Round and Tap are nil unless context compaction is configured;
+// FinalizeTurn is nil unless the turn-artifacts capability is wired.
 type TurnHooks struct {
 	// Round is the between-rounds mid-turn compaction hook (agent.RoundHook),
 	// installed on the freshly-built Confucius for this turn.
@@ -54,6 +56,16 @@ type TurnHooks struct {
 	// take complete, synchronized snapshots of the collected event stream —
 	// the source the mid-turn flush persists.
 	Tap *TurnEventTap
+	// FinalizeTurn runs at turn end, just before the done event goes on the
+	// wire (turn-artifacts capability): it detects and snapshots the turn's
+	// deliverables and returns them in path order. The adapter emits one
+	// artifact event per entry (persisted) and attaches the same list to the
+	// done event's Meta[MetaArtifacts] (live-stream convenience copy). A nil
+	// hook skips the capability entirely. The hook receives a
+	// cancel-detached, bounded context: client disconnect must not abort
+	// snapshotting, because the returned events feed persistence, not just
+	// the live wire.
+	FinalizeTurn func(ctx context.Context) []stream.ArtifactInfo
 }
 
 // TurnEventTap synchronizes mid-turn flushes with the orchestrator adapter's
@@ -138,8 +150,15 @@ func (t *TurnEventTap) requests() chan chan []stream.StreamEvent {
 // to, fans every event out to the caller's hub (so the SSE writer still sees
 // them) AND accumulates every event into a slice that becomes the returned
 // event stream.
+// innerRunner is the adapter's seam around the concrete orchestrator: exactly
+// the (*agent.Orchestrator).Handle signature. Tests substitute a fake that
+// writes canned events instead of driving the real agent loop.
+type innerRunner interface {
+	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, override agent.ModelOverride) error
+}
+
 type orchestratorAdapter struct {
-	inner *agent.Orchestrator
+	inner innerRunner
 }
 
 // NewOrchestratorAdapter wraps a *agent.Orchestrator as an OrchestratorRunner.
@@ -168,20 +187,43 @@ func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsD
 		eventsDrain := innerHub.Events()
 		done := innerHub.Done()
 		process := func(e stream.StreamEvent) {
-			// Mirror to the caller's hub. SendCtx blocks on a full buffer
-			// until the SSE writer drains it; on ctx cancel or hub close
-			// the event is dropped (the SSE writer is also observing ctx).
-			hub.SendCtx(ctx, e)
-			// Extract the usage object from the terminal done event so the
-			// handler can persist per-agent cost. The done event itself is
-			// still excluded from the returned event stream (it carries
-			// usage metadata, not chat content).
 			if e.Type == stream.EventDone {
+				// Turn-artifacts capability: announce the turn's deliverables
+				// BEFORE done goes on the wire, so consumers can treat done as
+				// "stream complete, artifact list final". The artifact events
+				// join the returned (persisted) stream; done only carries a
+				// summary copy in Meta and is still excluded from persistence.
+				if hooks.FinalizeTurn != nil {
+					finCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), artifactFinalizeBudget)
+					artifacts := hooks.FinalizeTurn(finCtx)
+					cancel()
+					for _, ai := range artifacts {
+						ev := stream.ArtifactEvent("", ai)
+						hub.SendCtx(ctx, ev)
+						events = append(events, ev)
+					}
+					if e.Meta == nil {
+						e.Meta = map[string]any{}
+					}
+					summary := make([]stream.ArtifactInfo, len(artifacts))
+					copy(summary, artifacts)
+					e.Meta[stream.MetaArtifacts] = summary
+				}
+				// Mirror to the caller's hub. SendCtx blocks on a full buffer
+				// until the SSE writer drains it; on ctx cancel or hub close
+				// the event is dropped (the SSE writer is also observing ctx).
+				hub.SendCtx(ctx, e)
+				// Extract the usage object from the terminal done event so the
+				// handler can persist per-agent cost. The done event itself is
+				// still excluded from the returned event stream (it carries
+				// usage metadata, not chat content).
 				if u, ok := e.Meta[stream.MetaUsage].(map[string]any); ok {
 					usage = u
 				}
 				return
 			}
+			// Mirror to the caller's hub (same SendCtx semantics as above).
+			hub.SendCtx(ctx, e)
 			events = append(events, e)
 		}
 		for {
@@ -240,3 +282,9 @@ type adapterResult struct {
 	events []stream.StreamEvent
 	usage  map[string]any
 }
+
+// artifactFinalizeBudget bounds the turn-end artifact finalization (detect +
+// snapshot) so a slow filesystem or database can never hold the done event
+// hostage. Over budget, FinalizeTurn returns whatever it has and the done
+// event still goes out.
+const artifactFinalizeBudget = 30 * time.Second

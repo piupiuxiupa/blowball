@@ -75,6 +75,27 @@ func TestMessagesToAgentMessages_MarkersIgnored(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// Artifact events (turn-artifacts capability) persist with an empty role via
+// MessageFromEvent's default branch; reconstruction must skip them so version
+// metadata never leaks into the LLM context.
+func TestMessagesToAgentMessages_ArtifactEventsIgnored(t *testing.T) {
+	prior := []model.Message{
+		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "make a report"},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "done, see "},
+		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "[report](blowball://workspace/report.md)"},
+		{Agent: "", Role: "", EventType: "artifact", Content: `{"path":"report.md","version_id":"v1","size":10,"mime":"text/markdown","op":"create"}`},
+	}
+
+	got, err := MessagesToAgentMessages(prior)
+	require.NoError(t, err)
+
+	want := []agent.Message{
+		{Role: "user", Content: "make a report"},
+		{Role: "assistant", Content: "done, see [report](blowball://workspace/report.md)"},
+	}
+	assert.Equal(t, want, got)
+}
+
 func TestMessagesToAgentMessages_SubAgentEventsIgnored(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "do it"},
