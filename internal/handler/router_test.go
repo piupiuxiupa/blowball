@@ -79,6 +79,8 @@ var expectedAPIRoutes = []string{
 	"GET /api/v1/workspace/files",
 	"GET /api/v1/workspace/files/*path",
 	"GET /api/v1/workspace/search",
+	"GET /api/v1/workspace/versions/:vid/content",
+	"GET /api/v1/workspace/versions/resolve",
 	"PATCH /api/v1/sessions/:session_id",
 	"POST /api/v1/auth/login",
 	"POST /api/v1/sessions",
