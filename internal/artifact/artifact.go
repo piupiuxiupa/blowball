@@ -26,6 +26,9 @@ import (
 	"time"
 
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/pkg/logger"
+
+	"go.uber.org/zap"
 )
 
 // Artifact op values recorded on artifact stream events.
@@ -179,10 +182,12 @@ func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) A
 		return a // version store unconfigured: announce without snapshot
 	}
 	if s.maxBytes > 0 && a.Size > s.maxBytes {
+		warnSkip(ctx, "over size cap", rel, userID, nil)
 		return a
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
+		warnSkip(ctx, "read failed", rel, userID, err)
 		return a
 	}
 	sum := sha256.Sum256(data)
@@ -201,6 +206,7 @@ func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) A
 
 	vid, err := s.store.Put(ctx, userID, rel, data)
 	if err != nil {
+		warnSkip(ctx, "version store put failed", rel, userID, err)
 		return a
 	}
 	rec := model.FileVersion{
@@ -212,8 +218,9 @@ func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) A
 		SHA256:    digest,
 	}
 	if err := s.index.InsertVersion(ctx, rec); err != nil {
-		// The blob is orphaned (harmless); without the index row the version
-		// is unreachable, so report the artifact unsnapshotted.
+		// The version is orphaned in office-vers (harmless); without the
+		// index row it is unreachable, so report the artifact unsnapshotted.
+		warnSkip(ctx, "version index insert failed", rel, userID, err)
 		return a
 	}
 	a.VersionID = rec.VersionID
@@ -247,6 +254,17 @@ func (s *Service) OpenVersion(ctx context.Context, userID, versionID string) (*m
 		return nil, nil, fmt.Errorf("artifact: read version %q: %w", versionID, err)
 	}
 	return rec, data, nil
+}
+
+// warnSkip logs a per-file snapshot skip: the turn still completes and the
+// artifact is announced without a version_id, but the cause is visible.
+func warnSkip(ctx context.Context, reason, rel, userID string, err error) {
+	logger.FromContext(ctx).Warn("artifact snapshot skipped",
+		zap.String("op", "artifact.snapshot"),
+		zap.String("reason", reason),
+		zap.String("path", rel),
+		zap.String("user_id", userID),
+		zap.Error(err))
 }
 
 // mimeOf infers the content type: extension first, then a 512-byte sniff for
