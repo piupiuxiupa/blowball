@@ -106,6 +106,9 @@ type serverView struct {
 	Auth        redactedAuth      `json:"auth"`
 	Headers     map[string]string `json:"headers,omitempty"`
 	Tools       int               `json:"tools"`
+	// Source labels where the server lives: "" (workspace, the pre-market
+	// wire shape) or "market" (read-only MCP-market entry).
+	Source string `json:"source,omitempty"`
 }
 
 // serverViewFrom builds the projection of s: auth redacted, custom headers in
@@ -119,5 +122,14 @@ func serverViewFrom(s Server) serverView {
 		Auth:        redactAuth(s.Auth),
 		Headers:     s.Headers,
 		Tools:       len(s.Tools),
+		Source:      marketSource(s),
 	}
+}
+
+// marketSource returns the serverView source label for s.
+func marketSource(s Server) string {
+	if s.market {
+		return "market"
+	}
+	return ""
 }

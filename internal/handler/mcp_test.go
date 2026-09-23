@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/mcpmarket"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/mcp"
@@ -74,7 +76,7 @@ func doTools(t *testing.T, h *MCPHandler, withUser bool) mcpToolResp {
 // MCP-sourced tools.
 func TestMCPTools_ExcludesBuiltins(t *testing.T) {
 	reg := allXizhiReg(t)
-	h := NewMCPHandler(reg, nil, nil)
+	h := NewMCPHandler(reg, nil, nil, nil)
 
 	resp := doTools(t, h, false)
 	assert.Empty(t, resp.Tools, "no built-in (xizhi/invoke) tools should be returned")
@@ -113,7 +115,7 @@ func TestMCPTools_OperatorProxyIncludedWithSource(t *testing.T) {
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	h := NewMCPHandler(reg, mgr.ServerTools(), nil)
+	h := NewMCPHandler(reg, mgr.ServerTools(), nil, nil)
 	resp := doTools(t, h, false)
 
 	require.Len(t, resp.Tools, 1)
@@ -141,7 +143,7 @@ func TestMCPTools_PerUserCachedToolsIncludedWithSource(t *testing.T) {
 		}},
 	}))
 
-	h := NewMCPHandler(reg, nil, func(userID string) string { return ws })
+	h := NewMCPHandler(reg, nil, func(userID string) string { return ws }, nil)
 	resp := doTools(t, h, true)
 
 	require.Len(t, resp.Tools, 1)
@@ -167,7 +169,7 @@ func TestMCPTools_MissingUserConfigYieldsOnlyGlobal(t *testing.T) {
 	require.NoError(t, err)
 	defer mgr.Close()
 
-	h := NewMCPHandler(reg, mgr.ServerTools(), func(userID string) string { return t.TempDir() }) // empty workspace
+	h := NewMCPHandler(reg, mgr.ServerTools(), func(userID string) string { return t.TempDir() }, nil) // empty workspace
 	resp := doTools(t, h, true)
 
 	require.Len(t, resp.Tools, 1, "missing user config must yield only the global tool")
@@ -189,7 +191,7 @@ func TestMCPTools_MalformedPerUserServerOmitted(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".blowball", "mcp", "bad"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, ".blowball", "mcp", "bad", "config.json"), []byte("{not json"), 0o644))
 
-	h := NewMCPHandler(reg, nil, func(userID string) string { return ws })
+	h := NewMCPHandler(reg, nil, func(userID string) string { return ws }, nil)
 	resp := doTools(t, h, true)
 
 	require.Len(t, resp.Tools, 1, "malformed server must be omitted, good server still returned")
@@ -231,4 +233,57 @@ func (m *mockMCPTransport) CallTool(ctx context.Context, params mcpclient.ToolsC
 func (m *mockMCPTransport) Close() error {
 	m.closed = true
 	return nil
+}
+
+// TestMCPTools_MarketCachedToolsMergedWithShadowing verifies the mcp-market
+// merge on the tools endpoint: market servers' cached tools appear attributed
+// to the market server name, a workspace server of the same name shadows the
+// market entry, and the endpoint still makes no MCP connections.
+func TestMCPTools_MarketCachedToolsMergedWithShadowing(t *testing.T) {
+	reg := tool.NewRegistry()
+	ws := t.TempDir()
+	require.NoError(t, mcp.WriteServer(ws, mcp.Server{
+		Name: "shared", URL: "http://ws/mcp", Transport: "http",
+		Tools: []mcp.ToolCache{{Name: "ws_tool"}},
+	}))
+
+	// Fake allowlist service + operator-synced market payloads.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"servers": []map[string]string{
+				{"name": "marketed", "path": "mid1/marketed"},
+				{"name": "shared", "path": "mid1/shared"},
+			},
+		})
+	}))
+	defer srv.Close()
+	root := t.TempDir()
+	for _, name := range []string{"marketed", "shared"} {
+		dir := filepath.Join(root, "mid1", name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		body := `{"url":"http://` + name + `/mcp","transport":"http","tools":[{"name":"` + name + `_tool"}]}`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o644))
+	}
+	market := mcpmarket.New(config.MCPMarketConfig{URL: srv.URL, Timeout: 2 * time.Second}, root)
+	require.NotNil(t, market)
+
+	h := NewMCPHandler(reg, nil, func(userID string) string { return ws }, market)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set(middleware.UserIDKey, "u-1"); c.Next() })
+	r.GET("/api/v1/mcp/tools", h.Tools)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/tools", nil)
+	req.Header.Set("Authorization", "Bearer jwt-u1")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp mcpToolResp
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Tools, 2)
+	got := map[string]string{}
+	for _, t2 := range resp.Tools {
+		got[t2.Name] = t2.Server
+	}
+	assert.Equal(t, "shared", got["ws_tool"], "workspace server wins the shadowed name")
+	assert.Equal(t, "marketed", got["marketed_tool"], "market tool attributed to its market server")
 }

@@ -35,6 +35,7 @@ type Config struct {
 	Messages    MessagesConfig    `yaml:"messages"`
 	Memory      MemoryConfig      `yaml:"memory"`
 	SkillMarket SkillMarketConfig `yaml:"skill_market"`
+	MCPMarket   MCPMarketConfig   `yaml:"mcp_market"`
 }
 
 // WorkspaceBackendLocal is the default workspace storage backend: per-user
@@ -271,6 +272,11 @@ const (
 	defaultSkillMarketCacheTTL = 60 * time.Second
 )
 
+const (
+	defaultMCPMarketTimeout  = 5 * time.Second
+	defaultMCPMarketCacheTTL = 60 * time.Second
+)
+
 // SkillMarketConfig holds the skill-market settings (the top-level
 // `skill_market:` block; skill-market capability). There is deliberately no
 // `enabled` switch: an omitted block or an empty url means the capability is
@@ -325,6 +331,54 @@ func (s SkillMarketConfig) validate() error {
 	}
 	if s.CacheTTL < 0 {
 		return fmt.Errorf("skill_market.cache_ttl: must be non-negative (got %s)", s.CacheTTL)
+	}
+	return nil
+}
+
+// MCPMarketConfig holds the MCP-market settings (the top-level `mcp_market:`
+// block; mcp-market capability). It mirrors SkillMarketConfig verbatim: no
+// `enabled` switch — an omitted block or an empty url means the capability is
+// fully OFF and a non-empty url enables it.
+type MCPMarketConfig struct {
+	URL      string        `yaml:"url"`       // market allowlist endpoint; the caller's login JWT rides Authorization: Bearer
+	Timeout  time.Duration `yaml:"timeout"`   // per-fetch deadline
+	CacheTTL time.Duration `yaml:"cache_ttl"` // per-user allowlist cache window
+}
+
+// IsEnabled reports whether the MCP market is on: url set.
+func (m MCPMarketConfig) IsEnabled() bool {
+	return strings.TrimSpace(m.URL) != ""
+}
+
+// applyDefaults fills zero-valued durations with the documented defaults.
+func (m *MCPMarketConfig) applyDefaults() {
+	if m.Timeout == 0 {
+		m.Timeout = defaultMCPMarketTimeout
+	}
+	if m.CacheTTL == 0 {
+		m.CacheTTL = defaultMCPMarketCacheTTL
+	}
+}
+
+// validate guards only the enabled state (non-empty url): the url must be an
+// absolute http(s) URL and both durations non-negative.
+func (m MCPMarketConfig) validate() error {
+	if !m.IsEnabled() {
+		return nil
+	}
+	raw := strings.TrimSpace(m.URL)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("mcp_market.url: must be an absolute http(s) URL (got %q)", m.URL)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("mcp_market.url: unsupported scheme %q (want http or https)", u.Scheme)
+	}
+	if m.Timeout < 0 {
+		return fmt.Errorf("mcp_market.timeout: must be non-negative (got %s)", m.Timeout)
+	}
+	if m.CacheTTL < 0 {
+		return fmt.Errorf("mcp_market.cache_ttl: must be non-negative (got %s)", m.CacheTTL)
 	}
 	return nil
 }
@@ -1644,6 +1698,7 @@ func Load(path string) (*Config, error) {
 	cfg.Messages.applyDefaults()
 	cfg.Memory.applyDefaults()
 	cfg.SkillMarket.applyDefaults()
+	cfg.MCPMarket.applyDefaults()
 	cfg.Tools.Executor.Bash.ApplyDefaults()
 	cfg.Tools.Executor.Sandbox.applyDefaults()
 	// Per-agent retry defaults (capability C, extended by llm-round-retry): all
@@ -1681,6 +1736,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.SkillMarket.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.MCPMarket.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Artifact.validate(); err != nil {

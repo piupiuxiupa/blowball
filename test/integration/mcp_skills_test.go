@@ -284,7 +284,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 	turnRunH := handler.NewTurnRunHandler(runMgr)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
-	mcpH := handler.NewMCPHandler(baseReg, serverTools, fsSvc.UserWorkspace)
+	mcpH := handler.NewMCPHandler(baseReg, serverTools, fsSvc.UserWorkspace, nil)
 	skillH := handler.NewSkillHandler(fsSvc, nil)
 	modelsH := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), "none")
 

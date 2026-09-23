@@ -224,6 +224,22 @@ skill_market:
   # timeout: 5s
   # cache_ttl: 60s
 
+# Remote-authorized MCP market (mcp-market capability; mirrors skill_market).
+# Default OFF: omit the whole block (or leave url empty) for zero behavior
+# change — a non-empty url IS the on switch. Blowball fetches the per-user
+# MCP-server allowlist with the CALLER's login JWT; payloads are NOT fetched:
+# the operator syncs each server's config.json to
+# {data-dir}/mcp-market/{market_user_id}/{server_name}/config.json (read-only
+# to blowball; entries cannot be modified or removed through the mcp_* tools).
+# Credentials in a market config.json follow the existing per-user server
+# schema (injected server-side, redacted in model-visible output); managing
+# them is out of scope for this capability. Any allowlist failure degrades
+# fail-closed to workspace-only MCP behavior — never a directory scan.
+mcp_market:
+  # url: ${MCP_MARKET_URL:}
+  # timeout: 5s
+  # cache_ttl: 60s
+
 # Process-level Landlock sandbox (Linux only; no-op on macOS/Windows). Applied
 # once at startup over the server process. The process RW application dirs
 # ({data-dir}/data, {data-dir}/logs, {data-dir}/skills) and RO dir

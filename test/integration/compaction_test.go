@@ -128,7 +128,7 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 	turnRunH := handler.NewTurnRunHandler(runMgr)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
-	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace)
+	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace, nil)
 	skillH := handler.NewSkillHandler(fsSvc, nil)
 
 	r := gin.New()

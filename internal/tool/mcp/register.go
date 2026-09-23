@@ -104,8 +104,10 @@ func registerListServers(r *tool.Registry, tools *Tools) error {
 		Description: "List the per-user MCP servers configured in YOUR workspace " +
 			"(`.blowball/mcp/{name}/config.json`, one directory per server). Returns name, " +
 			"url, transport, description, the auth KIND (credentials are redacted), and how " +
-			"many tools each server advertises. **You MUST call this before `mcp_call` to " +
-			"discover which servers you can use.** Credentials are **NEVER shown**.",
+			"many tools each server advertises; entries with `source: \"market\"` are " +
+			"read-only market servers (NEVER removable via mcp_remove_server). **You MUST " +
+			"call this before `mcp_call` to discover which servers you can use.** " +
+			"Credentials are **NEVER shown**.",
 		ParametersJSON: json.RawMessage(`{
 			"type": "object",
 			"properties": {},
@@ -115,7 +117,7 @@ func registerListServers(r *tool.Registry, tools *Tools) error {
 			// userID is propagated for logging/identity; the manager is already
 			// bound to the caller's workspace.
 			_ = skill.UserIDFromContext(ctx)
-			return listServers(tools.manager)
+			return listServers(ctx, tools.manager)
 		},
 	}
 	return r.Register(spec)
@@ -222,7 +224,7 @@ func registerRemoveServer(r *tool.Registry, tools *Tools) error {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("mcp_remove_server: parse args: %w", err)
 			}
-			return removeServer(tools.manager, a.Name)
+			return removeServer(ctx, tools.manager, a.Name)
 		},
 	}
 	return r.Register(spec)
@@ -357,9 +359,10 @@ type callResult struct {
 	Content []mcpclient.Content `json:"content"`
 }
 
-// listServers returns the redacted server list for the manager's workspace.
-func listServers(m *Manager) ([]serverView, error) {
-	cfg, err := LoadConfig(m.WorkspaceRoot())
+// listServers returns the redacted server list for the manager's workspace,
+// with the caller's market servers merged in (workspace-first shadowing).
+func listServers(ctx context.Context, m *Manager) ([]serverView, error) {
+	cfg, err := LoadServersWithMarket(ctx, skill.UserIDFromContext(ctx), m.WorkspaceRoot(), m.market)
 	if err != nil {
 		return nil, err
 	}
@@ -438,12 +441,21 @@ func addServer(ctx context.Context, m *Manager, name, url, description, transpor
 // removeServer drops the named server's directory (leaving every other server
 // untouched) and drops the cached connection so a later re-add reconnects
 // cleanly.
-func removeServer(m *Manager, name string) (removeResult, error) {
+func removeServer(ctx context.Context, m *Manager, name string) (removeResult, error) {
 	removed, err := RemoveServer(m.WorkspaceRoot(), name)
 	if err != nil {
 		return removeResult{}, err
 	}
 	if !removed {
+		// Not in the workspace: a market entry is read-only and gets an
+		// explicit "cannot remove" error rather than "not configured" (the
+		// operator owns its lifecycle). The allowlist — not the disk — is the
+		// visibility truth, so an unsynced entry still refuses.
+		if m.market != nil {
+			if _, ok := m.market.ResolveDir(m.market.Allowlist(ctx, skill.UserIDFromContext(ctx)), name); ok {
+				return removeResult{}, fmt.Errorf("mcp_remove_server: market server %q cannot be removed (market entries are read-only)", name)
+			}
+		}
 		return removeResult{}, fmt.Errorf("mcp_remove_server: server %q is not configured", name)
 	}
 	m.DropConnection(name)
@@ -467,13 +479,9 @@ func callTool(ctx context.Context, m *Manager, serverName, toolName string, args
 		return nil, err
 	}
 
-	cfg, err := LoadConfig(m.WorkspaceRoot())
+	server, err := lookupServer(ctx, m, serverName)
 	if err != nil {
-		return nil, err
-	}
-	server, ok := cfg.Server(serverName)
-	if !ok {
-		return nil, fmt.Errorf("mcp_call: server %q is not configured", serverName)
+		return nil, fmt.Errorf("mcp_call: %w", err)
 	}
 
 	// Validate the tool name and args against the persisted cache. If the tool
@@ -483,8 +491,11 @@ func callTool(ctx context.Context, m *Manager, serverName, toolName string, args
 	if !ok {
 		fresh, refreshErr := m.ListServerTools(totalCtx, serverName)
 		if refreshErr == nil {
-			// Update the persisted cache and re-resolve.
-			if err := persistRefreshedTools(m, serverName, fresh); err == nil {
+			// Update the persisted cache and re-resolve. Market servers skip
+			// the persisted write (read-only tree) and refresh memory only.
+			if server.market {
+				server.Tools = freshToCache(fresh)
+			} else if err := persistRefreshedTools(m, serverName, fresh); err == nil {
 				server.Tools = freshToCache(fresh)
 			}
 			schema, ok = lookupToolSchema(server.Tools, toolName)
@@ -572,12 +583,9 @@ func listTools(ctx context.Context, m *Manager, serverName string) ([]toolView, 
 	// Validate the server is configured before connecting so an unknown name
 	// is rejected with a clear error and no network activity (and no
 	// write-back).
-	cfg, err := LoadConfig(m.WorkspaceRoot())
+	server, err := lookupServer(ctx, m, serverName)
 	if err != nil {
-		return nil, err
-	}
-	if _, ok := cfg.Server(serverName); !ok {
-		return nil, fmt.Errorf("mcp_list_tools: server %q is not configured", serverName)
+		return nil, fmt.Errorf("mcp_list_tools: %w", err)
 	}
 
 	fresh, err := m.ListServerTools(ctx, serverName)
@@ -586,10 +594,13 @@ func listTools(ctx context.Context, m *Manager, serverName string) ([]toolView, 
 	}
 
 	views := toolsToViews(fresh)
-	// Trigger the async cache write-back AFTER the result is computed. It is
+	// Trigger the async cache write-back AFTER the result is computed
+	// (workspace servers only — the market tree is read-only). It is
 	// fire-and-forget (independent context, value copies, no Manager
 	// reference), so it never blocks this return or affects the turn.
-	writeBackToolsAsync(m.WorkspaceRoot(), serverName, fresh)
+	if !server.market {
+		writeBackToolsAsync(m.WorkspaceRoot(), serverName, fresh)
+	}
 	return views, nil
 }
 

@@ -27,6 +27,7 @@ import (
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/llmraw"
+	"github.com/lush/blowball/internal/mcpmarket"
 	"github.com/lush/blowball/internal/memory"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/msgflush"
@@ -275,23 +276,29 @@ func serve(configPath, dataRoot, role string) error {
 // because they are constructed once at startup and closed via deferred Close in
 // serveRun.
 type appRuntime struct {
-	cfg        *config.Config
-	role       string
-	dataDir    string
-	logDir     string
-	skillsDir  string
-	toolsDir   string
-	marketDir  string
-	log        *zap.Logger
-	mysqlStore *mysql.Store
-	redisStore *redis.Store
-	fsStore    *fs.Store
+	cfg          *config.Config
+	role         string
+	dataDir      string
+	logDir       string
+	skillsDir    string
+	toolsDir     string
+	marketDir    string
+	mcpMarketDir string
+	log          *zap.Logger
+	mysqlStore   *mysql.Store
+	redisStore   *redis.Store
+	fsStore      *fs.Store
 	// market is the skill-market client (skill-market capability), nil when
 	// the skill_market config block is off. Constructed here in the shared
 	// setup because BOTH roles consume it: the api role for the skills list
 	// endpoint, the agent role for the luban tools and the bash sandbox's
 	// per-skill market mounts.
 	market *skillmarket.Client
+	// mcpMarket is the MCP-market client (mcp-market capability), nil when
+	// the mcp_market config block is off. Both roles consume it: the api role
+	// for the MCP tools endpoint merge, the agent role for the mcp_* tools,
+	// the prompt advertisement, and manager connections.
+	mcpMarket *mcpmarket.Client
 }
 
 // setupRuntime performs the shared bootstrap that runs for every role: load
@@ -309,12 +316,13 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		return nil, fmt.Errorf("load config %q: %w", configPath, err)
 	}
 
-	// Derive the five runtime locations from the single -d root (D2/D3/D6): data, logs, skills, tools, skills-market.
+	// Derive the six runtime locations from the single -d root (D2/D3/D6): data, logs, skills, tools, skills-market, mcp-market.
 	dataDir := filepath.Join(dataRoot, "data")
 	logDir := filepath.Join(dataRoot, "logs")
 	skillsDir := filepath.Join(dataRoot, "skills")
 	toolsDir := filepath.Join(dataRoot, "tools")
 	marketDir := filepath.Join(dataRoot, "skills-market")
+	mcpMarketDir := filepath.Join(dataRoot, "mcp-market")
 
 	// Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -341,14 +349,15 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	}
 
 	rt := &appRuntime{
-		cfg:       cfg,
-		role:      role,
-		dataDir:   dataDir,
-		logDir:    logDir,
-		skillsDir: skillsDir,
-		toolsDir:  toolsDir,
-		marketDir: marketDir,
-		log:       log,
+		cfg:          cfg,
+		role:         role,
+		dataDir:      dataDir,
+		logDir:       logDir,
+		skillsDir:    skillsDir,
+		toolsDir:     toolsDir,
+		marketDir:    marketDir,
+		mcpMarketDir: mcpMarketDir,
+		log:          log,
 	}
 
 	// Skill-market client (skill-market capability): nil for a disabled
@@ -356,6 +365,8 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	// it. Pure HTTP client holder — no store dependencies, no startup probe
 	// (failures degrade per call, never gate boot).
 	rt.market = skillmarket.New(cfg.SkillMarket, marketDir)
+	// MCP-market client (mcp-market capability): the same shared-setup shape.
+	rt.mcpMarket = mcpmarket.New(cfg.MCPMarket, mcpMarketDir)
 
 	log.Info("runtime layout",
 		zap.String("role", role),
@@ -367,6 +378,9 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 		zap.String("tools_dir", toolsDir),
 		zap.String("skills_market_dir", marketDir),
 		zap.Bool("skill_market_enabled", rt.market.Enabled()))
+	log.Info("mcp market layout",
+		zap.String("mcp_market_dir", mcpMarketDir),
+		zap.Bool("mcp_market_enabled", rt.mcpMarket.Enabled()))
 
 	// MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
 	mysqlStore, err := mysql.New(cfg.MySQL.DSN)
@@ -448,10 +462,13 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	if err := os.MkdirAll(marketDir, 0o755); err != nil {
 		log.Fatal("create skills-market dir failed", zap.Error(err))
 	}
+	if err := os.MkdirAll(mcpMarketDir, 0o755); err != nil {
+		log.Fatal("create mcp-market dir failed", zap.Error(err))
+	}
 
 	// go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — plus operator extra_read_write; the operator tools dir and the skills-market dir are restricted read-only (the agent never writes market payloads — operators sync them), plus operator extra_read_only; the configurable system_read_only baseline is restricted read-only too. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless. landlock.enabled: false skips ApplyLandlock entirely (warning-only). All defaults reproduce the pre-configurability literals.
 	rwDirs := append([]string{dataDir, logDir, skillsDir}, cfg.Landlock.ExtraReadWrite...)
-	roDirs := append([]string{toolsDir, marketDir}, cfg.Landlock.ExtraReadOnly...)
+	roDirs := append([]string{toolsDir, marketDir, mcpMarketDir}, cfg.Landlock.ExtraReadOnly...)
 	log.Info("landlock policy",
 		zap.Bool("enabled", cfg.Landlock.IsEnabled()),
 		zap.Strings("rw_dirs", rwDirs),
@@ -745,6 +762,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	if err != nil {
 		log.Fatal("orchestrator init failed", zap.Error(err))
 	}
+	orch.WithMCPMarket(rt.mcpMarket)
 
 	orchAdapter := handler.NewOrchestratorAdapter(orch)
 
@@ -757,7 +775,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit()).
 		WithArtifactService(newArtifactService(rt))
 	turnRunHandler := handler.NewTurnRunHandler(runMgr)
-	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn)
+	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn, rt.mcpMarket)
 
 	return handler.RouteDeps{
 		AuthMW:      middleware.AuthMiddleware(cfg.JWT.Secret),

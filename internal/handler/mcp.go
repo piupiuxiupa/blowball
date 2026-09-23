@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/lush/blowball/internal/mcpmarket"
 	"github.com/lush/blowball/internal/middleware"
+	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/mcp"
 )
@@ -32,12 +35,16 @@ type MCPHandler struct {
 	// workspaceRootForUser resolves the authenticated user id to its workspace
 	// root, used to read the per-user MCP config cache. Agent-only wiring.
 	workspaceRootForUser func(userID string) string
+	// market is the optional MCP-market client (nil = capability off). When
+	// wired, the caller's market servers' cached tools are merged in
+	// (workspace-first shadowing), still cache-based: no MCP connections.
+	market *mcpmarket.Client
 }
 
 // NewMCPHandler wires the handler with the tool registry, the operator MCP
 // server→tools ownership map (mcpclient.Manager.ServerTools()), and the
 // userID→workspace-root resolver used to read the caller's per-user MCP cache.
-func NewMCPHandler(reg *tool.Registry, serverTools map[string][]string, workspaceRootForUser func(userID string) string) *MCPHandler {
+func NewMCPHandler(reg *tool.Registry, serverTools map[string][]string, workspaceRootForUser func(userID string) string, market *mcpmarket.Client) *MCPHandler {
 	// Invert server→[]tool into tool→server for O(1) lookup of a registry
 	// tool's owning operator server.
 	serverForTool := make(map[string]string)
@@ -50,6 +57,7 @@ func NewMCPHandler(reg *tool.Registry, serverTools map[string][]string, workspac
 		reg:                  reg,
 		serverForTool:        serverForTool,
 		workspaceRootForUser: workspaceRootForUser,
+		market:               market,
 	}
 }
 
@@ -95,15 +103,19 @@ func (h *MCPHandler) Tools(c *gin.Context) {
 		})
 	}
 
-	// Per-user MCP: read the caller's config cache (no network) and flatten each
-	// server's cached tools. The caller's userID is derived from the JWT;
-	// workspaceRootForUser resolves it to the workspace holding .blowball/mcp/.
-	// A missing resolver/userID/config yields nothing (no error); LoadConfig
-	// already skips malformed single servers.
+	// Per-user MCP: read the caller's config cache (no MCP connections) and
+	// flatten each server's cached tools. When the market is wired, the
+	// caller's market servers merge in workspace-first (the request's own
+	// Authorization header authenticates the allowlist fetch, the
+	// SkillHandler precedent); a market failure degrades fail-closed to the
+	// workspace-only list. A missing resolver/userID/config yields nothing
+	// (no error); malformed single servers are skipped by the loader.
 	if h.workspaceRootForUser != nil {
 		if userID := middleware.UserIDFromCtx(c); userID != "" {
 			ws := h.workspaceRootForUser(userID)
-			if cfg, err := mcp.LoadConfig(ws); err == nil && cfg != nil {
+			rawToken, _ := middleware.BearerToken(c.GetHeader("Authorization"))
+			tctx := skillmarket.WithToken(context.Background(), rawToken)
+			if cfg, err := mcp.LoadServersWithMarket(tctx, userID, ws, h.market); err == nil && cfg != nil {
 				for _, s := range cfg.SortedServers() {
 					for _, t := range s.Tools {
 						schema := t.InputSchema

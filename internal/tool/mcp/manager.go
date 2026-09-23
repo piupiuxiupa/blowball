@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lush/blowball/internal/mcpmarket"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/tool/mcpclient"
 	"go.uber.org/zap"
@@ -69,6 +70,8 @@ type Manager struct {
 	// unlike the timeouts — it gets NO zero-value fallback here; the config
 	// layer resolves unset → default before it reaches ManagerOptions.
 	maxInlineResultTokens int
+	// market is the optional MCP-market client; see ManagerOptions.Market.
+	market *mcpmarket.Client
 
 	// spillSeq numbers automatic spill files within the turn so parallel
 	// mcp_call dispatches never collide on a file name.
@@ -89,6 +92,10 @@ type ManagerOptions struct {
 	CallTimeout           time.Duration
 	MaxInlineResultTokens int
 	TransportFactory      TransportFactory
+	// Market is the optional MCP-market client. When set, Manager.Conn also
+	// resolves market servers (workspace-first) so connections and tools/list
+	// refreshes work for market-sourced servers without any caller change.
+	Market *mcpmarket.Client
 }
 
 // NewManager builds a turn-scoped manager bound to workspaceRoot (the caller's
@@ -111,6 +118,7 @@ func NewManager(opts ManagerOptions) *Manager {
 		callTimeout:           opts.CallTimeout,
 		maxInlineResultTokens: opts.MaxInlineResultTokens,
 		transportFactory:      tf,
+		market:                opts.Market,
 		conns:                 make(map[string]*conn),
 	}
 }
@@ -136,15 +144,10 @@ func (m *Manager) Conn(ctx context.Context, serverName string) (*conn, error) {
 		return c, nil
 	}
 
-	cfg, err := LoadConfig(m.workspaceRoot)
+	server, err := lookupServer(ctx, m, serverName)
 	if err != nil {
 		return nil, err
 	}
-	server, ok := cfg.Server(serverName)
-	if !ok {
-		return nil, fmt.Errorf("mcp server %q is not configured", serverName)
-	}
-
 	c, err := m.connect(ctx, server)
 	if err != nil {
 		return nil, err

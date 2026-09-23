@@ -144,6 +144,9 @@ type Server struct {
 	Headers     map[string]string `json:"headers,omitempty"`
 	Description string            `json:"description,omitempty"`
 	Tools       []ToolCache       `json:"tools,omitempty"`
+	// market marks a server resolved from the MCP market tree (read-only:
+	// never written, never removed). It never serializes.
+	market bool `json:"-"`
 }
 
 // Config is the in-memory aggregation of a user's configured servers. It is
@@ -324,6 +327,10 @@ func (c *Config) Server(name string) (Server, bool) {
 	}
 	return Server{}, false
 }
+
+// Market reports whether s was resolved from the MCP market tree (read-only:
+// no persisted cache write-back, no removal).
+func (s Server) Market() bool { return s.market }
 
 // SortedServers returns a shallow copy of the servers sorted by name. Used by
 // list rendering so output is deterministic.

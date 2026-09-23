@@ -2376,10 +2376,13 @@ paths:
       tags: [MCP]
       summary: List the MCP-sourced tool catalogue.
       description: |
-        Returns only MCP-sourced tools. The catalogue has two parts: proxy
-        tools advertised by configured operator (global) MCP servers, and the
+        Returns only MCP-sourced tools. The catalogue has three parts: proxy
+        tools advertised by configured operator (global) MCP servers, the
         cached tools of the caller's per-user MCP servers (read from the
-        workspace config cache; no live connections are made). Built-in tools
+        workspace config cache; no live connections are made), and — when the
+        `mcp_market` capability is enabled — the cached tools of the caller's
+        market-authorized MCP servers (operator-synced `config.json` caches,
+        workspace servers shadowing a market server of the same name). Built-in tools
         (`xizhi_*`, `webfetch`, executor, `luban_*`) and synthetic `spawn_subagent`
         dispatch tool are excluded. Each entry follows the OpenAI
         function-tool shape (`type: function`) and carries a `server` field

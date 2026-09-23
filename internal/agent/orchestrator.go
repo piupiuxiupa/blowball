@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/mcpmarket"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/stream"
@@ -60,6 +61,7 @@ type orchestratorFactory struct {
 	serverTools  map[string][]string  // server name -> prefixed tool names
 	skillLoader  *skill.Loader        // discovers global and per-user skills
 	userMCP      config.UserMCPConfig // per-user MCP tool timeouts/enabled flag
+	mcpMarket    *mcpmarket.Client    // optional MCP-market client (mcp-market capability; nil = off)
 	snapshots    SubAgentSnapshotStore
 }
 
@@ -98,6 +100,7 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 			ConnectTimeout:        f.userMCP.ConnectTimeout,
 			CallTimeout:           f.userMCP.CallTimeout,
 			MaxInlineResultTokens: f.userMCP.MaxInlineResultTokensOrDefault(),
+			Market:                f.mcpMarket,
 		})
 		closer = func() { _ = mcpMgr.Close() }
 	}
@@ -307,17 +310,19 @@ func (f *orchestratorFactory) renderSystemPrompt(ctx context.Context, cfg config
 	// description only) when the family is active. Credentials are never loaded
 	// into the prompt — only name/url/description are rendered.
 	if mcpMgr != nil {
-		input.UserMCP = collectUserMCPServers(ctx, workspaceRoot)
+		input.UserMCP = collectUserMCPServers(ctx, workspaceRoot, f.mcpMarket, userID)
 	}
 	return prompt.RenderSystemPrompt(input)
 }
 
-// collectUserMCPServers reads the caller's per-user MCP config and returns the
-// server-level descriptions for system-prompt advertisement. A missing or
-// unreadable config yields no servers (the read error is logged but never
-// crashes the turn — see the "malformed config does not crash" requirement).
-func collectUserMCPServers(ctx context.Context, workspaceRoot string) []prompt.MCPServerInfo {
-	cfg, err := mcp.LoadConfig(workspaceRoot)
+// collectUserMCPServers reads the caller's per-user MCP config (with market
+// entries merged in, workspace-first) and returns the server-level
+// descriptions for system-prompt advertisement. A missing or unreadable
+// config yields no servers (the read error is logged but never crashes the
+// turn — see the "malformed config does not crash" requirement); a market
+// failure degrades fail-closed to the workspace-only list.
+func collectUserMCPServers(ctx context.Context, workspaceRoot string, market *mcpmarket.Client, userID string) []prompt.MCPServerInfo {
+	cfg, err := mcp.LoadServersWithMarket(ctx, userID, workspaceRoot, market)
 	if err != nil {
 		logger.FromContext(ctx).Warn("load per-user mcp config for prompt failed; skipping user mcp advertisement",
 			zap.String("workspace", workspaceRoot),
@@ -326,7 +331,11 @@ func collectUserMCPServers(ctx context.Context, workspaceRoot string) []prompt.M
 	}
 	out := make([]prompt.MCPServerInfo, 0, len(cfg.Servers))
 	for _, s := range cfg.SortedServers() {
-		out = append(out, prompt.MCPServerInfo{Name: s.Name, Description: s.Description, URL: s.URL})
+		source := ""
+		if s.Market() {
+			source = "market"
+		}
+		out = append(out, prompt.MCPServerInfo{Name: s.Name, Description: s.Description, URL: s.URL, Source: source})
 	}
 	return out
 }
@@ -454,6 +463,16 @@ func NewOrchestrator(client LLMClient, cfg *config.Config, baseRegistry *tool.Re
 		snapshots:    snapshots,
 	}
 	return &Orchestrator{factory: factory, workspaceRootForUser: workspaceRootForUser}, nil
+}
+
+// WithMCPMarket attaches the MCP-market client (mcp-market capability) used
+// by per-turn managers and the system-prompt advertisement. nil (the
+// default) keeps workspace-only behavior. Chainable.
+func (o *Orchestrator) WithMCPMarket(c *mcpmarket.Client) *Orchestrator {
+	if f, ok := o.factory.(*orchestratorFactory); ok {
+		f.mcpMarket = c
+	}
+	return o
 }
 
 // WorkspaceRootForUser is a function type alias that maps a user ID to the

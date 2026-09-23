@@ -530,7 +530,7 @@ func TestListServers_RedactsCredentials(t *testing.T) {
 	})
 	m := NewManager(ManagerOptions{WorkspaceRoot: ws})
 
-	out, err := listServers(m)
+	out, err := listServers(context.Background(), m)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, "a", out[0].Name)
@@ -619,7 +619,7 @@ func TestRemoveServer_RemovesAndDropsConnection(t *testing.T) {
 	require.NoError(t, err)
 	_, _ = m.Conn(context.Background(), "calc") // warm the connection
 
-	res, err := removeServer(m, "calc")
+	res, err := removeServer(context.Background(), m, "calc")
 	require.NoError(t, err)
 	assert.Equal(t, "removed", res.Status)
 	assert.True(t, ft.closed, "cached connection must be dropped on remove")
@@ -634,7 +634,7 @@ func TestRemoveServer_RemovesAndDropsConnection(t *testing.T) {
 func TestRemoveServer_NotConfigured(t *testing.T) {
 	m := NewManager(ManagerOptions{WorkspaceRoot: t.TempDir()})
 	defer m.Close()
-	_, err := removeServer(m, "missing")
+	_, err := removeServer(context.Background(), m, "missing")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not configured")
 }
@@ -793,12 +793,12 @@ func TestPerUserIsolation(t *testing.T) {
 	defer bobMgr.Close()
 
 	// Each manager reads only its own config.
-	aliceServers, err := listServers(aliceMgr)
+	aliceServers, err := listServers(context.Background(), aliceMgr)
 	require.NoError(t, err)
 	require.Len(t, aliceServers, 1)
 	assert.Equal(t, "alice-srv", aliceServers[0].Name)
 
-	bobServers, err := listServers(bobMgr)
+	bobServers, err := listServers(context.Background(), bobMgr)
 	require.NoError(t, err)
 	require.Len(t, bobServers, 1)
 	assert.Equal(t, "bob-srv", bobServers[0].Name)
@@ -1102,7 +1102,7 @@ func TestListServers_CustomHeadersPlaintext(t *testing.T) {
 	})
 	m := NewManager(ManagerOptions{WorkspaceRoot: ws})
 
-	out, err := listServers(m)
+	out, err := listServers(context.Background(), m)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	// Custom header shown in plaintext.

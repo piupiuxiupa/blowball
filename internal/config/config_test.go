@@ -2325,3 +2325,74 @@ skill_market:
 		t.Fatalf("Load rejected a disabled skill_market block: %v", err)
 	}
 }
+
+// TestLoad_MCPMarketDisabledWhenOmitted verifies the mcp-market block-omitted
+// and url-empty states are fully off with default durations applied.
+func TestLoad_MCPMarketDisabledWhenOmitted(t *testing.T) {
+	base := `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`
+
+	for name, extra := range map[string]string{
+		"block omitted": "",
+		"empty url":     "\nmcp_market:\n  url: \"\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(writeTempYAML(t, base+extra))
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.MCPMarket.IsEnabled() {
+				t.Error("mcp_market should be disabled")
+			}
+			if cfg.MCPMarket.Timeout != defaultMCPMarketTimeout {
+				t.Errorf("Timeout = %s, want %s", cfg.MCPMarket.Timeout, defaultMCPMarketTimeout)
+			}
+			if cfg.MCPMarket.CacheTTL != defaultMCPMarketCacheTTL {
+				t.Errorf("CacheTTL = %s, want %s", cfg.MCPMarket.CacheTTL, defaultMCPMarketCacheTTL)
+			}
+		})
+	}
+}
+
+// TestLoad_MCPMarketEnabledAndInvalidURL verifies the enabled block loads with
+// defaults and a non-http(s) url fails the load.
+func TestLoad_MCPMarketEnabledAndInvalidURL(t *testing.T) {
+	base := `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+`
+
+	cfg, err := Load(writeTempYAML(t, base+"\nmcp_market:\n  url: \"http://market/api\"\n"))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.MCPMarket.IsEnabled() {
+		t.Fatal("mcp_market should be enabled by a non-empty url")
+	}
+
+	_, err = Load(writeTempYAML(t, base+"\nmcp_market:\n  url: \"ftp://x\"\n"))
+	if err == nil {
+		t.Fatal("ftp url should fail the load")
+	}
+	if !strings.Contains(err.Error(), "mcp_market.url") {
+		t.Errorf("error = %v, want mcp_market.url mention", err)
+	}
+}

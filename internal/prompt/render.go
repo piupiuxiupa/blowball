@@ -32,6 +32,9 @@ type MCPServerInfo struct {
 	Name        string
 	Description string
 	URL         string
+	// Source labels a market-sourced server ("market"); empty means the
+	// workspace-resident entry (the pre-market shape).
+	Source string
 }
 
 // RenderInput is the plain-data input to RenderSystemPrompt.
@@ -115,10 +118,14 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 			"is rejected before the remote call is even made. Credentials are managed " +
 			"server-side and are never shown to you.\n")
 		for _, s := range input.UserMCP {
+			source := ""
+			if s.Source != "" {
+				source = " [" + s.Source + "]"
+			}
 			if s.Description != "" {
-				fmt.Fprintf(&b, "- %s: %s (%s)\n", s.Name, s.Description, s.URL)
+				fmt.Fprintf(&b, "- %s: %s (%s)%s\n", s.Name, s.Description, s.URL, source)
 			} else {
-				fmt.Fprintf(&b, "- %s (%s)\n", s.Name, s.URL)
+				fmt.Fprintf(&b, "- %s (%s)%s\n", s.Name, s.URL, source)
 			}
 		}
 		b.WriteString("\n")
