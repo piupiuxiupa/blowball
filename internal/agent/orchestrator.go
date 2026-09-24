@@ -105,12 +105,17 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 		closer = func() { _ = mcpMgr.Close() }
 	}
 
-	rootReg, rootCfg, err := f.buildAgentRegistry(ctx, confuciusCfg, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+	subagentLimits := &prompt.SubagentDispatchLimits{
+		MaxConcurrent:   subagentCfg.MaxConcurrent,
+		MaxTotalPerTurn: subagentCfg.MaxTotalPerTurn,
+		MaxDepth:        subagentCfg.MaxDepth,
+	}
+	rootReg, rootCfg, err := f.buildAgentRegistry(ctx, confuciusCfg, subagentLimits, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
 	if err != nil {
 		closeTurn(closer)
 		return nil, nil, fmt.Errorf("agent factory: build confucius registry: %w", err)
 	}
-	subReg, renderedSubCfg, err := f.buildAgentRegistry(ctx, subagentCfg.AgentConfig, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+	subReg, renderedSubCfg, err := f.buildAgentRegistry(ctx, subagentCfg.AgentConfig, nil, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
 	if err != nil {
 		closeTurn(closer)
 		return nil, nil, fmt.Errorf("agent factory: build subagent registry: %w", err)
@@ -130,7 +135,7 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 		cfg.MaxRounds = spec.MaxRounds
 		cfg.OutputSchema = spec.OutputSchema
 		cfg.Retry = spec.Retry
-		rendered, err := f.renderSystemPrompt(ctx, cfg, workspaceRoot, globalSkillsDir, skillsDir, userID, spec.ToolRegistry, mcpMgr)
+		rendered, err := f.renderSystemPrompt(ctx, cfg, nil, workspaceRoot, globalSkillsDir, skillsDir, userID, spec.ToolRegistry, mcpMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -186,7 +191,7 @@ func unionToolNames(groups ...[]string) []string {
 // allowed by cfg.MCP, luban skill tools when they are configured, and the
 // per-user mcp_* tools when the agent lists one and a turn-scoped manager is
 // available.
-func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
+func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config.AgentConfig, subagentLimits *prompt.SubagentDispatchLimits, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
 	fullToolNames = append(fullToolNames, mcpToolNames...)
@@ -227,7 +232,7 @@ func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config
 		}
 	}
 
-	rendered, err := f.renderSystemPrompt(ctx, cfg, workspaceRoot, globalSkillsDir, userSkillsDir, userID, reg, mcpMgr)
+	rendered, err := f.renderSystemPrompt(ctx, cfg, subagentLimits, workspaceRoot, globalSkillsDir, userSkillsDir, userID, reg, mcpMgr)
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -281,7 +286,7 @@ func isLubanTool(name string) bool {
 }
 
 // renderSystemPrompt builds the complete system prompt for an agent.
-func (f *orchestratorFactory) renderSystemPrompt(ctx context.Context, cfg config.AgentConfig, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, reg *tool.Registry, mcpMgr *mcp.Manager) (string, error) {
+func (f *orchestratorFactory) renderSystemPrompt(ctx context.Context, cfg config.AgentConfig, subagentLimits *prompt.SubagentDispatchLimits, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, reg *tool.Registry, mcpMgr *mcp.Manager) (string, error) {
 	tools := f.collectTools(cfg)
 	// Per-user mcp_* tools are registered per-turn (not in the base registry),
 	// so surface them from the per-agent registry so the prompt advertises the
@@ -295,16 +300,17 @@ func (f *orchestratorFactory) renderSystemPrompt(ctx context.Context, cfg config
 	}
 
 	input := prompt.RenderInput{
-		BasePrompt:      cfg.SystemPrompt,
-		Workspace:       workspaceRoot,
-		GlobalSkillsDir: "/skills/global",
-		UserSkillsDir:   "/workspace/.blowball/skills",
-		UserID:          userID,
-		Platform:        runtime.GOARCH,
-		OS:              runtime.GOOS,
-		Cutoff:          "August 2025",
-		Tools:           tools,
-		Skills:          f.collectSkills(cfg),
+		BasePrompt:       cfg.SystemPrompt,
+		Workspace:        workspaceRoot,
+		GlobalSkillsDir:  "/skills/global",
+		UserSkillsDir:    "/workspace/.blowball/skills",
+		UserID:           userID,
+		Platform:         runtime.GOARCH,
+		OS:               runtime.GOOS,
+		Cutoff:           "August 2025",
+		Tools:            tools,
+		Skills:           f.collectSkills(cfg),
+		SubagentDispatch: subagentLimits,
 	}
 	// Advertise the caller's per-user MCP servers (server-level name +
 	// description only) when the family is active. Credentials are never loaded

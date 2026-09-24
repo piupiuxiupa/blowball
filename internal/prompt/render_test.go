@@ -32,6 +32,26 @@ func TestRenderSystemPrompt_EnvironmentOnly(t *testing.T) {
 	assert.NotContains(t, out, "- Workspace root: /data/u-1/workspace")
 }
 
+func TestRenderSystemPrompt_SubagentDispatchLimits(t *testing.T) {
+	out, err := RenderSystemPrompt(RenderInput{
+		BasePrompt: "You are a helpful assistant.",
+		UserID:     "u-1",
+		SubagentDispatch: &SubagentDispatchLimits{
+			MaxConcurrent:   5,
+			MaxTotalPerTurn: 9,
+			MaxDepth:        2,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "## Sub-agent Dispatch Planning and Budget")
+	assert.Contains(t, out, "At most 5 sub-agents may run concurrently")
+	assert.Contains(t, out, "At most 9 spawn_subagent dispatches")
+	assert.Contains(t, out, "at most 2 levels below Confucius")
+	assert.Contains(t, out, "per-turn budget is exhausted")
+	assert.Contains(t, out, "complete the remaining actionable work yourself")
+}
+
 func TestRenderSystemPrompt_WorkspacePathConvention(t *testing.T) {
 	out, err := RenderSystemPrompt(RenderInput{
 		BasePrompt: "You are a helpful assistant.",

@@ -52,6 +52,34 @@ func newTestOrchestrator(t *testing.T, client LLMClient) *Orchestrator {
 	return o
 }
 
+func TestOrchestrator_Build_RendersConfiguredSubagentBudget(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	cfg := &config.Config{
+		OpenAI: config.OpenAIConfig{APIKey: "test"},
+		Agents: config.AgentsConfig{
+			Confucius: config.AgentConfig{Name: "Confucius", SystemPrompt: "you are confucius"},
+			Subagent: config.SubAgentConfig{
+				AgentConfig:      config.AgentConfig{Name: "Subagent", SystemPrompt: "you are a subagent"},
+				MaxDepth:         2,
+				MaxConcurrent:    3,
+				MaxTotalPerTurn:  7,
+				MaxSnapshotBytes: 1 << 20,
+			},
+		},
+	}
+	o, err := NewOrchestrator(newFake(), cfg, nil, nil, skill.NewLoader("", nil), nil)
+	require.NoError(t, err)
+
+	root, closer, err := o.factory.Build(context.Background(), t.TempDir(), t.TempDir(), "user-1", ModelOverride{})
+	require.NoError(t, err)
+	defer closeTurn(closer)
+
+	assert.Contains(t, root.SystemPrompt(), "At most 3 sub-agents may run concurrently")
+	assert.Contains(t, root.SystemPrompt(), "At most 7 spawn_subagent dispatches")
+	assert.Contains(t, root.SystemPrompt(), "at most 2 levels below Confucius")
+}
+
 // TestOrchestrator_Build_AllXizhiToolsInBaseRegistry is a regression test for
 // the duplicate-registration crash when a new xizhi tool (e.g. xizhi_delete) is
 // enabled. The base registry is populated at startup via xizhi.RegisterAll (see

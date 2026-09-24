@@ -37,6 +37,14 @@ type MCPServerInfo struct {
 	Source string
 }
 
+// SubagentDispatchLimits carries the configured sub-agent topology budgets.
+// A nil pointer omits the dispatch guidance; only the root agent receives it.
+type SubagentDispatchLimits struct {
+	MaxConcurrent   int
+	MaxTotalPerTurn int
+	MaxDepth        int
+}
+
 // RenderInput is the plain-data input to RenderSystemPrompt.
 type RenderInput struct {
 	BasePrompt      string
@@ -51,6 +59,8 @@ type RenderInput struct {
 	Tools   []ToolInfo
 	Skills  []SkillInfo
 	UserMCP []MCPServerInfo
+
+	SubagentDispatch *SubagentDispatchLimits
 }
 
 // RenderSystemPrompt renders a complete system prompt from the provided input.
@@ -78,6 +88,11 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 
 	b.WriteString(renderDocumentPrompt())
 	b.WriteString("\n\n")
+
+	if input.SubagentDispatch != nil {
+		b.WriteString(renderSubagentDispatchPrompt(*input.SubagentDispatch))
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString(renderGetTimePrompt())
 	b.WriteString("\n\n")
@@ -166,6 +181,23 @@ func renderEnvironment(input RenderInput) string {
 - OS: %s
 - User ID: %s
 - Assistant knowledge cutoff: %s`, input.GlobalSkillsDir, input.UserSkillsDir, input.Platform, input.OS, input.UserID, input.Cutoff)
+}
+
+func renderSubagentDispatchPrompt(limits SubagentDispatchLimits) string {
+	return fmt.Sprintf(`## Sub-agent Dispatch Planning and Budget
+- For non-trivial multi-step work, call update_plan before dispatch and keep it current as results arrive.
+- Hard ceilings for this user turn:
+  - At most %d sub-agents may run concurrently across the whole tree.
+  - At most %d spawn_subagent dispatches are allowed in this user turn.
+  - Sub-agents may be at most %d levels below Confucius.
+- Treat these limits as safety ceilings, not goals. Use the fewest sub-agents that reliably complete the work and stay below the limits whenever possible.
+- Before dispatching, count spawn_subagent calls already used in this turn, including retries and continuations. Do not exceed the remaining total budget.
+- Emit independent spawn_subagent calls together, but never more than can run concurrently. Nested sub-agents share the same concurrency budget.
+- Spawn a sub-agent only for bounded, independently executable, separately verifiable work where isolation or parallelism adds clear value.
+- Do not spawn sub-agents for trivial, highly serial, unclear, or dependency-blocked work. Complete small work yourself and wait for preceding results first.
+- Give every sub-agent a short name and a self-contained task with the relevant plan step, acceptance criteria, paths, constraints, context, and prior results. Narrow its tools to the minimum needed.
+- If spawn_subagent reports that the per-turn budget is exhausted, do not call it again. Update the plan, complete the remaining actionable work yourself, verify results, and synthesize the final answer.`,
+		limits.MaxConcurrent, limits.MaxTotalPerTurn, limits.MaxDepth)
 }
 
 func renderWorkspaceConvention() string {
