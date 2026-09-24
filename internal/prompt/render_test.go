@@ -45,11 +45,17 @@ func TestRenderSystemPrompt_SubagentDispatchLimits(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "## Sub-agent Dispatch Planning and Budget")
+	assert.Contains(t, out, "Mark only the steps being dispatched now as in_progress")
 	assert.Contains(t, out, "At most 5 sub-agents may run concurrently")
 	assert.Contains(t, out, "At most 9 spawn_subagent dispatches")
 	assert.Contains(t, out, "at most 2 levels below Confucius")
+	assert.Contains(t, out, "Keep write sets disjoint")
+	assert.Contains(t, out, "status capped or status error")
+	assert.Contains(t, out, "only if the remaining budget allows it")
 	assert.Contains(t, out, "per-turn budget is exhausted")
-	assert.Contains(t, out, "complete the remaining actionable work yourself")
+	assert.Contains(t, out, "complete the remaining actionable steps yourself with your own tools")
+	assert.Contains(t, out, "If only the concurrency ceiling is reached")
+	assert.Contains(t, out, "do not duplicate their work yourself")
 }
 
 func TestRenderSystemPrompt_WorkspacePathConvention(t *testing.T) {
