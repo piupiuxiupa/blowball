@@ -426,13 +426,17 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: block})
 		}
 	}
-
+	req.Content += "\n" + `
+<current_status>
+	timestamp: ` + time.Now().Format(time.RFC3339) + `
+</current_status>
+	`
 	messages := append(agentMsgs, agent.Message{Role: "user", Content: req.Content})
 
 	// Capture the user message timestamp early so the persisted user row keeps
 	// the request-arrival time even though persistence is deferred until after
 	// the orchestrator succeeds.
-	userMsgTime := time.Now().UTC()
+	userMsgTime := time.Now()
 
 	// Turn-scoped persistence bookkeeping shared by the send-time user-row
 	// write, the mid-turn flush, and the turn-end save (context-compaction +

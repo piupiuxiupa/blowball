@@ -94,8 +94,8 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(renderGetTimePrompt())
-	b.WriteString("\n\n")
+	// b.WriteString(renderGetTimePrompt())
+	// b.WriteString("\n\n")
 
 	builtIn, mcpByServer := classifyTools(input.Tools)
 

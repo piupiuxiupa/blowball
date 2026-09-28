@@ -210,6 +210,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		}
 	} else {
 		if req.MaxCompletionTokens > 0 {
+			params.MaxCompletionTokens = openai.Int(int64(req.MaxCompletionTokens))
 			params.MaxTokens = openai.Int(int64(req.MaxCompletionTokens))
 		}
 	}
