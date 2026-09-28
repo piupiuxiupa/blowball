@@ -50,10 +50,16 @@ type Message struct {
 	MsgTime   time.Time `db:"msg_time"    json:"msg_time"`
 	Agent     string    `db:"agent"       json:"agent"`
 	MsgIndex  int       `db:"msg_index"   json:"msg_index"`
+	RoundNo   int       `db:"round_no"    json:"round_no,omitempty"`
 	Role      string    `db:"role"        json:"role"`
 	EventType string    `db:"event_type"  json:"event_type"`
+	Status    string    `db:"status"      json:"status,omitempty"`
 	Content   string    `db:"content"     json:"content"`
-	TraceID   string    `db:"trace_id"    json:"trace_id"`
+	// ReasoningContent holds the merged reasoning of an assistant FINAL row
+	// (event_type=message, refactor-message-storage). Legacy event rows keep
+	// it empty — their reasoning lives in separate event_type='reasoning' rows.
+	ReasoningContent string `db:"reasoning_content" json:"reasoning_content,omitempty"`
+	TraceID          string `db:"trace_id"          json:"trace_id"`
 	// ClientMsgID is the idempotency key minted at persistence time (UUID): the
 	// write-behind queue may redeliver a message (crash recovery, retry,
 	// fallback direct-write), and the messages table's UNIQUE index on

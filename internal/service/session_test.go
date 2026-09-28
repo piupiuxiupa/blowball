@@ -15,11 +15,10 @@ import (
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 )
 
-// TestSaveMessage_DualWrite_NoSyncMySQL verifies the Redis-first happy path:
-// one dual-write pipeline call carries the canonical JSON (with a freshly
-// minted client_msg_id) to both the read cache and the ingest queue, and NO
-// synchronous MySQL write or FS write happens.
-func TestSaveMessage_DualWrite_NoSyncMySQL(t *testing.T) {
+// TestSaveMessage_DirectWrite verifies the refactor-message-storage direct
+// path: the batch lands in MySQL synchronously, the read cache is appended,
+// and the minted client_msg_id rides the persisted row.
+func TestSaveMessage_DirectWrite(t *testing.T) {
 	const (
 		userID    = "u-1"
 		sessionID = "s-1"
@@ -47,10 +46,10 @@ func TestSaveMessage_DualWrite_NoSyncMySQL(t *testing.T) {
 	assert.Equal(t, msg.Content, got.Content)
 	assert.Equal(t, msg.SessionID, got.SessionID)
 
-	// The flusher owns the MySQL write now: no synchronous insert, no
-	// synchronous update_time, no FS touch.
-	assert.Equal(t, 0, m.appendMessagesCalls, "no synchronous MySQL write on the happy path")
-	assert.Equal(t, 0, m.updateSessionTimeCalls, "update_time refresh belongs to the flusher")
+	// Direct path: one synchronous idempotent insert plus the update_time
+	// refresh; no FS touch.
+	assert.Equal(t, 1, m.appendMessagesCalls, "direct MySQL write on the happy path")
+	assert.Equal(t, 1, m.updateSessionTimeCalls, "update_time refreshes with the direct write")
 	assert.Equal(t, 0, f.ensureCalls, "FS store is not part of the message write path")
 }
 
@@ -113,7 +112,7 @@ func TestSaveMessage_BothTiersFail_ErrorReturned(t *testing.T) {
 // TestSaveMessagesBatch_MixedEvents_DualWrite verifies a multi-message batch
 // (user message + assistant events) lands as ONE dual write with all rows in
 // order and each carrying a distinct client_msg_id.
-func TestSaveMessagesBatch_MixedEvents_DualWrite(t *testing.T) {
+func TestSaveMessagesBatch_MixedEvents_DirectWrite(t *testing.T) {
 	const (
 		userID    = "u-batch-1"
 		sessionID = "s-batch-1"
@@ -152,8 +151,8 @@ func TestSaveMessagesBatch_MixedEvents_DualWrite(t *testing.T) {
 	}
 	assert.Len(t, ids, 3, "every row gets a distinct client_msg_id")
 
-	assert.Equal(t, 0, m.appendMessagesCalls)
-	assert.Equal(t, 0, m.updateSessionTimeCalls)
+	assert.Equal(t, 1, m.appendMessagesCalls)
+	assert.Equal(t, 1, m.updateSessionTimeCalls)
 }
 
 // TestSaveMessagesBatch_Empty verifies an empty batch is a full no-op.

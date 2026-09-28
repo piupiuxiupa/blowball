@@ -76,8 +76,8 @@ func TestMessageCache_AppendGet(t *testing.T) {
 		[]byte(`{"i":1,"role":"assistant"}`),
 		[]byte(`{"i":2,"role":"tool"}`),
 	}
-	if err := store.AppendMessagesDual(ctx, "s-1", msgs); err != nil {
-		t.Fatalf("AppendMessagesDual: %v", err)
+	if err := store.AppendMessagesCache(ctx, "s-1", msgs); err != nil {
+		t.Fatalf("AppendMessagesCache: %v", err)
 	}
 
 	got, err := store.GetMessages(ctx, "s-1")

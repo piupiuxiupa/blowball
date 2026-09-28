@@ -262,14 +262,11 @@ func (s *SessionService) SaveMessage(ctx context.Context, userID string, msg mod
 	return s.SaveMessagesBatch(ctx, userID, []model.Message{msg})
 }
 
-// SaveMessagesBatch persists msgs through the Redis-first write-behind path:
-// every message is stamped with a freshly minted client_msg_id (the
-// idempotency key), and the whole batch is dual-written in ONE Redis
-// transactional pipeline — onto the per-session read cache (msgs:{session_id},
-// TTL refreshed) AND the global ingest queue (msgs:buffer, no TTL). A
-// background flusher (internal/msgflush, agent/all roles) later moves the
-// queue into MySQL in batches and refreshes sessions.update_time; no
-// synchronous MySQL write and no filesystem write happens on this path.
+// SaveMessagesBatch persists msgs through the direct path
+// (refactor-message-storage): an idempotent INSERT IGNORE into MySQL plus a
+// sessions.update_time refresh, then a best-effort append onto the per-session
+// read cache (msgs:{session_id}, TTL refreshed). A cache-append failure is
+// log-only — the next RecoverMessages backfills from MySQL.
 //
 // Failure policy: when the dual-write pipeline fails (Redis unavailable), the
 // batch falls back to a synchronous direct MySQL write (idempotent INSERT
@@ -307,7 +304,12 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 		msgs[i].ClientMsgID = id.String()
 	}
 
-	// One canonical JSON blob flows to both keys of the dual write.
+	if err := s.fallbackDirectWrite(ctx, log, msgs); err != nil {
+		return err
+	}
+
+	// Best-effort read-cache append (refactor-message-storage retired the
+	// ingest queue; the cache is a pure accelerator).
 	raws := make([][]byte, 0, len(msgs))
 	for i := range msgs {
 		raw, err := json.Marshal(msgs[i])
@@ -317,19 +319,47 @@ func (s *SessionService) SaveMessagesBatch(ctx context.Context, userID string, m
 		}
 		raws = append(raws, raw)
 	}
+	_ = s.redis.AppendMessagesCache(ctx, msgs[0].SessionID, raws)
+	return nil
+}
 
-	if err := s.redis.AppendMessagesDual(ctx, msgs[0].SessionID, raws); err != nil {
-		log.Error("redis dual-write failed; falling back to synchronous MySQL write",
-			zap.String("session_id", msgs[0].SessionID),
-			zap.Error(err))
-		return s.fallbackDirectWrite(ctx, log, msgs)
+// SaveFinalMessages persists one round batch (refactor-message-storage):
+// final message rows and their tool calls land in ONE MySQL transaction, the
+// session time refreshes, then the read cache is appended best-effort. The
+// caller retries the whole batch on failure — deterministic client_msg_ids
+// and the tool_calls unique key make redelivery idempotent.
+func (s *SessionService) SaveFinalMessages(ctx context.Context, userID string, msgs []model.Message, calls []model.ToolCall) error {
+	tid := trace.FromContext(ctx)
+	log := logger.L().With(
+		zap.String("op", "session.save_final_messages"),
+		zap.String("user_id", userID),
+	)
+	if tid != "" {
+		log = log.With(zap.String("trace_id", tid))
+	}
+	if len(msgs) == 0 && len(calls) == 0 {
+		return nil
 	}
 
-	// Wake the flusher (non-blocking): a signal lets it flush early once the
-	// queue has crossed its batch threshold instead of waiting for the next
-	// interval tick.
-	if s.nudge != nil {
-		s.nudge()
+	if err := s.mysql.AppendFinalBatch(ctx, msgs, calls); err != nil {
+		log.Error("round batch transaction failed",
+			zap.Int("msgs", len(msgs)),
+			zap.Int("calls", len(calls)),
+			zap.Error(err))
+		return fmt.Errorf("session.save_final_messages: %w", err)
+	}
+	if len(msgs) > 0 {
+		if err := s.mysql.UpdateSessionTime(ctx, msgs[0].SessionID); err != nil {
+			log.Error("update session time failed", zap.String("session_id", msgs[0].SessionID), zap.Error(err))
+		}
+		// Best-effort read-cache append; a miss backfills from MySQL.
+		raws := make([][]byte, 0, len(msgs))
+		for i := range msgs {
+			if raw, err := json.Marshal(msgs[i]); err == nil {
+				raws = append(raws, raw)
+			}
+		}
+		_ = s.redis.AppendMessagesCache(ctx, msgs[0].SessionID, raws)
 	}
 	return nil
 }

@@ -199,6 +199,20 @@ func (f *fakeMySQLStore) AppendMessages(_ context.Context, msgs []model.Message)
 	return f.appendMessagesIDs, nil
 }
 
+func (f *fakeMySQLStore) AppendFinalBatch(_ context.Context, msgs []model.Message, calls []model.ToolCall) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appendMessagesCalls++
+	f.appendMessagesArg = msgs
+	if f.order != nil {
+		*f.order = append(*f.order, "mysql.append")
+	}
+	if f.appendMessagesErr != nil {
+		return f.appendMessagesErr
+	}
+	return nil
+}
+
 func (f *fakeMySQLStore) ListMessages(_ context.Context, sessionID string) ([]model.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -327,7 +341,7 @@ func (f *fakeMySQLStore) LatestContextTokens(_ context.Context, _ string) (int, 
 	return f.latestContextTokens, nil
 }
 
-// fakeRedisStore records AppendMessagesDual/GetMessages/SetMessages/
+// fakeRedisStore records AppendMessagesCache/GetMessages/SetMessages/
 // ClearMessages/DelSessionCache calls. Order entries feed the delete-path
 // ordering assertions.
 type fakeRedisStore struct {
@@ -363,7 +377,7 @@ type fakeRedisStore struct {
 	order *[]string
 }
 
-func (f *fakeRedisStore) AppendMessagesDual(_ context.Context, sessionID string, raws [][]byte) error {
+func (f *fakeRedisStore) AppendMessagesCache(_ context.Context, sessionID string, raws [][]byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dualCalls++

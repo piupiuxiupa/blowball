@@ -32,6 +32,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 
 	cleanup := func() {
 		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS messages")
+		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS tool_calls")
 		_ = store.Close()
 	}
 
@@ -49,9 +50,12 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			msg_time    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			agent       VARCHAR(32)  NOT NULL,
 			msg_index   INT          NOT NULL,
+			round_no    INT          NULL,
 			role        VARCHAR(16)  NULL,
 			event_type  VARCHAR(16)  NOT NULL DEFAULT 'token',
+			status      VARCHAR(16)  NULL,
 			content     MEDIUMTEXT   NOT NULL,
+			reasoning_content MEDIUMTEXT NULL,
 			trace_id    CHAR(36)     NOT NULL,
 			client_msg_id CHAR(36)   NULL,
 			run_id      CHAR(64)     NULL,
@@ -60,6 +64,27 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			PRIMARY KEY (id),
 			KEY idx_messages_session_time (session_id, msg_time),
 			UNIQUE KEY uk_messages_client_msg_id (client_msg_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+	`)
+	require.NoError(t, err)
+
+	// tool_calls mirrors migration 020 for the round-batch tests.
+	_, err = store.db.ExecContext(context.Background(), `
+		CREATE TABLE IF NOT EXISTS tool_calls (
+			id           BIGINT       NOT NULL AUTO_INCREMENT,
+			session_id   CHAR(36)     NOT NULL,
+			turn_id      CHAR(36)     NOT NULL,
+			round_no     INT          NOT NULL,
+			tool_call_id VARCHAR(64)  NOT NULL,
+			name         VARCHAR(128) NOT NULL,
+			arguments    MEDIUMTEXT   NOT NULL,
+			result       MEDIUMTEXT   NULL,
+			status       VARCHAR(16)  NOT NULL DEFAULT 'pending',
+			create_time  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+			update_time  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_tool_calls_session_call (session_id, tool_call_id),
+			KEY ix_tool_calls_session_turn_round (session_id, turn_id, round_no)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 	`)
 	require.NoError(t, err)

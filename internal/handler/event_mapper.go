@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -80,106 +78,6 @@ func UserMessage(sessionID, traceID, content string, msgTime time.Time) model.Me
 		TraceID:     traceID,
 		ClientMsgID: deterministicClientMsgID(traceID, 0),
 	}
-}
-
-// MessageFromEvent maps a StreamEvent produced by the orchestrator into a
-// model.Message ready for persistence. Marker events (agent_start/agent_end)
-// leave Role empty; token/tool_call events carry the OpenAI assistant role;
-// tool_call content is JSON-encoded as {"tool_call_id":"...","name":..., "args":...};
-// tool_result content is JSON-encoded as {"tool_call_id":"...","output":...}.
-// The client_msg_id is the deterministic {trace_id}:{msg_index} keyed to the
-// event's ordinal within the MERGED stream — callers must pass the merged
-// index so the mid-turn flush and the turn-end save agree on every row.
-func MessageFromEvent(e stream.StreamEvent, sessionID, traceID string, msgIndex int, msgTime time.Time) (model.Message, error) {
-	msg := model.Message{
-		SessionID:   sessionID,
-		MsgTime:     msgTime,
-		Agent:       e.Agent,
-		MsgIndex:    msgIndex,
-		TraceID:     traceID,
-		ClientMsgID: deterministicClientMsgID(traceID, msgIndex),
-		// Sub-agent invocation identity (subagent-run-identity capability):
-		// stamped onto every event of a sub-agent Run by the dispatch layer.
-		// Absent on Confucius's own events and on user rows (built by
-		// UserMessage, which never sets it).
-		AgentInstanceID: agentInstanceIDFromEvent(e),
-		RunID:           runIDFromEvent(e),
-	}
-
-	switch e.Type {
-	case stream.EventToken:
-		msg.EventType = model.EventTypeToken
-		msg.Role = model.RoleAssistant
-		msg.Content = e.Content
-	case stream.EventReasoning:
-		msg.EventType = model.EventTypeReasoning
-		msg.Role = model.RoleAssistant
-		msg.Content = e.Content
-	case stream.EventToolCall:
-		msg.EventType = model.EventTypeToolCall
-		msg.Role = model.RoleAssistant
-		toolCallID, _ := e.Meta[stream.MetaToolCallID].(string)
-		args := e.Meta[stream.MetaArgs]
-		if args == nil {
-			args = map[string]any{}
-		}
-		payload := map[string]any{"tool_call_id": toolCallID, "name": e.Content, "args": args}
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return model.Message{}, fmt.Errorf("marshal tool_call content: %w", err)
-		}
-		msg.Content = string(b)
-	case stream.EventToolResult:
-		msg.EventType = model.EventTypeToolResult
-		msg.Role = model.RoleTool
-		toolCallID, _ := e.Meta[stream.MetaToolCallID].(string)
-		output, err := marshalToolResultOutput(e.Content)
-		if err != nil {
-			return model.Message{}, fmt.Errorf("marshal tool_result content: %w", err)
-		}
-		payload := map[string]any{"tool_call_id": toolCallID, "output": output}
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return model.Message{}, fmt.Errorf("marshal tool_result content: %w", err)
-		}
-		msg.Content = string(b)
-	case stream.EventPlanUpdated:
-		msg.EventType = model.EventTypePlanUpdated
-		msg.Role = ""
-		msg.Content = e.Content
-	case stream.EventAgentStart:
-		msg.EventType = model.EventTypeAgentStart
-		msg.Role = ""
-	case stream.EventAgentEnd:
-		msg.EventType = model.EventTypeAgentEnd
-		msg.Role = ""
-	case stream.EventAgentError:
-		msg.EventType = model.EventTypeAgentError
-		msg.Role = ""
-		msg.Content = e.Content
-	default:
-		// Unknown event types are persisted verbatim with an empty role so the
-		// store never silently drops events.
-		msg.EventType = e.Type
-		msg.Role = ""
-		msg.Content = e.Content
-	}
-
-	return msg, nil
-}
-
-// marshalToolResultOutput returns the output value to serialize inside a
-// tool_result payload. If content is valid JSON, it returns the decoded value
-// so it serializes as structured data; otherwise it returns the raw string.
-func marshalToolResultOutput(content string) (any, error) {
-	if content == "" {
-		return "", nil
-	}
-	var v any
-	if err := json.Unmarshal([]byte(content), &v); err == nil {
-		return v, nil
-	}
-	return content, nil
 }
 
 // runIDFromEvent extracts the sub-agent invocation identity from an event's

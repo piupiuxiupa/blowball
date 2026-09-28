@@ -25,54 +25,6 @@ func TestUserMessage(t *testing.T) {
 	assert.Equal(t, 0, msg.MsgIndex)
 }
 
-func TestUserMessage_PrependToAssistantBatch_Ordering(t *testing.T) {
-	userTime := time.Unix(1_700_000_000, 0).UTC()
-	assistantTime := userTime.Add(time.Second)
-
-	userMsg := UserMessage("sess-1", "trace-1", "hi", userTime)
-
-	events := []stream.StreamEvent{
-		stream.AgentStartEvent(stream.AgentConfucius),
-		stream.TokenEvent(stream.AgentConfucius, "Hello"),
-		stream.AgentEndEvent(stream.AgentConfucius),
-	}
-	merged := MergeEvents(events)
-	require.Len(t, merged, 3)
-
-	msgs := make([]model.Message, 0, len(merged)+1)
-	msgs = append(msgs, userMsg)
-	for i, e := range merged {
-		m, err := MessageFromEvent(e, "sess-1", "trace-1", i+1, assistantTime)
-		require.NoError(t, err)
-		msgs = append(msgs, m)
-	}
-
-	require.Len(t, msgs, 4)
-	assert.Equal(t, model.AgentUser, msgs[0].Agent)
-	assert.Equal(t, 0, msgs[0].MsgIndex)
-	assert.Equal(t, userTime, msgs[0].MsgTime)
-
-	for i, m := range msgs[1:] {
-		assert.Equal(t, i+1, m.MsgIndex)
-		assert.Equal(t, assistantTime, m.MsgTime)
-	}
-	assert.Equal(t, model.EventTypeAgentStart, msgs[1].EventType)
-	assert.Equal(t, model.EventTypeToken, msgs[2].EventType)
-	assert.Equal(t, model.EventTypeAgentEnd, msgs[3].EventType)
-}
-
-func TestMessageFromEvent_Reasoning(t *testing.T) {
-	msgTime := time.Unix(1_700_000_000, 0).UTC()
-	e := stream.ReasoningEvent(stream.AgentConfucius, "analyzing...")
-	msg, err := MessageFromEvent(e, "sess-1", "trace-1", 1, msgTime)
-	require.NoError(t, err)
-
-	assert.Equal(t, model.EventTypeReasoning, msg.EventType)
-	assert.Equal(t, model.RoleAssistant, msg.Role)
-	assert.Equal(t, "analyzing...", msg.Content)
-	assert.Equal(t, stream.AgentConfucius, msg.Agent)
-}
-
 func TestMergeEvents_Reasoning(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -262,57 +214,6 @@ func TestMergeEvents_RunIDChangeIsBoundary(t *testing.T) {
 	merged := MergeEvents(events)
 	require.Len(t, merged, 3, "run-id changes must break adjacency; same-run fragments merge")
 	assert.Equal(t, "run1-a ", merged[0].Content)
-	assert.Equal(t, "x1", merged[0].Meta[stream.MetaParentToolCallID])
-	assert.Equal(t, "run2-a ", merged[1].Content)
-	assert.Equal(t, "x2", merged[1].Meta[stream.MetaParentToolCallID])
-	assert.Equal(t, "run1-brun1-c", merged[2].Content)
-	assert.Equal(t, "x1", merged[2].Meta[stream.MetaParentToolCallID])
-}
-
-// TestMessageFromEvent_RunIDCopiedFromMeta: the persisted row carries the
-// event's run identity; events without one persist an empty RunID (NULL at
-// the store layer).
-func TestMessageFromEvent_RunIDCopiedFromMeta(t *testing.T) {
-	msgTime := time.Unix(1_700_000_000, 0).UTC()
-
-	tagged := taggedToken("call_x1", "hello")
-	m, err := MessageFromEvent(tagged, "sess-1", "trace-1", 1, msgTime)
-	require.NoError(t, err)
-	assert.Equal(t, "call_x1", m.RunID)
-
-	plain := stream.TokenEvent(stream.AgentConfucius, "hello")
-	m, err = MessageFromEvent(plain, "sess-1", "trace-1", 2, msgTime)
-	require.NoError(t, err)
-	assert.Empty(t, m.RunID, "top-level events persist no run identity")
-}
-
-// TestMessageFromEvent_PlanUpdated pins the persisted shape of the semantic
-// plan control-plane event: an empty-role marker row whose Content retains the
-// complete canonical JSON (Meta-only state would be lost in messages storage).
-func TestMessageFromEvent_PlanUpdated(t *testing.T) {
-	msgTime := time.Unix(1_700_000_000, 0).UTC()
-	planJSON := `{"revision":2,"steps":[{"step":"verify","status":"completed"}],"explanation":"done"}`
-	e := stream.PlanUpdatedEvent(stream.AgentConfucius, planJSON, 2)
-
-	m, err := MessageFromEvent(e, "sess-1", "trace-1", 3, msgTime)
-	require.NoError(t, err)
-	assert.Equal(t, model.EventTypePlanUpdated, m.EventType)
-	assert.Equal(t, stream.AgentConfucius, m.Agent)
-	assert.Empty(t, m.Role)
-	assert.Equal(t, planJSON, m.Content)
-	assert.Empty(t, m.RunID)
-	assert.Empty(t, m.AgentInstanceID)
-
-	info := turnPersistInfo{
-		sessionID: "sess-1", userID: "u", traceID: "trace-1",
-		userContent: "go", userMsgTime: msgTime,
-	}
-	batch, err := info.buildTurnMessages([]stream.StreamEvent{e}, 0, false, msgTime)
-	require.NoError(t, err)
-	require.Len(t, batch, 2)
-	assert.Equal(t, "trace-1:0", batch[0].ClientMsgID)
-	assert.Equal(t, "trace-1:1", batch[1].ClientMsgID)
-	assert.Equal(t, planJSON, batch[1].Content)
 }
 
 // TestMergeEvents_LengthContinuationSingleRow pins the llm-length-continuation

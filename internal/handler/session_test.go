@@ -143,8 +143,12 @@ type handlerFakeMySQL struct {
 	// appendMessagesErrFirst fails only the first N AppendMessages calls
 	// (harden-turn-persistence: send-time dual failure, turn-end recovery).
 	appendMessagesErrFirst int
-	listMessagesRows       []model.Message
-	listMessagesErr        error
+	// finalBatchHold parks the terminal AppendFinalBatch call — a timing
+	// probe for shutdown-order tests.
+	finalBatchEntered chan struct{}
+	finalBatchHold    chan struct{}
+	listMessagesRows  []model.Message
+	listMessagesErr   error
 	// listMessagesPagedCalls records every ListMessagesPaged call so tests can
 	// verify the validated subagent_content mode is threaded through (and that
 	// an invalid mode never reaches the store).
@@ -244,6 +248,41 @@ func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Messag
 	}
 	return ids, nil
 }
+
+func (m *handlerFakeMySQL) AppendFinalBatch(_ context.Context, msgs []model.Message, calls []model.ToolCall) error {
+	m.mu.Lock()
+	entered, hold := m.finalBatchEntered, m.finalBatchHold
+	m.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if hold != nil {
+		<-hold
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appendMessagesCalls++
+	m.appendMessagesArg = msgs
+	if m.appendMessagesErrFirst > 0 {
+		m.appendMessagesErrFirst--
+		return errFakeHandler
+	}
+	if m.appendMessagesErr != nil {
+		return m.appendMessagesErr
+	}
+	return nil
+}
+
+func (m *handlerFakeMySQL) setFinalBatchHold(entered, hold chan struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.finalBatchEntered = entered
+	m.finalBatchHold = hold
+}
+
 func (m *handlerFakeMySQL) ListMessages(_ context.Context, _ string) ([]model.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -392,7 +431,7 @@ type handlerFakeRedis struct {
 	getCompactionCalls int
 }
 
-func (r *handlerFakeRedis) AppendMessagesDual(_ context.Context, sessionID string, raws [][]byte) error {
+func (r *handlerFakeRedis) AppendMessagesCache(_ context.Context, sessionID string, raws [][]byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.dualCalls++

@@ -21,7 +21,7 @@
 - **AND** 该轮结束后 `messages` 只有一行 assistant 终稿
 
 ### Requirement: tool_calls table is the canonical tool interaction store
-`tool_calls` 表 SHALL 为工具交互的唯一权威存储：每行包含 `tool_call_id`（配对键）、`name`、`arguments`、`result`、`status`、`(session_id, turn_id, round_no)` 序数与起止时间。call 与 result SHALL 同行存储。`(session_id, tool_call_id)` SHALL 为唯一键，使重试幂等。工具交互数据 SHALL NOT 重复存储于 `messages`。
+`tool_calls` 表 SHALL 为工具交互的唯一权威存储：每行包含 `tool_call_id`（配对键）、`name`、`arguments`、`result`、`status` 与 `(session_id, turn_id, round_no)` 序数。call 与 result SHALL 同行存储。`(session_id, tool_call_id)` SHALL 为唯一键，使重试幂等。工具交互数据 SHALL NOT 重复存储于 `messages`。
 
 #### Scenario: call 与 result 同行配对
 - **WHEN** round 内工具 `call_abc` 执行完成

@@ -168,20 +168,12 @@ const (
 	// turnPersistRetryBackoff parks between attempts so a dead dependency is
 	// retried at a calm pace instead of hot-looping.
 	turnPersistRetryBackoff = 1 * time.Second
-	// turnEndDrainTimeout bounds the synchronous drain executed after the
-	// terminal batch lands in Redis and before the session claim is released,
-	// so the history endpoint (a pure MySQL reader) sees the complete turn as
-	// soon as generating flips false. A drain failure only WARNs — the
-	// background flusher closes the ≤1s residual gap.
-	turnEndDrainTimeout = 5 * time.Second
 )
 
-// incrementalPersistEvery is the cadence of the mid-turn incremental
-// persister (incremental-message-persistence). It deliberately matches the
-// message flusher's default interval: pushing closed entries into msgs:buffer
-// faster than the flusher drains them only grows the queue — MySQL visibility
-// is gated by the flusher either way. A var (not const) so tests can shrink
-// it; production never touches it.
+// incrementalPersistEvery is the cadence of the mid-turn round persister
+// (refactor-message-storage): a polling window that picks up newly closed
+// rounds. A var (not const) so tests can shrink it; production never touches
+// it.
 var incrementalPersistEvery = 1 * time.Second
 
 // SendMessage handles POST /api/v1/sessions/:session_id/messages.
@@ -642,8 +634,9 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// terminal batch computes its suffix.
 	stopIncremental := h.startIncrementalPersister(saveCtx, tap, persist, flushed)
 
-	// persistTurnEvents writes the supplied assistant event stream as the
-	// turn-end batch through the existing SaveMessagesBatch path and persists
+	// persistTurnEvents renders the supplied assistant event stream as the
+	// turn-end final batch (refactor-message-storage: round finals + tool
+	// calls, one transaction) and persists
 	// the turn's per-agent cost into turn_usage. It runs SYNCHRONOUSLY on the
 	// turn goroutine (harden-turn-persistence): the terminal batch must be
 	// durable before Finalize releases the session claim, so a process death
@@ -664,7 +657,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// post-flush suffix is persisted — the deterministic client_msg_ids would
 	// collapse the rows in MySQL, but the Redis msgs:{sid} read cache has no
 	// such dedup, so the suffix split keeps the cache list exact.
-	persistTurnEvents := func(events []stream.StreamEvent, usage map[string]any) {
+	persistTurnEvents := func(events []stream.StreamEvent, usage map[string]any, interrupted bool) {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.FromContext(saveCtx).Error("panic saving event stream",
@@ -711,15 +704,10 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			}(tc)
 		}
 
-		msgs, mErr := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), now)
-		if mErr != nil {
-			logger.FromContext(saveCtx).Error("map event to message failed",
-				zap.String("op", "handler.send_message"),
-				zap.Error(mErr))
-			return
-		}
+		batch, consumed := persist.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(), now,
+			roundRenderOptions{terminal: true, interrupted: interrupted})
 
-		if len(msgs) > 0 {
+		if len(batch.msgs) > 0 || len(batch.calls) > 0 {
 			// Bounded retry (harden-turn-persistence D4): the batch carries
 			// deterministic client_msg_ids, so redelivery collapses to one
 			// row per message — retrying the whole SaveMessagesBatch is
@@ -729,12 +717,12 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			var lastErr error
 			deadline := time.Now().Add(turnPersistBudget)
 			for attempt := 1; attempt <= turnPersistAttempts; attempt++ {
-				if err := h.sessSvc.SaveMessagesBatch(saveCtx, userID, msgs); err != nil {
+				if err := h.sessSvc.SaveFinalMessages(saveCtx, userID, batch.msgs, batch.calls); err != nil {
 					lastErr = err
 					logger.FromContext(saveCtx).Warn("turn-end message persist attempt failed",
 						zap.String("op", "handler.send_message"),
 						zap.Int("attempt", attempt),
-						zap.Int("rows", len(msgs)),
+						zap.Int("rows", len(batch.msgs)),
 						zap.Error(err))
 					if attempt == turnPersistAttempts || !time.Now().Add(turnPersistRetryBackoff).Before(deadline) {
 						break
@@ -750,9 +738,10 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 					zap.String("op", "handler.send_message"),
 					zap.String("session_id", sessionID),
 					zap.String("run_id", tid),
-					zap.Int("rows", len(msgs)),
+					zap.Int("rows", len(batch.msgs)),
 					zap.Error(lastErr))
 			}
+			flushed.mark(consumed)
 		}
 
 		// Persist per-agent token cost into turn_usage AFTER the message
@@ -819,22 +808,11 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// the session claim is only released after this turn's message batch
 		// is durable, making generating:false a reliable "history complete"
 		// signal for clients.
-		persistTurnEvents(events, usage)
+		persistTurnEvents(events, usage, err != nil)
 
-		// Drain-before-release (D5): the terminal batch is in Redis
-		// (msgs:{sid} + msgs:buffer); a bounded synchronous drain lands it in
-		// MySQL before the claim flips so the history endpoint (a pure MySQL
-		// reader) observes the complete turn the moment generating turns
-		// false. A drain failure is a WARN, not a blocker — the background
-		// flusher closes the ≤1s gap.
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), turnEndDrainTimeout)
-		if derr := h.sessSvc.DrainMessages(drainCtx); derr != nil {
-			logger.FromContext(saveCtx).Warn("turn-end drain failed; flusher will catch up",
-				zap.String("op", "handler.send_message"),
-				zap.String("run_id", tid),
-				zap.Error(derr))
-		}
-		drainCancel()
+		// (Drain-before-release D5 is retired with the ingest queue: the
+		// terminal batch above is a synchronous transactional MySQL write —
+		// history is complete the moment it returns.)
 		stopHeartbeat()
 
 		// Terminal run bookkeeping (turn-detach-resume) runs ON THE TURN
@@ -973,32 +951,6 @@ type turnPersistInfo struct {
 	userMsgTime time.Time
 }
 
-// buildTurnMessages renders the persistence batch for merged events
-// [from:len(merged)] plus the user message when from == 0 AND the user row was
-// not already persisted at send time (send-time-user-message-persistence:
-// callers pass the turn's userPersisted flag — the Redis msgs:{sid} list has
-// no dedup, so a re-included user row would read back duplicated). Message
-// ordinals are the merged-stream positions (user = 0, events 1..N), so an
-// overlapping re-render produces the SAME deterministic client_msg_ids and the
-// MySQL UNIQUE index collapses any redelivery.
-func (p turnPersistInfo) buildTurnMessages(merged []stream.StreamEvent, from int, userPersisted bool, now time.Time) ([]model.Message, error) {
-	if from > len(merged) {
-		from = len(merged)
-	}
-	var msgs []model.Message
-	if from == 0 && !userPersisted {
-		msgs = append(msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime))
-	}
-	for i := from; i < len(merged); i++ {
-		msg, err := MessageFromEvent(merged[i], p.sessionID, p.traceID, i+1, now)
-		if err != nil {
-			return nil, err
-		}
-		msgs = append(msgs, msg)
-	}
-	return msgs, nil
-}
-
 // turnFlushState tracks how much of the turn's merged event stream a mid-turn
 // flush has already persisted, plus whether the turn's user row was already
 // persisted at send time (send-time-user-message-persistence). It is written
@@ -1077,10 +1029,11 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 			zap.Int("context_tokens", contextTokens),
 		)
 
-		// ① Flush-first: persist the turn so far through the ordinary batch
-		// path. Compaction has a hard dependency on the flush — the boundary
-		// cursor must point at real persisted rows — so a flush failure aborts
-		// the compaction attempt.
+		// ① Flush-first: persist the turn so far as round finals through the
+		// transactional batch path. Compaction has a hard dependency on the
+		// flush — the boundary cursor must point at real persisted rows — so
+		// a flush failure aborts the compaction attempt. terminal=true closes
+		// the in-flight round: this hook runs after its results landed.
 		events := tap.Snapshot(ctx)
 		if events == nil {
 			log.Warn("mid-turn event snapshot unavailable; compaction skipped")
@@ -1091,20 +1044,16 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 		// persister (incremental-message-persistence): both read the flushed
 		// cursor, persist a non-overlapping range, then advance it.
 		flushed.persistMu.Lock()
-		msgs, err := persist.buildTurnMessages(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC())
-		if err != nil {
-			flushed.persistMu.Unlock()
-			log.Warn("mid-turn flush batch build failed; compaction skipped", zap.Error(err))
-			return nil
-		}
-		if len(msgs) > 0 {
-			if err := h.sessSvc.SaveMessagesBatch(ctx, persist.userID, msgs); err != nil {
+		batch, consumed := persist.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC(),
+			roundRenderOptions{terminal: true})
+		if len(batch.msgs) > 0 || len(batch.calls) > 0 {
+			if err := h.sessSvc.SaveFinalMessages(ctx, persist.userID, batch.msgs, batch.calls); err != nil {
 				flushed.persistMu.Unlock()
 				log.Warn("mid-turn flush failed; compaction skipped", zap.Error(err))
 				return nil
 			}
+			flushed.mark(consumed)
 		}
-		flushed.mark(len(merged))
 		flushed.persistMu.Unlock()
 
 		// ② Recover the now-complete history from the DURABLE tier (bounded
@@ -1186,13 +1135,12 @@ func startPersistHeartbeat(saveCtx context.Context, store run.Store, runID, sess
 	}
 }
 
-// startIncrementalPersister arms the mid-turn incremental persister
-// (incremental-message-persistence): every incrementalPersistEvery it
-// snapshots the turn's collected event stream through the (now unconditional)
-// TurnEventTap and persists the CLOSED merged-event prefix — everything except
-// the last merged entry, which may still be growing (MergeEvents only merges
-// adjacent token/reasoning events, so every earlier entry is final). The
-// persisted range continues the shared flushed cursor: identical merged
+// startIncrementalPersister arms the mid-turn round persister
+// (refactor-message-storage): every incrementalPersistEvery it snapshots the
+// turn's collected event stream through the TurnEventTap and persists CLOSED
+// ROUNDS as final batches — a round closes when the next round's first token
+// arrives, so the trailing (still-streaming) round never lands half-baked.
+// The persisted range continues the shared flushed cursor: identical round
 // ordinals, identical deterministic client_msg_ids as the terminal view, and
 // strictly non-overlapping ranges — the msgs:{sid} read cache has no dedup.
 //
@@ -1230,34 +1178,20 @@ func (h *MessageStreamHandler) startIncrementalPersister(
 					continue // turn over (tap closed) or ctx done
 				}
 				merged := MergeEvents(events)
-				if len(merged) < 2 {
-					continue // nothing closed yet
-				}
-				closed := len(merged) - 1 // last entry may still grow
-
 				flushed.persistMu.Lock()
-				from := flushed.count()
-				if closed <= from {
+				batch, consumed := persist.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(),
+					time.Now().UTC(), roundRenderOptions{})
+				if len(batch.msgs) == 0 && len(batch.calls) == 0 {
 					flushed.persistMu.Unlock()
 					continue
 				}
-				msgs, err := persist.buildTurnMessages(merged[:closed], from, flushed.userPersisted(), time.Now().UTC())
-				if err != nil {
+				if err := h.sessSvc.SaveFinalMessages(saveCtx, persist.userID, batch.msgs, batch.calls); err != nil {
 					flushed.persistMu.Unlock()
-					log.Warn("incremental batch build failed; terminal batch will cover it", zap.Error(err))
+					log.Warn("round persist failed; will retry next tick",
+						zap.Int("rows", len(batch.msgs)), zap.Error(err))
 					continue
 				}
-				if len(msgs) == 0 {
-					flushed.persistMu.Unlock()
-					continue
-				}
-				if err := h.sessSvc.SaveMessagesBatch(saveCtx, persist.userID, msgs); err != nil {
-					flushed.persistMu.Unlock()
-					log.Warn("incremental persist failed; will retry next tick",
-						zap.Int("from", from), zap.Int("rows", len(msgs)), zap.Error(err))
-					continue
-				}
-				flushed.mark(closed)
+				flushed.mark(consumed)
 				flushed.persistMu.Unlock()
 			}
 		}

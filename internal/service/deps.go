@@ -30,6 +30,9 @@ type MySQLStore interface {
 	// UNIQUE client_msg_id — the SaveMessagesBatch fallback direct-write path
 	// relies on the same idempotency the background flusher does.
 	AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error)
+	// AppendFinalBatch writes one round batch (final message rows + tool
+	// calls) in a single transaction (refactor-message-storage).
+	AppendFinalBatch(ctx context.Context, msgs []model.Message, calls []model.ToolCall) error
 	ListMessages(ctx context.Context, sessionID string) ([]model.Message, error)
 	// ListMessagesPaged returns one cursor page in the selected sub-agent
 	// content view (model.SubagentContentFull/Placeholder); the placeholder
@@ -49,11 +52,10 @@ type MySQLStore interface {
 // RedisStore is the subset of the cache layer that SessionService /
 // MessageService call. It is satisfied by *redis.Store.
 type RedisStore interface {
-	// AppendMessagesDual is the write-behind dual write: one transactional
-	// pipeline pushing the batch onto BOTH the per-session read cache
-	// (msgs:{session_id}, TTL refreshed) and the global ingest queue
-	// (msgs:buffer, no TTL).
-	AppendMessagesDual(ctx context.Context, sessionID string, raws [][]byte) error
+	// AppendMessagesCache is the read-cache append: one pipeline pushing the
+	// batch onto msgs:{session_id} (TTL refreshed). Cache-only by design
+	// (refactor-message-storage retired the ingest queue).
+	AppendMessagesCache(ctx context.Context, sessionID string, raws [][]byte) error
 	GetMessages(ctx context.Context, sessionID string) ([][]byte, error)
 	SetMessages(ctx context.Context, sessionID string, raws [][]byte) error
 	ClearMessages(ctx context.Context, sessionID string) error
