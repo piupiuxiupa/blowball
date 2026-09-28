@@ -2,6 +2,7 @@ package handler
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/model"
@@ -11,11 +12,11 @@ import (
 )
 
 func TestMessagesToAgentMessages_Empty(t *testing.T) {
-	msgs, err := MessagesToAgentMessages(nil)
+	msgs, err := MessagesToAgentMessages(nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, msgs)
 
-	msgs, err = MessagesToAgentMessages([]model.Message{})
+	msgs, err = MessagesToAgentMessages([]model.Message{}, nil)
 	require.NoError(t, err)
 	assert.Nil(t, msgs)
 }
@@ -27,7 +28,7 @@ func TestMessagesToAgentMessages_PlainTextConversation(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " there"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -45,7 +46,7 @@ func TestMessagesToAgentMessages_UserMessagesPreserved(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "two"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -65,7 +66,7 @@ func TestMessagesToAgentMessages_MarkersIgnored(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: "", EventType: model.EventTypeAgentEnd},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -86,7 +87,7 @@ func TestMessagesToAgentMessages_ArtifactEventsIgnored(t *testing.T) {
 		{Agent: "", Role: "", EventType: "artifact", Content: `{"path":"report.md","version_id":"v1","size":10,"mime":"text/markdown","op":"create"}`},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -106,7 +107,7 @@ func TestMessagesToAgentMessages_SubAgentEventsIgnored(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " done"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -123,7 +124,7 @@ func TestMessagesToAgentMessages_SingleToolCallAndResult(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"results"}`},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -146,7 +147,7 @@ func TestMessagesToAgentMessages_PlanUpdatedIgnoredButToolPairPreserved(t *testi
 		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"plan-1","output":{"revision":1,"steps":[{"step":"work","status":"in_progress"}]}}`},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	require.Len(t, got, 3)
@@ -170,7 +171,7 @@ func TestMessagesToAgentMessages_ParallelToolCalls(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-b","output":"B results"}`},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -192,7 +193,7 @@ func TestMessagesToAgentMessages_MissingToolResultOmitsCall(t *testing.T) {
 		// No matching tool_result.
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -207,7 +208,7 @@ func TestMessagesToAgentMessages_OldToolCallWithoutIDIsIgnored(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"name":"web_search","args":{"q":"x"}}`},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -223,7 +224,7 @@ func TestMessagesToAgentMessages_ToolOutputStructuredJSON(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":{"items":[{"title":"R"}]}}`},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -243,7 +244,7 @@ func TestMessagesToAgentMessages_ReasoningOnly(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "Let me think..."},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -261,7 +262,7 @@ func TestMessagesToAgentMessages_ReasoningAndContentMerged(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "Answer"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -279,7 +280,7 @@ func TestMessagesToAgentMessages_ReasoningFlushedBeforeToolCall(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"tc-1","output":"ok"}`},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -305,7 +306,7 @@ func TestMessagesToAgentMessages_SubAgentReasoningIgnored(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: " done"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -325,7 +326,7 @@ func TestMessagesToAgentMessages_MixedUserAssistantToolTurns(t *testing.T) {
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "second"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -360,7 +361,7 @@ func TestMessagesToAgentMessages_InterleavedRunsRegroupCoherently(t *testing.T) 
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "run2-psi", RunID: "call_x2"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -385,7 +386,7 @@ func TestMessagesToAgentMessages_NullRunIDGroupsByAgentAlone(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "c"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -415,7 +416,7 @@ func TestMessagesToAgentMessages_InterleavedRunsToolPairingUnchanged(t *testing.
 			Content: `{"tool_call_id":"tc-a","output":"A results"}`, RunID: "call_x1"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	// Both calls batch into one assistant message (agent-keyed batching);
@@ -445,7 +446,7 @@ func TestMessagesToAgentMessages_SubAgentRunRowsStillNameSkipped(t *testing.T) {
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "summary"},
 	}
 
-	got, err := MessagesToAgentMessages(prior)
+	got, err := MessagesToAgentMessages(prior, nil)
 	require.NoError(t, err)
 
 	want := []agent.Message{
@@ -453,4 +454,43 @@ func TestMessagesToAgentMessages_SubAgentRunRowsStillNameSkipped(t *testing.T) {
 		{Role: "assistant", Content: "summary"},
 	}
 	assert.Equal(t, want, got)
+}
+
+// TestMessagesToAgentMessages_FinalRowsMatchLegacyByteForByte is the
+// refactor-message-storage prefix-cache guarantee: the same tooled turn
+// stored as legacy event rows and as final rows + tool_calls reconstructs to
+// the IDENTICAL agent.Message sequence, so a session crossing the migration
+// boundary keeps hitting the provider prefix cache.
+func TestMessagesToAgentMessages_FinalRowsMatchLegacyByteForByte(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0).UTC()
+	const trace = "trace-dual"
+
+	// Legacy shape: user, token, tool_call, tool_result, token.
+	legacy := []model.Message{
+		{MsgTime: base, Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hi", TraceID: trace, MsgIndex: 0},
+		{MsgTime: base.Add(time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "let me check", TraceID: trace, MsgIndex: 1},
+		{MsgTime: base.Add(2 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: `{"tool_call_id":"c1","name":"grep","args":{"q":"x"}}`, TraceID: trace, MsgIndex: 2},
+		{MsgTime: base.Add(3 * time.Second), Agent: model.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"c1","output":"found 2"}`, TraceID: trace, MsgIndex: 3},
+		{MsgTime: base.Add(4 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "done", TraceID: trace, MsgIndex: 4},
+	}
+
+	// New shape: user + assistant final (round 1) + assistant final (round 2),
+	// with the tool interaction in tool_calls.
+	finals := []model.Message{
+		{MsgTime: base, Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hi", TraceID: trace, MsgIndex: 0},
+		{MsgTime: base.Add(3 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "let me check", TraceID: trace, MsgIndex: 1, RoundNo: 1},
+		{MsgTime: base.Add(4 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "done", TraceID: trace, MsgIndex: 4, RoundNo: 2},
+	}
+	calls := []model.ToolCall{{
+		TurnID: trace, RoundNo: 1, ToolCallID: "c1", Name: "grep",
+		Arguments: `{"q":"x"}`, Result: "found 2", Status: model.ToolCallStatusCompleted,
+	}}
+
+	legacySeq, err := MessagesToAgentMessages(legacy, nil)
+	require.NoError(t, err)
+	finalSeq, err := MessagesToAgentMessages(finals, calls)
+	require.NoError(t, err)
+
+	require.Len(t, legacySeq, 5, "user, content, assistant+tool_calls, tool, content")
+	require.Equal(t, legacySeq, finalSeq, "final-row reconstruction must be byte-identical to legacy")
 }

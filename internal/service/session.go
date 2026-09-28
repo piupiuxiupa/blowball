@@ -229,6 +229,12 @@ func (s *SessionService) GetSessionMessages(ctx context.Context, sessionID, curs
 	return s.mysql.ListMessagesPaged(ctx, sessionID, cursor, pageSize, order, subagentContent)
 }
 
+// ListToolCalls returns the session's tool interactions (turn, round order)
+// for history rendering and prompt reconstruction joins.
+func (s *SessionService) ListToolCalls(ctx context.Context, sessionID string) ([]model.ToolCall, error) {
+	return s.mysql.ListToolCalls(ctx, sessionID)
+}
+
 // ListSessions returns the caller's sessions most-recently-updated first. Each
 // entry includes its title (empty string when no title has been generated).
 // An empty slice is returned when the user has no sessions.

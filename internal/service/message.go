@@ -40,6 +40,12 @@ func (s *MessageService) AppendMessage(ctx context.Context, userID string, msg m
 	return s.saveMessage(ctx, userID, msg)
 }
 
+// ListToolCalls returns the session's tool interactions for reconstruction
+// joins (refactor-message-storage).
+func (s *MessageService) ListToolCalls(ctx context.Context, sessionID string) ([]model.ToolCall, error) {
+	return s.deps.MySQL.ListToolCalls(ctx, sessionID)
+}
+
 // RecoverMessages returns the full ordered message list for sessionID using
 // the priority chain Redis → MySQL, backfilling the cache on the MySQL
 // fallback so subsequent reads are cheaper. The filesystem no longer

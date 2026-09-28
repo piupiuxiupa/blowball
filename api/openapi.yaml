@@ -176,6 +176,13 @@ components:
           enum: [user, Confucius, Chongzhi, Liang]
         msg_index:
           type: integer
+        round_no:
+          type: integer
+          nullable: true
+          description: >
+            1-based round ordinal within the turn, present on assistant
+            FINAL rows (refactor-message-storage); the join key for the
+            row's `tool_calls`. Null on legacy event rows and user rows.
         role:
           type: string
           enum: [user, assistant, tool, ""]
@@ -184,6 +191,19 @@ components:
           enum: [message, token, tool_call, tool_result, plan_updated, agent_start, agent_end, agent_error, reasoning]
         content:
           type: string
+        reasoning_content:
+          type: string
+          nullable: true
+          description: >
+            Merged reasoning of an assistant FINAL row. Null on legacy event
+            rows (their reasoning lives in separate `reasoning` event rows).
+        status:
+          type: string
+          nullable: true
+          enum: [interrupted, ""]
+          description: >
+            `interrupted` marks a truncated final written when the turn was
+            cancelled or failed mid-round. Null on normal rows.
         trace_id:
           type: string
           format: uuid
@@ -221,6 +241,41 @@ components:
         update_time:
           type: string
           format: date-time
+        tool_calls:
+          type: array
+          description: >
+            The row's tool interactions (refactor-message-storage): present
+            only on assistant final rows, joined from the canonical
+            tool_calls table by (trace_id, round_no). Each entry pairs the
+            call with its result. Legacy event rows carry no such array —
+            their tool interactions are the event rows themselves.
+          items:
+            $ref: '#/components/schemas/ToolCallRecord'
+    ToolCallRecord:
+      type: object
+      required: [turn_id, round_no, tool_call_id, name, arguments, status]
+      properties:
+        turn_id:
+          type: string
+          format: uuid
+          description: Producing turn identity (messages.trace_id).
+        round_no:
+          type: integer
+        tool_call_id:
+          type: string
+          description: OpenAI tool_call pairing key.
+        name:
+          type: string
+        arguments:
+          type: string
+          description: Raw JSON arguments.
+        result:
+          type: string
+          nullable: true
+          description: Raw result output; null until the result arrives.
+        status:
+          type: string
+          enum: [pending, completed]
     SessionMessagesResponse:
       type: object
       required: [messages]
@@ -1363,10 +1418,14 @@ paths:
         user. Messages are ordered by `(msg_time, msg_index)` ascending by
         default; use `order=desc` to retrieve newest first. Pass
         `page_token` from the previous response to advance pages.
-        While a turn is running, history is incremental: the user row and
-        already-closed merged events can appear before `done`. A still-growing
-        token/reasoning span is not written until it closes. Clients that
-        combine history with live run replay should deduplicate rows by
+        Rows come in two storage generations (refactor-message-storage):
+        legacy event rows (`token`, `reasoning`, `tool_call`,
+        `tool_result`, markers) and new assistant FINAL rows
+        (`event_type=message`, `round_no >= 1`) whose tool interactions are
+        joined in as the `tool_calls` array. While a turn is running,
+        history is incremental: the user row and already-closed rounds
+        appear before `done`; the still-streaming round does not. Clients
+        that combine history with live run replay should deduplicate rows by
         `trace_id` and `msg_index` (equivalently, the deterministic
         `client_msg_id` when present); the event stream remains authoritative
         for live output.

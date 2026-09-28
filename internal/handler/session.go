@@ -104,6 +104,14 @@ type getSessionMessagesResponse struct {
 	NextPageToken string          `json:"next_page_token,omitempty"`
 }
 
+// sessionMessageItem is one history row with its tool interactions attached
+// (refactor-message-storage): assistant final rows join their tool_calls by
+// (trace_id, round_no); legacy event rows carry none.
+type sessionMessageItem struct {
+	model.Message
+	ToolCalls []model.ToolCall `json:"tool_calls,omitempty"`
+}
+
 // GetSessionMessages handles GET /api/v1/sessions/:session_id/messages. It
 // paginates the session's event stream from MySQL, validates ownership, and
 // returns the canonical message rows.
@@ -172,9 +180,34 @@ func (h *SessionHandler) GetSessionMessages(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, getSessionMessagesResponse{
-		Messages:      messages,
-		NextPageToken: nextCursor,
+	items := make([]sessionMessageItem, len(messages))
+	needsCalls := false
+	for i, m := range messages {
+		items[i] = sessionMessageItem{Message: m}
+		if m.Role == model.RoleAssistant && m.EventType == model.EventTypeMessage && m.RoundNo > 0 {
+			needsCalls = true
+		}
+	}
+	if needsCalls {
+		if calls, err := h.sessSvc.ListToolCalls(ctx, sessionID); err != nil {
+			logger.L().Warn("list tool calls for history failed; rows returned without them",
+				zap.String("op", "handler.get_session_messages"),
+				zap.String("session_id", sessionID),
+				zap.Error(err))
+		} else {
+			byRound := indexToolCallsByRound(calls)
+			for i := range items {
+				m := items[i].Message
+				if m.Role == model.RoleAssistant && m.EventType == model.EventTypeMessage && m.RoundNo > 0 {
+					items[i].ToolCalls = byRound[roundKeyOf(m.TraceID, m.RoundNo)]
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"messages":        items,
+		"next_page_token": nextCursor,
 	})
 }
 

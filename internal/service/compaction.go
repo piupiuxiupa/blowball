@@ -156,16 +156,24 @@ func (s *CompactionService) LatestContextTokens(ctx context.Context, sessionID s
 // matches nothing once the cache backfills from MySQL — the stitched context
 // would silently degrade to full history. A drain failure aborts the caller's
 // compaction attempt (the durable view would be missing the queued rows).
-func (s *CompactionService) RecoverDurable(ctx context.Context, sessionID string) ([]model.Message, error) {
+func (s *CompactionService) RecoverDurable(ctx context.Context, sessionID string) ([]model.Message, []model.ToolCall, error) {
 	if s.deps.DrainMessageQueue != nil {
 		drainCtx, cancel := context.WithTimeout(ctx, messageDrainTimeout)
 		err := s.deps.DrainMessageQueue(drainCtx)
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("compaction.recover_durable: drain: %w", err)
+			return nil, nil, fmt.Errorf("compaction.recover_durable: drain: %w", err)
 		}
 	}
-	return s.deps.MySQL.ListMessages(ctx, sessionID)
+	rows, err := s.deps.MySQL.ListMessages(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	calls, err := s.deps.MySQL.ListToolCalls(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rows, calls, nil
 }
 
 // CompactionInput carries the recovered conversation a caller hands to

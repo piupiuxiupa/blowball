@@ -17,13 +17,13 @@
 
 ## 3. 读路径与 compaction
 
-- [ ] 3.1 `message_reconstruct.go`：双模读——终稿行 + tool_calls join 直组 wire format；旧 chunk 行走现有合并；两种输入产出相同序列（对拍测试）
-- [ ] 3.2 `newRoundHook` compaction：flush-first 改为 round 终稿批写，boundary cursor 指向终稿行
-- [ ] 3.3 历史端点 `ListMessagesPaged`：双表 merge 聚合 DTO，兼容 placeholder/full 视图；`subagentPlaceholderFilter` 的 JSON_EXTRACT 过滤删除
-- [ ] 3.4 compaction / 历史端点集成测试
+- [x] 3.1 双模读：终稿行按 `(trace, round)` join `tool_calls` 直组 wire format（含 tool_calls 数组与 role=tool 消息）；旧 chunk 行走现有合并；byte 对拍测试通过
+- [x] 3.2 `newRoundHook` compaction：flush-first 改为 round 终稿批写（terminal 闭轮），boundary cursor 指向终稿行；`RecoverDurable` 同时返回 rows+calls
+- [x] 3.3 历史端点：final 行附带 `tool_calls` 数组（`ToolCallRecord` schema）；placeholder 过滤保留服务遗留行（新数据无事件行，过滤天然惰性）
+- [x] 3.4 集成测试重写为终稿形态：message_flow / subagent_run / dynamic_subagents / parallel_agent / reasoning / round_retry / mcp_skills / delete
 
 ## 4. 收尾
 
-- [ ] 4.1 `api/openapi.yaml` 历史端点响应结构更新
-- [ ] 4.2 前缀缓存对拍验证：同一会话新旧行混合重建的请求序列 byte 一致
-- [ ] 4.3 `gofmt` / `go vet ./...` / `make test`
+- [x] 4.1 `api/openapi.yaml`：Message 增 `round_no`/`reasoning_content`/`status`/`tool_calls`，新增 `ToolCallRecord` schema，端点描述双代存储说明
+- [x] 4.2 前缀缓存对拍验证：`TestMessagesToAgentMessages_FinalRowsMatchLegacyByteForByte`（legacy 事件行 vs 终稿+join 产出逐 byte 一致）
+- [x] 4.3 `gofmt`（改动文件全格式化）/ `go vet ./...` 零告警 / `make test`（race）：除 proposal 提交 a411d40 上即已失败的 `current_status` 时间注入家族（handler 13 + agent 1 + 集成 10）外全绿

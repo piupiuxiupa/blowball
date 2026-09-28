@@ -31,7 +31,7 @@ func frameCompactedSummary(content string) string {
 // slice). Returns nil whenever the boundary row cannot be located or the tail
 // fails to reconstruct — the caller's contract is to degrade to the full
 // history, never to error the turn.
-func stitchCompacted(rows []model.Message, agentMsgs []agent.Message, rec *model.ContextCompaction) []agent.Message {
+func stitchCompacted(rows []model.Message, calls []model.ToolCall, agentMsgs []agent.Message, rec *model.ContextCompaction) []agent.Message {
 	if rec == nil || len(agentMsgs) == 0 {
 		return nil
 	}
@@ -47,7 +47,9 @@ func stitchCompacted(rows []model.Message, agentMsgs []agent.Message, rec *model
 	if ord < 0 {
 		return nil
 	}
-	tailMsgs, err := MessagesToAgentMessages(rows[ord+1:])
+	// The full calls list is safe here: tail rows join their calls by
+	// (trace, round); calls of compacted turns match no tail row and drop out.
+	tailMsgs, err := MessagesToAgentMessages(rows[ord+1:], calls)
 	if err != nil {
 		return nil
 	}

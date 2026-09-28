@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -235,46 +235,38 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 	requireEventPresent(t, types, stream.EventDone)
 
 	// --- Persistence: arrival order, per-run attribution ------------------
-	env.waitForPersistedTurn(t, defaultSessionID, 20)
+	// Post refactor-message-storage the split is structural: sub-agent events
+	// NEVER land in messages — their transcript lives in subagent_runs — and
+	// messages holds only user + Confucius round finals (identity-free).
+	env.waitForPersistedTurn(t, defaultSessionID, 3)
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
-
-	var rowRunOrder []string
-	perRunRows := map[string]string{runX1: "", runX2: "", runX3: ""}
 	for _, m := range msgs {
-		if m.AgentInstanceID == "" {
-			// Top-level rows (user, Confucius) never carry identity.
-			assert.Empty(t, m.RunID, "non-sub-agent row (%s/%s) must have empty run_id", m.Agent, m.EventType)
-			continue
-		}
-		if m.EventType != model.EventTypeToken {
-			assert.Contains(t, []string{runX1, runX2, runX3}, m.RunID,
-				"every sub-agent row must carry its run id (%s)", m.EventType)
-			continue
-		}
-		require.Contains(t, []string{runX1, runX2, runX3}, m.RunID)
-		rowRunOrder = append(rowRunOrder, m.RunID)
-		perRunRows[m.RunID] += m.Content
+		assert.Empty(t, m.AgentInstanceID,
+			"messages must carry no sub-agent rows (got %s/%s)", m.Agent, m.EventType)
+		assert.Empty(t, m.RunID, "top-level row (%s/%s) must have empty run_id", m.Agent, m.EventType)
 	}
-	// Interleaved arrival persists as separate per-run rows (MergeEvents broke
-	// on every run-id change) — the pre-change behavior glued them into one.
-	assert.Equal(t, []string{runX1, runX2, runX3, runX1, runX2, runX3}, rowRunOrder,
-		"token rows must persist interleaved, each attributed to its run")
-	assert.Equal(t, "alpha-one alpha-two", perRunRows[runX1])
-	assert.Equal(t, "beta-one beta-two", perRunRows[runX2])
-	assert.Equal(t, "gamma-one gamma-two", perRunRows[runX3])
+	// The three interleaved runs' transcripts are complete in subagent_runs.
+	runRows := env.mysqlFake.snapshotSubAgentRuns(defaultSessionID)
+	perRunSnap := map[string]string{}
+	for _, r := range runRows {
+		var snap []agent.Message
+		require.NoError(t, json.Unmarshal(r.MessagesJSON, &snap))
+		for _, sm := range snap {
+			if sm.Role == "assistant" {
+				perRunSnap[r.RunID] += sm.Content
+			}
+		}
+	}
+	assert.Equal(t, "alpha-one alpha-two", perRunSnap[runX1])
+	assert.Equal(t, "beta-one beta-two", perRunSnap[runX2])
+	assert.Equal(t, "gamma-one gamma-two", perRunSnap[runX3])
 
 	// --- Redis read path round trip ---------------------------------------
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
-	recoveredRuns := map[string]string{}
 	for _, m := range recovered {
-		if m.AgentInstanceID != "" && m.EventType == model.EventTypeToken {
-			recoveredRuns[m.RunID] += m.Content
-		}
+		assert.Empty(t, m.AgentInstanceID, "Redis read path carries no sub-agent rows either")
 	}
-	assert.Equal(t, "alpha-one alpha-two", recoveredRuns[runX1], "run_id must survive the Redis read path")
-	assert.Equal(t, "beta-one beta-two", recoveredRuns[runX2])
-	assert.Equal(t, "gamma-one gamma-two", recoveredRuns[runX3])
 }
 
 // TestSubAgentRun_SingleInvocationRegression (task 5.2): a turn with ONE
@@ -331,14 +323,12 @@ func TestSubAgentRun_SingleInvocationRegression(t *testing.T) {
 	}
 	requireEventPresent(t, types, stream.EventDone)
 
-	env.waitForPersistedTurn(t, defaultSessionID, 5)
+	env.waitForPersistedTurn(t, defaultSessionID, 3)
 	for _, m := range env.mysqlFake.messagesFor(defaultSessionID) {
-		if m.AgentInstanceID != "" {
-			assert.Equal(t, "call_only", m.RunID)
-		} else {
-			assert.Empty(t, m.RunID, "row %s/%s must have no run id", m.Agent, m.EventType)
-			assert.Empty(t, m.AgentInstanceID, "row %s/%s must have no instance id", m.Agent, m.EventType)
-		}
+		// Sub-agent rows never enter messages; the invocation's identity is
+		// carried by subagent_runs alone.
+		assert.Empty(t, m.RunID, "row %s/%s must have no run id", m.Agent, m.EventType)
+		assert.Empty(t, m.AgentInstanceID, "row %s/%s must have no instance id", m.Agent, m.EventType)
 	}
 }
 
@@ -373,7 +363,7 @@ func TestSubAgentRun_NoSubAgentRegression(t *testing.T) {
 	}
 	requireEventPresent(t, types, stream.EventDone)
 
-	env.waitForPersistedTurn(t, defaultSessionID, 3)
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 	for _, m := range env.mysqlFake.messagesFor(defaultSessionID) {
 		assert.Empty(t, m.RunID, "row %s/%s must have no run id", m.Agent, m.EventType)
 	}

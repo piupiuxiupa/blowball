@@ -28,7 +28,6 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/msgflush"
 	cursorpkg "github.com/lush/blowball/internal/pkg/cursor"
 	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/pkg/logger"
@@ -219,11 +218,12 @@ func (c *scriptedLLMClient) turnRequests() []agent.LLMRequest {
 // sqlx-backed store does, so integration tests can verify the third
 // persistence tier without spinning up MySQL.
 type memoryMySQL struct {
-	mu       sync.Mutex
-	sessions map[string]*model.Session
-	titles   map[string]model.Title
-	messages map[string][]model.Message
-	nextID   int64
+	mu        sync.Mutex
+	sessions  map[string]*model.Session
+	titles    map[string]model.Title
+	messages  map[string][]model.Message
+	toolCalls map[string][]model.ToolCall
+	nextID    int64
 
 	// insertAttempts counts every row handed to AppendMessages including the
 	// ones INSERT IGNORE would drop (duplicate client_msg_id).
@@ -429,6 +429,44 @@ func (m *memoryMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([
 	return ids, nil
 }
 
+// AppendFinalBatch mirrors the real store's cross-table transaction: messages
+// land with the same client_msg_id dedup as AppendMessages; tool_calls land
+// with INSERT IGNORE semantics on (session_id, tool_call_id).
+func (m *memoryMySQL) AppendFinalBatch(ctx context.Context, msgs []model.Message, calls []model.ToolCall) error {
+	if _, err := m.AppendMessages(ctx, msgs); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.toolCalls == nil {
+		m.toolCalls = make(map[string][]model.ToolCall)
+	}
+	known := make(map[string]struct{})
+	for sid := range m.toolCalls {
+		for _, c := range m.toolCalls[sid] {
+			known[c.SessionID+""+c.ToolCallID] = struct{}{}
+		}
+	}
+	for _, c := range calls {
+		k := c.SessionID + "" + c.ToolCallID
+		if _, dup := known[k]; dup {
+			continue
+		}
+		known[k] = struct{}{}
+		m.toolCalls[c.SessionID] = append(m.toolCalls[c.SessionID], c)
+	}
+	return nil
+}
+
+// ListToolCalls returns the session's tool interactions in insertion order.
+func (m *memoryMySQL) ListToolCalls(_ context.Context, sessionID string) ([]model.ToolCall, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.ToolCall, len(m.toolCalls[sessionID]))
+	copy(out, m.toolCalls[sessionID])
+	return out, nil
+}
+
 // insertAttemptCount returns the total number of rows handed to AppendMessages
 // (including ignored duplicates). Test helper.
 func (m *memoryMySQL) insertAttemptCount() int {
@@ -622,6 +660,14 @@ func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr 
 }
 
 // messagesFor returns the recorded messages for sessionID. Test helper.
+func (m *memoryMySQL) toolCallsFor(sessionID string) []model.ToolCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.ToolCall, len(m.toolCalls[sessionID]))
+	copy(out, m.toolCalls[sessionID])
+	return out
+}
+
 func (m *memoryMySQL) messagesFor(sessionID string) []model.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -760,35 +806,31 @@ type testEnv struct {
 	msgSvc    *service.MessageService
 }
 
-// drainMessages synchronously drains the write-behind ingest queue into the
-// fake MySQL tier using the production msgflush.Drain primitive — the same
-// hook the harness wires into SessionDeps.DrainMessageQueue (used by the
-// pre-delete and read-miss paths).
-func (e *testEnv) drainMessages(ctx context.Context) error {
-	return msgflush.Drain(ctx, e.redisSvc, e.mysqlFake)
-}
-
-// waitForPersistedTurn waits until the detached persistence goroutine has
-// dual-written at least min messages for sessionID into Redis, then drains
-// the write-behind queue into the fake MySQL tier. This mirrors production:
-// after a turn, messages sit in the queue until the background flusher (here:
-// the explicit drain) moves them, and only then are they visible to the
-// MySQL-backed history reads.
+// waitForPersistedTurn waits until the session holds at least min message
+// rows in the (fake) MySQL tier. Post refactor-message-storage the terminal
+// batch is a synchronous transactional write that completes before the HTTP
+// call returns, so this is a short backstop, not a flusher wait.
 func (e *testEnv) waitForPersistedTurn(t *testing.T, sessionID string, min int) {
 	t.Helper()
 	waitForQueuedTurn(t, e.redisSvc, e.mysqlFake, sessionID, min)
 }
 
 // waitForQueuedTurn is waitForPersistedTurn for local harnesses that are not
-// built around a testEnv but share the same store pair (real miniredis-backed
-// redis.Store + memoryMySQL).
+// built around a testEnv but share the same store pair.
 func waitForQueuedTurn(t *testing.T, redisSvc *redisstore.Store, mysqlFake *memoryMySQL, sessionID string, min int) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		raws, err := redisSvc.GetMessages(context.Background(), sessionID)
-		return err == nil && len(raws) >= min
-	}, 2*time.Second, 10*time.Millisecond, "expected the turn to be dual-written into the redis read cache")
-	require.NoError(t, msgflush.Drain(context.Background(), redisSvc, mysqlFake))
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rows, err := mysqlFake.ListMessages(context.Background(), sessionID)
+		if err == nil && len(rows) >= min {
+			return
+		}
+		if time.Now().After(deadline) {
+			require.FailNow(t, "rows not durable in time",
+				fmt.Sprintf("expected %d durable rows in MySQL, got %d (err=%v)", min, len(rows), err))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // agentConfig builds the per-agent config used by the orchestrator. Chongzhi
@@ -863,9 +905,7 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 		MySQL: mysqlFake,
 		Redis: redisSvc,
 		FS:    fsSvc,
-		DrainMessageQueue: func(ctx context.Context) error {
-			return msgflush.Drain(ctx, redisSvc, mysqlFake)
-		},
+		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
@@ -964,9 +1004,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		MySQL: mysqlFake,
 		Redis: redisSvc,
 		FS:    fsSvc,
-		DrainMessageQueue: func(ctx context.Context) error {
-			return msgflush.Drain(ctx, redisSvc, mysqlFake)
-		},
+		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
@@ -1070,9 +1108,7 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 		MySQL: mysqlFake,
 		Redis: redisSvc,
 		FS:    fsSvc,
-		DrainMessageQueue: func(ctx context.Context) error {
-			return msgflush.Drain(ctx, redisSvc, mysqlFake)
-		},
+		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
@@ -1141,15 +1177,6 @@ func mustMarshal(t *testing.T, v any) []byte {
 	raw, err := json.Marshal(v)
 	require.NoError(t, err)
 	return raw
-}
-
-// mustLenMessageBuffer returns the current ingest-queue length, failing the
-// test on a Redis error.
-func mustLenMessageBuffer(t *testing.T, e *testEnv) int64 {
-	t.Helper()
-	n, err := e.redisSvc.LenMessageBuffer(context.Background())
-	require.NoError(t, err)
-	return n
 }
 
 // authToken returns a Bearer JWT for the default test user that the real auth

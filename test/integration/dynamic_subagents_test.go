@@ -121,20 +121,22 @@ func TestDynamicSubagents_ResumeArgumentRejectedEndToEnd(t *testing.T) {
 
 	w := env.postMessage(`{"content":"continue"}`, authToken(t, defaultUserID))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-	env.waitForPersistedTurn(t, defaultSessionID, 3)
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 
 	var sawResult bool
-	for _, msg := range env.mysqlFake.messagesFor(defaultSessionID) {
-		if msg.Agent == stream.AgentConfucius && msg.EventType == model.EventTypeToolResult {
+	for _, call := range env.mysqlFake.toolCallsFor(defaultSessionID) {
+		if call.ToolCallID == "resume_call" {
 			sawResult = true
-			assert.Contains(t, msg.Content, "resume_agent_id", "the rejection explains the unknown field")
+			assert.Contains(t, call.Result, "resume_agent_id", "the rejection explains the unknown field")
 		}
-		// A rejected dispatch must never create a sub-agent LLM call, so no
-		// sub-agent rows (which would carry a dynamic instance identity)
-		// may appear.
-		assert.Empty(t, msg.AgentInstanceID, "no sub-agent row may be persisted: %+v", msg)
 	}
 	require.True(t, sawResult, "the bad_args tool result must be persisted")
+
+	// A rejected dispatch must never create a sub-agent LLM call, so no
+	// sub-agent rows (dynamic instance identity) may appear in messages.
+	for _, msg := range env.mysqlFake.messagesFor(defaultSessionID) {
+		assert.Empty(t, msg.AgentInstanceID, "no sub-agent row may be persisted: %+v", msg)
+	}
 
 	llm.mu.Lock()
 	defer llm.mu.Unlock()
@@ -287,7 +289,7 @@ func TestAgentPlanState_EndToEnd(t *testing.T) {
 	require.Greater(t, firstChildIndex, planIndex)
 	require.Contains(t, w1.Body.String(), "status: error")
 
-	env.waitForPersistedTurn(t, defaultSessionID, 12)
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 
 	w2 := env.postMessage(`{"content":"continue"}`, token)
 	require.Equal(t, http.StatusOK, w2.Code, "body: %s", w2.Body.String())
@@ -301,22 +303,14 @@ func TestAgentPlanState_EndToEnd(t *testing.T) {
 	}
 	assert.Equal(t, float64(1), secondRevision)
 
-	env.waitForPersistedTurn(t, defaultSessionID, 20)
-	var planRows []model.Message
+	// Plan snapshots are control-plane state, not message rows
+	// (refactor-message-storage): their revisions were already asserted from
+	// the live SSE stream above. Messages hold only user + round finals.
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
 	for _, msg := range env.mysqlFake.messagesFor(defaultSessionID) {
-		if msg.EventType == model.EventTypePlanUpdated {
-			planRows = append(planRows, msg)
-		}
+		assert.Contains(t, []string{model.EventTypeMessage}, msg.EventType,
+			"only final rows persist: got %s/%s", msg.Agent, msg.EventType)
 	}
-	require.Len(t, planRows, 3)
-	for _, msg := range planRows {
-		assert.Empty(t, msg.Role)
-		assert.NotEmpty(t, msg.Content)
-	}
-	assert.Contains(t, planRows[0].Content, `"revision":1`)
-	assert.Contains(t, planRows[1].Content, `"revision":2`)
-	assert.Contains(t, planRows[1].Content, `"status":"completed"`)
-	assert.Contains(t, planRows[2].Content, `"revision":1`)
 }
 
 // TestDynamicSubagents_UniqueNamesAndPlaceholderHistoryEndToEnd is the
@@ -376,7 +370,7 @@ func TestDynamicSubagents_UniqueNamesAndPlaceholderHistoryEndToEnd(t *testing.T)
 
 	// Two distinct instances with unique names, each with a single run_no=1 run
 	// keyed by its parent spawn tool_call id.
-	env.waitForPersistedTurn(t, defaultSessionID, 8)
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 	instances := env.mysqlFake.snapshotSubAgentInstances(defaultSessionID)
 	require.Len(t, instances, 2, "two spawns produce exactly two instances")
 	names := map[string]bool{}
@@ -409,55 +403,26 @@ func TestDynamicSubagents_UniqueNamesAndPlaceholderHistoryEndToEnd(t *testing.T)
 	ph := decodeMessagesPage(t, phW)
 	require.NotEmpty(t, ph.Messages)
 
-	spawnToolCallSeen := map[string]bool{"spawn-a": false, "spawn-b": false}
 	var sawUser bool
-	var childStarts, childEnds int
-	var sawConfuciusStart, sawConfuciusEnd bool
+	var childStarts int
 	for _, m := range ph.Messages {
 		if m.AgentInstanceID != "" {
-			assert.Contains(t,
-				[]string{model.EventTypeAgentStart, model.EventTypeAgentEnd, model.EventTypeAgentError},
-				m.EventType,
-				"instance-attributed placeholder rows are lifecycle markers only: %+v", m)
+			childStarts++
 		}
 		switch m.EventType {
-		case model.EventTypeAgentStart:
-			if m.AgentInstanceID != "" {
-				childStarts++
-			} else if m.Agent == stream.AgentConfucius {
-				sawConfuciusStart = true
-			}
-		case model.EventTypeAgentEnd:
-			if m.AgentInstanceID != "" {
-				childEnds++
-			} else if m.Agent == stream.AgentConfucius {
-				sawConfuciusEnd = true
-			}
 		case model.EventTypeMessage:
 			sawUser = true
-		case model.EventTypeToolCall:
-			var payload struct {
-				ToolCallID string `json:"tool_call_id"`
-			}
-			if json.Unmarshal([]byte(m.Content), &payload) == nil {
-				if _, ok := spawnToolCallSeen[payload.ToolCallID]; ok {
-					spawnToolCallSeen[payload.ToolCallID] = true
-				}
-			}
-		case model.EventTypeToolResult:
-			assert.NotContains(t, m.Content, "subagent_result",
-				"the duplicated parent spawn result must be omitted")
 		}
 	}
-	assert.Equal(t, 2, childStarts, "both children's agent_start markers stay visible")
-	assert.Equal(t, 2, childEnds, "both children's agent_end markers stay visible")
-	assert.True(t, sawConfuciusStart && sawConfuciusEnd, "the parent's lifecycle markers stay visible")
+	// Post refactor-message-storage new data writes NO sub-agent rows into
+	// messages at all (their transcripts live in subagent_runs, lazy-loaded
+	// via the run APIs), and no marker/tool event rows either — so the
+	// placeholder and full views coincide, and the parent's lifecycle shows
+	// only through its user + round-final rows.
 	assert.True(t, sawUser, "the user row stays visible")
-	assert.True(t, spawnToolCallSeen["spawn-a"] && spawnToolCallSeen["spawn-b"],
-		"the parent spawn tool_call rows stay visible")
-
-	// Placeholder mode must strictly shrink the view.
-	assert.Less(t, len(ph.Messages), len(full.Messages))
+	assert.Equal(t, 0, childStarts, "no sub-agent rows exist to filter")
+	assert.Equal(t, len(ph.Messages), len(full.Messages),
+		"placeholder and full views coincide when no sub-agent rows exist")
 
 	// An unknown mode is a 400 before any pagination read.
 	badW := env.getSessionMessages(defaultSessionID, "?subagent_content=bogus", token)

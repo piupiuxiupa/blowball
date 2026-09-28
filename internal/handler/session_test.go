@@ -283,6 +283,10 @@ func (m *handlerFakeMySQL) setFinalBatchHold(entered, hold chan struct{}) {
 	m.finalBatchHold = hold
 }
 
+func (m *handlerFakeMySQL) ListToolCalls(_ context.Context, sessionID string) ([]model.ToolCall, error) {
+	return nil, nil
+}
+
 func (m *handlerFakeMySQL) ListMessages(_ context.Context, _ string) ([]model.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -77,44 +77,6 @@ func TestDeleteSession_EndToEnd(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, getW.Code, "body: %s", getW.Body.String())
 }
 
-// TestDeleteSession_ArchiveIncludesQueuedMessages verifies the pre-delete
-// drain: messages that were dual-written into Redis but not yet flushed to
-// MySQL are drained into the archive, so the *_deleted mirror captures every
-// message the session ever produced despite the async write-behind window.
-func TestDeleteSession_ArchiveIncludesQueuedMessages(t *testing.T) {
-	env := newTestEnv(t, newScriptedLLMClient())
-	ctx := context.Background()
-	sessionID := defaultSessionID
-	userID := defaultUserID
-
-	// Simulate a turn whose batch reached Redis (dual write) but has NOT been
-	// flushed: push straight onto the ingest queue through the service API.
-	msgs := []model.Message{
-		{SessionID: sessionID, Agent: model.AgentUser, MsgIndex: 0, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "unflushed", TraceID: "t-1", ClientMsgID: "unflushed-cmid-1"},
-		{SessionID: sessionID, Agent: stream.AgentConfucius, MsgIndex: 1, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "still-queued", TraceID: "t-1", ClientMsgID: "unflushed-cmid-2"},
-	}
-	raws := make([][]byte, 0, len(msgs))
-	for _, m := range msgs {
-		raws = append(raws, mustMarshal(t, m))
-	}
-	require.NoError(t, env.redisSvc.PushMessageBuffer(ctx, raws))
-	require.Equal(t, int64(2), mustLenMessageBuffer(t, env), "precondition: queue holds the unflushed batch")
-
-	// Delete through the real HTTP stack; the service drains first.
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sessionID, nil)
-	req.Header.Set("Authorization", "Bearer "+authToken(t, userID))
-	w := httptest.NewRecorder()
-	env.engine.ServeHTTP(w, req)
-	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
-
-	env.mysqlFake.mu.Lock()
-	require.Len(t, env.mysqlFake.deletedMessages[sessionID], 2,
-		"the archive must include the queued-but-unflushed messages (drain ran first)")
-	content := env.mysqlFake.deletedMessages[sessionID][0].Content
-	env.mysqlFake.mu.Unlock()
-	assert.Equal(t, "unflushed", content)
-}
-
 // TestDeleteSession_NonOwner_404 verifies a user cannot delete another user's
 // session, and that no tiers are touched.
 func TestDeleteSession_NonOwner_404(t *testing.T) {

@@ -87,7 +87,7 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 
 	// Wait for the dual write, then drain the write-behind queue into the
 	// fake MySQL tier.
-	env.waitForPersistedTurn(t, defaultSessionID, 4)
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 
 	// Wait for the async title generation round to complete so the request
 	// snapshot is stable.
@@ -109,12 +109,13 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	assert.Equal(t, "high", reasoningReq.ReasoningEffort, "reasoning_effort must match the deployment default")
 	assert.Equal(t, 512, reasoningReq.MaxCompletionTokens, "quota must match the turn-resolved catalog entry")
 
-	// Verify reasoning content was persisted.
+	// Verify reasoning content was persisted on the final row.
 	var foundReasoning bool
 	for _, m := range env.mysqlFake.messagesFor(defaultSessionID) {
-		if m.EventType == "reasoning" {
+		if m.Role == model.RoleAssistant && m.ReasoningContent != "" {
 			foundReasoning = true
-			assert.Equal(t, "Analyzing the greeting", m.Content)
+			assert.Equal(t, "Analyzing the greeting", m.ReasoningContent,
+				"the final row carries the merged reasoning")
 			assert.Equal(t, model.RoleAssistant, m.Role)
 		}
 	}
@@ -124,7 +125,7 @@ func TestMessageFlow_ReasoningConfig_Propagated(t *testing.T) {
 	w2 := env.postMessage(`{"content":"again"}`, token)
 	require.Equal(t, http.StatusOK, w2.Code, "body: %s", w2.Body.String())
 
-	env.waitForPersistedTurn(t, defaultSessionID, 8)
+	env.waitForPersistedTurn(t, defaultSessionID, 3)
 
 	var echoed bool
 	for _, req := range llm.requests() {

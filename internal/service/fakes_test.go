@@ -213,6 +213,10 @@ func (f *fakeMySQLStore) AppendFinalBatch(_ context.Context, msgs []model.Messag
 	return nil
 }
 
+func (f *fakeMySQLStore) ListToolCalls(_ context.Context, sessionID string) ([]model.ToolCall, error) {
+	return nil, nil
+}
+
 func (f *fakeMySQLStore) ListMessages(_ context.Context, sessionID string) ([]model.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

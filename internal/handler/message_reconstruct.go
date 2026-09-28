@@ -24,8 +24,8 @@ import (
 //     are omitted.
 //   - marker rows (agent_start, agent_end, agent_error) and rows produced by
 //     sub-agents (Chongzhi, Liang) are ignored.
-func MessagesToAgentMessages(prior []model.Message) ([]agent.Message, error) {
-	out, _, err := MessagesToAgentMessagesIndexed(prior)
+func MessagesToAgentMessages(prior []model.Message, calls []model.ToolCall) ([]agent.Message, error) {
+	out, _, err := MessagesToAgentMessagesIndexed(prior, calls)
 	return out, err
 }
 
@@ -43,10 +43,15 @@ func MessagesToAgentMessages(prior []model.Message) ([]agent.Message, error) {
 // into per-run fragments instead of merging across runs. A NULL/empty run_id
 // degenerates to the agent name alone — the pre-change behavior for top-level
 // turns.
-func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []int, error) {
+// The calls parameter carries the session's tool_calls rows
+// (refactor-message-storage): assistant FINAL rows join them by
+// (trace_id, round_no) to rebuild the wire-format tool unit. Legacy event
+// rows ignore it — their tool interactions reconstruct from event rows.
+func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCall) ([]agent.Message, []int, error) {
 	if len(prior) == 0 {
 		return nil, nil, nil
 	}
+	callsByRound := indexToolCallsByRound(calls)
 
 	var out []agent.Message
 	var lastRow []int
@@ -69,6 +74,22 @@ func MessagesToAgentMessagesIndexed(prior []model.Message) ([]agent.Message, []i
 
 		switch msg.EventType {
 		case model.EventTypeMessage:
+			// Assistant FINAL row (refactor-message-storage): content is
+			// already merged; the wire-format tool unit joins in from
+			// tool_calls by (trace_id, round_no).
+			if msg.Role == model.RoleAssistant && msg.RoundNo > 0 {
+				state.flush(&out, &lastRow)
+				if msg.Content != "" || msg.ReasoningContent != "" {
+					out = append(out, agent.Message{
+						Role:             "assistant",
+						Content:          msg.Content,
+						ReasoningContent: msg.ReasoningContent,
+					})
+					lastRow = append(lastRow, i)
+				}
+				emitFinalRoundTools(callsByRound[roundKeyOf(msg.TraceID, msg.RoundNo)], &out, &lastRow, i)
+				continue
+			}
 			if msg.Role != model.RoleUser {
 				continue
 			}
@@ -186,6 +207,67 @@ type runGroupKey struct {
 // runGroupKeyOf returns msg's identity grouping key.
 func runGroupKeyOf(msg model.Message) runGroupKey {
 	return runGroupKey{agent: msg.Agent, instance: msg.AgentInstanceID, runID: msg.RunID}
+}
+
+// roundKey identifies one round's tool interactions.
+type roundKey struct {
+	traceID string
+	roundNo int
+}
+
+// roundKeyOf builds the join key for one (turn, round).
+func roundKeyOf(traceID string, roundNo int) roundKey { return roundKey{traceID, roundNo} }
+
+// indexToolCallsByRound buckets the session's tool_calls rows by their
+// (turn, round) identity, preserving call order.
+func indexToolCallsByRound(calls []model.ToolCall) map[roundKey][]model.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make(map[roundKey][]model.ToolCall, len(calls))
+	for _, c := range calls {
+		k := roundKeyOf(c.TurnID, c.RoundNo)
+		out[k] = append(out[k], c)
+	}
+	return out
+}
+
+// emitFinalRoundTools rebuilds one final row's wire-format tool unit,
+// byte-matching the legacy event-row shape: one assistant message carrying
+// the paired tool_calls array, then one role=tool message per result.
+// Unpaired calls (no result) are skipped, exactly like the legacy path.
+// lastRow attribution uses the assistant final row for the whole unit — the
+// round is atomic from a boundary cursor's perspective.
+func emitFinalRoundTools(calls []model.ToolCall, out *[]agent.Message, lastRow *[]int, row int) {
+	var paired []agent.ToolCall
+	var toolMsgs []agent.Message
+	for _, c := range calls {
+		if c.Result == "" && c.Status != model.ToolCallStatusCompleted {
+			continue
+		}
+		paired = append(paired, agent.ToolCall{
+			ID: c.ToolCallID,
+			Function: agent.ToolCallFunction{
+				Name:      c.Name,
+				Arguments: c.Arguments,
+			},
+		})
+		toolMsgs = append(toolMsgs, agent.Message{
+			Role:       "tool",
+			Content:    c.Result,
+			ToolCallID: c.ToolCallID,
+			Name:       c.Name,
+		})
+	}
+	if len(paired) == 0 {
+		return
+	}
+	*out = append(*out, agent.Message{Role: "assistant", ToolCalls: paired})
+	*lastRow = append(*lastRow, row)
+	*out = append(*out, toolMsgs...)
+	for range toolMsgs {
+		*lastRow = append(*lastRow, row)
+	}
 }
 
 // appendToken adds a token fragment to its run's accumulator (no-op on empty

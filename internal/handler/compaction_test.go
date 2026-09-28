@@ -114,7 +114,7 @@ func (c *cannedSummaryLLM) StreamChat(context.Context, agent.LLMRequest, func(st
 // rows; and the nil degradations.
 func TestStitchCompacted_Unit(t *testing.T) {
 	rows := compactionRows(8) // 16 rows, 16 agent messages
-	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows)
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, nil)
 	require.NoError(t, err)
 	require.Len(t, agentMsgs, 16)
 	require.Len(t, lastRow, 16)
@@ -128,7 +128,7 @@ func TestStitchCompacted_Unit(t *testing.T) {
 		BoundaryMsgID:    boundaryRow.ID,
 	}
 
-	stitched := stitchCompacted(rows, agentMsgs, rec)
+	stitched := stitchCompacted(rows, nil, agentMsgs, rec)
 	require.NotNil(t, stitched)
 	require.Len(t, stitched, 2+9) // first + summary + 9 tail messages
 	require.Equal(t, agentMsgs[0], stitched[0], "first message must survive verbatim")
@@ -148,8 +148,8 @@ func TestStitchCompacted_Unit(t *testing.T) {
 
 	// Degradations: unknown boundary row and nil record → nil (full history).
 	ghost := &model.ContextCompaction{BoundaryMsgID: 99999, BoundaryMsgTime: time.Now(), BoundaryMsgIndex: 0}
-	require.Nil(t, stitchCompacted(rows, agentMsgs, ghost))
-	require.Nil(t, stitchCompacted(rows, agentMsgs, nil))
+	require.Nil(t, stitchCompacted(rows, nil, agentMsgs, ghost))
+	require.Nil(t, stitchCompacted(rows, nil, agentMsgs, nil))
 }
 
 func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
@@ -162,7 +162,7 @@ func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
 		{ID: 4, MsgTime: msgTime, MsgIndex: 4, Agent: stream.AgentConfucius, Role: "", EventType: model.EventTypePlanUpdated, Content: planJSON},
 		{ID: 5, MsgTime: msgTime, MsgIndex: 5, Agent: stream.AgentConfucius, Role: model.RoleTool, EventType: model.EventTypeToolResult, Content: `{"tool_call_id":"p9","output":{"revision":9}}`},
 	}
-	agentMsgs, _, err := MessagesToAgentMessagesIndexed(rows)
+	agentMsgs, _, err := MessagesToAgentMessagesIndexed(rows, nil)
 	require.NoError(t, err)
 
 	rec := &model.ContextCompaction{
@@ -171,7 +171,7 @@ func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
 		BoundaryMsgIndex: rows[1].MsgIndex,
 		BoundaryMsgID:    rows[1].ID,
 	}
-	stitched := stitchCompacted(rows, agentMsgs, rec)
+	stitched := stitchCompacted(rows, nil, agentMsgs, rec)
 	require.NotNil(t, stitched)
 	require.Len(t, stitched, 4) // original task + summary + tool call + result
 	for _, m := range stitched {
@@ -193,7 +193,7 @@ func TestSendMessage_CompactedFlagStitchesFromCache(t *testing.T) {
 	env.mysql.getSessionByIDFound.ContextCompacted = true
 
 	// Boundary after the 6th agent message; cache the record in Redis.
-	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows)
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, nil)
 	require.NoError(t, err)
 	boundaryRow := rows[lastRow[6]]
 	raw, err := json.Marshal(model.ContextCompaction{

@@ -33,6 +33,9 @@ type MySQLStore interface {
 	// AppendFinalBatch writes one round batch (final message rows + tool
 	// calls) in a single transaction (refactor-message-storage).
 	AppendFinalBatch(ctx context.Context, msgs []model.Message, calls []model.ToolCall) error
+	// ListToolCalls returns the session's tool interactions in (turn, round)
+	// order — the join input for final-row reconstruction and the history DTO.
+	ListToolCalls(ctx context.Context, sessionID string) ([]model.ToolCall, error)
 	ListMessages(ctx context.Context, sessionID string) ([]model.Message, error)
 	// ListMessagesPaged returns one cursor page in the selected sub-agent
 	// content view (model.SubagentContentFull/Placeholder); the placeholder

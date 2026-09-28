@@ -321,7 +321,15 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	}
 	isFirstTurn := len(prior) == 0
 
-	agentMsgs, _, err := MessagesToAgentMessagesIndexed(prior)
+	priorCalls, cerr := h.msgSvc.ListToolCalls(ctx, sessionID)
+	if cerr != nil {
+		logger.FromContext(ctx).Warn("recover tool calls failed; proceeding without",
+			zap.String("op", "handler.send_message"),
+			zap.Error(cerr))
+		priorCalls = nil
+	}
+
+	agentMsgs, _, err := MessagesToAgentMessagesIndexed(prior, priorCalls)
 	if err != nil {
 		logger.FromContext(ctx).Warn("reconstruct messages failed; falling back to current message only",
 			zap.String("op", "handler.send_message"),
@@ -361,8 +369,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			}
 		}
 		if overThreshold || sess.ContextCompacted {
-			if durable, derr := h.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
-				durableMsgs, durableRow, rerr := MessagesToAgentMessagesIndexed(durable)
+			if durable, durableCalls, derr := h.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
+				durableMsgs, durableRow, rerr := MessagesToAgentMessagesIndexed(durable, durableCalls)
 				if rerr != nil {
 					logger.FromContext(ctx).Warn("durable reconstruct failed; using full recovered history",
 						zap.String("op", "handler.send_message"),
@@ -384,7 +392,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 						activeRecord = h.compSvc.LatestCompactionRecord(ctx, sessionID)
 					}
 					if activeRecord != nil {
-						if stitched := stitchCompacted(durable, durableMsgs, activeRecord); stitched != nil {
+						if stitched := stitchCompacted(durable, durableCalls, durableMsgs, activeRecord); stitched != nil {
 							agentMsgs = stitched
 						}
 					}
@@ -1061,12 +1069,12 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 		// boundary cursor must reference real MySQL identities — the Redis
 		// read cache would serve them with id 0. A drain failure aborts the
 		// compaction attempt like a flush failure.
-		rows, err := h.compSvc.RecoverDurable(ctx, persist.sessionID)
+		rows, calls, err := h.compSvc.RecoverDurable(ctx, persist.sessionID)
 		if err != nil {
 			log.Warn("mid-turn durable recover failed; compaction skipped", zap.Error(err))
 			return nil
 		}
-		agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows)
+		agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, calls)
 		if err != nil {
 			log.Warn("mid-turn reconstruct failed; compaction skipped", zap.Error(err))
 			return nil
@@ -1089,7 +1097,7 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 
 		// ④ Rewrite the in-memory round to first + framed summary + retained
 		// tail — the same shape later turns stitch from the record.
-		stitched := stitchCompacted(rows, agentMsgs, rec)
+		stitched := stitchCompacted(rows, calls, agentMsgs, rec)
 		if stitched == nil {
 			log.Warn("mid-turn stitch failed after compaction; keeping original context")
 			return nil

@@ -103,13 +103,11 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	env.mysqlFake.mu.Unlock()
 	assert.True(t, ok, "session must be persisted to MySQL tier")
 
-	// Wait for the single combined batch (user message + assistant events) to
-	// land in the Redis dual write (read cache + ingest queue), then drain the
-	// queue into MySQL. The batch is saved AFTER the SSE response completes via
-	// a detached context, so we poll for the cache entries first.
-	env.waitForPersistedTurn(t, defaultSessionID, 4)
+	// The terminal round batch is a synchronous transactional write: by the
+	// time the SSE response completes, user + assistant FINAL rows are durable.
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
-	require.Len(t, msgs, 4, "user + 3 merged assistant events in MySQL tier after drain")
+	require.Len(t, msgs, 2, "user + one assistant final row in MySQL tier")
 
 	// Every persisted row carries the idempotency key.
 	for _, m := range msgs {
@@ -121,36 +119,19 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.Equal(t, 0, msgs[0].MsgIndex)
 	assert.Equal(t, "hello", msgs[0].Content)
 
-	// Assistant events follow in order: agent_start, merged token, agent_end.
-	wantEvents := []struct {
-		EventType string
-		Agent     string
-		Role      string
-	}{
-		{model.EventTypeAgentStart, stream.AgentConfucius, ""},
-		{model.EventTypeToken, stream.AgentConfucius, model.RoleAssistant},
-		{model.EventTypeAgentEnd, stream.AgentConfucius, ""},
-	}
-	for i, want := range wantEvents {
-		assert.Equal(t, want.EventType, msgs[i+1].EventType, "assistant event %d", i)
-		assert.Equal(t, want.Agent, msgs[i+1].Agent, "assistant event %d", i)
-		assert.Equal(t, want.Role, msgs[i+1].Role, "assistant event %d", i)
-		assert.Equal(t, i+1, msgs[i+1].MsgIndex, "assistant event %d", i)
-	}
-
-	// The ingest queue drained with the read cache.
-	require.NoError(t, env.drainMessages(context.Background()))
-	assert.Equal(t, 4, len(env.mysqlFake.messagesFor(defaultSessionID)),
-		"re-draining the queue must not duplicate rows (INSERT IGNORE)")
+	// The assistant FINAL row carries the full content and the round ordinal.
+	assert.Equal(t, model.RoleAssistant, msgs[1].Role)
+	assert.Equal(t, model.EventTypeMessage, msgs[1].EventType)
+	assert.Equal(t, 1, msgs[1].RoundNo)
+	assert.NotEmpty(t, msgs[1].MsgIndex)
 
 	// RecoverMessages through the public service API must return the same
 	// ordered stream (Redis hit fast-path).
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
-	require.Len(t, recovered, 4)
+	require.Len(t, recovered, 2)
 	assert.Equal(t, "hello", recovered[0].Content)
-	assert.Equal(t, model.EventTypeAgentStart, recovered[1].EventType)
-	assert.Equal(t, model.EventTypeAgentEnd, recovered[3].EventType)
+	assert.Equal(t, model.EventTypeMessage, recovered[1].EventType)
 }
 
 // TestMessageFlow_UserMessageVisibleWhileTurnRunning is the regression anchor
@@ -193,9 +174,9 @@ func TestMessageFlow_UserMessageVisibleWhileTurnRunning(t *testing.T) {
 		return err == nil && len(raws) == 1
 	}, 2*time.Second, 5*time.Millisecond, "the send-time user row must be readable while the turn runs")
 
-	// Move the queued row into MySQL (the flusher's job) and read the history
-	// endpoint mid-turn: the user row is present, no assistant rows are.
-	require.NoError(t, env.drainMessages(ctx))
+	// The send-time write is a direct synchronous MySQL insert: read the
+	// history endpoint mid-turn — the user row is present, no assistant rows.
+
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/sessions/"+defaultSessionID+"/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -211,13 +192,12 @@ func TestMessageFlow_UserMessageVisibleWhileTurnRunning(t *testing.T) {
 	assert.Equal(t, model.EventTypeMessage, resp.Messages[0].EventType)
 	assert.Equal(t, "mid-turn question", resp.Messages[0].Content)
 
-	// Let the turn finish; the assistant suffix lands afterwards and the
-	// completed history keeps exactly one user row.
+	// Let the turn finish; the final row lands afterwards and the completed
+	// history keeps exactly one user row.
 	<-done
-	env.waitForPersistedTurn(t, defaultSessionID, 4)
-	require.NoError(t, env.drainMessages(ctx))
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 	final := env.mysqlFake.messagesFor(defaultSessionID)
-	require.Len(t, final, 4, "user + 3 merged assistant events after the turn")
+	require.Len(t, final, 2, "user + one assistant final after the turn")
 	userRows := 0
 	for _, m := range final {
 		if m.EventType == model.EventTypeMessage {
@@ -252,24 +232,19 @@ func TestMessageFlow_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 	// is observed; the stream simply terminates early.
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// Wait for the detached-context persistence goroutine to dual-write, then
-	// drain the write-behind queue into MySQL.
-	env.waitForPersistedTurn(t, defaultSessionID, 1)
+	// The terminal batch is synchronous: user row plus the truncated
+	// interrupted final (refactor-message-storage: cancel/error persists the
+	// accumulated content as a final row).
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
-	require.GreaterOrEqual(t, len(msgs), 2, "expected user message plus at least one assistant event")
+	require.Len(t, msgs, 2, "user row plus the interrupted assistant final")
 	assert.Equal(t, model.RoleUser, msgs[0].Role)
 	assert.Equal(t, "hello", msgs[0].Content)
-
-	var sawToken bool
-	for _, m := range msgs[1:] {
-		if m.EventType == model.EventTypeToken {
-			assert.Equal(t, "Hello", m.Content, "partial assistant token should be persisted")
-			sawToken = true
-			break
-		}
-	}
-	assert.True(t, sawToken, "expected the partial assistant token emitted before the failure to be persisted")
+	assert.Equal(t, model.RoleAssistant, msgs[1].Role)
+	assert.Equal(t, model.EventTypeMessage, msgs[1].EventType)
+	assert.Equal(t, "Hello", msgs[1].Content, "partial assistant content persists as a truncated final")
+	assert.Equal(t, model.MessageStatusInterrupted, msgs[1].Status)
 }
 
 // TestMessageFlow_Unauthenticated_401 verifies that the real AuthMiddleware is

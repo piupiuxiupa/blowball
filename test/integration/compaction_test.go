@@ -21,7 +21,6 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
@@ -100,9 +99,7 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 		MySQL: mysqlFake,
 		Redis: redisSvc,
 		FS:    fsSvc,
-		DrainMessageQueue: func(ctx context.Context) error {
-			return msgflush.Drain(ctx, redisSvc, mysqlFake)
-		},
+		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)

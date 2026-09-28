@@ -22,7 +22,6 @@ import (
 	"github.com/lush/blowball/internal/handler"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/msgflush"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/store/fs"
@@ -146,7 +145,7 @@ func TestIntegration_AgentMCPToolVisibility(t *testing.T) {
 
 	// Wait for the dual write, then drain the write-behind queue into the
 	// fake MySQL tier.
-	waitForQueuedTurn(t, redisSvc, mysqlFake, "sess-mcp", 4)
+	waitForQueuedTurn(t, redisSvc, mysqlFake, "sess-mcp", 2)
 
 	require.NotNil(t, llm.confuciusRequest().Tools)
 	var tools []struct {
@@ -231,7 +230,7 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 
 	// Wait for the dual write, then drain the write-behind queue into the
 	// fake MySQL tier.
-	waitForQueuedTurn(t, redisSvc, mysqlFake, "sess-skills", 4)
+	waitForQueuedTurn(t, redisSvc, mysqlFake, "sess-skills", 3)
 
 	prompt := llm.confuciusRequest().Messages[0].Content
 	assert.Contains(t, prompt, "coding-style")
@@ -268,9 +267,7 @@ func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Co
 		MySQL: mysqlFake,
 		Redis: redisSvc,
 		FS:    fsSvc,
-		DrainMessageQueue: func(ctx context.Context) error {
-			return msgflush.Drain(ctx, redisSvc, mysqlFake)
-		},
+		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)

@@ -234,23 +234,21 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 	assert.NotEmpty(t, liangTokens)
 	mu.Unlock()
 
-	// With event-stream storage, every assistant event is persisted. The
-	// assistant summary is reconstructed from Confucius round-2 token events.
-	// Wait for the dual write, then drain the write-behind queue into the
-	// fake MySQL tier before reading the rows back.
+	// Final-content storage: the summary is the LAST assistant final row's
+	// content (round 2; round 1 was the spawn round).
 	env.waitForPersistedTurn(t, defaultSessionID, 3)
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
 	var summaryBuf string
 	for _, m := range msgs {
-		if m.Agent == stream.AgentConfucius && m.EventType == model.EventTypeToken {
-			summaryBuf += m.Content
+		if m.Agent == stream.AgentConfucius && m.EventType == model.EventTypeMessage && m.Role == model.RoleAssistant {
+			summaryBuf = m.Content
 		}
 	}
-	assert.Equal(t, summary, summaryBuf, "Confucius round-2 token events must reconstruct the summary")
+	assert.Equal(t, summary, summaryBuf, "the round-2 final row carries the summary")
 
-	// Sanity: many rows persisted (user + all assistant events).
-	require.Greater(t, len(msgs), 2, "expected user message plus multiple assistant events")
+	// Sanity: user row plus both round finals.
+	require.Len(t, msgs, 3, "user + two assistant finals")
 
 	// The user row must be first and correctly tagged.
 	require.Equal(t, model.AgentUser, msgs[0].Agent)
