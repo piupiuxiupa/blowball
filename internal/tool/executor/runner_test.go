@@ -7,7 +7,7 @@ import (
 
 func TestDetectDangerousCommand(t *testing.T) {
 	cases := []struct {
-		cmd      string
+		cmd       string
 		dangerous bool
 	}{
 		{"rm -rf /workspace/build", true},

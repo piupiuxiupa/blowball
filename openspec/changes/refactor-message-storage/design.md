@@ -15,7 +15,7 @@ mid-turn compaction 对已持久化真实行有硬依赖（boundary cursor 必�
 
 ### D2 — tool_calls 独立表为 canonical，`(turn, round)` join
 
-`tool_call_id` 负责 call↔result 同行配对（OpenAI wire format 原生语义）；对话流位置由 `(session_id, turn_id, round_no)` 序数确定——每轮内部结构固定（assistant → 该轮 tool calls → results），合并全确定，无时间戳排序歧义。不选 assistant 行内嵌 JSON：tool 结果是对话最大 payload，内嵌+索引表会双倍存储。
+`tool_call_id` 负责 call↔result 同行配对（OpenAI wire format 原生语义）；对话流位置由 `messages` 里的工具占位行（`tool_call_id` 列、`msg_index` 排序）锚定——占位行只带工具名，参数/结果 payload 全在 `tool_calls`，无重复存储、无派生序数（round_no 可由占位行的位置完全推导，故不设该列）。
 
 重建请求序列与现状 wire format 逐 byte 一致（现有逻辑本就把离散 tool_call 行 batch 成带 `tool_calls` 数组的 assistant 消息），迁移边界上前缀缓存连续命中。
 

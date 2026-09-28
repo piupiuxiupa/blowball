@@ -420,19 +420,18 @@ func TestRoundPersistence_ClosedRoundsLandDuringTurn(t *testing.T) {
 	require.Len(t, batches[0], 1)
 	require.Equal(t, "trace-1:0", batches[0][0].ClientMsgID)
 
-	// The mid-turn batch is round 1's FINAL row (full content, no event rows).
-	// ponytail: first matching batch wins; deterministic under the 20ms tick
-	// vs 150ms event spacing.
+	// The mid-turn batch is round 1's rows: the final (full content) plus its
+	// tool placeholder.
 	var mid []model.Message
 	for _, b := range batches[1:] {
-		if len(b) == 1 && b[0].EventType == model.EventTypeMessage {
+		if len(b) > 0 && b[0].EventType == model.EventTypeMessage && b[0].Content == "Hel" {
 			mid = b
 			break
 		}
 	}
 	require.NotNil(t, mid, "a closed round must land mid-turn as a final row")
-	require.Equal(t, "Hel", mid[0].Content, "round-1 narration merged")
-	require.Equal(t, 1, mid[0].RoundNo)
+	require.Len(t, mid, 2, "final row + tool placeholder")
+	require.Equal(t, "c1", mid[1].ToolCallID)
 
 	// No token event rows anywhere: new data is final-content only.
 	for _, b := range batches {

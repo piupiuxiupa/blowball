@@ -474,15 +474,16 @@ func TestMessagesToAgentMessages_FinalRowsMatchLegacyByteForByte(t *testing.T) {
 		{MsgTime: base.Add(4 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "done", TraceID: trace, MsgIndex: 4},
 	}
 
-	// New shape: user + assistant final (round 1) + assistant final (round 2),
-	// with the tool interaction in tool_calls.
+	// New shape: user + assistant final (round 1) + tool placeholder +
+	// assistant final (round 2); the placeholder joins the canonical payload.
 	finals := []model.Message{
 		{MsgTime: base, Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hi", TraceID: trace, MsgIndex: 0},
-		{MsgTime: base.Add(3 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "let me check", TraceID: trace, MsgIndex: 1, RoundNo: 1},
-		{MsgTime: base.Add(4 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "done", TraceID: trace, MsgIndex: 4, RoundNo: 2},
+		{MsgTime: base.Add(3 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "let me check", TraceID: trace, MsgIndex: 1},
+		{MsgTime: base.Add(3 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: "grep", TraceID: trace, MsgIndex: 2, ToolCallID: "c1"},
+		{MsgTime: base.Add(4 * time.Second), Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "done", TraceID: trace, MsgIndex: 4},
 	}
 	calls := []model.ToolCall{{
-		TurnID: trace, RoundNo: 1, ToolCallID: "c1", Name: "grep",
+		TurnID: trace, ToolCallID: "c1", Name: "grep",
 		Arguments: `{"q":"x"}`, Result: "found 2", Status: model.ToolCallStatusCompleted,
 	}}
 

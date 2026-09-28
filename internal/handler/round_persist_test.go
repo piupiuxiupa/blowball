@@ -47,20 +47,27 @@ func TestBuildRoundFinalBatch_ClosedRoundsAndDeterministicIDs(t *testing.T) {
 	// round 2; the trailing round stays in flight.
 	batch, consumed := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(), roundRenderOptions{})
 	require.Equal(t, 4, consumed, "cursor stops at the round-2 opening token")
-	require.Len(t, batch.msgs, 2) // user + round-1 final
+	require.Len(t, batch.msgs, 3) // user + round-1 final + tool placeholder
 	require.Len(t, batch.calls, 1)
 
 	round1 := batch.msgs[1]
 	assert.Equal(t, "trace-1:1", round1.ClientMsgID)
-	assert.Equal(t, 1, round1.RoundNo)
 	assert.Equal(t, "Hello", round1.Content)
 	assert.Equal(t, model.EventTypeMessage, round1.EventType)
 	assert.Equal(t, model.RoleAssistant, round1.Role)
+	assert.Empty(t, round1.ToolCallID, "the final row carries no placeholder anchor")
+
+	ph := batch.msgs[2]
+	assert.Equal(t, model.EventTypeToolCall, ph.EventType)
+	assert.Equal(t, "c1", ph.ToolCallID)
+	assert.Equal(t, "grep", ph.Content, "the placeholder carries the tool name")
+	assert.Equal(t, 2, ph.MsgIndex, "the placeholder sits at the call's stream ordinal")
+	assert.Equal(t, "trace-1:2", ph.ClientMsgID)
+
 	assert.Equal(t, "grep", batch.calls[0].Name)
 	assert.Equal(t, `{"q":"x"}`, batch.calls[0].Arguments)
 	assert.Equal(t, "out", batch.calls[0].Result)
 	assert.Equal(t, model.ToolCallStatusCompleted, batch.calls[0].Status)
-	assert.Equal(t, 1, batch.calls[0].RoundNo)
 
 	// Terminal render from the cursor: round 2 only, id keyed on its opening
 	// ordinal; re-rendering the full range yields the same ids (idempotency
@@ -71,7 +78,6 @@ func TestBuildRoundFinalBatch_ClosedRoundsAndDeterministicIDs(t *testing.T) {
 		roundRenderOptions{terminal: true})
 	require.Len(t, suffix.msgs, 1)
 	assert.Equal(t, "trace-1:4", suffix.msgs[0].ClientMsgID)
-	assert.Equal(t, 2, suffix.msgs[0].RoundNo)
 	assert.Equal(t, "done", suffix.msgs[0].Content)
 
 	again, _ := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(), roundRenderOptions{terminal: true})
@@ -114,8 +120,8 @@ func TestBuildRoundFinalBatch_InterruptedTerminal(t *testing.T) {
 
 	batch, _ := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(),
 		roundRenderOptions{terminal: true, interrupted: true})
-	require.Len(t, batch.msgs, 3) // user + round1 + round2(truncated)
-	last := batch.msgs[2]
+	require.Len(t, batch.msgs, 4) // user + round1 final + placeholder + round2 final(truncated)
+	last := batch.msgs[3]
 	assert.Equal(t, model.MessageStatusInterrupted, last.Status)
 	assert.Empty(t, batch.msgs[1].Status, "only the truncated final round carries the mark")
 }
@@ -157,7 +163,7 @@ func TestRoundPersistSequence_UserRowExactlyOnce(t *testing.T) {
 		time.Now().UTC(), roundRenderOptions{terminal: true})
 
 	all := append(append(sendBatch, midBatch.msgs...), endBatch.msgs...)
-	require.Len(t, all, 3, "user + two round finals, nothing duplicated or dropped")
+	require.Len(t, all, 4, "user + round-1 final + placeholder + round-2 final, nothing duplicated or dropped")
 	seen := map[string]int{}
 	for _, m := range all {
 		seen[m.ClientMsgID]++

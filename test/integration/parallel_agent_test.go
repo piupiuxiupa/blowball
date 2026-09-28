@@ -236,7 +236,7 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 
 	// Final-content storage: the summary is the LAST assistant final row's
 	// content (round 2; round 1 was the spawn round).
-	env.waitForPersistedTurn(t, defaultSessionID, 3)
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
 	var summaryBuf string
@@ -247,8 +247,9 @@ func TestParallelAgent_ConfuciusDispatchesBothSubAgents(t *testing.T) {
 	}
 	assert.Equal(t, summary, summaryBuf, "the round-2 final row carries the summary")
 
-	// Sanity: user row plus both round finals.
-	require.Len(t, msgs, 3, "user + two assistant finals")
+	// Sanity: user row, the dispatch round's final (empty narration) + its
+	// spawn placeholder, and the summary final.
+	require.Len(t, msgs, 4, "user + dispatch final + placeholder + summary final")
 
 	// The user row must be first and correctly tagged.
 	require.Equal(t, model.AgentUser, msgs[0].Agent)

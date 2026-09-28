@@ -50,11 +50,15 @@ type Message struct {
 	MsgTime   time.Time `db:"msg_time"    json:"msg_time"`
 	Agent     string    `db:"agent"       json:"agent"`
 	MsgIndex  int       `db:"msg_index"   json:"msg_index"`
-	RoundNo   int       `db:"round_no"    json:"round_no,omitempty"`
-	Role      string    `db:"role"        json:"role"`
-	EventType string    `db:"event_type"  json:"event_type"`
-	Status    string    `db:"status"      json:"status,omitempty"`
-	Content   string    `db:"content"     json:"content"`
+	// ToolCallID is set only on tool PLACEHOLDER rows (event_type=tool_call):
+	// a tiny structural marker whose position in the (msg_time, msg_index)
+	// stream locates the interaction; it joins to the canonical payload in
+	// tool_calls. Assistant finals and user rows leave it empty.
+	ToolCallID string `db:"tool_call_id" json:"tool_call_id,omitempty"`
+	Role       string `db:"role"        json:"role"`
+	EventType  string `db:"event_type"  json:"event_type"`
+	Status     string `db:"status"      json:"status,omitempty"`
+	Content    string `db:"content"     json:"content"`
 	// ReasoningContent holds the merged reasoning of an assistant FINAL row
 	// (event_type=message, refactor-message-storage). Legacy event rows keep
 	// it empty — their reasoning lives in separate event_type='reasoning' rows.

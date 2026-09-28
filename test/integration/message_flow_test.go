@@ -119,10 +119,11 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.Equal(t, 0, msgs[0].MsgIndex)
 	assert.Equal(t, "hello", msgs[0].Content)
 
-	// The assistant FINAL row carries the full content and the round ordinal.
+	// The assistant FINAL row carries the full content; no placeholder on a
+	// pure-text turn.
 	assert.Equal(t, model.RoleAssistant, msgs[1].Role)
 	assert.Equal(t, model.EventTypeMessage, msgs[1].EventType)
-	assert.Equal(t, 1, msgs[1].RoundNo)
+	assert.Empty(t, msgs[1].ToolCallID)
 	assert.NotEmpty(t, msgs[1].MsgIndex)
 
 	// RecoverMessages through the public service API must return the same

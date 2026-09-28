@@ -184,7 +184,7 @@ func (h *SessionHandler) GetSessionMessages(c *gin.Context) {
 	needsCalls := false
 	for i, m := range messages {
 		items[i] = sessionMessageItem{Message: m}
-		if m.Role == model.RoleAssistant && m.EventType == model.EventTypeMessage && m.RoundNo > 0 {
+		if m.ToolCallID != "" {
 			needsCalls = true
 		}
 	}
@@ -195,11 +195,12 @@ func (h *SessionHandler) GetSessionMessages(c *gin.Context) {
 				zap.String("session_id", sessionID),
 				zap.Error(err))
 		} else {
-			byRound := indexToolCallsByRound(calls)
+			byID := indexToolCallsByID(calls)
 			for i := range items {
-				m := items[i].Message
-				if m.Role == model.RoleAssistant && m.EventType == model.EventTypeMessage && m.RoundNo > 0 {
-					items[i].ToolCalls = byRound[roundKeyOf(m.TraceID, m.RoundNo)]
+				if id := items[i].ToolCallID; id != "" {
+					if c, ok := byID[items[i].TraceID+""+id]; ok {
+						items[i].ToolCalls = []model.ToolCall{c}
+					}
 				}
 			}
 		}

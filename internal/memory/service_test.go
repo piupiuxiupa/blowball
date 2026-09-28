@@ -152,8 +152,8 @@ func TestRecall_RendersBlock(t *testing.T) {
 
 	assert.Contains(t, block, "<user-memories>")
 	assert.Contains(t, block, "</user-memories>")
-	assert.Contains(t, block, "fish shell on macOS")                       // abstract preferred
-	assert.Contains(t, block, "blowball, a Go multi-agent chat backend")   // overview fallback
+	assert.Contains(t, block, "fish shell on macOS")                     // abstract preferred
+	assert.Contains(t, block, "blowball, a Go multi-agent chat backend") // overview fallback
 	assert.Contains(t, block, "[memory 87%]")
 	assert.NotContains(t, block, "viking://user/alice/memories/empty") // textless entry dropped
 }

@@ -305,11 +305,11 @@ func TestAgentPlanState_EndToEnd(t *testing.T) {
 
 	// Plan snapshots are control-plane state, not message rows
 	// (refactor-message-storage): their revisions were already asserted from
-	// the live SSE stream above. Messages hold only user + round finals.
+	// the live SSE stream above. Messages hold finals + tool placeholders.
 	env.waitForPersistedTurn(t, defaultSessionID, 4)
 	for _, msg := range env.mysqlFake.messagesFor(defaultSessionID) {
-		assert.Contains(t, []string{model.EventTypeMessage}, msg.EventType,
-			"only final rows persist: got %s/%s", msg.Agent, msg.EventType)
+		assert.Contains(t, []string{model.EventTypeMessage, model.EventTypeToolCall}, msg.EventType,
+			"only finals and placeholders persist: got %s/%s", msg.Agent, msg.EventType)
 	}
 }
 

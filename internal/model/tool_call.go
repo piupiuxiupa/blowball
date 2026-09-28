@@ -21,7 +21,6 @@ type ToolCall struct {
 	ID         int64     `db:"id"           json:"id"`
 	SessionID  string    `db:"session_id"   json:"session_id"`
 	TurnID     string    `db:"turn_id"      json:"turn_id"`
-	RoundNo    int       `db:"round_no"     json:"round_no"`
 	ToolCallID string    `db:"tool_call_id" json:"tool_call_id"`
 	Name       string    `db:"name"         json:"name"`
 	Arguments  string    `db:"arguments"    json:"arguments"`

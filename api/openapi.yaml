@@ -176,13 +176,15 @@ components:
           enum: [user, Confucius, Chongzhi, Liang]
         msg_index:
           type: integer
-        round_no:
-          type: integer
+        tool_call_id:
+          type: string
           nullable: true
           description: >
-            1-based round ordinal within the turn, present on assistant
-            FINAL rows (refactor-message-storage); the join key for the
-            row's `tool_calls`. Null on legacy event rows and user rows.
+            Placeholder anchor (refactor-message-storage): set only on tool
+            placeholder rows (event_type=tool_call) whose position in the
+            (msg_time, msg_index) stream locates one interaction; it joins to
+            the row's `tool_calls` payload. Null on final, user, and legacy
+            rows.
         role:
           type: string
           enum: [user, assistant, tool, ""]
@@ -244,11 +246,11 @@ components:
         tool_calls:
           type: array
           description: >
-            The row's tool interactions (refactor-message-storage): present
-            only on assistant final rows, joined from the canonical
-            tool_calls table by (trace_id, round_no). Each entry pairs the
-            call with its result. Legacy event rows carry no such array —
-            their tool interactions are the event rows themselves.
+            The row's tool interaction (refactor-message-storage): present
+            only on tool placeholder rows, joined from the canonical
+            tool_calls table by tool_call_id as a one-element array. Legacy
+            event rows carry no such array — their tool interactions are the
+            event rows themselves.
           items:
             $ref: '#/components/schemas/ToolCallRecord'
     ToolCallRecord:
@@ -259,8 +261,6 @@ components:
           type: string
           format: uuid
           description: Producing turn identity (messages.trace_id).
-        round_no:
-          type: integer
         tool_call_id:
           type: string
           description: OpenAI tool_call pairing key.

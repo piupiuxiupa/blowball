@@ -6,7 +6,7 @@
 
 - **落库粒度改为 round 边界**：一轮（一次完整 LLM 回复 + 其工具执行）结束才写库；流式 chunk 只留在 Redis（复用现有 run event log），新数据不再产生 `token`/`reasoning`/`tool_call`/`tool_result`/marker 事件行。
 - **`messages` 只存终稿**：user 行 + assistant 终稿行（完整 content + reasoning）；assistant 行不再内嵌 tool_calls。
-- **新增 `tool_calls` 表（canonical）**：一行 = call + result 配对（`tool_call_id` 同行 UK），带 `(session_id, turn_id, round_no)` 序数；与 `messages` 按 `(turn, round)` 确定性 join 重建对话流，请求序列 byte-stable，前缀缓存不受影响。
+- **新增 `tool_calls` 表（canonical）**：一行 = call + result 配对（`tool_call_id` 同行 UK）；`messages` 增 `tool_call_id` 占位列——占位行按 `msg_index` 锚定交互位置并单键 join，请求序列 byte-stable，前缀缓存不受影响。
 - **子 agent 内容不进 `messages`**：transcript 继续走已有 `subagent_runs.messages_json`（run 结束快照），分流点在持久化层按 `agent_instance_id` 判断。
 - **msgflush chunk 队列退役**：round 批写走现有 turn-end 持久化重试机制（3 attempts / 30s budget / 确定性 client_msg_id 幂等）。
 - **崩溃语义**：crash 丢当前进行中 round（已完成 round 已落库）；cancel/provider-error 仍持久化 partial 内容，但形状从事件行变为截断终稿行。

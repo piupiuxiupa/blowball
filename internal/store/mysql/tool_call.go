@@ -14,7 +14,7 @@ import (
 // statement. INSERT IGNORE plus uk_tool_calls_session_call collapses
 // redelivery (round-batch retry) to one row per call.
 const insertToolCallsSQL = `
-INSERT IGNORE INTO tool_calls (session_id, turn_id, round_no, tool_call_id, name, arguments, result, status)
+INSERT IGNORE INTO tool_calls (session_id, turn_id, tool_call_id, name, arguments, result, status)
 VALUES %s
 `
 
@@ -22,7 +22,7 @@ VALUES %s
 // order (which follows (turn, round) by construction — round batches are
 // written in order). result COALESCE keeps the plain model field.
 const listToolCallsSQL = `
-SELECT id, session_id, turn_id, round_no, tool_call_id, name, arguments,
+SELECT id, session_id, turn_id, tool_call_id, name, arguments,
        COALESCE(result, '') AS result, status, create_time, update_time
 FROM tool_calls
 WHERE session_id = ?
@@ -81,13 +81,12 @@ func (s *Store) AppendFinalBatch(ctx context.Context, msgs []model.Message, call
 // (the store or an open transaction).
 func insertToolCalls(ctx context.Context, q sqlx.ExtContext, calls []model.ToolCall) error {
 	placeholders := make([]string, 0, len(calls))
-	args := make([]any, 0, len(calls)*8)
+	args := make([]any, 0, len(calls)*7)
 	for _, c := range calls {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?)")
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			c.SessionID,
 			c.TurnID,
-			c.RoundNo,
 			c.ToolCallID,
 			c.Name,
 			c.Arguments,

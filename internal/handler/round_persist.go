@@ -11,27 +11,29 @@ import (
 )
 
 // roundBatch is one round-boundary persistence unit (refactor-message-
-// storage): the assistant final rows plus their tool interactions, written in
-// a single cross-table transaction.
+// storage): the assistant final row, one tiny tool PLACEHOLDER row per call
+// (the positional anchor in the messages stream), and the canonical
+// tool_calls payload rows — all written in a single cross-table transaction.
 type roundBatch struct {
 	msgs  []model.Message
 	calls []model.ToolCall
 }
 
 // roundState accumulates one LLM round while walking the merged event
-// stream: the assistant's content/reasoning and the round's tool calls
-// (results filled in as they arrive).
+// stream: the assistant's content/reasoning, the round's tool calls (results
+// filled in as they arrive), and each call's merged-stream ordinal (the
+// placeholder row's msg_index).
 type roundState struct {
-	no        int
 	firstOrd  int // merged-stream ordinal of the round's first event
 	content   strings.Builder
 	reasoning strings.Builder
 	calls     []model.ToolCall
-	callOrd   map[string]int // tool_call_id -> index into calls
+	ord       []int // merged ordinal per call (placeholder msg_index)
+	callOrd   map[string]int
 }
 
-func newRoundState(no, firstOrd int) *roundState {
-	return &roundState{no: no, firstOrd: firstOrd, callOrd: map[string]int{}}
+func newRoundState(firstOrd int) *roundState {
+	return &roundState{firstOrd: firstOrd, callOrd: map[string]int{}}
 }
 
 // roundRenderOptions selects what the renderer closes.
@@ -44,18 +46,19 @@ type roundRenderOptions struct {
 	interrupted bool
 }
 
-// buildRoundFinalBatch renders final-content rows for merged[from:] plus the
-// user row when from == 0 and it was not send-time persisted. Round ordinals
-// are counted over the WHOLE merged stream so successive renders (incremental
-// tick, compaction flush, turn-end suffix) number rounds identically.
+// buildRoundFinalBatch renders final rows for merged[from:] plus the user row
+// when from == 0 and it was not send-time persisted.
 //
 // A round closes when the next round's first token/reasoning event arrives —
-// by then all of its tool results have necessarily landed (the agent loop
-// awaits parallel results before the next LLM call). opts.terminal closes the
-// trailing round unconditionally. The second return value is the merged
-// ordinal consumed; the caller advances the shared cursor only on persist
-// success, and the deterministic client_msg_id {trace}:{firstOrd} collapses
-// any redelivery.
+// by then all of its tool results have landed (the agent loop awaits
+// parallel results before the next LLM call). opts.terminal closes the
+// trailing round unconditionally. Each closed round emits: one assistant
+// final row (event_type=message, carries merged content/reasoning), then one
+// PLACEHOLDER row per tool call (event_type=tool_call, carries only
+// tool_call_id + name; its msg_index position anchors the interaction in the
+// stream). The second return value is the merged ordinal consumed; the
+// caller advances the shared cursor only on persist success, and the
+// deterministic client_msg_id {trace}:{ordinal} collapses any redelivery.
 func (p turnPersistInfo) buildRoundFinalBatch(
 	merged []stream.StreamEvent,
 	from int,
@@ -73,8 +76,8 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 		batch.msgs = append(batch.msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime))
 	}
 
-	// emit appends r's final rows unless the round predates the cursor
-	// (already persisted by an earlier render).
+	// emit appends r's rows unless the round predates the cursor (already
+	// persisted by an earlier render).
 	emit := func(r *roundState, last bool) {
 		if r == nil || r.firstOrd < from {
 			return
@@ -88,7 +91,6 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			MsgTime:          now,
 			Agent:            model.AgentConfucius,
 			MsgIndex:         r.firstOrd,
-			RoundNo:          r.no,
 			Role:             model.RoleAssistant,
 			EventType:        model.EventTypeMessage,
 			Status:           status,
@@ -97,13 +99,30 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			TraceID:          p.traceID,
 			ClientMsgID:      deterministicClientMsgID(p.traceID, r.firstOrd),
 		})
+		for i, c := range r.calls {
+			ord := r.ord[i]
+			if ord < from {
+				continue // placeholder already persisted by an earlier render
+			}
+			batch.msgs = append(batch.msgs, model.Message{
+				SessionID:   p.sessionID,
+				MsgTime:     now,
+				Agent:       model.AgentConfucius,
+				MsgIndex:    ord,
+				Role:        model.RoleAssistant,
+				EventType:   model.EventTypeToolCall,
+				Content:     c.Name,
+				TraceID:     p.traceID,
+				ClientMsgID: deterministicClientMsgID(p.traceID, ord),
+				ToolCallID:  c.ToolCallID,
+			})
+		}
 		batch.calls = append(batch.calls, r.calls...)
 	}
 
-	// Walk the whole stream so round numbering is render-independent; emit
-	// is gated on firstOrd >= from.
+	// Walk the whole stream so ordinals are render-independent; emit is
+	// gated on firstOrd >= from.
 	var cur *roundState
-	roundNo := 0
 	afterResult := false
 
 	for i := range merged {
@@ -123,8 +142,7 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				afterResult = false
 			}
 			if cur == nil {
-				roundNo++
-				cur = newRoundState(roundNo, i)
+				cur = newRoundState(i)
 			}
 			if e.Type == stream.EventToken {
 				cur.content.WriteString(e.Content)
@@ -136,8 +154,7 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			if cur == nil {
 				// Defensive: a call with no preceding narration still owns a
 				// round (models may open with tool_calls directly).
-				roundNo++
-				cur = newRoundState(roundNo, i)
+				cur = newRoundState(i)
 			}
 			id, _ := e.Meta[stream.MetaToolCallID].(string)
 			args := "{}"
@@ -145,10 +162,10 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				args = string(marshalEventJSON(raw))
 			}
 			cur.callOrd[id] = len(cur.calls)
+			cur.ord = append(cur.ord, i)
 			cur.calls = append(cur.calls, model.ToolCall{
 				SessionID:  p.sessionID,
 				TurnID:     p.traceID,
-				RoundNo:    cur.no,
 				ToolCallID: id,
 				Name:       e.Content,
 				Arguments:  args,

@@ -50,7 +50,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			msg_time    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			agent       VARCHAR(32)  NOT NULL,
 			msg_index   INT          NOT NULL,
-			round_no    INT          NULL,
+			tool_call_id VARCHAR(64)  NULL,
 			role        VARCHAR(16)  NULL,
 			event_type  VARCHAR(16)  NOT NULL DEFAULT 'token',
 			status      VARCHAR(16)  NULL,
@@ -74,7 +74,6 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			id           BIGINT       NOT NULL AUTO_INCREMENT,
 			session_id   CHAR(36)     NOT NULL,
 			turn_id      CHAR(36)     NOT NULL,
-			round_no     INT          NOT NULL,
 			tool_call_id VARCHAR(64)  NOT NULL,
 			name         VARCHAR(128) NOT NULL,
 			arguments    MEDIUMTEXT   NOT NULL,
@@ -84,7 +83,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			update_time  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
 			PRIMARY KEY (id),
 			UNIQUE KEY uk_tool_calls_session_call (session_id, tool_call_id),
-			KEY ix_tool_calls_session_turn_round (session_id, turn_id, round_no)
+			KEY ix_tool_calls_session_turn (session_id, turn_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 	`)
 	require.NoError(t, err)
