@@ -201,7 +201,7 @@ func TestMessageFlow_UserMessageVisibleWhileTurnRunning(t *testing.T) {
 	require.Len(t, final, 2, "user + one assistant final after the turn")
 	userRows := 0
 	for _, m := range final {
-		if m.EventType == model.EventTypeMessage {
+		if m.Role == model.RoleUser {
 			userRows++
 		}
 	}
@@ -420,8 +420,8 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 
 	// Wait for the async batch save to land (redis dual write + drain into
 	// MySQL) before the second turn so the recovered history is complete.
-	env.waitForPersistedTurn(t, defaultSessionID, 4)
-	require.GreaterOrEqual(t, len(env.mysqlFake.messagesFor(defaultSessionID)), 4, "expected first turn messages to be persisted")
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
+	require.GreaterOrEqual(t, len(env.mysqlFake.messagesFor(defaultSessionID)), 2, "expected first turn messages to be persisted")
 
 	// Wait for the title-generation goroutine to consume its LLM round.
 	require.Eventually(t, func() bool {
@@ -435,14 +435,14 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	// Wait for the second turn's async batch save as well.
-	env.waitForPersistedTurn(t, defaultSessionID, 8)
-	require.GreaterOrEqual(t, len(env.mysqlFake.messagesFor(defaultSessionID)), 8, "expected second turn messages to be persisted")
+	env.waitForPersistedTurn(t, defaultSessionID, 4)
+	require.GreaterOrEqual(t, len(env.mysqlFake.messagesFor(defaultSessionID)), 4, "expected second turn messages to be persisted")
 
 	client := llm
 	var secondTurn *agent.LLMRequest
 	for i := range client.calls {
 		msgs := client.calls[i].Messages
-		if len(msgs) > 0 && msgs[len(msgs)-1].Role == "user" && msgs[len(msgs)-1].Content == "second message" {
+		if len(msgs) > 0 && msgs[len(msgs)-1].Role == "user" && strings.Contains(msgs[len(msgs)-1].Content, "second message") {
 			req := client.calls[i]
 			secondTurn = &req
 			break
@@ -452,13 +452,13 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 
 	// The prompt should include the system prompt, first user message, first
 	// assistant reply, and the current user message.
-	var contents []string
+	var prompt strings.Builder
 	for _, m := range secondTurn.Messages {
-		contents = append(contents, m.Content)
+		prompt.WriteString(m.Content + "\n")
 	}
-	assert.Contains(t, contents, "first message")
-	assert.Contains(t, contents, "first reply")
-	assert.Contains(t, contents, "second message")
+	assert.Contains(t, prompt.String(), "first message")
+	assert.Contains(t, prompt.String(), "first reply")
+	assert.Contains(t, prompt.String(), "second message")
 }
 
 // TestMessageFlow_ToolCallMemory exercises a two-turn session where the first
@@ -527,7 +527,7 @@ func TestMessageFlow_ToolCallMemory(t *testing.T) {
 	var secondTurn *agent.LLMRequest
 	for i := range client.calls {
 		msgs := client.calls[i].Messages
-		if len(msgs) > 0 && msgs[len(msgs)-1].Role == "user" && msgs[len(msgs)-1].Content == "what did I ask" {
+		if len(msgs) > 0 && msgs[len(msgs)-1].Role == "user" && strings.Contains(msgs[len(msgs)-1].Content, "what did I ask") {
 			req := client.calls[i]
 			secondTurn = &req
 			break
@@ -595,7 +595,7 @@ func TestMessageFlow_InterruptedTurn_PersistsPartialStream(t *testing.T) {
 
 	// Wait for the detached-context persistence goroutine to dual-write, then
 	// drain the write-behind queue into MySQL.
-	env.waitForPersistedTurn(t, defaultSessionID, 1)
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
 	require.GreaterOrEqual(t, len(msgs), 2, "expected user message plus at least one assistant event")
@@ -604,7 +604,7 @@ func TestMessageFlow_InterruptedTurn_PersistsPartialStream(t *testing.T) {
 
 	var sawToken bool
 	for _, m := range msgs[1:] {
-		if m.EventType == model.EventTypeToken {
+		if m.Role == model.RoleAssistant && m.EventType == model.EventTypeMessage {
 			sawToken = true
 			break
 		}
@@ -619,7 +619,7 @@ func TestMessageFlow_InterruptedTurn_PersistsPartialStream(t *testing.T) {
 
 	var recoveredToken bool
 	for _, m := range recovered[1:] {
-		if m.EventType == model.EventTypeToken {
+		if m.Role == model.RoleAssistant && m.EventType == model.EventTypeMessage {
 			recoveredToken = true
 			break
 		}

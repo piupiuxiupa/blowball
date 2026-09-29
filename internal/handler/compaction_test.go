@@ -214,7 +214,8 @@ func TestSendMessage_CompactedFlagStitchesFromCache(t *testing.T) {
 	require.Equal(t, "user", got[1].Role)
 	require.Contains(t, got[1].Content, "CACHED CHECKPOINT")
 	require.Equal(t, agentMsgs[7], got[2], "tail begins after the boundary")
-	require.Equal(t, "next question", got[len(got)-1].Content)
+	require.Equal(t, "user", got[len(got)-1].Role)
+	require.Contains(t, got[len(got)-1].Content, "next question")
 	shadowed := map[string]bool{}
 	for _, m := range agentMsgs[1:7] {
 		shadowed[m.Content] = true
@@ -240,7 +241,7 @@ func TestSendMessage_UncompactedFlagSendsFullHistory(t *testing.T) {
 	got := env.stub.gotMessages
 	require.Len(t, got, 9) // 8 history + current user
 	require.Equal(t, "user turn xxxx", got[6].Content)
-	require.Equal(t, "next question", got[8].Content)
+	require.Contains(t, got[8].Content, "next question")
 }
 
 // TestSendMessage_MissingRecordDegradesToFullHistory: flag=1 but both cache
@@ -291,7 +292,7 @@ func TestSendMessage_TurnStartPreventiveCompaction(t *testing.T) {
 	got := env.stub.gotMessages
 	require.GreaterOrEqual(t, len(got), 4)
 	require.Contains(t, got[1].Content, "FRESH CHECKPOINT")
-	require.Equal(t, "next question", got[len(got)-1].Content)
+	require.Contains(t, got[len(got)-1].Content, "next question")
 	// The middle was re-summarized from scratch: no prior middle content is
 	// fed to the orchestrator except inside the checkpoint frame.
 	for _, m := range got[1 : len(got)-1] {

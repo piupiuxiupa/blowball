@@ -20,6 +20,7 @@ import (
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
+	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/skillmarket"
@@ -426,12 +427,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: block})
 		}
 	}
-	req.Content += "\n" + `
-<current_status>
-	timestamp: ` + time.Now().Format(time.RFC3339) + `
-</current_status>
-	`
-	messages := append(agentMsgs, agent.Message{Role: "user", Content: req.Content})
+
+	messages := append(agentMsgs, agent.Message{Role: "user", Content: req.Content + prompt.RenderStatus()})
 
 	// Capture the user message timestamp early so the persisted user row keeps
 	// the request-arrival time even though persistence is deferred until after

@@ -132,7 +132,7 @@ func TestMemoryRecall_InjectsEphemeralBlock(t *testing.T) {
 	require.GreaterOrEqual(t, len(msgs), 2, "stub should receive the recall block plus the user message")
 	last, secondLast := msgs[len(msgs)-1], msgs[len(msgs)-2]
 	assert.Equal(t, "user", last.Role)
-	assert.Equal(t, "which shell do I use?", last.Content)
+	assert.Contains(t, last.Content, "which shell do I use?")
 	assert.Equal(t, "user", secondLast.Role)
 	assert.Contains(t, secondLast.Content, "<user-memories>")
 	assert.Contains(t, secondLast.Content, "fish shell on macOS")
@@ -168,7 +168,7 @@ func TestMemoryRecall_FailureDegrades(t *testing.T) {
 
 	msgs := stub.messages()
 	require.NotEmpty(t, msgs)
-	assert.Equal(t, "hello", msgs[len(msgs)-1].Content)
+	assert.Contains(t, msgs[len(msgs)-1].Content, "hello")
 	for _, m := range msgs {
 		assert.NotContains(t, m.Content, "<user-memories>")
 	}
@@ -252,7 +252,7 @@ func TestMemoryNilService_Regression(t *testing.T) {
 
 	msgs := stub.messages()
 	require.NotEmpty(t, msgs)
-	assert.Equal(t, "plain turn", msgs[len(msgs)-1].Content)
+	assert.Contains(t, msgs[len(msgs)-1].Content, "plain turn")
 	assert.Len(t, msgs, 1, "no recall block and no extra messages")
 
 	select {

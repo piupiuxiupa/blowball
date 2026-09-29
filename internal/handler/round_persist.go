@@ -28,7 +28,6 @@ type roundState struct {
 	content   strings.Builder
 	reasoning strings.Builder
 	calls     []model.ToolCall
-	ord       []int // merged ordinal per call (placeholder msg_index)
 	callOrd   map[string]int
 }
 
@@ -100,7 +99,10 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			ClientMsgID:      deterministicClientMsgID(p.traceID, r.firstOrd),
 		})
 		for i, c := range r.calls {
-			ord := r.ord[i]
+			// A tool-first round opens on the same ordinal as its first call;
+			// derive placeholder ordinals from the round so the final row and
+			// every placeholder keep unique deterministic client_msg_ids.
+			ord := r.firstOrd + 1 + i
 			if ord < from {
 				continue // placeholder already persisted by an earlier render
 			}
@@ -163,7 +165,6 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				args = string(marshalEventJSON(raw))
 			}
 			cur.callOrd[id] = len(cur.calls)
-			cur.ord = append(cur.ord, i)
 			cur.calls = append(cur.calls, model.ToolCall{
 				SessionID:  p.sessionID,
 				TurnID:     p.traceID,

@@ -295,12 +295,11 @@ func TestCompaction_MidTurnTrigger_EndToEnd(t *testing.T) {
 	assert.True(t, sawFirst, "the first message must survive verbatim")
 	assert.False(t, sawShadowed, "shadowed middle content must not reach the model")
 
-	// Persistence: flush + turn-end suffix produced the turn rows exactly
-	// once. The turn yields the user message + 6 merged events
-	// (agent_start, token, tool_call, tool_result, final token, agent_end).
-	env.waitForPersistedTurn(t, defaultSessionID, 16+7)
+	// Persistence: flush + turn-end suffix produced the round-final rows
+	// exactly once: user + two assistant finals + one tool placeholder.
+	env.waitForPersistedTurn(t, defaultSessionID, 16+4)
 	rows := env.mysqlFake.messagesFor(defaultSessionID)
-	require.Len(t, rows, 16+7, "seeded history + this turn, with no duplicates from flush + turn-end save")
+	require.Len(t, rows, 16+4, "seeded history + this turn, with no duplicates from flush + turn-end save")
 	ids := map[string]int{}
 	for _, r := range rows {
 		if r.ClientMsgID != "" {
@@ -311,15 +310,15 @@ func TestCompaction_MidTurnTrigger_EndToEnd(t *testing.T) {
 		require.Equal(t, 1, n, "client_msg_id %s appeared %d times", id, n)
 	}
 	// Every row of THIS turn carries a deterministic id ({trace}:{index}).
-	for _, r := range rows[len(rows)-7:] {
+	for _, r := range rows[len(rows)-4:] {
 		require.NotEmpty(t, r.ClientMsgID)
 		require.Contains(t, r.ClientMsgID, ":")
 	}
 
 	// Display path: complete history, no summary row, order preserved.
 	display := getMessages(t, env, token)
-	require.Len(t, display, 16+7)
-	assert.Equal(t, "current task", display[len(display)-7].Content)
+	require.Len(t, display, 16+4)
+	assert.Equal(t, "current task", display[len(display)-4].Content)
 	for _, m := range display {
 		assert.NotContains(t, m.Content, "CHECKPOINT", "summary text must never become a message row")
 	}
@@ -351,17 +350,17 @@ func TestCompaction_SubsequentTurnStitches(t *testing.T) {
 
 	w := env.postMessage(`{"content":"current task"}`, token)
 	require.Equal(t, http.StatusOK, w.Code)
-	env.waitForPersistedTurn(t, defaultSessionID, 16+5)
+	env.waitForPersistedTurn(t, defaultSessionID, 16+3)
 
 	w = env.postMessage(`{"content":"follow up"}`, token)
 	require.Equal(t, http.StatusOK, w.Code)
-	env.waitForPersistedTurn(t, defaultSessionID, 16+5+3)
+	env.waitForPersistedTurn(t, defaultSessionID, 16+4)
 
 	// Turn 2's request: first + framed summary + tail + "follow up".
 	var turn2 *agent.LLMRequest
 	for _, req := range llm.requests() {
 		for _, m := range req.Messages {
-			if m.Role == "user" && m.Content == "follow up" {
+			if m.Role == "user" && strings.Contains(m.Content, "follow up") {
 				turn2 = &req
 			}
 		}
@@ -374,11 +373,11 @@ func TestCompaction_SubsequentTurnStitches(t *testing.T) {
 		assert.NotEqual(t, "seed user 3", m.Content, "shadowed middle must not be sent")
 		assert.NotEqual(t, "seed reply 3", m.Content, "shadowed middle must not be sent")
 	}
-	assert.Equal(t, "follow up", turn2.Messages[len(turn2.Messages)-1].Content)
+	assert.Contains(t, turn2.Messages[len(turn2.Messages)-1].Content, "follow up")
 
 	// Display path still complete.
 	display := getMessages(t, env, token)
-	require.Len(t, display, 16+5+3)
+	require.Len(t, display, 16+4)
 }
 
 // TestCompaction_RecompactionMergesPrior (task 6.5): a second trigger feeds
@@ -420,11 +419,11 @@ func TestCompaction_RecompactionMergesPrior(t *testing.T) {
 
 	w := env.postMessage(`{"content":"current task"}`, token)
 	require.Equal(t, http.StatusOK, w.Code)
-	env.waitForPersistedTurn(t, defaultSessionID, 16+5)
+	env.waitForPersistedTurn(t, defaultSessionID, 16+3)
 
 	w = env.postMessage(`{"content":"second task"}`, token)
 	require.Equal(t, http.StatusOK, w.Code)
-	env.waitForPersistedTurn(t, defaultSessionID, 16+5+5)
+	env.waitForPersistedTurn(t, defaultSessionID, 16+6)
 
 	// Two records; the newest is authoritative.
 	recs := env.mysqlFake.compactionsFor(defaultSessionID)
@@ -450,11 +449,11 @@ func TestCompaction_RecompactionMergesPrior(t *testing.T) {
 	// Turn 3 stitches from the consolidated record.
 	w = env.postMessage(`{"content":"third task"}`, token)
 	require.Equal(t, http.StatusOK, w.Code)
-	env.waitForPersistedTurn(t, defaultSessionID, 16+5+5+3)
+	env.waitForPersistedTurn(t, defaultSessionID, 16+7)
 	var turn3 *agent.LLMRequest
 	for _, req := range llm.requests() {
 		for _, m := range req.Messages {
-			if m.Role == "user" && m.Content == "third task" {
+			if m.Role == "user" && strings.Contains(m.Content, "third task") {
 				turn3 = &req
 			}
 		}
@@ -484,11 +483,11 @@ func TestCompaction_RecompactionMergesPrior(t *testing.T) {
 	for id, n := range seen {
 		assert.Equal(t, 1, n, "msgs cache duplicate for client_msg_id %s", id)
 	}
-	assert.Len(t, raws, 16+5+5+3)
+	assert.Len(t, raws, 16+7)
 
 	// Display path unaffected: full history, no checkpoints.
 	display := getMessages(t, env, token)
-	require.Len(t, display, 16+5+5+3)
+	require.Len(t, display, 16+7)
 	for _, m := range display {
 		assert.NotContains(t, m.Content, "CHECKPOINT")
 	}
@@ -517,7 +516,7 @@ func TestCompaction_DisabledByDefault(t *testing.T) {
 
 	w := env.postMessage(`{"content":"current task"}`, token)
 	require.Equal(t, http.StatusOK, w.Code)
-	env.waitForPersistedTurn(t, defaultSessionID, 16+5)
+	env.waitForPersistedTurn(t, defaultSessionID, 16+3)
 
 	assert.Empty(t, env.mysqlFake.compactionsFor(defaultSessionID), "disabled compaction must write no records")
 	assert.False(t, env.mysqlFake.isCompacted(defaultSessionID))
@@ -525,7 +524,7 @@ func TestCompaction_DisabledByDefault(t *testing.T) {
 	// The tool round's request carried the full history.
 	var toolRound *agent.LLMRequest
 	for _, req := range llm.requests() {
-		if len(req.Messages) > 0 && req.Messages[len(req.Messages)-1].Content == "current task" {
+		if len(req.Messages) > 0 && strings.Contains(req.Messages[len(req.Messages)-1].Content, "current task") {
 			toolRound = &req
 		}
 	}

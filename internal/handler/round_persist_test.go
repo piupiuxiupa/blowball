@@ -84,6 +84,23 @@ func TestBuildRoundFinalBatch_ClosedRoundsAndDeterministicIDs(t *testing.T) {
 	assert.Equal(t, "trace-1:4", again.msgs[len(again.msgs)-1].ClientMsgID)
 }
 
+// TestBuildRoundFinalBatch_ToolFirstUniquePlaceholderIDs covers a round that
+// opens directly with a tool call: its final row and placeholder must not
+// collide on the same deterministic client_msg_id.
+func TestBuildRoundFinalBatch_ToolFirstUniquePlaceholderIDs(t *testing.T) {
+	info := testTurnPersistInfo()
+	merged := MergeEvents([]stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.ToolCallEvent(stream.AgentConfucius, "c1", "grep", json.RawMessage(`{}`)),
+		stream.ToolResultEvent(stream.AgentConfucius, "c1", "out"),
+	})
+
+	batch, _ := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(), roundRenderOptions{terminal: true})
+	require.Len(t, batch.msgs, 3) // user + final + placeholder
+	assert.Equal(t, "trace-1:1", batch.msgs[1].ClientMsgID)
+	assert.Equal(t, "trace-1:2", batch.msgs[2].ClientMsgID)
+}
+
 // TestBuildRoundFinalBatch_UserPersistedGating covers the send-time user-row
 // gating in three states: fresh turn (user row included), send-time write
 // landed (pure round suffix from 0), cursor past 0 (suffix only regardless of

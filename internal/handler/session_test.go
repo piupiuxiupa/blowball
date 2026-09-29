@@ -673,7 +673,7 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	env.stub.mu.Lock()
 	require.Len(t, env.stub.gotMessages, 1)
 	require.Equal(t, "user", env.stub.gotMessages[0].Role)
-	require.Equal(t, "hi there", env.stub.gotMessages[0].Content)
+	require.Contains(t, env.stub.gotMessages[0].Content, "hi there")
 	require.Contains(t, env.stub.gotWorkspace, "user-1/workspace")
 	env.stub.mu.Unlock()
 
@@ -698,25 +698,18 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	assert.Equal(t, "hi there", userMsg.Content)
 	require.NotEmpty(t, userMsg.ClientMsgID, "persisted rows carry the idempotency key")
 
-	// Batch 2 (turn-end): the assistant events only — the user row must not
+	// Batch 2 (turn-end): the assistant final only — the user row must not
 	// re-enter (msgs:{sid} has no dedup).
 	for _, m := range batches[1] {
-		assert.NotEqual(t, model.EventTypeMessage, m.EventType, "turn-end batch must not repeat the user row")
+		assert.NotEqual(t, model.RoleUser, m.Role, "turn-end batch must not repeat the user row")
 	}
 
 	rows := env.redis.dualSnapshot()
-	// Concatenated: user message followed by merged assistant events (agent_start, token, agent_end).
-	require.Len(t, rows, 4, "batches must contain user + 3 merged assistant events")
+	// Concatenated: user message followed by the assistant final row.
+	require.Len(t, rows, 2, "batches must contain user + assistant final")
 
-	// Assistant event stream is merged: agent_start, merged token, agent_end (done excluded).
-	wantTypes := []string{
-		model.EventTypeAgentStart,
-		model.EventTypeToken,
-		model.EventTypeAgentEnd,
-	}
-	for i, want := range wantTypes {
-		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
-	}
+	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
+	assert.Equal(t, "Hello, world!", rows[1].Content)
 }
 
 // TestSendMessage_BadRequest_NoBody verifies that an empty / malformed body
@@ -1575,8 +1568,8 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 
 	rows := env.redis.dualSnapshot()
 
-	// Concatenated batches: 1 user message + 7 assistant events, done excluded.
-	require.Len(t, rows, 8)
+	// Concatenated batches: 1 user message + assistant final + tool placeholder.
+	require.Len(t, rows, 3)
 
 	// User message comes first (from the send-time batch).
 	userMsg := rows[0]
@@ -1586,40 +1579,16 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	assert.Equal(t, 0, userMsg.MsgIndex)
 	assert.Equal(t, "do it", userMsg.Content)
 
-	// Assistant event stream: 7 events, done excluded.
-	wantTypes := []string{
-		model.EventTypeAgentStart,
-		model.EventTypeToken,
-		model.EventTypeToolCall,
-		model.EventTypeAgentStart,
-		model.EventTypeToken,
-		model.EventTypeAgentEnd,
-		model.EventTypeAgentEnd,
-	}
-	for i, want := range wantTypes {
-		assert.Equal(t, want, rows[i+1].EventType, "event %d", i)
-	}
-
-	// Token/tool_call rows carry the assistant role; markers have empty role.
-	for _, m := range rows[1:] {
-		switch m.EventType {
-		case model.EventTypeToken, model.EventTypeToolCall:
-			assert.Equal(t, model.RoleAssistant, m.Role, "event_type=%s", m.EventType)
-		default:
-			assert.Empty(t, m.Role, "event_type=%s", m.EventType)
-		}
-	}
+	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
+	assert.Equal(t, "Thinking42", rows[1].Content)
+	assert.Equal(t, model.EventTypeToolCall, rows[2].EventType)
+	assert.Equal(t, model.RoleAssistant, rows[2].Role)
 
 	// Agent column is preserved from the event.
 	assert.Equal(t, stream.AgentConfucius, rows[1].Agent)
-	assert.Equal(t, stream.AgentChongzhi, rows[5].Agent)
 
-	// Tool_call content is JSON with name and args.
-	toolMsg := rows[3]
-	require.Equal(t, model.EventTypeToolCall, toolMsg.EventType)
-	var payload map[string]any
-	require.NoError(t, json.Unmarshal([]byte(toolMsg.Content), &payload))
-	assert.Equal(t, "spawn_subagent", payload["name"])
+	assert.Equal(t, "spawn_subagent", rows[2].Content)
+	assert.Equal(t, "tc-1", rows[2].ToolCallID)
 }
 
 // TestSendMessage_OrchestratorFailure_PersistsPartialTurn verifies that when
@@ -1654,22 +1623,17 @@ func TestSendMessage_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 
 	rows := env.redis.dualSnapshot()
 
-	// 1 user message + 2 merged assistant events (agent_start, token).
-	require.Len(t, rows, 3, "batches must contain user + partial assistant events")
+	// 1 user message + 1 interrupted assistant final.
+	require.Len(t, rows, 2, "batches must contain user + partial assistant final")
 	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
 	assert.Equal(t, "hi", userMsg.Content)
 
-	wantTypes := []string{
-		model.EventTypeAgentStart,
-		model.EventTypeToken,
-	}
-	for i, want := range wantTypes {
-		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
-	}
-	assert.Equal(t, "oops", rows[2].Content, "partial token should be persisted")
+	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
+	assert.Equal(t, model.MessageStatusInterrupted, rows[1].Status)
+	assert.Equal(t, "oops", rows[1].Content, "partial token should be persisted")
 }
 
 // TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents verifies that a
@@ -1705,23 +1669,16 @@ func TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents(t *testing.T) 
 
 	rows := env.redis.dualSnapshot()
 
-	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
-	require.Len(t, rows, 4, "batches must contain user + partial assistant events")
+	// 1 user message + 1 interrupted assistant final.
+	require.Len(t, rows, 2, "batches must contain user + partial assistant final")
 	userMsg := rows[0]
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
 	assert.Equal(t, "hi", userMsg.Content)
 
-	wantTypes := []string{
-		model.EventTypeAgentStart,
-		model.EventTypeToken,
-		model.EventTypeAgentEnd,
-	}
-	for i, want := range wantTypes {
-		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
-	}
-	assert.Equal(t, "partial reply", rows[2].Content, "partial tokens should be merged")
+	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
+	assert.Equal(t, "partial reply", rows[1].Content, "partial tokens should be merged")
 }
 
 // TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser verifies
@@ -1842,20 +1799,13 @@ func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialE
 
 	rows := env.redis.dualSnapshot()
 
-	// 1 user message + 3 merged assistant events (agent_start, token, agent_end).
-	require.Len(t, rows, 4, "batches must contain user + partial assistant events")
+	// 1 user message + 1 interrupted assistant final.
+	require.Len(t, rows, 2, "batches must contain user + partial assistant final")
 	assert.Equal(t, model.RoleUser, rows[0].Role)
 	assert.Equal(t, "hi", rows[0].Content)
 
-	wantTypes := []string{
-		model.EventTypeAgentStart,
-		model.EventTypeToken,
-		model.EventTypeAgentEnd,
-	}
-	for i, want := range wantTypes {
-		assert.Equal(t, want, rows[i+1].EventType, "assistant event %d", i)
-	}
-	assert.Equal(t, "partial reply", rows[2].Content, "partial tokens should be merged")
+	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
+	assert.Equal(t, "partial reply", rows[1].Content, "partial tokens should be merged")
 }
 
 // TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser
