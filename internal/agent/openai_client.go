@@ -198,8 +198,8 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	// gateways actually disable thinking instead of falling back to the
 	// model's own default level — and sends the output quota as
 	// max_completion_tokens. A non-thinking entry never sends
-	// reasoning_effort and sends the same quota as the legacy max_tokens
-	// (the wire family translates the one quota concept;
+	// reasoning_effort and sends both quota spellings for OpenAI-compatible
+	// gateways (the wire family translates the one quota concept;
 	// per-model-completion-budget D1). Sampling parameters (temperature
 	// etc.) are sent on neither family (the former always-0 temperature is
 	// dead code, removed).
@@ -210,6 +210,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		}
 	} else {
 		if req.MaxCompletionTokens > 0 {
+			params.MaxCompletionTokens = openai.Int(int64(req.MaxCompletionTokens))
 			params.MaxTokens = openai.Int(int64(req.MaxCompletionTokens))
 		}
 	}

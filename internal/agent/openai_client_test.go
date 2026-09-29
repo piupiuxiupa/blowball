@@ -204,7 +204,7 @@ func captureRequestBody(t *testing.T, req LLMRequest) string {
 
 // TestOpenAIClient_RequestBranch_NonThinkingFamilyOmitsEffort verifies the
 // non-thinking wire family (model-effort-v2 B2): a thinking:false entry sends
-// NO reasoning_effort, plain max_tokens, and no sampling parameters.
+// NO reasoning_effort, both quota spellings, and no sampling parameters.
 func TestOpenAIClient_RequestBranch_NonThinkingFamilyOmitsEffort(t *testing.T) {
 	body := captureRequestBody(t, LLMRequest{
 		Model:               "glm-4.7",
@@ -216,8 +216,8 @@ func TestOpenAIClient_RequestBranch_NonThinkingFamilyOmitsEffort(t *testing.T) {
 		ReasoningEffort: "none",
 	})
 	assert.NotContains(t, body, "reasoning_effort", "non-thinking entries must not send reasoning_effort")
+	assert.Contains(t, body, `"max_completion_tokens":512`)
 	assert.Contains(t, body, `"max_tokens":512`)
-	assert.NotContains(t, body, "max_completion_tokens", "non-reasoning branch must not send max_completion_tokens")
 	assert.NotContains(t, body, "temperature", "the always-0 temperature dead parameter is removed")
 }
 
