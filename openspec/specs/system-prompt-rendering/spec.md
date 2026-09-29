@@ -92,7 +92,7 @@ When the system prompt renders a Skills section, it SHALL include guidance descr
 - **交付物入工作空间并归组**：最终交付物 SHALL 写入工作空间（非 `tmp/`），按主题/任务归入有意义的目录，相关联的多个文件 SHALL 放进同一目录而非散落各处。
 - **`tmp/` 及时清理**：`tmp/` 为临时草稿区，Agent SHALL 在草稿完成其使命后及时清理；清理 SHALL 优先使用 `xizhi_delete`，当该工具不可用时可用 `bash rm`。
 - **禁止 `tmp/` 作交付物路径**：Agent 不得把 `tmp/` 路径作为交付物路径交给用户（因为 `tmp/` 内容是临时的、会被清理）。
-- **交付物链接语法**：Agent 在最终回复中向用户提及交付物文件时，SHALL 使用产物链接语法 `[显示名](blowball://workspace/<工作区相对路径>)`；显示名建议使用文件名；链接 SHALL 只用于最终交付物，且 SHALL NOT 携带任何查询参数（版本钉定由系统完成）。
+- **交付物必须链接**：Agent SHALL 在最终回复中为每个最终交付物使用产物链接语法 `[显示名](blowball://workspace/<工作区相对路径>)`；显示名建议使用文件名。链接 SHALL 只用于最终交付物，且 SHALL NOT 携带任何查询参数。Agent SHALL 被明确告知：未使用产物链接的交付物不会进入 artifact 记录。
 
 #### Scenario: Convention distinguishes temporary from deliverables
 - **WHEN** 系统提示词被渲染
@@ -114,9 +114,13 @@ When the system prompt renders a Skills section, it SHALL include guidance descr
 - **WHEN** 系统提示词被渲染
 - **THEN** 输出规范与既有“`xizhi_*` 用相对路径”“沙箱 `/tmp` 映射到 `./tmp/`”指引并存于同一约定段，互不取代
 
-#### Scenario: Convention defines artifact link syntax
+#### Scenario: Convention requires a link for every deliverable
 - **WHEN** 系统提示词被渲染
-- **THEN** 约定段指示 Agent 在最终回复中提及交付物时使用 `[显示名](blowball://workspace/<工作区相对路径>)` 链接语法，且链接不携带查询参数
+- **THEN** 约定段指示每个最终交付物都必须使用 `[显示名](blowball://workspace/<工作区相对路径>)` 链接，且链接不携带查询参数
+
+#### Scenario: Convention states the consequence of omitting a link
+- **WHEN** 系统提示词被渲染
+- **THEN** 约定段明确指示未链接的交付物不会进入 artifact 记录
 
 #### Scenario: Convention limits links to deliverables
 - **WHEN** 系统提示词被渲染
