@@ -318,7 +318,7 @@ func TestCompaction_MidTurnTrigger_EndToEnd(t *testing.T) {
 	// Display path: complete history, no summary row, order preserved.
 	display := getMessages(t, env, token)
 	require.Len(t, display, 16+4)
-	assert.Equal(t, "current task", display[len(display)-4].Content)
+	assert.Contains(t, display[len(display)-4].Content, "current task")
 	for _, m := range display {
 		assert.NotContains(t, m.Content, "CHECKPOINT", "summary text must never become a message row")
 	}

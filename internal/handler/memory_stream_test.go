@@ -205,7 +205,7 @@ func TestMemoryCapture_SuccessAndErrorPaths(t *testing.T) {
 	}
 	msgs := batch["messages"].([]any)
 	require.Len(t, msgs, 2)
-	assert.Equal(t, "remember fish shell", msgs[0].(map[string]any)["content"])
+	assert.Contains(t, msgs[0].(map[string]any)["content"], "remember fish shell")
 	assert.Equal(t, "final answer", msgs[1].(map[string]any)["content"])
 	for _, u := range ov.findUsers() {
 		assert.Equal(t, "user-1", u, "every OV request must carry the turn's user identity")
@@ -228,7 +228,7 @@ func TestMemoryCapture_SuccessAndErrorPaths(t *testing.T) {
 	case b := <-ov2.batch:
 		msgs := b["messages"].([]any)
 		require.Len(t, msgs, 2)
-		assert.Equal(t, "another question", msgs[0].(map[string]any)["content"])
+		assert.Contains(t, msgs[0].(map[string]any)["content"], "another question")
 		assert.Equal(t, "partial output", msgs[1].(map[string]any)["content"])
 	case <-time.After(3 * time.Second):
 		t.Fatal("error-path capture never reached the OV session batch endpoint")

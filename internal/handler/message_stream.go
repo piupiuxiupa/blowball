@@ -427,8 +427,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: block})
 		}
 	}
-
-	messages := append(agentMsgs, agent.Message{Role: "user", Content: req.Content + prompt.RenderStatus()})
+	req.Content += prompt.RenderStatus()
+	messages := append(agentMsgs, agent.Message{Role: "user", Content: req.Content})
 
 	// Capture the user message timestamp early so the persisted user row keeps
 	// the request-arrival time even though persistence is deferred until after

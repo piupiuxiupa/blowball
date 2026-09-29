@@ -117,7 +117,7 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	assert.Equal(t, model.AgentUser, msgs[0].Agent)
 	assert.Equal(t, model.EventTypeMessage, msgs[0].EventType)
 	assert.Equal(t, 0, msgs[0].MsgIndex)
-	assert.Equal(t, "hello", msgs[0].Content)
+	assert.Contains(t, msgs[0].Content, "hello")
 
 	// The assistant FINAL row carries the full content; no placeholder on a
 	// pure-text turn.
@@ -131,7 +131,7 @@ func TestMessageFlow_DirectAnswer_PersistsAllTiers(t *testing.T) {
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
 	require.Len(t, recovered, 2)
-	assert.Equal(t, "hello", recovered[0].Content)
+	assert.Contains(t, recovered[0].Content, "hello")
 	assert.Equal(t, model.EventTypeMessage, recovered[1].EventType)
 }
 
@@ -191,7 +191,7 @@ func TestMessageFlow_UserMessageVisibleWhileTurnRunning(t *testing.T) {
 	require.Len(t, resp.Messages, 1, "mid-turn history must contain exactly this turn's user row")
 	assert.Equal(t, model.RoleUser, resp.Messages[0].Role)
 	assert.Equal(t, model.EventTypeMessage, resp.Messages[0].EventType)
-	assert.Equal(t, "mid-turn question", resp.Messages[0].Content)
+	assert.Contains(t, resp.Messages[0].Content, "mid-turn question")
 
 	// Let the turn finish; the final row lands afterwards and the completed
 	// history keeps exactly one user row.
@@ -233,19 +233,20 @@ func TestMessageFlow_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 	// is observed; the stream simply terminates early.
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	// The terminal batch is synchronous: user row plus the truncated
-	// interrupted final (refactor-message-storage: cancel/error persists the
-	// accumulated content as a final row).
-	env.waitForPersistedTurn(t, defaultSessionID, 2)
+	// The terminal batch is synchronous: user row, the truncated interrupted
+	// final, and the durable agent_error marker.
+	env.waitForPersistedTurn(t, defaultSessionID, 3)
 
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
-	require.Len(t, msgs, 2, "user row plus the interrupted assistant final")
+	require.Len(t, msgs, 3, "user row plus interrupted final and error marker")
 	assert.Equal(t, model.RoleUser, msgs[0].Role)
-	assert.Equal(t, "hello", msgs[0].Content)
+	assert.Contains(t, msgs[0].Content, "hello")
 	assert.Equal(t, model.RoleAssistant, msgs[1].Role)
 	assert.Equal(t, model.EventTypeMessage, msgs[1].EventType)
 	assert.Equal(t, "Hello", msgs[1].Content, "partial assistant content persists as a truncated final")
 	assert.Equal(t, model.MessageStatusInterrupted, msgs[1].Status)
+	assert.Equal(t, model.EventTypeAgentError, msgs[2].EventType)
+	assert.Contains(t, msgs[2].Content, assert.AnError.Error())
 }
 
 // TestMessageFlow_Unauthenticated_401 verifies that the real AuthMiddleware is
@@ -600,7 +601,7 @@ func TestMessageFlow_InterruptedTurn_PersistsPartialStream(t *testing.T) {
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
 	require.GreaterOrEqual(t, len(msgs), 2, "expected user message plus at least one assistant event")
 	assert.Equal(t, model.RoleUser, msgs[0].Role)
-	assert.Equal(t, "hello", msgs[0].Content)
+	assert.Contains(t, msgs[0].Content, "hello")
 
 	var sawToken bool
 	for _, m := range msgs[1:] {
@@ -615,7 +616,7 @@ func TestMessageFlow_InterruptedTurn_PersistsPartialStream(t *testing.T) {
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(recovered), 2)
-	assert.Equal(t, "hello", recovered[0].Content)
+	assert.Contains(t, recovered[0].Content, "hello")
 
 	var recoveredToken bool
 	for _, m := range recovered[1:] {

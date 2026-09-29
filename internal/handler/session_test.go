@@ -695,7 +695,8 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
 	assert.Equal(t, 0, userMsg.MsgIndex)
-	assert.Equal(t, "hi there", userMsg.Content)
+	assert.Contains(t, userMsg.Content, "hi there")
+	assert.Contains(t, userMsg.Content, "<current_status>")
 	require.NotEmpty(t, userMsg.ClientMsgID, "persisted rows carry the idempotency key")
 
 	// Batch 2 (turn-end): the assistant final only — the user row must not
@@ -1577,7 +1578,7 @@ func TestSendMessage_EventStreamIncludesMarkersAndToolCall(t *testing.T) {
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
 	assert.Equal(t, 0, userMsg.MsgIndex)
-	assert.Equal(t, "do it", userMsg.Content)
+	assert.Contains(t, userMsg.Content, "do it")
 
 	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
 	assert.Equal(t, "Thinking42", rows[1].Content)
@@ -1629,7 +1630,7 @@ func TestSendMessage_OrchestratorFailure_PersistsPartialTurn(t *testing.T) {
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
-	assert.Equal(t, "hi", userMsg.Content)
+	assert.Contains(t, userMsg.Content, "hi")
 
 	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
 	assert.Equal(t, model.MessageStatusInterrupted, rows[1].Status)
@@ -1675,7 +1676,7 @@ func TestSendMessage_ContextCanceled_PersistsUserAndPartialEvents(t *testing.T) 
 	assert.Equal(t, model.AgentUser, userMsg.Agent)
 	assert.Equal(t, model.EventTypeMessage, userMsg.EventType)
 	assert.Equal(t, model.RoleUser, userMsg.Role)
-	assert.Equal(t, "hi", userMsg.Content)
+	assert.Contains(t, userMsg.Content, "hi")
 
 	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
 	assert.Equal(t, "partial reply", rows[1].Content, "partial tokens should be merged")
@@ -1714,7 +1715,7 @@ func TestSendMessage_ContextCanceled_NoAssistantEvents_PersistsOnlyUser(t *testi
 	rows := env.redis.dualSnapshot()
 	require.Len(t, rows, 1, "only the user message should be persisted")
 	assert.Equal(t, model.RoleUser, rows[0].Role)
-	assert.Equal(t, "hello?", rows[0].Content)
+	assert.Contains(t, rows[0].Content, "hello?")
 }
 
 // TestSendMessage_ContextCanceled_FirstTurnGeneratesTitle verifies that a
@@ -1802,7 +1803,7 @@ func TestSendMessage_OrchestratorFailure_NonCancellation_PersistsUserAndPartialE
 	// 1 user message + 1 interrupted assistant final.
 	require.Len(t, rows, 2, "batches must contain user + partial assistant final")
 	assert.Equal(t, model.RoleUser, rows[0].Role)
-	assert.Equal(t, "hi", rows[0].Content)
+	assert.Contains(t, rows[0].Content, "hi")
 
 	assert.Equal(t, model.EventTypeMessage, rows[1].EventType)
 	assert.Equal(t, "partial reply", rows[1].Content, "partial tokens should be merged")
@@ -1840,7 +1841,7 @@ func TestSendMessage_OrchestratorFailure_NoAssistantEvents_PersistsOnlyUser(t *t
 	rows := env.redis.dualSnapshot()
 	require.Len(t, rows, 1, "only the user message should be persisted")
 	assert.Equal(t, model.RoleUser, rows[0].Role)
-	assert.Equal(t, "hello?", rows[0].Content)
+	assert.Contains(t, rows[0].Content, "hello?")
 }
 
 // TestSendMessage_OrchestratorFailure_FirstTurnGeneratesTitle verifies that a
