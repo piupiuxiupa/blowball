@@ -1,27 +1,17 @@
 ## Purpose
 
 Define how streaming assistant events are compressed before persistence to reduce storage overhead while preserving the order and semantic boundaries of the event stream.
-
 ## Requirements
-
 ### Requirement: Merge consecutive assistant token events before persistence
-The system SHALL merge adjacent `EventToken` events that share the same `Agent` into a single persisted message row. Non-token events (`agent_start`, `agent_end`, `agent_error`, `tool_call`) and token events from different agents SHALL NOT be merged.
+新数据 SHALL NOT 持久化 token 事件行：流式 chunk 留存 Redis，round 完成后写入 assistant 终稿行（见 message-final-persistence）。本需求的合并行为仅保留于遗留 chunk 行的读取适配路径。SSE 实时流仍逐 chunk 推送。
 
-#### Scenario: Pure token reply is merged
-- **WHEN** an agent emits five consecutive `token` events with contents "H", "e", "l", "l", "o"
-- **THEN** the system persists exactly one `token` message row with content "Hello"
+#### Scenario: 新数据无 token 行
+- **WHEN** 一轮输出 500 个 token chunk
+- **THEN** SSE 推送 500 个 token 事件，round 结束后数据库仅一条 assistant 终稿行
 
-#### Scenario: Token boundaries are broken by lifecycle events
-- **WHEN** an agent emits `agent_start`, three `token` events, `agent_end`
-- **THEN** the system persists four rows: `agent_start`, one merged `token`, `agent_end`
-
-#### Scenario: Tokens from different agents are not merged
-- **WHEN** the event sequence is `token` from Confucius, `agent_start` Liang, `token` from Liang, `agent_end` Liang, `token` from Confucius
-- **THEN** the system persists five rows: Confucius token block, Liang agent_start, Liang token block, Liang agent_end, Confucius token block
-
-#### Scenario: Tool calls remain independent
-- **WHEN** an agent emits `token`, `tool_call`, `token`
-- **THEN** the system persists three rows: merged token block, tool_call row, merged token block
+#### Scenario: 遗留 chunk 行仍可重建
+- **WHEN** 读取迁移前的合并 token 行
+- **THEN** 既有合并重建逻辑将其组装进请求序列
 
 ### Requirement: Preserve total event order after merging
 The system SHALL assign monotonic `MsgIndex` values to merged message rows such that the original event order is recoverable when messages are ordered by `(MsgTime, MsgIndex)`.
@@ -53,3 +43,4 @@ The system SHALL continue to emit individual `token` events to the SSE consumer;
 #### Scenario: Reasoning aggregation ignores empty deltas
 - **WHEN** LLM 流中出现的 `reasoning_content` 字段均为空字符串
 - **THEN** 聚合响应的 `ReasoningContent` 保持为空，且不触发任何 `reasoning` 回调
+

@@ -3,9 +3,7 @@
 ## Purpose
 
 Define the context-compaction capability: when conversation context pressure reaches 80% of the request-selected catalog entry's `max_context_tokens` window, the compressible middle history is condensed into a structured checkpoint summary (first message and recent tail preserved) so long sessions never grow unbounded into the provider's hard window limit. Covers trigger conditions and authoritative measurement, range selection with tool-pairing boundaries, summary generation, compaction record storage (MySQL + Redis cache + session flag), stitched model context, the mid-turn pause-compact-continue flow, idempotent persistence, and best-effort failure degradation — with the display path untouched.
-
 ## Requirements
-
 ### Requirement: Compaction is disabled without a configured max context
 The system SHALL treat a missing effective max-context value for the selected model as compaction-disabled: no trigger checks fire, no compaction records are written, and the model context path behaves exactly as before this capability existed. The effective max context for a turn SHALL be **exclusively** the request-selected catalog model's `max_context_tokens` (with the catalog mandatory, every turn resolves to an entry; the legacy top-level `openai.max_context_tokens` field no longer exists). A configured value MUST be a positive integer; any other value SHALL fail configuration load.
 
@@ -48,23 +46,11 @@ The system SHALL trigger compaction when measured context reaches `0.8 × effect
 - **THEN** the turn-start check compares the stored 300k against `0.8 × 200k` and compaction runs before the first LLM call
 
 ### Requirement: Compaction preserves the first message, the last five agent messages, and tool pairing boundaries
-The system SHALL select the compaction range on the reconstructed agent-message sequence: the first user message is never compacted, the last five agent messages (complete conversation units after `MessagesToAgentMessages`) are retained verbatim, and everything between them is shadowed. The range boundary SHALL NOT split an assistant message carrying tool calls from its corresponding tool result messages. The boundary SHALL be persisted as the composite cursor `(msg_time, msg_index, id)` of the last shadowed persistence row.
+mid-turn compaction 的 flush-first 依赖 SHALL 改为 round 终稿批写：boundary cursor 指向 `messages` 终稿行；被压缩区间的 `tool_calls` 行保留但重建时按 boundary 跳过（join 与 boundary 均以 turn 为单位，语义对齐）。工具配对边界保护语义不变。
 
-#### Scenario: First message always survives
-- **WHEN** any compaction completes
-- **THEN** the reconstructed model context still begins with the session's first user message verbatim
-
-#### Scenario: Last five agent messages retained verbatim
-- **WHEN** compaction completes
-- **THEN** the five agent messages preceding the cut point appear in subsequent model contexts exactly as reconstructed
-
-#### Scenario: Boundary never splits a tool pair
-- **WHEN** the nominal fifth-from-last agent message is a tool result whose paired assistant tool-call message would fall inside the shadowed range
-- **THEN** the retained tail is extended backward so the call/result pair stays together on one side of the boundary
-
-#### Scenario: Boundary stored as composite cursor
-- **WHEN** a compaction record is written
-- **THEN** it carries the shadowed range's final persistence row as `(boundary_msg_time, boundary_msg_index, boundary_msg_id)`
+#### Scenario: boundary 指向终稿行
+- **WHEN** mid-turn compaction 触发
+- **THEN** cursor 引用已落库的 round 边界 `messages` 行 id，压缩区间外工具交互完整保留
 
 ### Requirement: Summary generation uses the current agent model with a structured checkpoint template
 The system SHALL generate the summary using the turn's request-selected model (the same model the three agents run for that turn) via the existing LLM client. The summarization instruction SHALL require a structured checkpoint (sections for primary intent, technical concepts, files and code, errors and fixes, pending jobs, current work, next step, critical context) preserving exact paths, commands, error strings, identifiers, and numeric values. Only returned text SHALL be retained; reasoning content and tool calls SHALL be discarded.
@@ -183,3 +169,4 @@ Any compaction-stage failure (summary call error, empty summary, persistence err
 #### Scenario: No frontend signal
 - **WHEN** any compaction attempt runs, succeeds, or fails
 - **THEN** no compaction-specific SSE event is emitted to the client
+
