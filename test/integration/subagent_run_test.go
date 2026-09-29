@@ -240,13 +240,25 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 	// messages holds only user + Confucius round finals (identity-free).
 	env.waitForPersistedTurn(t, defaultSessionID, 3)
 	msgs := env.mysqlFake.messagesFor(defaultSessionID)
+	runRows := env.mysqlFake.snapshotSubAgentRuns(defaultSessionID)
+	knownInstances := map[string]bool{}
+	for _, r := range runRows {
+		knownInstances[r.AgentInstanceID] = true
+	}
 	for _, m := range msgs {
+		if m.ToolCallID != "" {
+			// A spawn PLACEHOLDER links to its dispatched instance; the
+			// instance must be one of this session's recorded runs.
+			assert.True(t, knownInstances[m.AgentInstanceID],
+				"spawn placeholder links to a recorded instance: %s", m.AgentInstanceID)
+			assert.Empty(t, m.RunID, "the placeholder is a parent-level row")
+			continue
+		}
 		assert.Empty(t, m.AgentInstanceID,
-			"messages must carry no sub-agent rows (got %s/%s)", m.Agent, m.EventType)
+			"messages carry no sub-agent rows (got %s/%s)", m.Agent, m.EventType)
 		assert.Empty(t, m.RunID, "top-level row (%s/%s) must have empty run_id", m.Agent, m.EventType)
 	}
 	// The three interleaved runs' transcripts are complete in subagent_runs.
-	runRows := env.mysqlFake.snapshotSubAgentRuns(defaultSessionID)
 	perRunSnap := map[string]string{}
 	for _, r := range runRows {
 		var snap []agent.Message
@@ -265,7 +277,11 @@ func TestSubAgentRun_IdentityEndToEnd(t *testing.T) {
 	recovered, err := env.msgSvc.RecoverMessages(context.Background(), defaultUserID, defaultSessionID)
 	require.NoError(t, err)
 	for _, m := range recovered {
-		assert.Empty(t, m.AgentInstanceID, "Redis read path carries no sub-agent rows either")
+		// Spawn placeholders keep their instance link through the Redis read
+		// path; content rows still never appear.
+		if m.ToolCallID == "" {
+			assert.Empty(t, m.AgentInstanceID, "Redis read path carries no sub-agent content rows")
+		}
 	}
 }
 
@@ -324,9 +340,19 @@ func TestSubAgentRun_SingleInvocationRegression(t *testing.T) {
 	requireEventPresent(t, types, stream.EventDone)
 
 	env.waitForPersistedTurn(t, defaultSessionID, 3)
+	instances := env.mysqlFake.snapshotSubAgentInstances(defaultSessionID)
+	known := map[string]bool{}
+	for _, inst := range instances {
+		known[inst.AgentInstanceID] = true
+	}
 	for _, m := range env.mysqlFake.messagesFor(defaultSessionID) {
-		// Sub-agent rows never enter messages; the invocation's identity is
-		// carried by subagent_runs alone.
+		// Sub-agent rows never enter messages; a spawn PLACEHOLDER may carry
+		// the dispatched instance id as its transcript link.
+		if m.ToolCallID == "call_only" {
+			assert.True(t, known[m.AgentInstanceID],
+				"the spawn placeholder links to the recorded instance")
+			continue
+		}
 		assert.Empty(t, m.RunID, "row %s/%s must have no run id", m.Agent, m.EventType)
 		assert.Empty(t, m.AgentInstanceID, "row %s/%s must have no instance id", m.Agent, m.EventType)
 	}

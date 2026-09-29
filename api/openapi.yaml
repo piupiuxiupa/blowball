@@ -225,9 +225,12 @@ components:
           nullable: true
           description: >
             Stable dynamic sub-agent instance identity. It survives resume and
-            groups one thread across multiple run_id values. Present only on
-            dynamic sub-agent rows; top-level/user rows and rows written before
-            migration 016 are null.
+            groups one thread across multiple run_id values. On spawn
+            placeholder rows (refactor-message-storage) it links the parent
+            spawn_subagent call to its dispatched instance — the lazy-load key
+            for GET .../subagents/{agent_instance_id}/runs. Legacy dynamic
+            sub-agent rows carry their producing instance; top-level/user rows
+            and rows written before migration 016 are null.
         run_id:
           type: string
           nullable: true

@@ -67,9 +67,11 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 		}
 
 		// Ignore sub-agent events; only the top-level agent (Confucius) conversation
-		// belongs in the main prompt history.
+		// belongs in the main prompt history. A spawn PLACEHOLDER row keeps
+		// its instance id purely as the transcript link — it is a top-level
+		// call (ToolCallID set) and stays in the history.
 		if msg.Agent == model.AgentChongzhi || msg.Agent == model.AgentLiang ||
-			msg.AgentInstanceID != "" {
+			(msg.AgentInstanceID != "" && msg.ToolCallID == "") {
 			continue
 		}
 

@@ -77,6 +77,12 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 		batch.msgs = append(batch.msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime))
 	}
 
+	// spawnInstances maps a spawn tool_call id to the sub-agent instance it
+	// dispatched (harvested from the skipped sub-agent events' Meta). The
+	// parent tool_result only arrives after the sub run completes, so the
+	// mapping is always populated before the round closes and emits.
+	spawnInstances := map[string]string{}
+
 	// emit appends r's rows unless the round predates the cursor (already
 	// persisted by an earlier render).
 	emit := func(r *roundState, last bool) {
@@ -119,6 +125,10 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				TraceID:     p.traceID,
 				ClientMsgID: deterministicClientMsgID(p.traceID, ord),
 				ToolCallID:  c.ToolCallID,
+				// A spawn placeholder carries the dispatched instance id:
+				// the frontend's lazy-load link into the sub-agent
+				// transcript APIs. Empty on ordinary tool calls.
+				AgentInstanceID: spawnInstances[c.ToolCallID],
 			})
 		}
 		// agent_error markers ride the round's batch (retry markers, spawn
@@ -150,7 +160,10 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 
 	for i := range merged {
 		e := merged[i]
-		if agentInstanceIDFromEvent(e) != "" {
+		if inst := agentInstanceIDFromEvent(e); inst != "" {
+			if run := runIDFromEvent(e); run != "" {
+				spawnInstances[run] = inst
+			}
 			continue // sub-agent split: never persisted to messages/tool_calls
 		}
 

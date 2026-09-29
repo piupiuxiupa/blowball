@@ -578,6 +578,7 @@ func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr 
 		kept := rows[:0]
 		for _, msg := range rows {
 			if msg.AgentInstanceID != "" &&
+				msg.ToolCallID == "" &&
 				msg.EventType != model.EventTypeAgentStart &&
 				msg.EventType != model.EventTypeAgentEnd &&
 				msg.EventType != model.EventTypeAgentError {

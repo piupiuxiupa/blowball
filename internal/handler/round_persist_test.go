@@ -270,3 +270,55 @@ func TestBuildRoundFinalBatch_AgentErrorMarkersPersist(t *testing.T) {
 	assert.Equal(t, model.EventTypeAgentError, b2.msgs[1].EventType)
 	assert.Equal(t, 2, consumed2, "cursor advances past a round-less marker")
 }
+
+// TestBuildRoundFinalBatch_SpawnPlaceholderCarriesInstanceID pins the
+// sub-agent lazy-load link: the spawn placeholder row carries the dispatched
+// agent_instance_id (harvested from the skipped sub-agent events), while
+// sub-agent content itself never lands in messages.
+func TestBuildRoundFinalBatch_SpawnPlaceholderCarriesInstanceID(t *testing.T) {
+	info := testTurnPersistInfo()
+	sub := stream.TokenEvent(stream.AgentChongzhi, "child work")
+	sub.Meta = map[string]any{stream.MetaAgentInstanceID: "inst-9", stream.MetaParentToolCallID: "c1"}
+	events := []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "dispatching"),
+		stream.ToolCallEvent(stream.AgentConfucius, "c1", "spawn_subagent", json.RawMessage(`{"task":"x"}`)),
+		sub,
+		stream.ToolResultEvent(stream.AgentConfucius, "c1", "child answer"),
+		stream.TokenEvent(stream.AgentConfucius, "done"),
+	}
+	merged := MergeEvents(events)
+
+	batch, _ := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(), roundRenderOptions{})
+	var ph *model.Message
+	for i := range batch.msgs {
+		if batch.msgs[i].EventType == model.EventTypeToolCall && batch.msgs[i].ToolCallID == "c1" {
+			ph = &batch.msgs[i]
+		}
+	}
+	require.NotNil(t, ph, "the spawn placeholder must persist")
+	assert.Equal(t, "inst-9", ph.AgentInstanceID,
+		"the spawn placeholder links to the dispatched instance")
+	assert.Empty(t, ph.RunID, "the placeholder is a parent-level row, not a sub-agent row")
+	for _, m := range batch.msgs {
+		assert.NotEqual(t, "child work", m.Content, "sub-agent content never lands in messages")
+	}
+
+	// Reconstruction keeps the spawn tool unit in the prompt history even
+	// though the placeholder carries an instance id.
+	finals := append([]model.Message{}, batch.msgs...)
+	rec, err := MessagesToAgentMessages(finals, batch.calls)
+	require.NoError(t, err)
+	var sawSpawn bool
+	for _, m := range rec {
+		for _, tc := range m.ToolCalls {
+			if tc.ID == "c1" {
+				sawSpawn = true
+			}
+		}
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			sawSpawn = true
+		}
+	}
+	assert.True(t, sawSpawn, "the spawn call+result stay in the reconstructed prompt")
+}

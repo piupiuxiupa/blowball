@@ -56,10 +56,12 @@
 ### Requirement: Sub-agent content is excluded from messages
 持久化层 SHALL 按事件 Meta 的 `agent_instance_id` 分流：非空的事件 SHALL NOT 写入 `messages` 或 `tool_calls`，其 transcript 由既有 `subagent_runs` 快照提供。
 
-#### Scenario: 子 agent 流不进 messages
+#### Scenario: 子 agent 流不进 messages，spawn 占位行携带实例链接
 - **WHEN** 子 agent 运行产生 token/tool 事件
 - **THEN** SSE 与 `subagent_runs` 快照正常
-- **AND** `messages` 与 `tool_calls` 无该子 agent 的行
+- **AND** `messages` 与 `tool_calls` 无该子 agent 的内容行
+- **AND** 对应 spawn_subagent 占位行携带 `agent_instance_id`（该子 agent 实例），作为前端懒加载 transcript 的链接键
+- **AND** 重建时该占位行仍参与 prompt 历史（它是父级调用，不是子 agent 产出行）
 
 ### Requirement: Legacy chunk rows read dual-mode without migration
 存量事件行 SHALL NOT 迁移。重建路径 SHALL 按 event type 双模：终稿行直读组装，遗留 chunk 行走既有合并逻辑，二者产出一致的请求序列。

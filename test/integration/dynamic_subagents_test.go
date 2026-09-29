@@ -404,10 +404,10 @@ func TestDynamicSubagents_UniqueNamesAndPlaceholderHistoryEndToEnd(t *testing.T)
 	require.NotEmpty(t, ph.Messages)
 
 	var sawUser bool
-	var childStarts int
+	var spawnLinks int
 	for _, m := range ph.Messages {
-		if m.AgentInstanceID != "" {
-			childStarts++
+		if m.ToolCallID != "" && m.AgentInstanceID != "" {
+			spawnLinks++
 		}
 		switch m.EventType {
 		case model.EventTypeMessage:
@@ -420,9 +420,9 @@ func TestDynamicSubagents_UniqueNamesAndPlaceholderHistoryEndToEnd(t *testing.T)
 	// placeholder and full views coincide, and the parent's lifecycle shows
 	// only through its user + round-final rows.
 	assert.True(t, sawUser, "the user row stays visible")
-	assert.Equal(t, 0, childStarts, "no sub-agent rows exist to filter")
+	assert.Equal(t, 2, spawnLinks, "both spawn placeholders stay visible with their instance links")
 	assert.Equal(t, len(ph.Messages), len(full.Messages),
-		"placeholder and full views coincide when no sub-agent rows exist")
+		"placeholder and full views coincide when no sub-agent content rows exist")
 
 	// An unknown mode is a 400 before any pagination read.
 	badW := env.getSessionMessages(defaultSessionID, "?subagent_content=bogus", token)

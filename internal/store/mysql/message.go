@@ -214,6 +214,7 @@ FROM
 const subagentPlaceholderFilter = `
 		AND (
 			agent_instance_id IS NULL
+			OR tool_call_id IS NOT NULL
 			OR event_type IN ('agent_start', 'agent_end', 'agent_error')
 		)
 		AND NOT (
