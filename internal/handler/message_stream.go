@@ -587,13 +587,12 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	skillsDir := filepath.Join(h.dataDir, userID, "skills")
 
 	// Turn-artifacts capability: the turn-end finalization closure. The
-	// adapter invokes it just before the done event; userMsgTime (request
-	// arrival) is the turn-start watermark for mtime detection — anything the
-	// turn wrote is newer by construction.
+	// adapter invokes it with this turn's top-level assistant text just
+	// before the done event; linked paths are the artifact declaration.
 	if h.artifacts != nil {
 		svc := h.artifacts
-		hooks.FinalizeTurn = func(ctx context.Context) []stream.ArtifactInfo {
-			arts, err := svc.FinalizeTurn(ctx, userID, workspaceRoot, userMsgTime)
+		hooks.FinalizeTurn = func(ctx context.Context, assistantText string) []stream.ArtifactInfo {
+			arts, err := svc.FinalizeTurn(ctx, userID, workspaceRoot, assistantText)
 			if err != nil {
 				logger.FromContext(ctx).Warn("artifact finalization failed; turn completes without artifact events",
 					zap.String("op", "handler.artifact_finalize"),

@@ -104,11 +104,14 @@ func TestRenderSystemPrompt_FileOutputConvention(t *testing.T) {
 	assert.Contains(t, out, "All `xizhi_*` paths must be relative to the workspace root")
 	assert.Contains(t, out, "sandbox's `/tmp` is mapped")
 	// (e) artifact link syntax (turn-artifacts capability): deliverables are
-	// referenced as blowball://workspace/ markdown links; links never carry
-	// query parameters and never point into tmp/ or .blowball/.
+	// explicitly declared as blowball://workspace/ markdown links; links
+	// never carry query parameters and never point into tmp/ or .blowball/.
+	assert.Contains(t, out, "**Link every final deliverable in your reply:**")
+	assert.Contains(t, out, "for EACH final deliverable")
 	assert.Contains(t, out, "](blowball://workspace/")
 	assert.Contains(t, out, "never append query parameters")
 	assert.Contains(t, out, "never for `tmp/` scratch files, never for `.blowball/` paths")
+	assert.Contains(t, out, "A final deliverable without this link will NOT be included in artifact records.")
 }
 
 func TestRenderSystemPrompt_Tools(t *testing.T) {

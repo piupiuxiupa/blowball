@@ -61,7 +61,8 @@ func TestAdapter_EmitsArtifactEventsBeforeDone(t *testing.T) {
 	go func() { received <- collectHub(hub) }()
 
 	hooks := TurnHooks{
-		FinalizeTurn: func(ctx context.Context) []stream.ArtifactInfo {
+		FinalizeTurn: func(_ context.Context, assistantText string) []stream.ArtifactInfo {
+			assert.Equal(t, "see [a](blowball://workspace/a.md)", assistantText)
 			return []stream.ArtifactInfo{
 				{Path: "a.md", VersionID: "v-1", Size: 3, Mime: "text/markdown", Op: "create"},
 			}
@@ -99,6 +100,28 @@ func TestAdapter_EmitsArtifactEventsBeforeDone(t *testing.T) {
 	assert.Equal(t, stream.EventArtifact, events[2].Type)
 }
 
+func TestAdapter_FinalizeTurnExcludesSubAgentText(t *testing.T) {
+	subAgent := stream.TokenEvent("Sub", "[secret](blowball://workspace/sub.md)")
+	subAgent.Meta = map[string]any{stream.MetaParentToolCallID: "call-1"}
+	inner := &fakeInnerRunner{emit: []stream.StreamEvent{
+		subAgent,
+		stream.TokenEvent(stream.AgentConfucius, "[top](blowball://workspace/top.md)"),
+	}}
+	adapter := &orchestratorAdapter{inner: inner}
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+	hub.Close()
+
+	var got string
+	hooks := TurnHooks{FinalizeTurn: func(_ context.Context, assistantText string) []stream.ArtifactInfo {
+		got = assistantText
+		return nil
+	}}
+
+	_, _, err := adapter.Handle(context.Background(), "/ws", "/skills", "u1", nil, hub, hooks, agent.ModelOverride{})
+	require.NoError(t, err)
+	assert.Equal(t, "[top](blowball://workspace/top.md)", got)
+}
+
 func TestAdapter_NoFinalizeHookIsZeroChange(t *testing.T) {
 	inner := &fakeInnerRunner{emit: []stream.StreamEvent{
 		stream.TokenEvent(stream.AgentConfucius, "hi"),
@@ -130,7 +153,7 @@ func TestAdapter_EmptyArtifactsStillTagDone(t *testing.T) {
 	received := make(chan []stream.StreamEvent, 1)
 	go func() { received <- collectHub(hub) }()
 
-	hooks := TurnHooks{FinalizeTurn: func(ctx context.Context) []stream.ArtifactInfo { return nil }}
+	hooks := TurnHooks{FinalizeTurn: func(ctx context.Context, assistantText string) []stream.ArtifactInfo { return nil }}
 	events, _, err := adapter.Handle(context.Background(), "/ws", "/skills", "u1", nil, hub, hooks, agent.ModelOverride{})
 	hub.Close()
 	require.NoError(t, err)

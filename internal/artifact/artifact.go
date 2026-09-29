@@ -1,15 +1,13 @@
 // Package artifact implements the turn-artifacts capability: at the end of
-// each turn it detects the files the turn produced (deliverables written
-// anywhere in the workspace by ANY tool path — xizhi_* or the bash sandbox),
-// snapshots their content into the office-vers version store, and records
-// the version in a MySQL index so historical references can always open the
-// content as it was at that turn's end.
+// each turn it reads the deliverables explicitly linked in the assistant
+// reply, snapshots their content into the office-vers version store, and
+// records the version in a MySQL index so historical references can always
+// open the content as it was at that turn's end.
 //
-// Detection is mtime-based (files modified since turn start) and excludes the
-// scratch area (tmp/), the reserved .blowball/ namespace, and hidden entries
-// at any depth — mirroring the prompt's deliverable-vs-scratch convention.
-// Snapshots live in office-vers (outside the user workspace), so neither
-// xizhi_* nor the bash sandbox can reach the version store.
+// A blowball://workspace link is the sole attribution signal. The scratch area
+// (tmp/), the reserved .blowball/ namespace, and hidden entries at any depth
+// remain excluded. Snapshots live in office-vers (outside the user workspace),
+// so neither xizhi_* nor the bash sandbox can reach the version store.
 package artifact
 
 import (
@@ -17,11 +15,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,8 @@ import (
 
 	"go.uber.org/zap"
 )
+
+var workspaceLinkRE = regexp.MustCompile(`\[[^\]\n]*\]\((blowball://workspace/[^)\n]+)\)`)
 
 // Artifact op values recorded on artifact stream events.
 const (
@@ -85,45 +88,6 @@ func NewService(store VersionStore, index Index, maxBytes int64) *Service {
 	return &Service{store: store, index: index, maxBytes: maxBytes}
 }
 
-// Detect returns the workspace-relative slash-separated paths of regular,
-// non-empty files whose mtime is at or after since, excluding tmp/, hidden
-// entries (any path segment starting with "."), and symlinks. The result is
-// sorted (filepath.WalkDir order) so callers get deterministic output.
-func Detect(wsRoot string, since time.Time) ([]string, error) {
-	var out []string
-	err := filepath.WalkDir(wsRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Unreadable entries (permissions, dangling symlinks) are skipped,
-			// not fatal: detection is best-effort at turn end.
-			return nil
-		}
-		rel, err := filepath.Rel(wsRoot, path)
-		if err != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if d.IsDir() {
-			if rel != "." && (rel == "tmp" || strings.HasPrefix(rel, "tmp/") || isHiddenPath(rel)) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if isHiddenPath(rel) || strings.HasPrefix(rel, "tmp/") {
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil || info.Size() == 0 || info.ModTime().Before(since) {
-			return nil
-		}
-		out = append(out, rel)
-		return nil
-	})
-	return out, err
-}
-
 // isHiddenPath reports whether any segment of a slash-separated relative path
 // starts with "." (covering .blowball/, .pip/, .git/ and dotfiles at any
 // depth). The root "." itself is not hidden.
@@ -136,36 +100,91 @@ func isHiddenPath(rel string) bool {
 	return false
 }
 
-// FinalizeTurn detects the turn's artifacts (files with mtime >= since) and
-// snapshots each into the version store, returning the artifacts in path
-// order. Per-file failures (read/store/index errors, over-cap files) degrade
-// to an artifact without a VersionID rather than failing the turn; ctx
-// cancellation stops the loop early.
-func (s *Service) FinalizeTurn(ctx context.Context, userID, wsRoot string, since time.Time) ([]Artifact, error) {
-	paths, err := Detect(wsRoot, since)
-	if err != nil {
-		return nil, fmt.Errorf("artifact: detect in %q: %w", wsRoot, err)
+// declaredPaths extracts workspace-relative paths from the assistant reply's
+// markdown artifact links. Invalid links are skipped with a WARN; valid paths
+// are deduplicated and sorted so artifact events are deterministic.
+func declaredPaths(ctx context.Context, userID, content string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, match := range workspaceLinkRE.FindAllStringSubmatch(content, -1) {
+		rel, err := workspacePath(match[1])
+		if err != nil {
+			warnSkip(ctx, "invalid artifact link", match[1], userID, err)
+			continue
+		}
+		if _, ok := seen[rel]; ok {
+			continue
+		}
+		seen[rel] = struct{}{}
+		out = append(out, rel)
 	}
+	sort.Strings(out)
+	return out
+}
+
+// workspacePath validates and normalizes one blowball://workspace URL. It
+// returns the decoded slash-separated workspace-relative path.
+func workspacePath(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "blowball" || u.Host != "workspace" || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
+		return "", fmt.Errorf("link must be blowball://workspace/<relative-path> without query or fragment")
+	}
+
+	rel := strings.TrimPrefix(u.Path, "/")
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("path traversal is not allowed")
+		}
+	}
+	if rel == "" || strings.HasPrefix(rel, "/") || strings.Contains(rel, "\\") ||
+		isHiddenPath(rel) || rel == "tmp" || strings.HasPrefix(rel, "tmp/") {
+		return "", fmt.Errorf("path must be a visible workspace-relative file path")
+	}
+	rel = path.Clean(rel)
+	if rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
+		return "", fmt.Errorf("path traversal is not allowed")
+	}
+	return rel, nil
+}
+
+// FinalizeTurn snapshots each artifact explicitly linked in assistantContent,
+// returning the artifacts in path order. Invalid links and unusable targets
+// are skipped. Other per-file failures (read/store/index errors, over-cap
+// files) degrade to an artifact without a VersionID rather than failing the
+// turn; ctx cancellation stops the loop early.
+func (s *Service) FinalizeTurn(ctx context.Context, userID, wsRoot, assistantContent string) ([]Artifact, error) {
+	paths := declaredPaths(ctx, userID, assistantContent)
 	arts := make([]Artifact, 0, len(paths))
 	for _, rel := range paths {
 		if err := ctx.Err(); err != nil {
 			return arts, err
 		}
-		arts = append(arts, s.snapshotOne(ctx, userID, wsRoot, rel))
+		if a, ok := s.snapshotOne(ctx, userID, wsRoot, rel); ok {
+			arts = append(arts, a)
+		}
 	}
 	return arts, nil
 }
 
-// snapshotOne snapshots one detected file. The returned Artifact always
+// snapshotOne snapshots one declared file. The returned Artifact always
 // carries Path/Size/Mime/Op; VersionID is set only when the snapshot (or a
-// dedup hit) succeeded.
-func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) Artifact {
+// dedup hit) succeeded. ok=false means the target is not an existing regular,
+// non-empty file and must not be announced.
+func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) (Artifact, bool) {
 	abs := filepath.Join(wsRoot, filepath.FromSlash(rel))
 	a := Artifact{Path: rel, Op: OpCreate}
 
-	info, err := os.Stat(abs)
+	info, err := os.Lstat(abs)
 	if err != nil {
-		return a // vanished between Detect and stat: announce with zero size
+		warnSkip(ctx, "target unavailable", rel, userID, err)
+		return Artifact{}, false
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		warnSkip(ctx, "target is not a regular non-empty file", rel, userID, nil)
+		return Artifact{}, false
 	}
 	a.Size = info.Size()
 	a.Mime = mimeOf(rel, abs)
@@ -179,35 +198,35 @@ func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) A
 	}
 
 	if s.store == nil {
-		return a // version store unconfigured: announce without snapshot
+		return a, true // version store unconfigured: announce without snapshot
 	}
 	if s.maxBytes > 0 && a.Size > s.maxBytes {
 		warnSkip(ctx, "over size cap", rel, userID, nil)
-		return a
+		return a, true
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		warnSkip(ctx, "read failed", rel, userID, err)
-		return a
+		return a, true
 	}
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 
 	if lerr != nil {
-		return a
+		return a, true
 	}
 	if latest != nil && latest.SHA256 == digest {
 		// Byte-identical to the latest version (mtime touched only): reuse
 		// the existing version_id instead of storing a duplicate snapshot
 		// (office-vers creates a new version per POST — dedup is our job).
 		a.VersionID = latest.VersionID
-		return a
+		return a, true
 	}
 
 	vid, err := s.store.Put(ctx, userID, rel, data)
 	if err != nil {
 		warnSkip(ctx, "version store put failed", rel, userID, err)
-		return a
+		return a, true
 	}
 	rec := model.FileVersion{
 		UserID:    userID,
@@ -221,10 +240,10 @@ func (s *Service) snapshotOne(ctx context.Context, userID, wsRoot, rel string) A
 		// The version is orphaned in office-vers (harmless); without the
 		// index row it is unreachable, so report the artifact unsnapshotted.
 		warnSkip(ctx, "version index insert failed", rel, userID, err)
-		return a
+		return a, true
 	}
 	a.VersionID = rec.VersionID
-	return a
+	return a, true
 }
 
 // Resolve returns the newest version record for (userID, path). When before
@@ -256,8 +275,8 @@ func (s *Service) OpenVersion(ctx context.Context, userID, versionID string) (*m
 	return rec, data, nil
 }
 
-// warnSkip logs a per-file snapshot skip: the turn still completes and the
-// artifact is announced without a version_id, but the cause is visible.
+// warnSkip logs a skipped link/target or snapshot degradation. The turn still
+// completes; only the affected artifact loses its version or announcement.
 func warnSkip(ctx context.Context, reason, rel, userID string, err error) {
 	logger.FromContext(ctx).Warn("artifact snapshot skipped",
 		zap.String("op", "artifact.snapshot"),

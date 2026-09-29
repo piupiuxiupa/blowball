@@ -119,7 +119,8 @@ func (e *artifactTestEnv) get(t *testing.T, url string) *httptest.ResponseRecord
 func (e *artifactTestEnv) seed(t *testing.T, rel, content string) artifact.Artifact {
 	t.Helper()
 	writeWorkspaceFile(t, e.wsRoot, rel, content)
-	arts, err := e.svc.FinalizeTurn(context.Background(), "user-1", e.wsRoot, time.Now().Add(-time.Minute))
+	assistant := "[file](blowball://workspace/" + rel + ")"
+	arts, err := e.svc.FinalizeTurn(context.Background(), "user-1", e.wsRoot, assistant)
 	require.NoError(t, err)
 	require.Len(t, arts, 1)
 	return arts[0]

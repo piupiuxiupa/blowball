@@ -174,3 +174,41 @@ func TestRoundPersistSequence_UserRowExactlyOnce(t *testing.T) {
 	totalCalls := len(midBatch.calls) + len(endBatch.calls)
 	assert.Equal(t, 1, totalCalls)
 }
+
+func TestBuildRoundFinalBatch_PersistsArtifactEvent(t *testing.T) {
+	info := testTurnPersistInfo()
+	ai := stream.ArtifactInfo{Path: "a.md", VersionID: "v1", Size: 3, Mime: "text/markdown", Op: "create"}
+	merged := MergeEvents([]stream.StreamEvent{
+		stream.TokenEvent(stream.AgentConfucius, "[a](blowball://workspace/a.md)"),
+		stream.ArtifactEvent("", ai),
+	})
+	require.Len(t, merged, 2)
+
+	mid, _ := info.buildRoundFinalBatch(merged, 0, true, time.Now().UTC(), roundRenderOptions{})
+	for _, m := range mid.msgs {
+		assert.NotEqual(t, model.EventTypeArtifact, m.EventType, "incremental renders must not claim terminal artifact rows")
+	}
+
+	batch, consumed := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(),
+		roundRenderOptions{terminal: true})
+	require.Equal(t, len(merged), consumed)
+	require.Len(t, batch.msgs, 3) // user + assistant final + artifact
+
+	var row *model.Message
+	for i := range batch.msgs {
+		if batch.msgs[i].EventType == model.EventTypeArtifact {
+			row = &batch.msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, row, "artifact event must render as a message row")
+	assert.Empty(t, row.Role)
+	assert.Empty(t, row.Agent)
+	assert.Equal(t, `{"path":"a.md","version_id":"v1","size":3,"mime":"text/markdown","op":"create"}`, row.Content)
+	assert.Equal(t, "trace-1:1", row.ClientMsgID)
+
+	reconstructed, err := MessagesToAgentMessages(batch.msgs, nil)
+	require.NoError(t, err)
+	require.Len(t, reconstructed, 2) // user + assistant; artifact excluded
+	assert.NotContains(t, reconstructed[1].Content, `"version_id"`)
+}

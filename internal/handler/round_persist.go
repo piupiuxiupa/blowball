@@ -124,6 +124,7 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 	// gated on firstOrd >= from.
 	var cur *roundState
 	afterResult := false
+	var artifactRows []model.Message
 
 	for i := range merged {
 		e := merged[i]
@@ -181,6 +182,21 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				}
 			}
 			afterResult = true
+
+		case stream.EventArtifact:
+			if !opts.terminal || i < from {
+				continue // terminal metadata is claimed only by the terminal render
+			}
+			artifactRows = append(artifactRows, model.Message{
+				SessionID:   p.sessionID,
+				MsgTime:     now,
+				MsgIndex:    i,
+				Role:        "",
+				EventType:   model.EventTypeArtifact,
+				Content:     e.Content,
+				TraceID:     p.traceID,
+				ClientMsgID: deterministicClientMsgID(p.traceID, i),
+			})
 		}
 	}
 
@@ -188,6 +204,7 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 		if cur != nil {
 			emit(cur, true)
 		}
+		batch.msgs = append(batch.msgs, artifactRows...)
 		// Terminal renders (compaction flush, turn end) close everything.
 		consumed = len(merged)
 	}

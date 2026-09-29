@@ -84,7 +84,7 @@ func TestMessagesToAgentMessages_ArtifactEventsIgnored(t *testing.T) {
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "make a report"},
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "done, see "},
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToken, Content: "[report](blowball://workspace/report.md)"},
-		{Agent: "", Role: "", EventType: "artifact", Content: `{"path":"report.md","version_id":"v1","size":10,"mime":"text/markdown","op":"create"}`},
+		{Agent: "", Role: "", EventType: model.EventTypeArtifact, Content: `{"path":"report.md","version_id":"v1","size":10,"mime":"text/markdown","op":"create"}`},
 	}
 
 	got, err := MessagesToAgentMessages(prior, nil)

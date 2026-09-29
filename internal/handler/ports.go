@@ -57,15 +57,15 @@ type TurnHooks struct {
 	// the source the mid-turn flush persists.
 	Tap *TurnEventTap
 	// FinalizeTurn runs at turn end, just before the done event goes on the
-	// wire (turn-artifacts capability): it detects and snapshots the turn's
-	// deliverables and returns them in path order. The adapter emits one
+	// wire (turn-artifacts capability): it snapshots the deliverables linked
+	// in assistantText and returns them in path order. The adapter emits one
 	// artifact event per entry (persisted) and attaches the same list to the
 	// done event's Meta[MetaArtifacts] (live-stream convenience copy). A nil
 	// hook skips the capability entirely. The hook receives a
 	// cancel-detached, bounded context: client disconnect must not abort
 	// snapshotting, because the returned events feed persistence, not just
 	// the live wire.
-	FinalizeTurn func(ctx context.Context) []stream.ArtifactInfo
+	FinalizeTurn func(ctx context.Context, assistantText string) []stream.ArtifactInfo
 }
 
 // TurnEventTap synchronizes mid-turn flushes with the orchestrator adapter's
@@ -195,7 +195,7 @@ func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsD
 				// summary copy in Meta and is still excluded from persistence.
 				if hooks.FinalizeTurn != nil {
 					finCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), artifactFinalizeBudget)
-					artifacts := hooks.FinalizeTurn(finCtx)
+					artifacts := hooks.FinalizeTurn(finCtx, topLevelAssistantText(MergeEvents(events)))
 					cancel()
 					for _, ai := range artifacts {
 						ev := stream.ArtifactEvent("", ai)

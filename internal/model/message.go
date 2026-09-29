@@ -39,6 +39,7 @@ const (
 	EventTypeAgentStart  = "agent_start"
 	EventTypeAgentEnd    = "agent_end"
 	EventTypeAgentError  = "agent_error"
+	EventTypeArtifact    = "artifact"
 )
 
 // Message mirrors the `messages` table (migration 004_messages.sql,
