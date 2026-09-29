@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Round-boundary final content persistence
-系统 SHALL 以 round 为最小持久化单位：一轮（一次完整 LLM 回复及其全部工具执行结果）完成后，将该 round 的终稿写入 MySQL。持久化批 SHALL 在单事务内跨 `messages` 与 `tool_calls` 两表写入。新数据 SHALL NOT 产生 `token`、`reasoning`、`tool_call`、`tool_result`、`agent_start`、`agent_end`、`agent_error` 或 `plan_updated` 事件行。
+系统 SHALL 以 round 为最小持久化单位：一轮（一次完整 LLM 回复及其全部工具执行结果）完成后，将该 round 的终稿写入 MySQL。持久化批 SHALL 在单事务内跨 `messages` 与 `tool_calls` 两表写入。新数据 SHALL NOT 产生 `token`、`reasoning`、`tool_result`、`agent_start`、`agent_end` 或 `plan_updated` 事件行；例外：`agent_error` SHALL 作为错误留痕行持久化（role 为空、content 为错误文本、随所属 round 批次落库），`tool_call` 仅以占位行形式存在（见下）。
 
 #### Scenario: 一轮完成即落库
 - **WHEN** 主 agent 完成 round 1（assistant 回复 + 2 个工具调用及结果）后开始 round 2

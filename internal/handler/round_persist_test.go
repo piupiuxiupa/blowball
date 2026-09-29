@@ -229,3 +229,44 @@ func TestBuildRoundFinalBatch_PersistsArtifactEvent(t *testing.T) {
 	require.Len(t, reconstructed, 2) // user + assistant; artifact excluded
 	assert.NotContains(t, reconstructed[1].Content, `"version_id"`)
 }
+
+// TestBuildRoundFinalBatch_AgentErrorMarkersPersist pins the durable error
+// trace: an agent_error inside a round lands with the round's batch, and a
+// turn-start marker (no round open) lands directly.
+func TestBuildRoundFinalBatch_AgentErrorMarkersPersist(t *testing.T) {
+	info := testTurnPersistInfo()
+	marker := stream.AgentErrorEvent(stream.AgentConfucius, "confucius: stream chat: 503", "retry")
+	events := []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "Hel"),
+		stream.ToolCallEvent(stream.AgentConfucius, "c1", "grep", json.RawMessage(`{}`)),
+		stream.ToolResultEvent(stream.AgentConfucius, "c1", "out"),
+		marker,
+		stream.TokenEvent(stream.AgentConfucius, "done"),
+	}
+	merged := MergeEvents(events)
+
+	// Mid-turn render: round 1 closes when "done" arrives; the marker rides
+	// that batch.
+	batch, consumed := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(), roundRenderOptions{})
+	require.Equal(t, 5, consumed)
+	var markerRow *model.Message
+	for i := range batch.msgs {
+		if batch.msgs[i].EventType == model.EventTypeAgentError {
+			markerRow = &batch.msgs[i]
+		}
+	}
+	require.NotNil(t, markerRow, "the retry marker must persist with the closed round")
+	assert.Contains(t, markerRow.Content, "503")
+	assert.Empty(t, markerRow.Role)
+	assert.Equal(t, "trace-1:4", markerRow.ClientMsgID)
+
+	// Turn-start marker with no round open emits directly.
+	solo := stream.AgentErrorEvent(stream.AgentConfucius, "immediate failure", "llm_error")
+	b2, consumed2 := info.buildRoundFinalBatch([]stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius), solo,
+	}, 0, false, time.Now().UTC(), roundRenderOptions{})
+	require.Len(t, b2.msgs, 2) // user + marker
+	assert.Equal(t, model.EventTypeAgentError, b2.msgs[1].EventType)
+	assert.Equal(t, 2, consumed2, "cursor advances past a round-less marker")
+}

@@ -29,6 +29,8 @@ type roundState struct {
 	reasoning strings.Builder
 	calls     []model.ToolCall
 	callOrd   map[string]int
+	errOrd    []int // merged ordinals of agent_error markers inside the round
+	errMsg    []string
 }
 
 func newRoundState(firstOrd int) *roundState {
@@ -119,6 +121,24 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				ToolCallID:  c.ToolCallID,
 			})
 		}
+		// agent_error markers ride the round's batch (retry markers, spawn
+		// rejections, in-round failures) — the durable error trace.
+		for j, ord := range r.errOrd {
+			if ord < from {
+				continue
+			}
+			batch.msgs = append(batch.msgs, model.Message{
+				SessionID:   p.sessionID,
+				MsgTime:     now,
+				Agent:       model.AgentConfucius,
+				MsgIndex:    ord,
+				Role:        "",
+				EventType:   model.EventTypeAgentError,
+				Content:     r.errMsg[j],
+				TraceID:     p.traceID,
+				ClientMsgID: deterministicClientMsgID(p.traceID, ord),
+			})
+		}
 		batch.calls = append(batch.calls, r.calls...)
 	}
 
@@ -183,6 +203,34 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				}
 			}
 			afterResult = true
+
+		case stream.EventAgentError:
+			if cur == nil {
+				// Marker outside any round (turn-start failure): emit
+				// directly and advance the cursor past it.
+				if i < from {
+					continue
+				}
+				batch.msgs = append(batch.msgs, model.Message{
+					SessionID:   p.sessionID,
+					MsgTime:     now,
+					Agent:       model.AgentConfucius,
+					MsgIndex:    i,
+					Role:        "",
+					EventType:   model.EventTypeAgentError,
+					Content:     e.Content,
+					TraceID:     p.traceID,
+					ClientMsgID: deterministicClientMsgID(p.traceID, i),
+				})
+				if i+1 > consumed {
+					consumed = i + 1
+				}
+				continue
+			}
+			// Marker inside an open round: lands with the round's batch
+			// (round close or terminal render).
+			cur.errOrd = append(cur.errOrd, i)
+			cur.errMsg = append(cur.errMsg, e.Content)
 
 		case stream.EventArtifact:
 			if !opts.terminal || i < from {

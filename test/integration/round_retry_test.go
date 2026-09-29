@@ -93,14 +93,17 @@ func TestRoundRetry_TransientFailureRecoveredEndToEnd(t *testing.T) {
 	require.Len(t, turnCalls, 2)
 	assert.Equal(t, turnCalls[0], turnCalls[1], "retry must re-send the byte-identical request")
 
-	// Retry markers are transient agent_error events — not persisted as
-	// message rows (refactor-message-storage); the retried turn's rounds
-	// persist normally and turn_usage below proves both attempts ran.
-	env.waitForPersistedTurn(t, defaultSessionID, 2)
+	// The retry marker is a durable agent_error row riding the round's
+	// batch (refactor-message-storage error trace).
+	env.waitForPersistedTurn(t, defaultSessionID, 3)
+	var errRows int
 	for _, m := range env.mysqlFake.messagesFor(defaultSessionID) {
-		assert.NotEqual(t, model.EventTypeAgentError, m.EventType,
-			"retry markers are not message rows")
+		if m.EventType == model.EventTypeAgentError {
+			errRows++
+			assert.Contains(t, m.Content, "503", "the persisted retry row carries the triggering error")
+		}
 	}
+	assert.Equal(t, 1, errRows, "exactly one retry agent_error row")
 
 	// turn_usage reflects BOTH attempts (real spend): 12 + 12 = 24.
 	require.Eventually(t, func() bool {
