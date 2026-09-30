@@ -90,6 +90,16 @@ WHERE session_id = ? AND agent_instance_id = ?
 ORDER BY run_no ASC, id ASC
 `
 
+const listSubAgentChildRunsSQL = `
+SELECT id, session_id, agent_instance_id, run_id,
+       COALESCE(previous_run_id, '') AS previous_run_id,
+       run_no, COALESCE(parent_instance_id, '') AS parent_instance_id,
+       depth, name, status, started_at, finished_at, create_time, update_time
+FROM subagent_runs
+WHERE session_id = ? AND parent_instance_id = ?
+ORDER BY run_no ASC, id ASC
+`
+
 const getSubAgentRunSQL = `
 SELECT id, session_id, agent_instance_id, run_id,
        COALESCE(previous_run_id, '') AS previous_run_id,
@@ -123,6 +133,23 @@ func (s *Store) ListSubAgentRuns(ctx context.Context, sessionID, instanceID stri
 	var runs []model.SubAgentRun
 	if err := s.db.SelectContext(ctx, &runs, listSubAgentRunsSQL, sessionID, instanceID); err != nil {
 		return nil, fmt.Errorf("list sub-agent runs: %w", err)
+	}
+	if runs == nil {
+		runs = make([]model.SubAgentRun, 0)
+	}
+	return runs, nil
+}
+
+// ListSubAgentChildRuns returns the terminal child runs spawned by one
+// instance, ordered by run number. It is an identity projection: message
+// payloads (messages_json) and tool snapshots stay unloaded because callers
+// only resolve child instance links. The query is always scoped by session AND
+// parent instance so a run id can never match across sessions.
+func (s *Store) ListSubAgentChildRuns(ctx context.Context, sessionID, parentInstanceID string) ([]model.SubAgentRun, error) {
+	logQuery(ctx, "subagent_run.list_children", listSubAgentChildRunsSQL, sessionID, parentInstanceID)
+	var runs []model.SubAgentRun
+	if err := s.db.SelectContext(ctx, &runs, listSubAgentChildRunsSQL, sessionID, parentInstanceID); err != nil {
+		return nil, fmt.Errorf("list sub-agent child runs: %w", err)
 	}
 	if runs == nil {
 		runs = make([]model.SubAgentRun, 0)

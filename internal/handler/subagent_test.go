@@ -22,6 +22,7 @@ type handlerSubAgentStore struct {
 	hasInst  bool
 	run      model.SubAgentRun
 	runFound bool
+	children []model.SubAgentRun
 }
 
 func (s *handlerSubAgentStore) GetSessionByID(context.Context, string) (*model.Session, error) {
@@ -39,6 +40,10 @@ func (s *handlerSubAgentStore) GetSubAgentRun(context.Context, string, string, s
 
 func (s *handlerSubAgentStore) ListSubAgentRuns(context.Context, string, string) ([]model.SubAgentRun, error) {
 	return []model.SubAgentRun{s.run}, nil
+}
+
+func (s *handlerSubAgentStore) ListSubAgentChildRuns(context.Context, string, string) ([]model.SubAgentRun, error) {
+	return append([]model.SubAgentRun(nil), s.children...), nil
 }
 
 func newSubAgentHandlerTestRouter(t *testing.T, store *handlerSubAgentStore) *gin.Engine {
@@ -70,6 +75,17 @@ func handlerSubAgentRun() model.SubAgentRun {
 			{"role":"tool","tool_call_id":"tool-call","name":"executor","content":"ok"}
 		]`),
 	}
+}
+
+func handlerNestedSubAgentRun() model.SubAgentRun {
+	run := handlerSubAgentRun()
+	run.ParentInstanceID = "w-parent"
+	run.MessagesJSON = []byte(`[
+		{"role":"user","content":"task"},
+		{"role":"assistant","content":"dispatch","tool_calls":[
+			{"id":"call-spawn","function":{"name":"spawn_subagent","arguments":"{\"task\":\"dig\"}"}}]}
+	]`)
+	return run
 }
 
 func TestSubAgentHandlers_ListAndDetail(t *testing.T) {
@@ -105,6 +121,36 @@ func TestSubAgentHandlers_ListAndDetail(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"type":"task"`)
 	assert.Contains(t, w.Body.String(), `"type":"assistant"`)
 	assert.Contains(t, w.Body.String(), `"tool_call_id"`)
+}
+
+func TestSubAgentHandlers_NestedRunLinks(t *testing.T) {
+	run := handlerNestedSubAgentRun()
+	children := []model.SubAgentRun{{
+		SessionID: "sess-1", AgentInstanceID: "w-child", ParentInstanceID: "inst-1",
+		RunID: "call-spawn", RunNo: 1, Name: "digger#w-child",
+		Status: model.SubAgentStatusCompleted,
+	}}
+	r := newSubAgentHandlerTestRouter(t, &handlerSubAgentStore{
+		session: model.Session{SessionID: "sess-1", UserID: "user-1"},
+		hasInst: true, run: run, runFound: true, children: children,
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/sess-1/subagents/inst-1/runs", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), `"parent_instance_id":"w-parent"`)
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/sess-1/subagents/inst-1/runs/run-1", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), `"parent_instance_id":"w-parent"`)
+	assert.Contains(t, w.Body.String(), `"sub_agent_instance_id":"w-child"`)
+	assert.Contains(t, w.Body.String(), `"sub_agent_name":"digger#w-child"`)
+	assert.NotContains(t, w.Body.String(), "messages_json")
 }
 
 func TestSubAgentHandlers_NotFound(t *testing.T) {

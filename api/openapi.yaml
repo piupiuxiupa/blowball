@@ -304,6 +304,18 @@ components:
           type: object
           additionalProperties: true
           description: Decoded tool-call arguments. Empty arguments are `{}`.
+        sub_agent_instance_id:
+          type: string
+          description: >
+            Present only on spawn_subagent tool calls whose dispatched child
+            instance has a durable terminal run row in the same session: the
+            child instance id the frontend uses to recursively lazy-load the
+            next tree level through the sub-agent run APIs. Omitted on ordinary
+            tool calls and on spawns without a terminal child row (bad-args or
+            budget failures, still-running children, legacy identities).
+        sub_agent_name:
+          type: string
+          description: Stable attribution label of the linked child instance.
     SubAgentTranscriptItem:
       type: object
       required: [type]
@@ -352,6 +364,11 @@ components:
         previous_run_id:
           type: string
           description: Predecessor run when this execution resumed an instance.
+        parent_instance_id:
+          type: string
+          description: >
+            Parent sub-agent instance that dispatched this run. Omitted for
+            root dispatches (spawned directly by the main agent).
         run_no:
           type: integer
           minimum: 1
@@ -378,6 +395,7 @@ components:
         runs:
           - agent_instance_id: w-9f2d4c
             run_id: call_019glegacy
+            parent_instance_id: w-parent01
             run_no: 1
             name: researcher#w-9f2d4c
             status: completed
@@ -407,6 +425,7 @@ components:
         agent_instance_id: w-9f2d4c
         run_id: call_019glegacy
         previous_run_id: call_019gprevious
+        parent_instance_id: w-parent01
         run_no: 2
         name: researcher#w-9f2d4c
         status: completed
@@ -423,6 +442,11 @@ components:
               - id: call_tool_1
                 name: executor
                 arguments: {command: rg regression}
+              - id: call_spawn_1
+                name: spawn_subagent
+                arguments: {task: dig deeper}
+                sub_agent_instance_id: w-child02
+                sub_agent_name: digger#w-child02
           - type: tool_result
             tool_call_id: call_tool_1
             name: executor

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -526,6 +527,32 @@ func (m *memoryMySQL) ListSubAgentRuns(_ context.Context, sessionID, instanceID 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]model.SubAgentRun(nil), m.subagentRuns[sessionID+"\x00"+instanceID]...), nil
+}
+
+func (m *memoryMySQL) ListSubAgentChildRuns(_ context.Context, sessionID, parentInstanceID string) ([]model.SubAgentRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []model.SubAgentRun
+	for key, runs := range m.subagentRuns {
+		if !strings.HasPrefix(key, sessionID+"\x00") {
+			continue
+		}
+		for _, run := range runs {
+			if run.ParentInstanceID == parentInstanceID {
+				out = append(out, run)
+			}
+		}
+	}
+	if out == nil {
+		out = []model.SubAgentRun{}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RunNo != out[j].RunNo {
+			return out[i].RunNo < out[j].RunNo
+		}
+		return out[i].AgentInstanceID < out[j].AgentInstanceID
+	})
+	return out, nil
 }
 
 func (m *memoryMySQL) GetSubAgentRun(_ context.Context, sessionID, instanceID, runID string) (model.SubAgentRun, bool, error) {

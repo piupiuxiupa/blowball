@@ -16,6 +16,7 @@ import (
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -461,6 +462,130 @@ func decodeMessagesPage(t *testing.T, w *httptest.ResponseRecorder) struct {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 	return page
+}
+
+// getSubAgentJSON issues an authenticated sub-agent API GET and decodes the
+// JSON body into out.
+func getSubAgentJSON(t *testing.T, env *testEnv, path, token string, out any) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), out))
+	return w
+}
+
+func TestDynamicSubagents_NestedRunLinksOverHTTP(t *testing.T) {
+	llm := newScriptedLLMClient(
+		// Confucius spawns the depth-1 instance.
+		scriptedLLMResponse{
+			finishReason: "tool_calls",
+			toolCalls: []agent.ToolCall{{
+				ID: "spawn-a",
+				Function: agent.ToolCallFunction{
+					Name:      agent.SpawnSubagentTool,
+					Arguments: `{"task":"outer work","name":"Outer"}`,
+				},
+			}},
+		},
+		// The depth-1 instance spawns a depth-2 grandchild.
+		scriptedLLMResponse{
+			finishReason: "tool_calls",
+			toolCalls: []agent.ToolCall{{
+				ID: "spawn-b",
+				Function: agent.ToolCallFunction{
+					Name:      agent.SpawnSubagentTool,
+					Arguments: `{"task":"inner work","name":"Inner"}`,
+				},
+			}},
+		},
+		scriptedLLMResponse{content: "grandchild result", finishReason: "stop"},
+		scriptedLLMResponse{content: "outer done", finishReason: "stop"},
+		scriptedLLMResponse{content: "merged answer", finishReason: "stop"},
+	)
+	env := newTestEnvWithAgents(t, llm, dynamicAgentsForTest(func(c *config.SubAgentConfig) {
+		c.MaxDepth = 2
+	}))
+	token := authToken(t, defaultUserID)
+
+	w := env.postMessage(`{"content":"delegate twice"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	env.waitForPersistedTurn(t, defaultSessionID, 2)
+
+	instances := env.mysqlFake.snapshotSubAgentInstances(defaultSessionID)
+	require.Len(t, instances, 2, "one depth-1 and one depth-2 instance must persist")
+	var outer, inner model.SubAgentInstance
+	for _, inst := range instances {
+		if inst.ParentInstanceID == "" {
+			outer = inst
+		}
+	}
+	for _, inst := range instances {
+		if inst.AgentInstanceID != outer.AgentInstanceID && inst.ParentInstanceID == outer.AgentInstanceID {
+			inner = inst
+		}
+	}
+	require.NotEmpty(t, outer.AgentInstanceID, "depth-1 instance not found")
+	require.NotEmpty(t, inner.AgentInstanceID, "depth-2 instance not found")
+	assert.Equal(t, 2, inner.Depth)
+
+	// Root run listing omits parent_instance_id entirely.
+	var outerList struct {
+		Runs []service.SubAgentRunSummary `json:"runs"`
+	}
+	listW := getSubAgentJSON(t, env,
+		"/api/v1/sessions/"+defaultSessionID+"/subagents/"+outer.AgentInstanceID+"/runs",
+		token, &outerList)
+	require.Len(t, outerList.Runs, 1)
+	assert.Equal(t, "spawn-a", outerList.Runs[0].RunID)
+	assert.Empty(t, outerList.Runs[0].ParentInstanceID)
+	assert.NotContains(t, listW.Body.String(), "parent_instance_id")
+
+	// The depth-1 run detail links its nested spawn tool call to the depth-2
+	// instance — the only durable way for the frontend to discover it.
+	var outerDetail service.SubAgentRunDetail
+	getSubAgentJSON(t, env,
+		"/api/v1/sessions/"+defaultSessionID+"/subagents/"+outer.AgentInstanceID+"/runs/spawn-a",
+		token, &outerDetail)
+	var linked *service.SubAgentToolCall
+	for i := range outerDetail.Transcript {
+		for j := range outerDetail.Transcript[i].ToolCalls {
+			call := outerDetail.Transcript[i].ToolCalls[j]
+			if call.ID == "spawn-b" {
+				linked = &outerDetail.Transcript[i].ToolCalls[j]
+			}
+		}
+	}
+	require.NotNil(t, linked, "the nested spawn tool call must appear in the transcript")
+	assert.Equal(t, agent.SpawnSubagentTool, linked.Name)
+	assert.Equal(t, inner.AgentInstanceID, linked.SubAgentInstanceID)
+	assert.Equal(t, inner.Name, linked.SubAgentName)
+
+	// The discovered id resolves through the same run APIs one level deeper.
+	var innerList struct {
+		Runs []service.SubAgentRunSummary `json:"runs"`
+	}
+	getSubAgentJSON(t, env,
+		"/api/v1/sessions/"+defaultSessionID+"/subagents/"+inner.AgentInstanceID+"/runs",
+		token, &innerList)
+	require.Len(t, innerList.Runs, 1)
+	assert.Equal(t, "spawn-b", innerList.Runs[0].RunID)
+	assert.Equal(t, outer.AgentInstanceID, innerList.Runs[0].ParentInstanceID)
+
+	var innerDetail service.SubAgentRunDetail
+	getSubAgentJSON(t, env,
+		"/api/v1/sessions/"+defaultSessionID+"/subagents/"+inner.AgentInstanceID+"/runs/spawn-b",
+		token, &innerDetail)
+	assert.Equal(t, outer.AgentInstanceID, innerDetail.ParentInstanceID)
+	foundGrandchild := false
+	for _, item := range innerDetail.Transcript {
+		if strings.Contains(item.Content, "grandchild result") {
+			foundGrandchild = true
+		}
+	}
+	assert.True(t, foundGrandchild, "the depth-2 transcript lazy-loads its own content")
 }
 
 func TestDynamicSubagents_TotalBudgetExhaustionEndToEnd(t *testing.T) {

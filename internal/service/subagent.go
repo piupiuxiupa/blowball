@@ -24,6 +24,7 @@ type SubAgentRunStore interface {
 	GetSubAgentInstance(ctx context.Context, sessionID, instanceID string) (model.SubAgentInstance, bool, error)
 	GetSubAgentRun(ctx context.Context, sessionID, instanceID, runID string) (model.SubAgentRun, bool, error)
 	ListSubAgentRuns(ctx context.Context, sessionID, instanceID string) ([]model.SubAgentRun, error)
+	ListSubAgentChildRuns(ctx context.Context, sessionID, parentInstanceID string) ([]model.SubAgentRun, error)
 }
 
 // SubAgentService turns persisted model-context deltas into stable, non-leaky
@@ -42,6 +43,12 @@ type SubAgentToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+	// SubAgentInstanceID links a spawn_subagent tool call to the durable child
+	// instance it dispatched, so the frontend can recursively lazy-load the
+	// next tree level through the run APIs. Empty on ordinary tool calls and
+	// on spawns that never created a terminal child run row.
+	SubAgentInstanceID string `json:"sub_agent_instance_id,omitempty"`
+	SubAgentName       string `json:"sub_agent_name,omitempty"`
 }
 
 // SubAgentTranscriptItem is one deliberately exposed frontend transcript item.
@@ -59,26 +66,30 @@ type SubAgentRunSummary struct {
 	AgentInstanceID string `json:"agent_instance_id"`
 	RunID           string `json:"run_id"`
 	PreviousRunID   string `json:"previous_run_id,omitempty"`
-	RunNo           int    `json:"run_no"`
-	Name            string `json:"name"`
-	Status          string `json:"status"`
-	MessageCount    int    `json:"message_count"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at"`
+	// ParentInstanceID is empty for root dispatches (spawned by Confucius).
+	ParentInstanceID string `json:"parent_instance_id,omitempty"`
+	RunNo            int    `json:"run_no"`
+	Name             string `json:"name"`
+	Status           string `json:"status"`
+	MessageCount     int    `json:"message_count"`
+	StartedAt        string `json:"started_at"`
+	FinishedAt       string `json:"finished_at"`
 }
 
 // SubAgentRunDetail is a single run's sanitized transcript.
 type SubAgentRunDetail struct {
-	AgentInstanceID string                   `json:"agent_instance_id"`
-	RunID           string                   `json:"run_id"`
-	PreviousRunID   string                   `json:"previous_run_id,omitempty"`
-	RunNo           int                      `json:"run_no"`
-	Name            string                   `json:"name"`
-	Status          string                   `json:"status"`
-	MessageCount    int                      `json:"message_count"`
-	StartedAt       string                   `json:"started_at"`
-	FinishedAt      string                   `json:"finished_at"`
-	Transcript      []SubAgentTranscriptItem `json:"transcript"`
+	AgentInstanceID string `json:"agent_instance_id"`
+	RunID           string `json:"run_id"`
+	PreviousRunID   string `json:"previous_run_id,omitempty"`
+	// ParentInstanceID is empty for root dispatches (spawned by Confucius).
+	ParentInstanceID string                   `json:"parent_instance_id,omitempty"`
+	RunNo            int                      `json:"run_no"`
+	Name             string                   `json:"name"`
+	Status           string                   `json:"status"`
+	MessageCount     int                      `json:"message_count"`
+	StartedAt        string                   `json:"started_at"`
+	FinishedAt       string                   `json:"finished_at"`
+	Transcript       []SubAgentTranscriptItem `json:"transcript"`
 }
 
 // ListRuns returns metadata for an owned instance's terminal runs.
@@ -117,17 +128,27 @@ func (s *SubAgentService) GetRun(ctx context.Context, userID, sessionID, instanc
 		log.Error("sub-agent transcript decode failed", zap.Error(err))
 		return SubAgentRunDetail{}, fmt.Errorf("subagent.get_run: decode: %w", err)
 	}
+	// Nested spawn links are best-effort enrichment: the transcript stays
+	// complete without them, so a child-lookup failure degrades to the
+	// pre-change response instead of failing the whole detail request.
+	children, err := s.store.ListSubAgentChildRuns(ctx, sessionID, instanceID)
+	if err != nil {
+		log.Warn("sub-agent child link lookup failed; returning transcript without nested links", zap.Error(err))
+	} else {
+		applySubAgentLinks(transcript, children)
+	}
 	detail := SubAgentRunDetail{
-		AgentInstanceID: run.AgentInstanceID,
-		RunID:           run.RunID,
-		PreviousRunID:   run.PreviousRunID,
-		RunNo:           run.RunNo,
-		Name:            run.Name,
-		Status:          run.Status,
-		MessageCount:    run.MessageCount,
-		StartedAt:       run.StartedAt.UTC().Format(time.RFC3339Nano),
-		FinishedAt:      run.FinishedAt.UTC().Format(time.RFC3339Nano),
-		Transcript:      transcript,
+		AgentInstanceID:  run.AgentInstanceID,
+		RunID:            run.RunID,
+		PreviousRunID:    run.PreviousRunID,
+		ParentInstanceID: run.ParentInstanceID,
+		RunNo:            run.RunNo,
+		Name:             run.Name,
+		Status:           run.Status,
+		MessageCount:     run.MessageCount,
+		StartedAt:        run.StartedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:       run.FinishedAt.UTC().Format(time.RFC3339Nano),
+		Transcript:       transcript,
 	}
 	log.Debug("sub-agent run detail returned", zap.Int("items", len(transcript)))
 	return detail, nil
@@ -235,21 +256,56 @@ func subAgentTranscript(raw []byte) ([]SubAgentTranscriptItem, error) {
 	return out, nil
 }
 
+// spawnSubagentToolName mirrors agent.SpawnSubagentTool. The service layer
+// deliberately does not import the agent package, so the wire-level tool name
+// is restated here next to its only consumer.
+const spawnSubagentToolName = "spawn_subagent"
+
+// applySubAgentLinks annotates spawn_subagent transcript tool calls with the
+// durable child instance they dispatched. A child run row's RunID equals the
+// parent's spawn tool_call id, so the lookup keys directly on the call id.
+// Spawns without a matching terminal child row (bad-args rejections, budget
+// failures, still-running children, legacy backfilled identities) keep their
+// pre-change shape with no link.
+func applySubAgentLinks(transcript []SubAgentTranscriptItem, children []model.SubAgentRun) {
+	if len(transcript) == 0 || len(children) == 0 {
+		return
+	}
+	childByRunID := make(map[string]model.SubAgentRun, len(children))
+	for _, child := range children {
+		childByRunID[child.RunID] = child
+	}
+	for i := range transcript {
+		for j, call := range transcript[i].ToolCalls {
+			if call.Name != spawnSubagentToolName {
+				continue
+			}
+			child, ok := childByRunID[call.ID]
+			if !ok {
+				continue
+			}
+			transcript[i].ToolCalls[j].SubAgentInstanceID = child.AgentInstanceID
+			transcript[i].ToolCalls[j].SubAgentName = child.Name
+		}
+	}
+}
+
 func subAgentRunSummary(run model.SubAgentRun, fallbackName string) SubAgentRunSummary {
 	name := run.Name
 	if name == "" {
 		name = fallbackName
 	}
 	return SubAgentRunSummary{
-		AgentInstanceID: run.AgentInstanceID,
-		RunID:           run.RunID,
-		PreviousRunID:   run.PreviousRunID,
-		RunNo:           run.RunNo,
-		Name:            name,
-		Status:          run.Status,
-		MessageCount:    run.MessageCount,
-		StartedAt:       run.StartedAt.UTC().Format(time.RFC3339Nano),
-		FinishedAt:      run.FinishedAt.UTC().Format(time.RFC3339Nano),
+		AgentInstanceID:  run.AgentInstanceID,
+		RunID:            run.RunID,
+		PreviousRunID:    run.PreviousRunID,
+		ParentInstanceID: run.ParentInstanceID,
+		RunNo:            run.RunNo,
+		Name:             name,
+		Status:           run.Status,
+		MessageCount:     run.MessageCount,
+		StartedAt:        run.StartedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:       run.FinishedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 

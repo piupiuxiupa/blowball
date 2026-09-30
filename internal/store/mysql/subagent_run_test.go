@@ -134,6 +134,60 @@ func TestSubAgentRuns_MultipleDeltasRetryAndScopedRead(t *testing.T) {
 	assert.False(t, ok, "lookups are session-scoped")
 }
 
+func TestSubAgentRuns_ListChildRunsScopedIdentityProjection(t *testing.T) {
+	store, cleanup := setupSubAgentRunStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	sessionID := "aaaaaaaa-0000-7000-8000-0000000000bf"
+	otherSessionID := "aaaaaaaa-0000-7000-8000-0000000000c0"
+
+	parent := model.SubAgentInstance{
+		SessionID: sessionID, AgentInstanceID: "w-parent", Depth: 1, Name: "parent",
+		SystemPrompt: "be useful",
+	}
+	require.NoError(t, store.AppendSubAgentRun(ctx, parent, testSubAgentRun(parent, "call-parent", "", 1)))
+
+	childA := model.SubAgentInstance{
+		SessionID: sessionID, AgentInstanceID: "w-child-a", ParentInstanceID: "w-parent",
+		Depth: 2, Name: "researcher#w-child-a", SystemPrompt: "be useful",
+	}
+	childB := model.SubAgentInstance{
+		SessionID: sessionID, AgentInstanceID: "w-child-b", ParentInstanceID: "w-parent",
+		Depth: 2, Name: "writer#w-child-b", SystemPrompt: "be useful",
+	}
+	require.NoError(t, store.AppendSubAgentRun(ctx, childA, testSubAgentRun(childA, "call-child-a", "", 1)))
+	require.NoError(t, store.AppendSubAgentRun(ctx, childB, testSubAgentRun(childB, "call-child-b", "", 1)))
+
+	// The same parent identity in another session must stay invisible.
+	foreignParent := parent
+	foreignParent.SessionID = otherSessionID
+	foreignChild := model.SubAgentInstance{
+		SessionID: otherSessionID, AgentInstanceID: "w-foreign-child", ParentInstanceID: "w-parent",
+		Depth: 2, Name: "foreign", SystemPrompt: "be useful",
+	}
+	require.NoError(t, store.AppendSubAgentRun(ctx, foreignParent, testSubAgentRun(foreignParent, "call-foreign-parent", "", 1)))
+	require.NoError(t, store.AppendSubAgentRun(ctx, foreignChild, testSubAgentRun(foreignChild, "call-foreign-child", "", 1)))
+
+	children, err := store.ListSubAgentChildRuns(ctx, sessionID, "w-parent")
+	require.NoError(t, err)
+	require.Len(t, children, 2)
+	assert.Equal(t, "w-child-a", children[0].AgentInstanceID)
+	assert.Equal(t, "call-child-a", children[0].RunID)
+	assert.Equal(t, "w-parent", children[0].ParentInstanceID)
+	assert.Equal(t, "researcher#w-child-a", children[0].Name)
+	assert.Nil(t, children[0].MessagesJSON, "child link lookup must not load message payloads")
+
+	empty, err := store.ListSubAgentChildRuns(ctx, sessionID, "w-no-children")
+	require.NoError(t, err)
+	assert.NotNil(t, empty)
+	assert.Empty(t, empty)
+
+	foreign, err := store.ListSubAgentChildRuns(ctx, otherSessionID, "w-parent")
+	require.NoError(t, err)
+	require.Len(t, foreign, 1)
+	assert.Equal(t, "w-foreign-child", foreign[0].AgentInstanceID, "child lookups are session-scoped")
+}
+
 func TestSubAgentRuns_ConcurrentResumeCannotForkChain(t *testing.T) {
 	store, cleanup := setupSubAgentRunStore(t)
 	defer cleanup()
