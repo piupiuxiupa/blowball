@@ -41,6 +41,7 @@ func viewImageTestConfig() *config.Config {
 				Name:                viewImageModel,
 				MaxContextTokens:    8192,
 				MaxCompletionTokens: 2048,
+				Thinking:            true, // lets the agent pick a reasoning effort per call
 			}),
 		},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
@@ -93,7 +94,7 @@ func TestViewImage_ToolTurnDescribesWorkspaceImage(t *testing.T) {
 				ID: "call_view",
 				Function: agent.ToolCallFunction{
 					Name:      xizhi.NameViewImage,
-					Arguments: `{"path":` + mustMarshalJSONString(viewImageRelPath) + `,"question":` + mustMarshalJSONString(viewImageQuestion) + `}`,
+					Arguments: `{"path":` + mustMarshalJSONString(viewImageRelPath) + `,"question":` + mustMarshalJSONString(viewImageQuestion) + `,"reasoning_effort":"high"}`,
 				},
 			}},
 			usage: agent.Usage{PromptTokens: 30, CompletionTokens: 1, TotalTokens: 31},
@@ -129,6 +130,8 @@ func TestViewImage_ToolTurnDescribesWorkspaceImage(t *testing.T) {
 	require.Len(t, visionReq.Messages, 1)
 	assert.Equal(t, "user", visionReq.Messages[0].Role)
 	assert.Equal(t, viewImageQuestion, visionReq.Messages[0].Content)
+	assert.True(t, visionReq.Thinking, "agent-chosen high effort must select the thinking wire family")
+	assert.Equal(t, "high", visionReq.ReasoningEffort)
 
 	// The persisted tool interaction carries the success envelope with the
 	// description and image metadata.

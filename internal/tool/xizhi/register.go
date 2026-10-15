@@ -235,6 +235,11 @@ var (
     "question": {
       "type": "string",
       "description": "What to look for in the image. Ask something specific (e.g. the error stack in a screenshot, the values in a chart, the visible UI elements) — targeted questions get far better answers than an open-ended request."
+    },
+    "reasoning_effort": {
+      "type": "string",
+      "enum": ["none", "low", "medium", "high", "xhigh", "max"],
+      "description": "Thinking effort for the vision model. Omit or use \"none\" for routine lookups; raise it ONLY for genuinely hard images (dense charts, cluttered UI screenshots, fine-grained OCR). Requires a reasoning-capable vision model — on deployments whose vision model does not reason, non-\"none\" values return an error you should retry without the parameter."
     }
   },
   "required": ["path"],
@@ -307,8 +312,9 @@ type deleteArgs struct {
 }
 
 type viewImageArgs struct {
-	Path     string `json:"path"`
-	Question string `json:"question"`
+	Path            string `json:"path"`
+	Question        string `json:"question"`
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 // RegisterAll registers the enabled Xizhi file tools against r, scoping every
@@ -511,14 +517,16 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig,
 				"show?\", \"which UI elements are visible?\") — targeted questions get far better answers. Supported " +
 				"formats: png / jpeg / webp / gif (detected by content, not extension); oversized files are rejected. " +
 				"**`path` MUST be relative to the workspace root** (absolute paths, `..` and symlink escapes are " +
-				"rejected). For precision-critical details, ask focused follow-up questions in separate calls.",
+				"rejected). For precision-critical details, ask focused follow-up questions in separate calls, and pass a " +
+				"higher `reasoning_effort` only for genuinely hard images (dense charts, cluttered UI screenshots, " +
+				"fine-grained OCR) on reasoning-capable vision models — routine lookups should omit it.",
 			ParametersJSON: schemaViewImage,
 			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 				var a viewImageArgs
 				if err := json.Unmarshal(args, &a); err != nil {
 					return nil, fmt.Errorf("xizhi_view_image: parse args: %w", err)
 				}
-				return ViewImage(ctx, workspaceRoot, a.Path, a.Question, resolved, cfg.ViewImage.Model, vision)
+				return ViewImage(ctx, workspaceRoot, a.Path, a.Question, a.ReasoningEffort, resolved, cfg.ViewImage.Model, vision)
 			},
 		})
 	}

@@ -53,7 +53,7 @@ func TestVisionClient_DescribeBuildsSidecarRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	img := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2}
-	got, err := vc.Describe(context.Background(), "what does this chart show?", img, "image/png")
+	got, err := vc.Describe(context.Background(), "what does this chart show?", "", img, "image/png")
 	require.NoError(t, err)
 	assert.Equal(t, "a chart showing 42%", got)
 
@@ -69,15 +69,48 @@ func TestVisionClient_DescribeBuildsSidecarRequest(t *testing.T) {
 	assert.Equal(t, "vision", llm.gotAgent, "raw-capture attribution must be the vision pseudo-agent")
 }
 
-func TestVisionClient_ThinkingEntryRequestsNoneEffort(t *testing.T) {
-	llm := &fakeVisionLLM{resp: LLMResponse{Content: "ok"}}
-	vc, err := NewVisionClient(llm, visionCatalog(true), "glm-4v-flash", 64)
-	require.NoError(t, err)
+func TestVisionClient_EffortAxis(t *testing.T) {
+	t.Run("thinking entry defaults to literal none", func(t *testing.T) {
+		llm := &fakeVisionLLM{resp: LLMResponse{Content: "ok"}}
+		vc, err := NewVisionClient(llm, visionCatalog(true), "glm-4v-flash", 64)
+		require.NoError(t, err)
 
-	_, err = vc.Describe(context.Background(), "q", []byte("x"), "image/png")
-	require.NoError(t, err)
-	assert.True(t, llm.gotReq.Thinking)
-	assert.Equal(t, "none", llm.gotReq.ReasoningEffort)
+		_, err = vc.Describe(context.Background(), "q", "", []byte("x"), "image/png")
+		require.NoError(t, err)
+		assert.True(t, llm.gotReq.Thinking)
+		assert.Equal(t, "none", llm.gotReq.ReasoningEffort)
+	})
+
+	t.Run("agent-chosen high effort rides the request", func(t *testing.T) {
+		llm := &fakeVisionLLM{resp: LLMResponse{Content: "ok"}}
+		vc, err := NewVisionClient(llm, visionCatalog(true), "glm-4v-flash", 64)
+		require.NoError(t, err)
+
+		_, err = vc.Describe(context.Background(), "q", "high", []byte("x"), "image/png")
+		require.NoError(t, err)
+		assert.True(t, llm.gotReq.Thinking)
+		assert.Equal(t, "high", llm.gotReq.ReasoningEffort)
+	})
+
+	t.Run("non-thinking model rejects non-none effort", func(t *testing.T) {
+		llm := &fakeVisionLLM{resp: LLMResponse{Content: "ok"}}
+		vc, err := NewVisionClient(llm, visionCatalog(false), "glm-4v-flash", 64)
+		require.NoError(t, err)
+
+		_, err = vc.Describe(context.Background(), "q", "high", []byte("x"), "image/png")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support reasoning")
+	})
+
+	t.Run("non-thinking model accepts none", func(t *testing.T) {
+		llm := &fakeVisionLLM{resp: LLMResponse{Content: "ok"}}
+		vc, err := NewVisionClient(llm, visionCatalog(false), "glm-4v-flash", 64)
+		require.NoError(t, err)
+
+		_, err = vc.Describe(context.Background(), "q", "none", []byte("x"), "image/png")
+		require.NoError(t, err)
+		assert.False(t, llm.gotReq.Thinking)
+	})
 }
 
 func TestVisionClient_DescribeSurfacesModelError(t *testing.T) {
@@ -85,7 +118,7 @@ func TestVisionClient_DescribeSurfacesModelError(t *testing.T) {
 	vc, err := NewVisionClient(llm, visionCatalog(false), "glm-4v-flash", 64)
 	require.NoError(t, err)
 
-	_, err = vc.Describe(context.Background(), "q", []byte("x"), "image/png")
+	_, err = vc.Describe(context.Background(), "q", "", []byte("x"), "image/png")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "vision model call")
 }

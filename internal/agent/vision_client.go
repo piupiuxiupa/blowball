@@ -31,14 +31,23 @@ func NewVisionClient(llm LLMClient, openAI config.OpenAIConfig, model string, ma
 
 // Describe sends the image plus the (possibly defaulted) question to the
 // configured vision model as one base64-inline user message and returns the
-// model's text description. The call rides the shared streaming client, so
-// llm-raw-capture observes it for free; attribution is the "vision"
-// pseudo-agent (like compaction's "compaction"). Vision calls always request
-// the non-reasoning effort family when a thinking model is selected, keeping
-// this side channel inexpensive.
-func (c visionClient) Describe(ctx context.Context, question string, image []byte, mime string) (string, error) {
+// model's text description. effort is the CALLING agent's per-invocation
+// reasoning choice ("" normalizes to none): on a thinking vision model the
+// literal value rides the request (none included, disabling thinking — the
+// default cheap sidecar behavior); on a non-thinking model any non-none value
+// is a fail-fast error so the agent learns to omit it rather than silently
+// paying for a capability the deployment does not have. The call rides the
+// shared streaming client, so llm-raw-capture observes it for free;
+// attribution is the "vision" pseudo-agent (like compaction's "compaction").
+func (c visionClient) Describe(ctx context.Context, question, effort string, image []byte, mime string) (string, error) {
 	if c.llm == nil {
 		return "", fmt.Errorf("agent: vision llm client is nil")
+	}
+	if effort == "" {
+		effort = "none"
+	}
+	if effort != "none" && !c.entry.Thinking {
+		return "", fmt.Errorf("agent: vision model %q does not support reasoning; omit reasoning_effort or use \"none\"", c.entry.Name)
 	}
 	ctx = WithAgentName(ctx, "vision")
 	req := LLMRequest{
@@ -51,7 +60,7 @@ func (c visionClient) Describe(ctx context.Context, question string, image []byt
 	}
 	if c.entry.Thinking {
 		req.Thinking = true
-		req.ReasoningEffort = "none"
+		req.ReasoningEffort = effort
 	}
 	resp, err := c.llm.StreamChat(ctx, req, nil, nil)
 	if err != nil {

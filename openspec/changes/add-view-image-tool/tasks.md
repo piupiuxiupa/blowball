@@ -24,3 +24,9 @@
 - [x] 4.1 集成测试：启用配置 + fake/本地识图模型端点，走一轮带 `xizhi_view_image` 的 turn，验证工具结果 envelope、主对话不受识图失败影响、llm_raw_log 归属 vision
 - [x] 4.2 `make test`（含 race）与 `make lint` 通过；`gofmt` 无 diff
 - [x] 4.3 检查 `api/openapi.yaml` 无需变更（无新 HTTP 端点/契约变化）并确认；更新 README/config 文档中关于识图工具的说明（如有运维文档）
+
+## 5. Agent 自选识图思考等级
+
+- [x] 5.1 `VisionClient.Describe` 增加 effort 参数：thinking 条目按字面值下发（含 none），非 thinking 条目下非 none 返回明确错误；闭集校验留在 xizhi 参数解析层
+- [x] 5.2 工具 schema 与描述更新：`reasoning_effort` 枚举、缺省 none、升档指引（密集图表/复杂截图/精细 OCR）与非思考模型的行为说明
+- [x] 5.3 单测与集成测试更新：effort 透传/wire family/错误路径/闭集校验，集成断言 Agent 传入的 effort 到达识图请求

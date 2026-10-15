@@ -40,7 +40,7 @@ func TestVisionClient_RawCaptureAttribution(t *testing.T) {
 	ctx := trace.WithContext(context.Background(), "trace-vision")
 	ctx = WithSessionID(ctx, "sess-vision")
 	ctx = skill.WithUserID(ctx, "user-vision")
-	desc, err := vc.Describe(ctx, "what is in this image?", pngVisionHeader, "image/png")
+	desc, err := vc.Describe(ctx, "what is in this image?", "", pngVisionHeader, "image/png")
 	require.NoError(t, err)
 	assert.Equal(t, "Hello", desc)
 

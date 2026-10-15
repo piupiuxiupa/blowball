@@ -54,6 +54,25 @@
 - **WHEN** 识图模型请求返回错误或超时
 - **THEN** 工具按错误 envelope（`{"status":1,"error":...}`）返回，当前 turn 继续执行
 
+### Requirement: Agent 自选识图思考等级
+`xizhi_view_image` SHALL 提供可选参数 `reasoning_effort`，取值为闭集 `none|low|medium|high|xhigh|max`，缺省或空 SHALL 归一化为 `none`；由调用方 Agent 按图片复杂度自行选择。当识图模型为 thinking 条目时，请求 SHALL 携带该 effort 字面值（含 `none`）；当识图模型为非 thinking 条目时，`none` SHALL 正常执行（不发 reasoning_effort），非 `none` 值 SHALL 返回明确的工具错误（提示该部署识图模型不支持推理，应省略参数或改用 `none`），非法枚举值 SHALL 在参数解析层被拒绝。
+
+#### Scenario: Agent 为复杂图表请求高思考等级
+- **WHEN** Agent 调用 `xizhi_view_image`，reasoning_effort 为 `"high"`，且识图模型为 thinking 条目
+- **THEN** 识图请求携带 `reasoning_effort: "high"` 与 `max_completion_tokens`（thinking wire family）
+
+#### Scenario: 缺省 effort 归一化为 none
+- **WHEN** Agent 调用 `xizhi_view_image` 未提供 reasoning_effort，且识图模型为 thinking 条目
+- **THEN** 识图请求携带字面值 `reasoning_effort: "none"`（禁用思考的既有副驾行为不变）
+
+#### Scenario: 非思考识图模型拒绝非 none effort
+- **WHEN** 识图模型为非 thinking 条目，Agent 传 reasoning_effort 为 `"high"`
+- **THEN** 工具返回错误 envelope，错误信息指明该识图模型不支持 reasoning 并建议省略参数或使用 `none`
+
+#### Scenario: 非法枚举值被拒绝
+- **WHEN** Agent 传 reasoning_effort 为 `"extreme"`（不在闭集内）
+- **THEN** 参数解析层返回错误，且不发起识图模型调用
+
 ### Requirement: 配置开关与注册
 `tools.xizhi.view_image.enabled` SHALL 控制工具注册，默认为 false；未启用时 `xizhi_view_image` MUST NOT 出现在工具注册表与任何 Agent 的可用工具中。启用后，工具 SHALL 遵循现有 agent 配置的 tools 列表机制：仅列出 `xizhi_view_image` 的 agent 可调用它。工具 SHALL 纳入现有按工具名的执行超时机制（`tools.timeouts` 的 `xizhi_view_image` 条目与配置块 `timeout`，默认 60s，零/负回退）。
 

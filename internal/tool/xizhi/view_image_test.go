@@ -18,6 +18,7 @@ import (
 type fakeVisionClient struct {
 	calls       int
 	gotQuestion string
+	gotEffort   string
 	gotImage    []byte
 	gotMIME     string
 	description string
@@ -25,9 +26,10 @@ type fakeVisionClient struct {
 	blockCtx    bool
 }
 
-func (f *fakeVisionClient) Describe(ctx context.Context, question string, image []byte, mime string) (string, error) {
+func (f *fakeVisionClient) Describe(ctx context.Context, question, effort string, image []byte, mime string) (string, error) {
 	f.calls++
 	f.gotQuestion = question
+	f.gotEffort = effort
 	f.gotImage = image
 	f.gotMIME = mime
 	if f.blockCtx {
@@ -88,7 +90,7 @@ func TestViewImage_SuccessReturnsDescription(t *testing.T) {
 	root, rel := writeTestImage(t, pngHeader)
 	fake := &fakeVisionClient{description: "a red error dialog"}
 
-	got, err := ViewImage(context.Background(), root, rel, "what is the error?", viewCfg(), "glm-4v-flash", fake)
+	got, err := ViewImage(context.Background(), root, rel, "what is the error?", "", viewCfg(), "glm-4v-flash", fake)
 	require.NoError(t, err)
 	assert.Equal(t, rel, got.Path)
 	assert.Equal(t, "image/png", got.MIMEType)
@@ -106,14 +108,42 @@ func TestViewImage_DefaultQuestionWhenOmitted(t *testing.T) {
 	root, rel := writeTestImage(t, pngHeader)
 	fake := &fakeVisionClient{description: "d"}
 
-	_, err := ViewImage(context.Background(), root, rel, "   ", viewCfg(), "glm-4v-flash", fake)
+	_, err := ViewImage(context.Background(), root, rel, "   ", "", viewCfg(), "glm-4v-flash", fake)
 	require.NoError(t, err)
 	assert.Equal(t, defaultViewImageQuestion, fake.gotQuestion)
 }
 
+func TestViewImage_EffortPassthrough(t *testing.T) {
+	root, rel := writeTestImage(t, pngHeader)
+	fake := &fakeVisionClient{description: "d"}
+
+	_, err := ViewImage(context.Background(), root, rel, "q", "high", viewCfg(), "m", fake)
+	require.NoError(t, err)
+	assert.Equal(t, "high", fake.gotEffort)
+}
+
+func TestViewImage_EffortDefaultsToNone(t *testing.T) {
+	root, rel := writeTestImage(t, pngHeader)
+	fake := &fakeVisionClient{description: "d"}
+
+	_, err := ViewImage(context.Background(), root, rel, "q", "", viewCfg(), "m", fake)
+	require.NoError(t, err)
+	assert.Equal(t, "none", fake.gotEffort)
+}
+
+func TestViewImage_InvalidEffortRejected(t *testing.T) {
+	root, rel := writeTestImage(t, pngHeader)
+	fake := &fakeVisionClient{}
+
+	_, err := ViewImage(context.Background(), root, rel, "q", "extreme", viewCfg(), "m", fake)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid reasoning_effort")
+	assert.Zero(t, fake.calls, "invalid effort must fail at arg parsing, before any model call")
+}
+
 func TestViewImage_RejectsPathOutsideWorkspace(t *testing.T) {
 	fake := &fakeVisionClient{}
-	_, err := ViewImage(context.Background(), t.TempDir(), "../../etc/passwd", "q", viewCfg(), "m", fake)
+	_, err := ViewImage(context.Background(), t.TempDir(), "../../etc/passwd", "q", "", viewCfg(), "m", fake)
 	require.Error(t, err)
 	assert.True(t, IsPathOutsideWorkspace(err))
 	assert.Zero(t, fake.calls, "no model call may happen for a rejected path")
@@ -121,7 +151,7 @@ func TestViewImage_RejectsPathOutsideWorkspace(t *testing.T) {
 
 func TestViewImage_FileNotFound(t *testing.T) {
 	fake := &fakeVisionClient{}
-	_, err := ViewImage(context.Background(), t.TempDir(), "missing.png", "q", viewCfg(), "m", fake)
+	_, err := ViewImage(context.Background(), t.TempDir(), "missing.png", "q", "", viewCfg(), "m", fake)
 	require.Error(t, err)
 	assert.True(t, IsFileNotFound(err))
 	assert.Zero(t, fake.calls)
@@ -131,7 +161,7 @@ func TestViewImage_ExtensionLieRejectedByMagicBytes(t *testing.T) {
 	root, rel := writeTestImage(t, []byte("%PDF-1.7 definitely not a png"))
 	fake := &fakeVisionClient{}
 
-	_, err := ViewImage(context.Background(), root, rel, "q", viewCfg(), "m", fake)
+	_, err := ViewImage(context.Background(), root, rel, "q", "", viewCfg(), "m", fake)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported image format")
 	assert.Zero(t, fake.calls, "unsupported formats must fail before any model call")
@@ -143,7 +173,7 @@ func TestViewImage_ExceedsMaxImageBytes(t *testing.T) {
 	cfg := viewCfg()
 	cfg.MaxImageBytes = 4
 
-	_, err := ViewImage(context.Background(), root, rel, "q", cfg, "m", fake)
+	_, err := ViewImage(context.Background(), root, rel, "q", "", cfg, "m", fake)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max_image_bytes")
 	assert.Zero(t, fake.calls)
@@ -153,7 +183,7 @@ func TestViewImage_ModelErrorSurfacesAsToolError(t *testing.T) {
 	root, rel := writeTestImage(t, pngHeader)
 	fake := &fakeVisionClient{err: errors.New("gateway 500")}
 
-	_, err := ViewImage(context.Background(), root, rel, "q", viewCfg(), "m", fake)
+	_, err := ViewImage(context.Background(), root, rel, "q", "", viewCfg(), "m", fake)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gateway 500")
 }
@@ -164,7 +194,7 @@ func TestViewImage_TimeoutBoundsModelCall(t *testing.T) {
 	cfg := viewCfg()
 	cfg.Timeout = 20 * time.Millisecond
 
-	_, err := ViewImage(context.Background(), root, rel, "q", cfg, "m", fake)
+	_, err := ViewImage(context.Background(), root, rel, "q", "", cfg, "m", fake)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.DeadlineExceeded))
 }
@@ -200,13 +230,14 @@ func TestRegisterAll_ViewImageExecutableViaRegistry(t *testing.T) {
 	r := tool.NewRegistry()
 	RegisterAll(r, root, config.XizhiConfig{ViewImage: viewCfg()}, fake)
 
-	out, err := r.Call(context.Background(), NameViewImage, []byte(`{"path":`+mustJSONString(rel)+`,"question":"what is this?"}`))
+	out, err := r.Call(context.Background(), NameViewImage, []byte(`{"path":`+mustJSONString(rel)+`,"question":"what is this?","reasoning_effort":"low"}`))
 	require.NoError(t, err)
 	res, ok := out.(viewImageResult)
 	require.True(t, ok, "registry call must return the logical result object")
 	assert.Equal(t, "registry-driven description", res.Description)
 	assert.Equal(t, "image/png", res.MIMEType)
 	assert.Equal(t, "what is this?", fake.gotQuestion)
+	assert.Equal(t, "low", fake.gotEffort)
 }
 
 func mustJSONString(s string) string {

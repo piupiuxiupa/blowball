@@ -14,9 +14,10 @@ import (
 // VisionClient is the narrow model boundary used by xizhi_view_image. The
 // agent package provides the production implementation (a shared-client
 // adapter that sends the image base64-inline to the configured vision model);
-// tests use fakes.
+// tests use fakes. effort is one of the closed reasoning-effort set
+// ("" normalizes to none) chosen by the CALLING agent per invocation.
 type VisionClient interface {
-	Describe(ctx context.Context, question string, image []byte, mime string) (string, error)
+	Describe(ctx context.Context, question, effort string, image []byte, mime string) (string, error)
 }
 
 // defaultViewImageQuestion is used when the model omits question. A targeted
@@ -24,6 +25,13 @@ type VisionClient interface {
 // this", so the tool description steers the model toward passing one; this
 // fallback keeps bare calls useful.
 const defaultViewImageQuestion = "Describe this image in detail, including any text visible in it."
+
+// visionEfforts is the closed set accepted by the reasoning_effort tool
+// parameter — identical to the chat request axis (model-effort-v2) so agents
+// see one vocabulary across the product.
+var visionEfforts = map[string]bool{
+	"none": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true,
+}
 
 // viewImageResult is the logical result of xizhi_view_image. The description
 // is the vision model's TEXT account of the image — the image itself never
@@ -62,9 +70,15 @@ func sniffImageMIME(data []byte) (string, bool) {
 // non-image files are rejected before any model call is made. The cfg timeout
 // bounds the whole operation (the registry-level tools.timeouts entry, when
 // present, acts as a coarser outer backstop).
-func ViewImage(ctx context.Context, workspaceRoot, relPath, question string, cfg config.ViewImageConfig, modelName string, client VisionClient) (viewImageResult, error) {
+func ViewImage(ctx context.Context, workspaceRoot, relPath, question, effort string, cfg config.ViewImageConfig, modelName string, client VisionClient) (viewImageResult, error) {
 	if client == nil {
 		return viewImageResult{}, fmt.Errorf("xizhi_view_image: vision client is nil")
+	}
+	if effort == "" {
+		effort = "none"
+	}
+	if !visionEfforts[effort] {
+		return viewImageResult{}, fmt.Errorf("xizhi_view_image: invalid reasoning_effort %q (must be none, low, medium, high, xhigh or max)", effort)
 	}
 
 	absPath, err := validatePath(workspaceRoot, relPath)
@@ -106,7 +120,7 @@ func ViewImage(ctx context.Context, workspaceRoot, relPath, question string, cfg
 		defer cancel()
 	}
 
-	description, err := client.Describe(ctx, q, data, mime)
+	description, err := client.Describe(ctx, q, effort, data, mime)
 	if err != nil {
 		return viewImageResult{}, fmt.Errorf("xizhi_view_image: %w", err)
 	}

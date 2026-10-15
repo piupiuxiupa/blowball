@@ -82,6 +82,10 @@ tools:
 
 经统一 envelope 回传：`{"status":0,"result":{...}}`；失败走 `{"status":1,"error":...}`（tool-result-envelope 对注册表工具自动生效）。`description` 长度受 `max_output_tokens` 约束（请求侧 `max_tokens`/`max_completion_tokens`）。
 
+### D8: `reasoning_effort` 由 Agent 按调用自选
+
+工具暴露可选 `reasoning_effort`（闭集 `none|low|medium|high|xhigh|max`，缺省归一化 `none`）。识图模型为 thinking 条目时按字面值下发（`none` 仍发送，保持"禁用思考"语义与全局 wire family 一致）；非 thinking 条目下非 `none` 值返回明确工具错误（对齐 per-request-model-selection 的 fail-fast 哲学：显式冲突报错、缺省宽容），错误信息引导 Agent 省略参数重试。闭集校验落在工具参数解析层（xizhi），能力校验落在模型边界（agent visionClient）——前者是 args 语法、后者依赖目录解析结果。工具描述引导：简单描述用缺省，密集图表/复杂 UI 截图/精细 OCR 才升档，避免默认烧推理 token。
+
 ## Risks / Trade-offs
 
 - [转述损耗/识图模型幻觉] → `question` 定向识图 + 工具描述引导；结果携带 `model` 字段明示描述来源；对精度敏感场景引导模型分多问调用。
