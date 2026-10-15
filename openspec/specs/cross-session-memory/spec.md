@@ -32,20 +32,16 @@ The system SHALL scope every OpenViking request to the requesting blowball user 
 - **WHEN** a user_id contains characters outside the OpenViking-safe set
 - **THEN** it maps to a stable hash-derived tenant id and two distinct such ids never map to the same value
 
-### Requirement: Turn-start recall injects an ephemeral block
-On every streaming message send with memory enabled, the system SHALL query the user's memory namespace (semantic search scoped to `viking://~/memories`, which the server expands to the authenticated user's space, context type memory, `memory.recall_limit` entries, deadline `memory.recall_timeout`) using the new message content as the query, and when hits survive rendering SHALL inject the rendered block as a user-role message immediately before the new user message in the turn's LLM context. The block SHALL be ephemeral: never persisted to the messages store, never present in history recovery output, and never re-captured (capture content is sourced exclusively from the persisted pair). Rendering SHALL sort entries by score descending, prefer the entry Abstract over the Overview, cap each entry's rendered length, and bound the aggregate block by `memory.recall_token_budget` using the shared CJK-aware estimate, always including the top-scored entry. Recall SHALL complete before the send-time user-row write (the history-read invariant).
+### Requirement: Turn-start recall injects an incremental persisted tool pair
+On every streaming message send with memory enabled, the system SHALL query the user's memory namespace (semantic search scoped to `viking://~/memories`, context type memory, `memory.recall_limit` entries, deadline `memory.recall_timeout`) using the new message content as the query. Hits whose dedupe key was already injected earlier in the session SHALL be excluded before rendering; when new hits survive rendering the system SHALL inject the rendered block as a synthetic `recall_memories` tool-call/tool-result pair immediately before the new user message and persist both sides (see the memory-recall-replay capability). Rendering SHALL sort entries by score descending, prefer the entry Abstract over the Overview, cap each entry's rendered length, and bound the aggregate block by `memory.recall_token_budget` using the shared CJK-aware estimate, always including the top-scored new entry. Recall SHALL complete before the send-time user-row write (the history-read invariant).
 
-#### Scenario: Relevant memory is injected before the user message
-- **WHEN** the user sends a message and the memory store returns hits for it
-- **THEN** the orchestrator receives a `<user-memories>` framed user-role message immediately before the new user message
+#### Scenario: Relevant new memory is injected before the user message
+- **WHEN** the user sends a message and the memory store returns hits not yet injected this session
+- **THEN** the orchestrator receives a `recall_memories` tool result containing the `<user-memories>` framed block immediately before the new user message
 
-#### Scenario: Nothing relevant means no injection
-- **WHEN** the query returns no memories or none survive rendering
-- **THEN** no extra message is injected and the context is exactly the pre-capability shape
-
-#### Scenario: The recall block never reaches persistence
-- **WHEN** a turn with recall injection completes and its messages are persisted
-- **THEN** no persisted row (Redis write-behind batch or MySQL) contains the recall frame
+#### Scenario: Nothing new means no injection
+- **WHEN** the query returns no memories, none survive rendering, or every survivor was already injected this session
+- **THEN** no tool pair is built and the context is exactly the pre-capability shape plus previously persisted recall pairs replayed from history
 
 ### Requirement: Turn-end capture on both terminal paths
 On every turn terminal state (success, error, or cancellation), the system SHALL asynchronously submit the turn's exchange to OpenViking as a fire-and-forget operation on a detached context: get-or-create the session (`bb-{session_id}`), batch-append the user message (always) plus the top-level assistant text (skipped when the turn produced none), and commit with `keep_recent_count: 0` (archiving pending messages and triggering server-side asynchronous memory extraction; the extraction task is NOT polled). The assistant content SHALL be the merged top-level token runs only (sub-agent output, reasoning, and tool events excluded). Each message body SHALL be truncated with an explicit marker at `memory.max_capture_bytes`. Failures SHALL be logged as warnings and SHALL NOT affect the turn, its persistence, or the response. A capture racing graceful shutdown is at-least-once (landed messages stay pending on the session and the session's next turn commits them).
