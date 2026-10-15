@@ -74,7 +74,7 @@ func TestListFiles_ViaRegistry_Execute(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "file.txt"), []byte("content"), 0o644))
 
 	r := newTestRegistry(t)
-	RegisterAll(r, root, testXizhiConfig())
+	RegisterAll(r, root, testXizhiConfig(), nil)
 
 	spec, ok := r.Get(NameListFiles)
 	require.True(t, ok)

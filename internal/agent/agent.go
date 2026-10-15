@@ -250,6 +250,18 @@ type LLMRequest struct {
 	Thinking        bool
 	ReasoningEffort string
 	ResponseFormat  json.RawMessage
+	// vision carries one base64-inline image for the vision side channel
+	// (xizhi-view-image). It is deliberately UNEXPORTED: only in-package
+	// callers (the vision client) can attach an image, so the public request
+	// schema stays text-only for the main conversation pipeline. The client
+	// renders it as image_url content parts on the final user message.
+	vision *visionImage
+}
+
+// visionImage is one raw image payload bound for an image_url content part.
+type visionImage struct {
+	MIMEType string
+	Data     []byte
 }
 
 // ModelOverride is the per-turn model/effort configuration resolved from the

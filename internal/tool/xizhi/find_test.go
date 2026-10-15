@@ -380,7 +380,7 @@ func TestFind_ViaRegistry_Execute(t *testing.T) {
 	writeFindTree(t, root)
 
 	r := newTestRegistry(t)
-	RegisterAll(r, root, testXizhiConfig())
+	RegisterAll(r, root, testXizhiConfig(), nil)
 
 	spec, ok := r.Get(NameFind)
 	require.True(t, ok)

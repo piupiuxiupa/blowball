@@ -559,7 +559,6 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	// Tool registry. The main registry backs the MCP tools-listing endpoint. Real tool execution during orchestration uses a per-request registry the orchestrator's factory rebuilds scoped to the user's workspace root.
 	reg := tool.NewRegistry()
 	reg.SetTimeouts(cfg.Tools.Timeouts)
-	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi)
 
 	// Sandboxed bash execution. Only registered on Linux where bwrap is available; on other platforms the enabled tool is ignored. If bash is explicitly enabled but bwrap is missing on Linux, startup fails fast. (The dedicated python/pip_install executors were removed; Python code and pip installs run via bash.)
 	if executorConfigured(cfg) {
@@ -655,6 +654,21 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		)
 	}
 	webfetch.RegisterAllWithDigester(reg, cfg.Tools.Webfetch, webfetchDigester)
+
+	// Workspace image understanding sidecar (xizhi-view-image). Registered
+	// into the base registry for the MCP tools-list endpoint; the real
+	// execution path re-registers it per request against the user's workspace
+	// inside the orchestrator factory. The vision model was validated against
+	// the catalog at config load, so resolution here cannot fail.
+	var visionClient xizhi.VisionClient
+	if cfg.Tools.Xizhi.ViewImage.Enabled {
+		vc, err := agent.NewVisionClient(llmClient, cfg.OpenAI, cfg.Tools.Xizhi.ViewImage.Model, cfg.Tools.Xizhi.ViewImage.Resolve().MaxOutputTokens)
+		if err != nil {
+			log.Fatal("xizhi view_image model resolution failed", zap.Error(err))
+		}
+		visionClient = vc
+	}
+	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi, visionClient)
 
 	// Title generation runs on its own resolved model (openai.title_model or
 	// the default catalog entry) over the shared resolver-wrapped client, so

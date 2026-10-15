@@ -470,7 +470,7 @@ func TestLiangRun_WrapUpContinuesOnLength(t *testing.T) {
 	// round and also emits a tool_call -> cap -> wrap-up, whose first attempt
 	// is length and whose continuation answers.
 	reg := tool.NewRegistry()
-	xizhi.RegisterAll(reg, t.TempDir(), testXizhiConfigLike())
+	xizhi.RegisterAll(reg, t.TempDir(), testXizhiConfigLike(), nil)
 	client := newFake(
 		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{{ID: "c1", Function: ToolCallFunction{Name: xizhi.NameReadFile, Arguments: `{"path":"x.txt"}`}}}},
 		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{{ID: "c2", Function: ToolCallFunction{Name: xizhi.NameReadFile, Arguments: `{"path":"y.txt"}`}}}},
@@ -501,7 +501,7 @@ func TestLiangRun_WrapUpContinuesOnLength(t *testing.T) {
 func writeToolsRegistry(t *testing.T) *tool.Registry {
 	t.Helper()
 	reg := tool.NewRegistry()
-	xizhi.RegisterAll(reg, t.TempDir(), testXizhiConfigLike())
+	xizhi.RegisterAll(reg, t.TempDir(), testXizhiConfigLike(), nil)
 	return reg
 }
 

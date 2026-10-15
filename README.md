@@ -11,7 +11,9 @@ A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API
 - **Multi-agent orchestration** — a central `Confucius` agent dispatches to specialist agents:
   - `Chongzhi` — coding agent with workspace file tools.
   - `Liang` — analysis and explanation agent.
-- **Workspace file tools** (`xizhi_*`) scoped per user: read, write, modify, list, tree, glob, plus `webfetch`.
+- **Workspace file tools** (`xizhi_*`) scoped per user: read, write, modify, list, tree, glob, plus `webfetch`
+  and the opt-in image-understanding sidecar `xizhi_view_image` (a designated vision model describes a
+  workspace image and returns text to the main agent — the image never enters the conversation pipeline).
 - **Sandboxed command execution** (`bash`, `python`) via bubblewrap on Linux.
 - **Skill management** (`luban_*`) — list, read, and install skills from GitHub or a remote `SKILL.md`.
 - **External MCP client support** — connect SSE, stdio, or Streamable HTTP MCP servers at startup and proxy their tools into the agent tool catalogue.

@@ -102,7 +102,7 @@ func TestOrchestrator_Build_AllXizhiToolsInBaseRegistry(t *testing.T) {
 	}
 	// Mirror startup: the base registry is populated with ALL enabled xizhi tools.
 	baseReg := tool.NewRegistry()
-	xizhi.RegisterAll(baseReg, t.TempDir(), xizhiCfg)
+	xizhi.RegisterAll(baseReg, t.TempDir(), xizhiCfg, nil)
 
 	client := newFake(fakeResponse{
 		tokens:       []string{"done"},

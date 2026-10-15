@@ -20,6 +20,7 @@ const (
 	NameFind       = "xizhi_find"
 	NameGrep       = "xizhi_grep"
 	NameDeleteFile = "xizhi_delete"
+	NameViewImage  = "xizhi_view_image"
 )
 
 // Per-tool parameter JSON Schemas. They are JSON objects (not wrapped in an
@@ -223,6 +224,22 @@ var (
   "required": ["path"],
   "additionalProperties": false
 }`)
+
+	schemaViewImage = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the image file, relative to the workspace root."
+    },
+    "question": {
+      "type": "string",
+      "description": "What to look for in the image. Ask something specific (e.g. the error stack in a screenshot, the values in a chart, the visible UI elements) — targeted questions get far better answers than an open-ended request."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
 )
 
 // readArgs / writeArgs / modifyArgs decode the model-supplied tool arguments.
@@ -289,12 +306,19 @@ type deleteArgs struct {
 	Path string `json:"path"`
 }
 
+type viewImageArgs struct {
+	Path     string `json:"path"`
+	Question string `json:"question"`
+}
+
 // RegisterAll registers the enabled Xizhi file tools against r, scoping every
 // operation at workspaceRoot. It is called once per request so each user gets a
 // registry bound to their own workspace. A duplicate-name registration indicates
 // a programming error and panics here rather than silently masking an earlier
-// registration.
-func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig) {
+// registration. vision is the production VisionClient for xizhi_view_image
+// (nil disables that one tool — callers that have not wired vision pass nil;
+// enabling view_image in cfg while passing nil is a wiring bug and panics).
+func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig, vision VisionClient) {
 	var tools []*tool.ToolSpec
 
 	// The original three file tools are always registered for backward
@@ -469,6 +493,32 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig)
 					return nil, fmt.Errorf("xizhi_delete: parse args: %w", err)
 				}
 				return DeletePath(workspaceRoot, a.Path)
+			},
+		})
+	}
+
+	if cfg.ViewImage.Enabled {
+		if vision == nil {
+			panic("xizhi register xizhi_view_image: enabled in config but vision client is nil")
+		}
+		resolved := cfg.ViewImage.Resolve()
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameViewImage,
+			Description: "Understands an image in YOUR workspace (screenshots, charts, photos, UI captures) by asking a " +
+				"dedicated vision model, and returns `{path, mime_type, size, model, description}` where `description` is " +
+				"that model's TEXT account of the image — the main model does NOT see the image itself. **Always pass a " +
+				"specific `question`** (e.g. \"what is the error stack in this screenshot?\", \"what values does this chart " +
+				"show?\", \"which UI elements are visible?\") — targeted questions get far better answers. Supported " +
+				"formats: png / jpeg / webp / gif (detected by content, not extension); oversized files are rejected. " +
+				"**`path` MUST be relative to the workspace root** (absolute paths, `..` and symlink escapes are " +
+				"rejected). For precision-critical details, ask focused follow-up questions in separate calls.",
+			ParametersJSON: schemaViewImage,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a viewImageArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_view_image: parse args: %w", err)
+				}
+				return ViewImage(ctx, workspaceRoot, a.Path, a.Question, resolved, cfg.ViewImage.Model, vision)
 			},
 		})
 	}

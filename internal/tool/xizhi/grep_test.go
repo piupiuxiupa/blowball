@@ -319,7 +319,7 @@ func TestGrepFiles_ViaRegistry_Execute(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("func Foo() {}\n"), 0o644))
 
 	r := newTestRegistry(t)
-	RegisterAll(r, root, testXizhiConfig())
+	RegisterAll(r, root, testXizhiConfig(), nil)
 
 	spec, ok := r.Get(NameGrep)
 	require.True(t, ok)
@@ -341,7 +341,7 @@ func TestGrepRegisteredCallback_ReceivesRegistryContext(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("func Foo() {}\n"), 0o644))
 
 	r := newTestRegistry(t)
-	RegisterAll(r, root, testXizhiConfig())
+	RegisterAll(r, root, testXizhiConfig(), nil)
 	spec, ok := r.Get(NameGrep)
 	require.True(t, ok)
 	args, err := json.Marshal(grepArgs{Path: ".", Pattern: "Foo"})

@@ -117,7 +117,7 @@ func TestDelete_ErrorIncludesRelativePathGuidance(t *testing.T) {
 func TestRegisterAll_DeleteExecute_DecodesArgs(t *testing.T) {
 	root := t.TempDir()
 	r := newTestRegistry(t)
-	RegisterAll(r, root, testXizhiConfig())
+	RegisterAll(r, root, testXizhiConfig(), nil)
 
 	spec, ok := r.Get(NameDeleteFile)
 	require.True(t, ok)

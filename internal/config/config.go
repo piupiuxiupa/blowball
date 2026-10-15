@@ -1116,6 +1116,67 @@ type XizhiConfig struct {
 	Find      XizhiToolConfig `yaml:"find"`
 	Grep      XizhiToolConfig `yaml:"grep"`
 	Delete    XizhiToolConfig `yaml:"delete"`
+	ViewImage ViewImageConfig `yaml:"view_image"`
+}
+
+// Default xizhi_view_image knobs. Vision is off until Enabled is set; these
+// values bound model cost and raw-capture row size once an operator turns it
+// on. MaxImageBytes keeps the base64-encoded image (~4/3 of the raw bytes)
+// comfortably below the llm_raw_log.raw MEDIUMTEXT 16 MiB ceiling, preserving
+// the raw-capture "never truncate" invariant.
+const (
+	DefaultViewImageMaxImageBytes  = 8 << 20
+	DefaultViewImageMaxOutputToken = 2048
+	DefaultViewImageTimeout        = 60 * time.Second
+)
+
+// ViewImageConfig configures the workspace image-understanding sidecar
+// (xizhi_view_image): the tool reads an image from the user's workspace and
+// asks the designated vision model to describe it, returning text to the main
+// agent. The image never enters the main conversation pipeline.
+type ViewImageConfig struct {
+	Enabled         bool          `yaml:"enabled"`
+	Model           string        `yaml:"model"`
+	MaxImageBytes   int           `yaml:"max_image_bytes"`
+	MaxOutputTokens int           `yaml:"max_output_tokens"`
+	Timeout         time.Duration `yaml:"timeout"`
+}
+
+// Resolve returns the effective view-image configuration, substituting
+// defaults for unset or invalid numeric values. It deliberately does not
+// inspect Enabled: callers can report normalized settings even when the tool
+// is disabled.
+func (v ViewImageConfig) Resolve() ViewImageConfig {
+	if v.MaxImageBytes <= 0 {
+		v.MaxImageBytes = DefaultViewImageMaxImageBytes
+	}
+	if v.MaxOutputTokens <= 0 {
+		v.MaxOutputTokens = DefaultViewImageMaxOutputToken
+	}
+	if v.Timeout <= 0 {
+		v.Timeout = DefaultViewImageTimeout
+	}
+	return v
+}
+
+// validate rejects an enabled view-image block whose model is missing or not
+// resolvable against the mandatory model catalog. Numeric values are not
+// rejected here: Resolve documents and normalizes zero/negative values like
+// the other tool knobs. Unlike the webfetch digest model, the vision model
+// MUST be explicit — silently defaulting the chat model to a vision task
+// would surprise deployments whose default entry has no vision capability.
+func (v ViewImageConfig) validate(openAI OpenAIConfig) error {
+	if !v.Enabled {
+		return nil
+	}
+	name := strings.TrimSpace(v.Model)
+	if name == "" {
+		return fmt.Errorf("tools.xizhi.view_image.model: model is required when view_image is enabled (must appear in openai.models)")
+	}
+	if _, ok := openAI.FindModelCatalogEntry(name); !ok {
+		return fmt.Errorf("tools.xizhi.view_image.model: unknown model %q (must appear in openai.models)", name)
+	}
+	return nil
 }
 
 // Default webfetch digest knobs. Digesting is off until its Enabled field is
@@ -1763,6 +1824,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Tools.Webfetch.Digest.validate(c.OpenAI); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.Tools.Xizhi.ViewImage.validate(c.OpenAI); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.OpenAI.validate(); err != nil {

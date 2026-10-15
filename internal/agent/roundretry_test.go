@@ -241,7 +241,7 @@ func TestRunLLMRound_BudgetStopsRetry(t *testing.T) {
 // a transient failure there is retried and the wrap-up still synthesizes.
 func TestLiangRun_WrapUpRoundRetriesTransient(t *testing.T) {
 	reg := tool.NewRegistry()
-	xizhi.RegisterAll(reg, t.TempDir(), testXizhiConfigLike())
+	xizhi.RegisterAll(reg, t.TempDir(), testXizhiConfigLike(), nil)
 	client := newFake(
 		// Round 1 (last allowed): dispatches a tool call -> cap -> wrap-up.
 		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{{ID: "c1", Function: ToolCallFunction{Name: xizhi.NameReadFile, Arguments: `{"path":"x.txt"}`}}}},

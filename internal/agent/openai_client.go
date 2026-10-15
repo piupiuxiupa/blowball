@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,6 +95,11 @@ func logLLMRequest(ctx context.Context, req LLMRequest) {
 		names := toolNamePreviews(req.Tools)
 		fields = append(fields, zap.Int("tools_count", len(names)))
 		fields = append(fields, zap.Any("tools_preview", names))
+	}
+	if req.vision != nil {
+		fields = append(fields,
+			zap.String("vision_image_mime", req.vision.MIMEType),
+			zap.Int("vision_image_bytes", len(req.vision.Data)))
 	}
 	logger.FromContext(ctx).Debug("LLM request", fields...)
 }
@@ -191,6 +197,13 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	params := openai.ChatCompletionNewParams{
 		Model:    shared.ChatModel(req.Model),
 		Messages: toOpenAIMessages(req.Messages),
+	}
+	// Vision side channel (xizhi-view-image): attach the in-package image
+	// payload as image_url content parts on the final user message. This is
+	// the only multimodal branch in the client; the main conversation pipeline
+	// never sets req.vision.
+	if req.vision != nil {
+		params.Messages = withVisionImage(params.Messages, req.vision)
 	}
 	// B2 wire family (model-effort-v2): the shape follows the resolved
 	// catalog entry's thinking capability. A thinking entry ALWAYS carries
@@ -526,6 +539,51 @@ func toOpenAIMessage(m Message) openai.ChatCompletionMessageParamUnion {
 			},
 		},
 	}
+}
+
+// withVisionImage converts the final user message's text content into
+// multimodal content parts — the question as a text part followed by the
+// image as an image_url base64 data-URL part — and returns the updated
+// message list. The image part is appended AFTER the text so the model reads
+// the question first. When no user message exists (a malformed in-package
+// request), a user message holding just the image is appended.
+func withVisionImage(msgs []openai.ChatCompletionMessageParamUnion, img *visionImage) []openai.ChatCompletionMessageParamUnion {
+	imagePart := openai.ChatCompletionContentPartUnionParam{
+		OfImageURL: &openai.ChatCompletionContentPartImageParam{
+			ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+				URL: "data:" + img.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(img.Data),
+			},
+		},
+	}
+	idx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].OfUser != nil {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return append(msgs, openai.ChatCompletionMessageParamUnion{
+			OfUser: &openai.ChatCompletionUserMessageParam{
+				Content: openai.ChatCompletionUserMessageParamContentUnion{
+					OfArrayOfContentParts: []openai.ChatCompletionContentPartUnionParam{imagePart},
+				},
+			},
+		})
+	}
+	user := *msgs[idx].OfUser
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, 2)
+	if user.Content.OfString.Valid() && user.Content.OfString.Value != "" {
+		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+			OfText: &openai.ChatCompletionContentPartTextParam{Text: user.Content.OfString.Value},
+		})
+	}
+	parts = append(parts, imagePart)
+	user.Content = openai.ChatCompletionUserMessageParamContentUnion{
+		OfArrayOfContentParts: parts,
+	}
+	msgs[idx] = openai.ChatCompletionMessageParamUnion{OfUser: &user}
+	return msgs
 }
 
 func toOpenAIToolCalls(calls []ToolCall) []openai.ChatCompletionMessageToolCallUnionParam {

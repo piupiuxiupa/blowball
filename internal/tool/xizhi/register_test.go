@@ -13,7 +13,7 @@ import (
 
 func TestRegisterAll_RegistersEnabledTools(t *testing.T) {
 	r := newTestRegistry(t)
-	RegisterAll(r, t.TempDir(), testXizhiConfig())
+	RegisterAll(r, t.TempDir(), testXizhiConfig(), nil)
 
 	for _, name := range []string{NameReadFile, NameWriteFile, NameModifyFile, NameListFiles, NameTree, NameFind, NameGrep, NameDeleteFile} {
 		spec, ok := r.Get(name)
@@ -26,13 +26,13 @@ func TestRegisterAll_RegistersEnabledTools(t *testing.T) {
 
 func TestRegisterAll_PanicsOnDuplicate(t *testing.T) {
 	r := newTestRegistry(t)
-	RegisterAll(r, t.TempDir(), testXizhiConfig())
+	RegisterAll(r, t.TempDir(), testXizhiConfig(), nil)
 	defer func() {
 		if recover() == nil {
 			t.Fatal("RegisterAll twice did not panic")
 		}
 	}()
-	RegisterAll(r, t.TempDir(), testXizhiConfig())
+	RegisterAll(r, t.TempDir(), testXizhiConfig(), nil)
 }
 
 func TestRegisterAll_SchemasAreValidJSON(t *testing.T) {
@@ -59,7 +59,7 @@ func TestRegisterAll_SchemasAreValidJSON(t *testing.T) {
 func TestRegisterAll_ReadExecute_DecodesArgs(t *testing.T) {
 	root := t.TempDir()
 	r := newTestRegistry(t)
-	RegisterAll(r, root, testXizhiConfig())
+	RegisterAll(r, root, testXizhiConfig(), nil)
 
 	spec, ok := r.Get(NameReadFile)
 	require.True(t, ok)
@@ -84,7 +84,7 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 		Grep:      config.XizhiToolConfig{Enabled: false},
 		Delete:    config.XizhiToolConfig{Enabled: false},
 	}
-	RegisterAll(r, t.TempDir(), cfg)
+	RegisterAll(r, t.TempDir(), cfg, nil)
 
 	// Original tools are always registered.
 	_, ok := r.Get(NameReadFile)
@@ -112,7 +112,7 @@ func TestRegisterAll_RespectsEnabledFlags(t *testing.T) {
 // "Xizhi tool descriptions declare result shape").
 func TestRegisterAll_DescriptionDeclaresResultShape(t *testing.T) {
 	r := newTestRegistry(t)
-	RegisterAll(r, t.TempDir(), testXizhiConfig())
+	RegisterAll(r, t.TempDir(), testXizhiConfig(), nil)
 
 	read, ok := r.Get(NameReadFile)
 	require.True(t, ok)
@@ -157,7 +157,7 @@ func TestRegisterAll_FindDisabled(t *testing.T) {
 	r := newTestRegistry(t)
 	cfg := testXizhiConfig()
 	cfg.Find = config.XizhiToolConfig{Enabled: false}
-	RegisterAll(r, t.TempDir(), cfg)
+	RegisterAll(r, t.TempDir(), cfg, nil)
 
 	_, ok := r.Get(NameFind)
 	assert.False(t, ok, "find should not be registered when disabled")
@@ -168,7 +168,7 @@ func TestRegisterAll_FindDisabled(t *testing.T) {
 // as unknown, so agents fail loudly at wiring time.
 func TestRegisterAll_LegacyGlobNameUnknown(t *testing.T) {
 	r := newTestRegistry(t)
-	RegisterAll(r, t.TempDir(), testXizhiConfig())
+	RegisterAll(r, t.TempDir(), testXizhiConfig(), nil)
 
 	_, err := r.ToolsFor([]string{"xizhi_glob_files"})
 	require.Error(t, err)

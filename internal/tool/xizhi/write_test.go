@@ -86,7 +86,7 @@ func TestWrite_ViaRegistry_Execute(t *testing.T) {
 	// RegisterAll lives in register.go but we want a focused test on the
 	// write Execute callback; call it via RegisterAll into a fresh registry.
 	r := newTestRegistry(t)
-	RegisterAll(r, root, testXizhiConfig())
+	RegisterAll(r, root, testXizhiConfig(), nil)
 
 	spec, ok := r.Get(NameWriteFile)
 	require.True(t, ok)
@@ -179,7 +179,7 @@ func TestWrite_ExecuteModeValidation(t *testing.T) {
 func toolSpecForWrite(t *testing.T, root string) *tool.ToolSpec {
 	t.Helper()
 	reg := tool.NewRegistry()
-	RegisterAll(reg, root, testXizhiConfig())
+	RegisterAll(reg, root, testXizhiConfig(), nil)
 	for _, spec := range reg.List() {
 		if spec.Name == NameWriteFile {
 			return spec

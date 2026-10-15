@@ -206,7 +206,15 @@ func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config
 	// so the per-tool timeout map (tools.timeouts) must be applied here for the
 	// timeouts to take effect (capability: tool-execution-timeout).
 	reg.SetTimeouts(f.cfg.Tools.Timeouts)
-	xizhi.RegisterAll(reg, workspaceRoot, f.cfg.Tools.Xizhi)
+	var vision xizhi.VisionClient
+	if f.cfg.Tools.Xizhi.ViewImage.Enabled {
+		vc, err := NewVisionClient(f.client, f.cfg.OpenAI, f.cfg.Tools.Xizhi.ViewImage.Model, f.cfg.Tools.Xizhi.ViewImage.Resolve().MaxOutputTokens)
+		if err != nil {
+			return nil, cfg, fmt.Errorf("agent factory: vision client: %w", err)
+		}
+		vision = vc
+	}
+	xizhi.RegisterAll(reg, workspaceRoot, f.cfg.Tools.Xizhi, vision)
 
 	for _, spec := range f.baseRegistry.List() {
 		// Skip Xizhi tools — they were re-registered above with the right
@@ -271,7 +279,8 @@ func (f *orchestratorFactory) allowedMCPTools(mcp config.AgentMCPConfig) []strin
 func isXizhiTool(name string) bool {
 	switch name {
 	case xizhi.NameReadFile, xizhi.NameWriteFile, xizhi.NameModifyFile,
-		xizhi.NameListFiles, xizhi.NameTree, xizhi.NameFind, xizhi.NameGrep, xizhi.NameDeleteFile:
+		xizhi.NameListFiles, xizhi.NameTree, xizhi.NameFind, xizhi.NameGrep, xizhi.NameDeleteFile,
+		xizhi.NameViewImage:
 		return true
 	}
 	return false

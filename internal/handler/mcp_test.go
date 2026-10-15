@@ -36,7 +36,7 @@ func allXizhiReg(t *testing.T) *tool.Registry {
 		ListFiles: config.XizhiToolConfig{Enabled: true},
 		Tree:      config.XizhiToolConfig{Enabled: true},
 		Find:      config.XizhiToolConfig{Enabled: true},
-	})
+	}, nil)
 	return reg
 }
 

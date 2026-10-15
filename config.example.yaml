@@ -458,6 +458,19 @@ tools:
       enabled: true   # enables xizhi_delete; also add "xizhi_delete" to an agent's tools list to use it
     grep:
       enabled: true   # enables xizhi_grep (RE2 content search with glob filter, line numbers, context lines); also add "xizhi_grep" to an agent's tools list to use it
+    # Workspace image understanding sidecar (xizhi-view-image): the tool reads
+    # an image from the user's workspace, sends it base64-inline to the
+    # designated vision model, and returns a TEXT description to the main
+    # agent — the image never enters the main conversation. Also add
+    # "xizhi_view_image" to an agent's tools list to expose it to that agent.
+    # The model MUST appear in the openai.models catalog and must actually
+    # support image inputs on the configured gateway (test it before enabling).
+    view_image:
+      enabled: false
+      # model: glm-4v-flash         # required when enabled; vision-capable catalog model
+      # max_image_bytes: 8388608    # image size cap (default 8 MiB; 0/negative -> default)
+      # max_output_tokens: 2048     # description output quota (default 2048)
+      # timeout: 60s                # total per-call budget (default 60s)
   webfetch:
     enabled: true
     timeout: 30s
