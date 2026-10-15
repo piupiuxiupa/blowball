@@ -406,25 +406,32 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		}
 	}
 
-	// Cross-session memory recall (cross-session-memory capability): query the
-	// user's OpenViking memory store with the new message and inject the
-	// rendered block as an EPHEMERAL user-role message immediately before it
-	// (adjacent user messages are already gateway-accepted — the compaction
-	// stitched-summary precedent). Ephemeral means it is never persisted, never
-	// part of RecoverMessages output, and never re-captured: it lives only in
-	// this turn's LLM context. This runs on the request context BEFORE the
-	// send-time user-row write below, satisfying the history-read invariant
-	// documented there; any failure or timeout is a WARN + no injection —
-	// memory must never block or fail a turn. (Known cost: recall precedes the
-	// run claim, so a SESSION_BUSY-rejected request pays one wasted Find.)
+	// Cross-session memory recall (cross-session-memory +
+	// memory-recall-cache-stable): query the user's OpenViking memory store
+	// with the new message and inject the NEW entries as a synthetic
+	// recall_memories tool pair immediately before the user message. The
+	// pair is persisted at send time (below) and replayed byte-identically
+	// by history recovery, so turn payloads are append-only and the LLM
+	// prefix cache covers prior turns; entries already injected this session
+	// (derived from the recovered transcript) are never repeated, and a turn
+	// with no new entries injects nothing at all. This runs on the request
+	// context BEFORE the send-time user-row write below, satisfying the
+	// history-read invariant documented there; any failure or timeout is a
+	// WARN + no injection — memory must never block or fail a turn. (Known
+	// cost: recall precedes the run claim, so a SESSION_BUSY-rejected
+	// request pays one wasted Find.)
+	var recall *recallInjection
 	if h.memSvc.Enabled() {
-		if block, err := h.memSvc.Recall(ctx, userID, req.Content); err != nil {
+		injected := injectedRecallKeys(agentMsgs)
+		if res, err := h.memSvc.Recall(ctx, userID, req.Content, injected); err != nil {
 			logger.FromContext(ctx).Warn("memory recall failed; continuing without memory",
 				zap.String("op", "handler.send_message"),
 				zap.String("user_id", userID),
 				zap.Error(err))
-		} else if block != "" {
-			agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: block})
+		} else if res.Frame != "" {
+			inj := newRecallInjection(sessionID, tid, req.Content, res)
+			agentMsgs = append(agentMsgs, inj.agentMessages()...)
+			recall = &inj
 		}
 	}
 	req.Content += prompt.RenderStatus()
@@ -561,6 +568,24 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// the duplicate in MySQL). A Redis-pipeline failure never surfaces here —
 	// SaveMessagesBatch degrades internally to a synchronous MySQL direct
 	// write and returns nil.
+	// The synthetic recall pair (memory-recall-cache-stable) persists FIRST,
+	// ahead of the user row, so both the Redis list order and the
+	// (msg_time, msg_index) stream order match the payload order: pair rows
+	// (msg_index -1) strictly before the user row (msg_index 0). One
+	// AppendFinalBatch transaction lands the placeholder + tool_calls row;
+	// the deterministic ids collapse any redelivery. Failure follows
+	// memory's standing best-effort contract: WARN and keep the in-memory
+	// injection (the model still sees its memories; the cost is a one-time
+	// prefix break on the next turn, never a failed chat).
+	if recall != nil {
+		placeholder, call := recall.persistRows(persist.sessionID, persist.traceID, persist.userMsgTime)
+		if err := h.sessSvc.SaveFinalMessages(ctx, userID, []model.Message{placeholder}, []model.ToolCall{call}); err != nil {
+			logger.FromContext(ctx).Warn("send-time recall pair persist failed; continuing with in-memory injection only",
+				zap.String("op", "handler.send_message"),
+				zap.String("run_id", tid),
+				zap.Error(err))
+		}
+	}
 	if err := h.sessSvc.SaveMessagesBatch(ctx, userID, []model.Message{
 		UserMessage(persist.sessionID, persist.traceID, persist.userContent, persist.userMsgTime),
 	}); err != nil {
@@ -681,7 +706,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// TitleService fire-and-forget pattern. saveCtx is detached from the
 		// HTTP request, so a client disconnect cannot kill the capture.
 		// The submitted content is the persisted pair (persist.userContent
-		// + top-level assistant tokens), never the ephemeral recall block.
+		// + top-level assistant tokens); recall tool-pair rows are never
+		// captured (capture sources only the user/assistant pair).
 		if h.memSvc.Enabled() {
 			tc := memory.TurnCapture{
 				UserID:        userID,

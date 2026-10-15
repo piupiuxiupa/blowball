@@ -147,8 +147,15 @@ type handlerFakeMySQL struct {
 	// probe for shutdown-order tests.
 	finalBatchEntered chan struct{}
 	finalBatchHold    chan struct{}
-	listMessagesRows  []model.Message
-	listMessagesErr   error
+	// finalBatchMsgs/Calls record EVERY AppendFinalBatch call in order
+	// (memory-recall-cache-stable: the send-time recall pair and the
+	// turn-end batch must both be assertable).
+	finalBatchMsgs   [][]model.Message
+	finalBatchCalls  [][]model.ToolCall
+	listMessagesRows []model.Message
+	listMessagesErr  error
+	// listToolCallsRows serves ListToolCalls (restart-recovery derivations).
+	listToolCallsRows []model.ToolCall
 	// listMessagesPagedCalls records every ListMessagesPaged call so tests can
 	// verify the validated subagent_content mode is threaded through (and that
 	// an invalid mode never reaches the store).
@@ -266,6 +273,8 @@ func (m *handlerFakeMySQL) AppendFinalBatch(_ context.Context, msgs []model.Mess
 	defer m.mu.Unlock()
 	m.appendMessagesCalls++
 	m.appendMessagesArg = msgs
+	m.finalBatchMsgs = append(m.finalBatchMsgs, append([]model.Message(nil), msgs...))
+	m.finalBatchCalls = append(m.finalBatchCalls, append([]model.ToolCall(nil), calls...))
 	if m.appendMessagesErrFirst > 0 {
 		m.appendMessagesErrFirst--
 		return errFakeHandler
@@ -283,8 +292,28 @@ func (m *handlerFakeMySQL) setFinalBatchHold(entered, hold chan struct{}) {
 	m.finalBatchHold = hold
 }
 
+// finalBatchSnapshots returns every AppendFinalBatch (msgs, calls) pair in
+// call order.
+func (m *handlerFakeMySQL) finalBatchSnapshots() ([][]model.Message, [][]model.ToolCall) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	msgs := make([][]model.Message, len(m.finalBatchMsgs))
+	for i, b := range m.finalBatchMsgs {
+		msgs[i] = append([]model.Message(nil), b...)
+	}
+	calls := make([][]model.ToolCall, len(m.finalBatchCalls))
+	for i, b := range m.finalBatchCalls {
+		calls[i] = append([]model.ToolCall(nil), b...)
+	}
+	return msgs, calls
+}
+
 func (m *handlerFakeMySQL) ListToolCalls(_ context.Context, sessionID string) ([]model.ToolCall, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.ToolCall, len(m.listToolCallsRows))
+	copy(out, m.listToolCallsRows)
+	return out, nil
 }
 
 func (m *handlerFakeMySQL) ListMessages(_ context.Context, _ string) ([]model.Message, error) {

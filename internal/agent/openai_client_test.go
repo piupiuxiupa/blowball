@@ -256,3 +256,80 @@ func TestOpenAIClient_RequestBranch_NoneEffortSentLiterally(t *testing.T) {
 	assert.Contains(t, body, `"max_completion_tokens":512`)
 	assert.NotContains(t, body, `"max_tokens"`, "thinking family uses max_completion_tokens even with effort none")
 }
+
+// TestOpenAIClient_WireHistoricalUnregisteredToolPair pins the wire shape
+// for a transcript carrying a historical tool call whose name is NOT in the
+// current tools list (memory-recall-cache-stable: the synthetic
+// recall_memories pair). OpenAI-compatible gateways accept assistant
+// tool_calls + tool results from history regardless of the current tool
+// registry — the same shape every renamed/removed tool already replays
+// through reconstruction — and the client must serialize the pair with its
+// id, name, arguments, and result intact.
+func TestOpenAIClient_WireHistoricalUnregisteredToolPair(t *testing.T) {
+	body := `data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+	var gotReq map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		require.NoError(t, json.Unmarshal(raw, &gotReq))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	client := NewOpenAIClientFromClient(openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(srv.URL+"/v1"),
+	), 0)
+
+	const args = `{"entries":["viking://u/mem/prefs"],"query":"which shell"}`
+	resp, err := client.StreamChat(context.Background(), LLMRequest{
+		Model: "m",
+		Messages: []Message{
+			{Role: "assistant", ToolCalls: []ToolCall{{
+				ID:       "recall-abc",
+				Function: ToolCallFunction{Name: "recall_memories", Arguments: args},
+			}}},
+			{Role: "tool", ToolCallID: "recall-abc", Name: "recall_memories", Content: "<user-memories>\nfacts\n</user-memories>"},
+			{Role: "user", Content: "which shell do I use?"},
+		},
+		Tools: []byte(`[{"type":"function","function":{"name":"executor_bash","description":"run a command"}}]`),
+	}, func(string) error { return nil }, func(string) error { return nil })
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+
+	// The pair serializes intact on the wire...
+	msgs := gotReq["messages"].([]any)
+	require.GreaterOrEqual(t, len(msgs), 3)
+	callMsg, _ := msgs[0].(map[string]any)
+	toolMsg, _ := msgs[1].(map[string]any)
+	userMsg, _ := msgs[len(msgs)-1].(map[string]any)
+	assert.Equal(t, "assistant", callMsg["role"])
+	calls, _ := callMsg["tool_calls"].([]any)
+	require.Len(t, calls, 1)
+	call, _ := calls[0].(map[string]any)
+	fn, _ := call["function"].(map[string]any)
+	assert.Equal(t, "recall-abc", call["id"])
+	assert.Equal(t, "recall_memories", fn["name"])
+	assert.JSONEq(t, args, fmt.Sprint(fn["arguments"]))
+	assert.Equal(t, "tool", toolMsg["role"])
+	assert.Equal(t, "recall-abc", toolMsg["tool_call_id"], "wire pairing is by tool_call_id; the name field is not sent")
+	assert.Contains(t, toolMsg["content"], "<user-memories>")
+	assert.Equal(t, "user", userMsg["role"])
+
+	// ...while the current tools list does not offer it as callable.
+	tools, _ := gotReq["tools"].([]any)
+	require.NotEmpty(t, tools)
+	for _, tl := range tools {
+		tm, _ := tl.(map[string]any)
+		f, _ := tm["function"].(map[string]any)
+		assert.NotEqual(t, "recall_memories", f["name"],
+			"recall_memories is a transcript artifact, never a callable tool")
+	}
+}

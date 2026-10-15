@@ -126,18 +126,20 @@ func ovSessionID(sessionID string) string {
 	return "bb-" + sid
 }
 
-// Recall queries the user's OpenViking memory store with the new turn's text
-// and returns the rendered injection block ("" when nothing relevant was
-// found — the caller skips injection entirely rather than injecting an empty
-// frame). A cfg.RecallTimeout deadline is applied on top of the caller's
-// context because recall sits on the turn-start path. Errors are returned
-// for the caller to WARN; recall never blocks or fails a turn by contract.
-func (s *Service) Recall(ctx context.Context, userID, query string) (string, error) {
+// Recall queries the user's OpenViking memory store with the new turn's
+// text and returns the incremental injection result: the entries that are
+// NEW this session (their keys absent from injected) plus the rendered
+// frame ("" when nothing relevant or everything was already injected — the
+// caller skips injection entirely rather than injecting an empty frame). A
+// cfg.RecallTimeout deadline is applied on top of the caller's context
+// because recall sits on the turn-start path. Errors are returned for the
+// caller to WARN; recall never blocks or fails a turn by contract.
+func (s *Service) Recall(ctx context.Context, userID, query string, injected map[string]struct{}) (RecallResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.RecallTimeout)
 	defer cancel()
 	c, err := s.client(ovUserID(userID))
 	if err != nil {
-		return "", err
+		return RecallResult{}, err
 	}
 	// TargetURI "~" expands server-side to the authenticated user's memory
 	// namespace (identity stays in X-OpenViking-User); the literal
@@ -151,9 +153,18 @@ func (s *Service) Recall(ctx context.Context, userID, query string) (string, err
 		Limit:       s.cfg.RecallLimit,
 	})
 	if err != nil {
-		return "", err
+		return RecallResult{}, err
 	}
-	return renderRecallBlock(res.Memories, s.cfg.RecallTokenBudget), nil
+	entries := renderRecallEntries(res.Memories, s.cfg.RecallTokenBudget, injected)
+	return RecallResult{Entries: entries, Frame: renderRecallFrame(entries)}, nil
+}
+
+// RecallResult is one turn-start recall's incremental output: the new
+// entries (for the handler's session-scoped dedupe bookkeeping) and the
+// rendered frame to inject.
+type RecallResult struct {
+	Entries []RecallEntry
+	Frame   string
 }
 
 // TurnCapture is one turn's memory-capture payload.

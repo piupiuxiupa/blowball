@@ -15,6 +15,7 @@ import (
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/memory"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/run"
@@ -178,6 +179,76 @@ func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
 		assert.NotContains(t, m.Content, planJSON)
 	}
 	assert.Equal(t, "update_plan", stitched[2].ToolCalls[0].Function.Name)
+}
+
+// TestStitchCompacted_RecallPairMiddleAndTail: the synthetic recall tool
+// pair is an ordinary transcript unit to compaction — summarized away when
+// its placeholder sits in the shadowed middle, replayed verbatim when it
+// sits in the retained tail (memory-recall-cache-stable D6).
+func TestStitchCompacted_RecallPairMiddleAndTail(t *testing.T) {
+	msgTime := time.Unix(1_700_000_000, 0).UTC()
+	res := recallResult(memory.RecallEntry{Key: "viking://u/mem/a", Line: "- [memory 87%] fact a"})
+	inj := newRecallInjection("sess-1", "trace-r", "question", res)
+
+	rows := append(compactionRows(2), []model.Message{
+		{ID: 5, MsgTime: msgTime.Add(10 * time.Minute), MsgIndex: -1, SessionID: "sess-1", Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: recallToolName, TraceID: "trace-r", ClientMsgID: "trace-r:-1", ToolCallID: inj.callID},
+		{ID: 6, MsgTime: msgTime.Add(10 * time.Minute), MsgIndex: 0, SessionID: "sess-1", Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "recall turn", TraceID: "trace-r"},
+		{ID: 7, MsgTime: msgTime.Add(11 * time.Minute), MsgIndex: 1, SessionID: "sess-1", Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "recall answer", TraceID: "trace-r"},
+	}...)
+	calls := []model.ToolCall{{
+		SessionID: "sess-1", TurnID: "trace-r", ToolCallID: inj.callID,
+		Name: recallToolName, Arguments: inj.args, Result: inj.frame,
+		Status: model.ToolCallStatusCompleted,
+	}}
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, calls)
+	require.NoError(t, err)
+	// Reconstructed history contains the replayed pair (assistant call +
+	// tool result) between the second exchange and the recall turn.
+	pairAt := -1
+	for i, m := range agentMsgs {
+		if m.Role == "tool" && m.Name == recallToolName {
+			pairAt = i
+		}
+	}
+	require.GreaterOrEqual(t, pairAt, 0)
+
+	// Boundary after the recall turn's assistant final: the pair lands in
+	// the MIDDLE — summarized away like every other middle message.
+	boundaryRow := rows[lastRow[len(lastRow)-1]]
+	rec := &model.ContextCompaction{
+		Content:          "CHECKPOINT BODY",
+		BoundaryMsgTime:  boundaryRow.MsgTime,
+		BoundaryMsgIndex: boundaryRow.MsgIndex,
+		BoundaryMsgID:    boundaryRow.ID,
+	}
+	stitched := stitchCompacted(rows, calls, agentMsgs, rec)
+	require.NotNil(t, stitched)
+	for _, m := range stitched {
+		assert.NotContains(t, m.Content, "<user-memories>",
+			"a middle recall pair must be shadowed by the summary, not replayed")
+		assert.NotEqual(t, recallToolName, m.Name)
+	}
+
+	// Boundary after the second exchange: the pair lands in the TAIL —
+	// replayed byte-identically.
+	tailBoundary := rows[lastRow[3]]
+	tailRec := &model.ContextCompaction{
+		Content:          "CHECKPOINT BODY",
+		BoundaryMsgTime:  tailBoundary.MsgTime,
+		BoundaryMsgIndex: tailBoundary.MsgIndex,
+		BoundaryMsgID:    tailBoundary.ID,
+	}
+	tailStitched := stitchCompacted(rows, calls, agentMsgs, tailRec)
+	require.NotNil(t, tailStitched)
+	found := false
+	for _, m := range tailStitched {
+		if m.Role == "tool" && m.Name == recallToolName {
+			found = true
+			assert.Contains(t, m.Content, "<user-memories>")
+			assert.Equal(t, inj.callID, m.ToolCallID)
+		}
+	}
+	assert.True(t, found, "a tail recall pair must survive compaction verbatim")
 }
 
 // TestSendMessage_CompactedFlagStitchesFromCache drives the streaming handler

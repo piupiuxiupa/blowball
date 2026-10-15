@@ -111,10 +111,13 @@ func newMemoryHandlerEnv(t *testing.T, stub *stubOrchestrator, ovSrvURL string) 
 	return &sessionHandlerTestEnv{stream: streamH, mysql: mysql, redis: redis, fs: fs, stub: stub, engine: r}
 }
 
-// TestMemoryRecall_InjectsEphemeralBlock: the recall block lands as a
-// user-role message immediately before the new user message in the
-// orchestrator's context, and NEVER in the persisted rows (ephemerality).
-func TestMemoryRecall_InjectsEphemeralBlock(t *testing.T) {
+// TestMemoryRecall_InjectsPersistedToolPair: the recall frame lands as a
+// synthetic recall_memories tool pair immediately before the new user
+// message in the orchestrator's context, and BOTH sides persist through the
+// ordinary final-batch path — placeholder row (msg_index -1) ordered before
+// the user row (msg_index 0), canonical tool_calls row completed with the
+// frame as its result (memory-recall-cache-stable).
+func TestMemoryRecall_InjectsPersistedToolPair(t *testing.T) {
 	ov := newOVCapture()
 	srv := httptest.NewServer(ov)
 	defer srv.Close()
@@ -129,25 +132,61 @@ func TestMemoryRecall_InjectsEphemeralBlock(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	msgs := stub.messages()
-	require.GreaterOrEqual(t, len(msgs), 2, "stub should receive the recall block plus the user message")
-	last, secondLast := msgs[len(msgs)-1], msgs[len(msgs)-2]
+	require.GreaterOrEqual(t, len(msgs), 3, "stub should receive the recall pair plus the user message")
+	last, toolMsg, callMsg := msgs[len(msgs)-1], msgs[len(msgs)-2], msgs[len(msgs)-3]
 	assert.Equal(t, "user", last.Role)
 	assert.Contains(t, last.Content, "which shell do I use?")
-	assert.Equal(t, "user", secondLast.Role)
-	assert.Contains(t, secondLast.Content, "<user-memories>")
-	assert.Contains(t, secondLast.Content, "fish shell on macOS")
+	assert.Equal(t, "tool", toolMsg.Role)
+	assert.Equal(t, recallToolName, toolMsg.Name)
+	assert.Contains(t, toolMsg.Content, "<user-memories>")
+	assert.Contains(t, toolMsg.Content, "fish shell on macOS")
+	require.Len(t, callMsg.ToolCalls, 1)
+	assert.Equal(t, recallToolName, callMsg.ToolCalls[0].Function.Name)
+	assert.Equal(t, toolMsg.ToolCallID, callMsg.ToolCalls[0].ID)
+	var args recallArgs
+	require.NoError(t, json.Unmarshal([]byte(callMsg.ToolCalls[0].Function.Arguments), &args))
+	assert.Equal(t, "which shell do I use?", args.Query)
+	assert.Equal(t, []string{"viking://user/user-1/memories/prefs"}, args.Entries)
 
-	// Ephemeral: nothing persisted (Redis dual-write batches nor the MySQL
-	// fallback) carries the recall frame.
+	// Persisted: the send-time final batch carries the placeholder row
+	// BEFORE the user row, and the tool_calls row carries the frame as its
+	// completed result. (The user row itself rides the dual-write pipeline;
+	// ordering across tiers is (msg_time, msg_index) with the placeholder
+	// at -1.)
+	batches, calls := env.mysql.finalBatchSnapshots()
+	require.NotEmpty(t, batches)
+	pairBatch := batches[0]
+	require.Len(t, pairBatch, 1)
+	ph := pairBatch[0]
+	assert.Equal(t, model.RoleAssistant, ph.Role)
+	assert.Equal(t, model.EventTypeToolCall, ph.EventType)
+	assert.Equal(t, -1, ph.MsgIndex)
+	assert.Equal(t, recallToolName, ph.Content)
+	assert.Equal(t, "trace-1:-1", ph.ClientMsgID)
+	require.Len(t, calls[0], 1)
+	tc := calls[0][0]
+	assert.Equal(t, ph.ToolCallID, tc.ToolCallID)
+	assert.Equal(t, recallToolName, tc.Name)
+	assert.Equal(t, model.ToolCallStatusCompleted, tc.Status)
+	assert.Contains(t, tc.Result, "fish shell on macOS")
+	assert.Equal(t, callMsg.ToolCalls[0].Function.Arguments, tc.Arguments,
+		"in-memory arguments must equal the persisted arguments byte-for-byte (append-only replay)")
+
+	// The user-row path still excludes the frame: every persisted MESSAGE
+	// row carries user/assistant content only (the frame lives in
+	// tool_calls.result), so the ordinary message stream stays clean.
 	require.Eventually(t, func() bool { return len(env.redis.batches()) > 0 }, 2*time.Second, 20*time.Millisecond)
 	for _, batch := range env.redis.batches() {
 		for _, m := range batch {
-			assert.NotContains(t, m.Content, "<user-memories>",
-				"the recall block must never be persisted")
+			if m.EventType == model.EventTypeMessage {
+				assert.NotContains(t, m.Content, "<user-memories>")
+			}
 		}
 	}
 	for _, m := range env.mysql.appendedMessages() {
-		assert.NotContains(t, m.Content, "<user-memories>")
+		if m.EventType == model.EventTypeMessage {
+			assert.NotContains(t, m.Content, "<user-memories>")
+		}
 	}
 }
 

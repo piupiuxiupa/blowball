@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,9 +22,22 @@ const recallLeadIn = "Long-term memories about this user, recalled from earlier 
 // eating the whole budget before any other entry lands.
 const maxRecallEntryRunes = 600
 
-// renderRecallBlock builds the framed <user-memories> injection block from
-// retrieval hits; "" when nothing survived (the caller then skips injection
-// entirely rather than injecting an empty frame).
+// RecallEntry is one recall hit that survived rendering and dedupe
+// filtering, carrying the machine-readable key the handler tracks for
+// session-scoped incremental injection.
+type RecallEntry struct {
+	// Key is the hit's stable identity: the memory URI when non-empty,
+	// otherwise a hash of the normalized entry text (URI-less hits are
+	// rare; the hash still dedupes content-identical hits).
+	Key string
+	// Line is the score-prefixed rendered entry exactly as it appears in
+	// the frame, so the handler never re-renders (byte-stable replay).
+	Line string
+}
+
+// renderRecallEntries builds the incremental set of recall entries from
+// retrieval hits. Hits whose key is in injected (already injected earlier in
+// this session) are dropped before budget accounting.
 //
 // Entries render score-first ("- [memory 87%] …", the official OpenViking
 // Claude Code plugin's shape) sorted by score descending, Abstract preferred
@@ -30,13 +45,10 @@ const maxRecallEntryRunes = 600
 // recallPreferAbstract default), each rune-capped. The aggregate block is
 // bounded by the shared CJK-aware token estimate: entries that do not fit
 // are dropped whole — never URI-hinted, since blowball has no read-back tool
-// in v1 and a pointer would be dead weight — with the top-scored entry
+// in v1 and a pointer would be dead weight — with the top-scored NEW entry
 // always included, so a tight budget degrades to the single most relevant
-// memory instead of nothing.
-func renderRecallBlock(memories []openviking.MatchedContext, budget int) string {
-	if len(memories) == 0 {
-		return ""
-	}
+// new memory instead of nothing.
+func renderRecallEntries(memories []openviking.MatchedContext, budget int, injected map[string]struct{}) []RecallEntry {
 	sorted := make([]openviking.MatchedContext, len(memories))
 	copy(sorted, memories)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Score > sorted[j].Score })
@@ -44,7 +56,7 @@ func renderRecallBlock(memories []openviking.MatchedContext, budget int) string 
 	// The frame (tags + lead-in) is part of the budget; the +8 fudge covers
 	// the tag lines and newlines around it.
 	used := tokens.Estimate(recallLeadIn) + 8
-	var lines []string
+	var entries []RecallEntry
 	for _, m := range sorted {
 		text := strings.TrimSpace(m.Abstract)
 		if text == "" {
@@ -53,30 +65,51 @@ func renderRecallBlock(memories []openviking.MatchedContext, budget int) string 
 		if text == "" {
 			continue
 		}
+		key := recallEntryKey(m.URI, text)
+		if _, ok := injected[key]; ok {
+			continue // already injected earlier in this session: never repeat
+		}
 		text = strings.ReplaceAll(text, "\n", " ") // keep one entry on one line
 		if r := []rune(text); len(r) > maxRecallEntryRunes {
 			text = string(r[:maxRecallEntryRunes]) + "…"
 		}
 		line := fmt.Sprintf("- [memory %d%%] %s", scorePercent(m.Score), text)
 		cost := tokens.Estimate(line) + 1 // trailing newline
-		if len(lines) > 0 && used+cost > budget {
+		if len(entries) > 0 && used+cost > budget {
 			continue // budget exhausted: drop whole entries; a cheaper one may still fit
 		}
-		lines = append(lines, line)
+		entries = append(entries, RecallEntry{Key: key, Line: line})
 		used += cost
 	}
-	if len(lines) == 0 {
+	return entries
+}
+
+// renderRecallFrame wraps entries in the framed <user-memories> block; ""
+// when nothing survived (the caller then skips injection entirely rather
+// than injecting an empty frame).
+func renderRecallFrame(entries []RecallEntry) string {
+	if len(entries) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("<user-memories>\n")
 	b.WriteString(recallLeadIn)
-	for _, line := range lines {
+	for _, e := range entries {
 		b.WriteString("\n")
-		b.WriteString(line)
+		b.WriteString(e.Line)
 	}
 	b.WriteString("\n</user-memories>")
 	return b.String()
+}
+
+// recallEntryKey derives the dedupe key for one hit: the memory URI when the
+// server provides one, otherwise a SHA-256 of the normalized entry text.
+func recallEntryKey(uri, text string) string {
+	if uri != "" {
+		return uri
+	}
+	sum := sha256.Sum256([]byte(text))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // scorePercent renders a retrieval score as a stable 0-100 integer, clamped

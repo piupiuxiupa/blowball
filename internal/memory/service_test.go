@@ -147,15 +147,15 @@ func TestRecall_RendersBlock(t *testing.T) {
 	defer srv.Close()
 
 	svc := testService(t, srv.URL)
-	block, err := svc.Recall(context.Background(), "01928f3e-7c1a-7abc-8def-0123456789ab", "which shell do I use?")
+	res, err := svc.Recall(context.Background(), "01928f3e-7c1a-7abc-8def-0123456789ab", "which shell do I use?", nil)
 	require.NoError(t, err)
 
-	assert.Contains(t, block, "<user-memories>")
-	assert.Contains(t, block, "</user-memories>")
-	assert.Contains(t, block, "fish shell on macOS")                     // abstract preferred
-	assert.Contains(t, block, "blowball, a Go multi-agent chat backend") // overview fallback
-	assert.Contains(t, block, "[memory 87%]")
-	assert.NotContains(t, block, "viking://user/alice/memories/empty") // textless entry dropped
+	assert.Contains(t, res.Frame, "<user-memories>")
+	assert.Contains(t, res.Frame, "</user-memories>")
+	assert.Contains(t, res.Frame, "fish shell on macOS")                     // abstract preferred
+	assert.Contains(t, res.Frame, "blowball, a Go multi-agent chat backend") // overview fallback
+	assert.Contains(t, res.Frame, "[memory 87%]")
+	assert.NotContains(t, res.Frame, "viking://user/alice/memories/empty") // textless entry dropped
 }
 
 func TestRecall_EmptyAndError(t *testing.T) {
@@ -164,9 +164,9 @@ func TestRecall_EmptyAndError(t *testing.T) {
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 	svc := testService(t, srv.URL)
-	block, err := svc.Recall(context.Background(), "u1", "q")
+	res, err := svc.Recall(context.Background(), "u1", "q", nil)
 	require.NoError(t, err)
-	assert.Empty(t, block)
+	assert.Empty(t, res.Frame)
 
 	// Server error → error returned for the caller to WARN.
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +175,7 @@ func TestRecall_EmptyAndError(t *testing.T) {
 	}))
 	defer srv2.Close()
 	svc2 := testService(t, srv2.URL)
-	if _, err := svc2.Recall(context.Background(), "u1", "q"); err == nil {
+	if _, err := svc2.Recall(context.Background(), "u1", "q", nil); err == nil {
 		t.Fatal("Recall should surface server errors for the caller to WARN")
 	}
 }
@@ -204,12 +204,76 @@ func TestRecall_TokenBudget(t *testing.T) {
 	defer srv.Close()
 
 	svc := testService(t, srv.URL)
-	block, err := svc.Recall(context.Background(), "u1", "q")
+	res, err := svc.Recall(context.Background(), "u1", "q", nil)
 	require.NoError(t, err)
-	assert.NotEmpty(t, block)
-	assert.LessOrEqual(t, tokens.Estimate(block), 2000+tokens.Estimate(recallLeadIn)+8,
+	assert.NotEmpty(t, res.Frame)
+	assert.LessOrEqual(t, tokens.Estimate(res.Frame), 2000+tokens.Estimate(recallLeadIn)+8,
 		"the rendered block must respect the aggregate budget")
-	assert.Contains(t, block, "长记忆条目内容", "the top-scored entry must always be included")
+	assert.Contains(t, res.Frame, "长记忆条目内容", "the top-scored entry must always be included")
+}
+
+func TestRecall_IncrementalDedupe(t *testing.T) {
+	fake := newMemoriesFake()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	svc := testService(t, srv.URL)
+
+	// First turn: everything is new; the returned keys cover both URIs.
+	first, err := svc.Recall(context.Background(), "u1", "q", nil)
+	require.NoError(t, err)
+	require.Len(t, first.Entries, 2)
+	assert.Equal(t, "viking://user/alice/memories/preferences/shell", first.Entries[0].Key)
+	assert.Equal(t, "viking://user/alice/memories/projects/blowball", first.Entries[1].Key)
+	for _, e := range first.Entries {
+		assert.Contains(t, first.Frame, e.Line)
+	}
+
+	// Second turn with both keys already injected: nothing new, empty frame.
+	injected := map[string]struct{}{
+		first.Entries[0].Key: {},
+		first.Entries[1].Key: {},
+	}
+	second, err := svc.Recall(context.Background(), "u1", "q2", injected)
+	require.NoError(t, err)
+	assert.Empty(t, second.Entries)
+	assert.Empty(t, second.Frame)
+
+	// Partial dedupe keeps only the new entry, still score-sorted.
+	partial := map[string]struct{}{first.Entries[0].Key: {}}
+	third, err := svc.Recall(context.Background(), "u1", "q3", partial)
+	require.NoError(t, err)
+	require.Len(t, third.Entries, 1)
+	assert.Equal(t, first.Entries[1].Key, third.Entries[0].Key)
+	assert.NotContains(t, third.Frame, "fish shell on macOS")
+	assert.Contains(t, third.Frame, "blowball, a Go multi-agent chat backend")
+}
+
+func TestRecall_URIlessHashFallback(t *testing.T) {
+	fake := &fakeOpenViking{handler: func(r fakeRequest) (int, any) {
+		if r.Path == "/api/v1/search/find" {
+			return http.StatusOK, map[string]any{"status": "ok", "result": map[string]any{
+				"memories": []map[string]any{
+					{"abstract": "hash-deduped fact", "score": 0.8},
+				},
+			}}
+		}
+		return http.StatusOK, map[string]any{"status": "ok", "result": map[string]any{}}
+	}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	svc := testService(t, srv.URL)
+
+	first, err := svc.Recall(context.Background(), "u1", "q", nil)
+	require.NoError(t, err)
+	require.Len(t, first.Entries, 1)
+	assert.True(t, strings.HasPrefix(first.Entries[0].Key, "sha256:"), "URI-less hits dedupe on a content hash")
+
+	// A DIFFERENT score for the same text still dedupes: the key hashes the
+	// text, not the score prefix.
+	dup := map[string]struct{}{first.Entries[0].Key: {}}
+	second, err := svc.Recall(context.Background(), "u1", "q2", dup)
+	require.NoError(t, err)
+	assert.Empty(t, second.Frame)
 }
 
 func TestRecall_RequestAndIdentityHeaders(t *testing.T) {
@@ -218,7 +282,7 @@ func TestRecall_RequestAndIdentityHeaders(t *testing.T) {
 	defer srv.Close()
 
 	svc := testService(t, srv.URL)
-	_, err := svc.Recall(context.Background(), "01928f3e-7c1a-7abc-8def-0123456789ab", "q")
+	_, err := svc.Recall(context.Background(), "01928f3e-7c1a-7abc-8def-0123456789ab", "q", nil)
 	require.NoError(t, err)
 
 	reqs := fake.recorded()
@@ -242,11 +306,11 @@ func TestRecall_PerUserIsolationAndClientCache(t *testing.T) {
 	defer srv.Close()
 
 	svc := testService(t, srv.URL)
-	_, err := svc.Recall(context.Background(), "user-a", "q")
+	_, err := svc.Recall(context.Background(), "user-a", "q", nil)
 	require.NoError(t, err)
-	_, err = svc.Recall(context.Background(), "user-b", "q")
+	_, err = svc.Recall(context.Background(), "user-b", "q", nil)
 	require.NoError(t, err)
-	_, err = svc.Recall(context.Background(), "user-a", "q2")
+	_, err = svc.Recall(context.Background(), "user-a", "q2", nil)
 	require.NoError(t, err)
 
 	reqs := fake.recorded()
