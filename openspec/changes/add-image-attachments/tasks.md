@@ -19,20 +19,20 @@
 
 ## 4. 发送链路
 
-- [ ] 4.1 `sendMessageRequest` 增加 `attachment_ids []string`；解析后先做三元组所有权校验（≤4，非法 404）再做 `vision=false` → 400 `MODEL_NOT_VISION` 拒绝（全部在占 turn 槽与持久化之前）
-- [ ] 4.2 用户消息持久化携带 `Attachments` 引用（随现有 write-behind 路径落库），SSE 用户消息回显事件输出 `attachments` 元数据
-- [ ] 4.3 发送链路测试：引用他人附件 404、超 4 张 400、非 vision 模型 400 且无副作用、无附件请求行为与现状一致
+- [x] 4.1 `sendMessageRequest` 增加 `attachment_ids []string`；解析后先做三元组所有权校验（≤4，非法 404）再做 `vision=false` → 400 `MODEL_NOT_VISION` 拒绝（全部在占 turn 槽与持久化之前）
+- [x] 4.2 用户消息持久化携带 `Attachments` 引用（随现有 write-behind 路径落库）；仓库无 SSE 用户消息回显事件（前端本地渲染 + 历史端点读取），元数据契约由消息列表端点承载
+- [x] 4.3 发送链路测试：引用他人附件 404、超 4 张 400、非 vision 模型 400 且无副作用、无附件请求行为与现状一致
 
 ## 5. 模型管线
 
-- [ ] 5.1 `agent.Message` 增加 `Images []MessageImage`（内存态）；历史重建区分当前轮/历史轮——当前轮读文件填字节，历史轮渲染确定性占位符（读取失败降级 + ERROR 日志）
-- [ ] 5.2 `openai_client.toOpenAIMessage`：带图 user 消息渲染 text + image_url content parts（文本在前）；无图消息保持现有纯文本路径字节不变
-- [ ] 5.3 子 agent 派发上下文与 compaction 摘要输入剥离 `Images`，统一占位符渲染
-- [ ] 5.4 agent 层测试：当前轮 parts 顺序与 base64 一致性、占位符跨轮字节稳定、子 agent/摘要无图
+- [x] 5.1 `agent.Message` 增加 `Images []MessageImage`（内存态）；历史重建区分当前轮/历史轮——当前轮读文件填字节，历史轮渲染确定性占位符（读取失败降级 + ERROR 日志）
+- [x] 5.2 `openai_client.toOpenAIMessage`：带图 user 消息渲染 text + image_url content parts（文本在前）；无图消息保持现有纯文本路径字节不变
+- [x] 5.3 子 agent 派发上下文与 compaction 摘要输入剥离 `Images`，统一占位符渲染
+- [x] 5.4 agent 层测试：当前轮 parts 顺序与 base64 一致性、占位符跨轮字节稳定、子 agent/摘要无图
 
 ## 6. raw log 脱敏
 
-- [ ] 6.1 llm raw capture 请求序列化对 `image_url` part 替换为 `image_url_redacted`（mime/bytes/sha256/attachment_id），捕获测试断言无 base64 且其余字段原样
+- [x] 6.1 llm raw capture 请求序列化对 `image_url` part 替换为 `image_url_redacted`（mime/bytes/sha256/attachment_id），捕获测试断言无 base64 且其余字段原样
 
 ## 7. 会话删除生命周期
 

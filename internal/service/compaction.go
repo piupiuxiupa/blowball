@@ -255,7 +255,10 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		return nil, false
 	}
 
-	middle := in.AgentMsgs[scopeStart:tailStart]
+	// Summary input never carries image payloads (add-image-attachments):
+	// reconstructed history already renders placeholders, but StripImages
+	// future-proofs any caller handing in live messages with Images set.
+	middle := agent.StripImages(in.AgentMsgs[scopeStart:tailStart])
 	boundaryRow := in.Rows[in.LastRow[tailStart-1]]
 
 	// The summary model follows the TURN (per-request-model-selection): the

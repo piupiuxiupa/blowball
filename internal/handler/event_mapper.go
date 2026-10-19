@@ -66,7 +66,7 @@ func deterministicClientMsgID(traceID string, msgIndex int) string {
 // arrival timestamp so it sorts before the assistant events emitted later.
 // The client_msg_id is the deterministic {trace_id}:0 so a mid-turn flush and
 // the turn-end save of the same user row collapse to one.
-func UserMessage(sessionID, traceID, content string, msgTime time.Time) model.Message {
+func UserMessage(sessionID, traceID, content string, msgTime time.Time, attachments ...model.MessageAttachmentRef) model.Message {
 	return model.Message{
 		SessionID:   sessionID,
 		MsgTime:     msgTime,
@@ -75,6 +75,7 @@ func UserMessage(sessionID, traceID, content string, msgTime time.Time) model.Me
 		Role:        model.RoleUser,
 		EventType:   model.EventTypeMessage,
 		Content:     content,
+		Attachments: attachments,
 		TraceID:     traceID,
 		ClientMsgID: deterministicClientMsgID(traceID, 0),
 	}

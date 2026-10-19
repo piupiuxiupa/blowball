@@ -1,0 +1,100 @@
+package agent
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestToOpenAIMessage_UserImages_TextFirst(t *testing.T) {
+	img1 := []byte("fake-png-bytes-1")
+	img2 := []byte("fake-png-bytes-2")
+	m := Message{
+		Role:    "user",
+		Content: "what is in these images?",
+		Images: []MessageImage{
+			{AttachmentID: "a-1", MIMEType: "image/png", Data: img1},
+			{AttachmentID: "a-2", MIMEType: "image/webp", Data: img2},
+		},
+	}
+
+	raw, err := json.Marshal(toOpenAIMessage(m))
+	require.NoError(t, err)
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	content, ok := doc["content"].([]any)
+	require.True(t, ok, "image-bearing user message must render content parts")
+	require.Len(t, content, 3)
+
+	text, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "text", text["type"])
+	assert.Equal(t, "what is in these images?", text["text"])
+
+	mimes := []string{"image/png", "image/webp"}
+	for i, data := range [][]byte{img1, img2} {
+		part, ok := content[i+1].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "image_url", part["type"])
+		iu, ok := part["image_url"].(map[string]any)
+		require.True(t, ok)
+		want := "data:" + mimes[i] + ";base64," + base64.StdEncoding.EncodeToString(data)
+		assert.Equal(t, want, iu["url"])
+	}
+}
+
+func TestToOpenAIMessage_PlainUserUnchanged(t *testing.T) {
+	raw, err := json.Marshal(toOpenAIMessage(Message{Role: "user", Content: "plain"}))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"role":"user","content":"plain"}`, string(raw))
+}
+
+func TestStripImages(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "q", Images: []MessageImage{{AttachmentID: "a", MIMEType: "image/png", Data: []byte("x")}}},
+		{Role: "assistant", Content: "a"},
+	}
+	out := StripImages(msgs)
+	require.Len(t, out, 2)
+	assert.Empty(t, out[0].Images)
+	assert.Equal(t, "q", out[0].Content)
+
+	// No-images input returns the same slice value unchanged (no copy churn).
+	plain := []Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "a"}}
+	stripped := StripImages(plain)
+	require.Len(t, stripped, 2)
+	assert.Equal(t, plain[0].Content, stripped[0].Content)
+}
+
+func TestRedactImageParts(t *testing.T) {
+	imgData := []byte("secret-image-bytes")
+	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imgData)
+	raw := []byte(`{"model":"m","messages":[` +
+		`{"role":"user","content":[` +
+		`{"type":"text","text":"hello"},` +
+		`{"type":"image_url","image_url":{"url":"` + dataURL + `"}}` +
+		`]},{"role":"assistant","content":"hi"}]}`)
+
+	out := redactImageParts(raw, []Message{{
+		Role:   "user",
+		Images: []MessageImage{{AttachmentID: "att-1", MIMEType: "image/png", Data: imgData}},
+	}})
+
+	s := string(out)
+	assert.NotContains(t, s, "base64,")
+	assert.NotContains(t, s, dataURL)
+	assert.Contains(t, s, `"type":"image_url_redacted"`)
+	assert.Contains(t, s, `"attachment_id":"att-1"`)
+	assert.Contains(t, s, `"bytes":18`)
+	assert.Contains(t, s, "sha256")
+	assert.Contains(t, s, `"text":"hello"`, "text parts stay verbatim")
+	assert.Contains(t, s, `"assistant"`)
+
+	// No image_url anywhere → payload returned untouched.
+	plain := []byte(`{"model":"m","messages":[{"role":"user","content":"plain"}]}`)
+	assert.Equal(t, plain, redactImageParts(plain, nil))
+}

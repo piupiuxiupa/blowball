@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -62,6 +63,10 @@ type MessageStreamHandler struct {
 	// set, each turn end snapshots the turn's deliverables into the version
 	// store and announces them via artifact events (see TurnHooks.FinalizeTurn).
 	artifacts *artifact.Service
+	// attachments is the image-attachment registry lookup (nil-safe): when
+	// unset, requests carrying attachment_ids fail closed with 500 — only
+	// hand-built tests that never send attachments can leave it nil.
+	attachments attachmentStore
 	// maxInputTokens caps the estimated token count of a user message
 	// (add-input-token-limit), the config-resolved value of
 	// messages.max_input_tokens. The estimate uses the CJK-aware heuristic in
@@ -126,6 +131,49 @@ func (h *MessageStreamHandler) WithArtifactService(s *artifact.Service) *Message
 	return h
 }
 
+// WithAttachmentStore wires the image-attachment registry
+// (add-image-attachments): the send-time ownership validation and current-
+// turn image loader read from it. Separate from the constructor so existing
+// wiring/test call sites stay untouched.
+func (h *MessageStreamHandler) WithAttachmentStore(store attachmentStore) *MessageStreamHandler {
+	h.attachments = store
+	return h
+}
+
+// loadCurrentTurnImages reads the live turn's attachment files into in-memory
+// payloads for the orchestrator (add-image-attachments). Reading happens once
+// per turn on the handler goroutine; the OpenAI client re-encodes the bytes
+// per call (deterministic for identical bytes). A file that cannot be read —
+// deleted or corrupted underneath the registry — degrades to the same
+// deterministic placeholder history uses, with an ERROR log: the turn must
+// not fail because an old upload vanished.
+func (h *MessageStreamHandler) loadCurrentTurnImages(
+	ctx context.Context, userID, sessionID, content string, refs []model.MessageAttachmentRef,
+) ([]agent.MessageImage, string) {
+	images := make([]agent.MessageImage, 0, len(refs))
+	var missing []string
+	for _, ref := range refs {
+		ext, ok := attachmentMimeExt[ref.MIME]
+		if !ok {
+			missing = append(missing, ref.Filename)
+			continue
+		}
+		path := filepath.Join(h.dataDir, userID, "attachments", sessionID, ref.ID+ext)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			logger.FromContext(ctx).Error("current-turn attachment read failed; degrading to placeholder",
+				zap.String("op", "handler.send_message"),
+				zap.String("attachment_id", ref.ID),
+				zap.String("path", path),
+				zap.Error(err))
+			missing = append(missing, ref.Filename)
+			continue
+		}
+		images = append(images, agent.MessageImage{AttachmentID: ref.ID, MIMEType: ref.MIME, Data: data})
+	}
+	return images, renderAttachmentPlaceholders(content, missing)
+}
+
 // sendMessageRequest is the JSON body for POST /api/v1/sessions/:session_id/messages.
 type sendMessageRequest struct {
 	Content string `json:"content"`
@@ -141,6 +189,12 @@ type sendMessageRequest struct {
 	// value on thinking entries (B2 wire family) rather than meaning "omit
 	// the parameter".
 	ReasoningEffort string `json:"reasoning_effort"`
+	// AttachmentIDs references images uploaded to the session's attachment
+	// endpoint (add-image-attachments). Each id must resolve against the
+	// attachments registry's (id, user, session) ownership triple, and the
+	// turn's resolved model must carry the vision capability. Empty/omitted
+	// is the pre-change plain-text request.
+	AttachmentIDs []string `json:"attachment_ids"`
 }
 
 // maxMessageBodyBytes caps the raw request body of the streaming message
@@ -313,6 +367,54 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		return
 	}
 
+	// Attachment validation (add-image-attachments). Everything here happens
+	// BEFORE the turn-slot claim and any persistence: an invalid reference
+	// never occupies the run slot. Order: count cap → vision capability →
+	// per-id ownership triple.
+	var userAttachments []model.MessageAttachmentRef
+	if len(req.AttachmentIDs) > 0 {
+		if len(req.AttachmentIDs) > maxAttachmentsPerMessage {
+			c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST",
+				fmt.Sprintf("at most %d attachments are allowed per message", maxAttachmentsPerMessage)))
+			return
+		}
+		if !sel.Vision {
+			c.JSON(http.StatusBadRequest, errorBody("MODEL_NOT_VISION",
+				fmt.Sprintf("model %q does not support image attachments", turnModel)))
+			return
+		}
+		if h.attachments == nil {
+			logger.FromContext(ctx).Error("attachment store not wired on the streaming handler",
+				zap.String("op", "handler.send_message"))
+			c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "attachment store not configured"))
+			return
+		}
+		seen := make(map[string]bool, len(req.AttachmentIDs))
+		for _, id := range req.AttachmentIDs {
+			if seen[id] {
+				c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "duplicate attachment id "+id))
+				return
+			}
+			seen[id] = true
+			att, aerr := h.attachments.GetAttachment(ctx, id, userID, sessionID)
+			if aerr != nil {
+				logger.FromContext(ctx).Error("attachment lookup failed",
+					zap.String("op", "handler.send_message"),
+					zap.String("attachment_id", id),
+					zap.Error(aerr))
+				c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "attachment lookup failed"))
+				return
+			}
+			if att == nil {
+				c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+id))
+				return
+			}
+			userAttachments = append(userAttachments, model.MessageAttachmentRef{
+				ID: att.ID, Filename: att.Filename, MIME: att.MIME,
+			})
+		}
+	}
+
 	prior, err := h.msgSvc.RecoverMessages(ctx, userID, sessionID)
 	if err != nil {
 		logger.FromContext(ctx).Warn("recover messages failed; proceeding",
@@ -435,7 +537,16 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		}
 	}
 	req.Content += prompt.RenderStatus()
-	messages := append(agentMsgs, agent.Message{Role: "user", Content: req.Content})
+	// Current-turn inline images (K=1 window): the LIVE user message carries
+	// the image bytes read from disk; from the next turn on, reconstruction
+	// renders this row as text placeholders instead. A missing file degrades
+	// to the placeholder (ERROR log) — the turn must not die because a file
+	// vanished underneath the registry.
+	current := agent.Message{Role: "user", Content: req.Content}
+	if len(userAttachments) > 0 {
+		current.Images, current.Content = h.loadCurrentTurnImages(ctx, userID, sessionID, req.Content, userAttachments)
+	}
+	messages := append(agentMsgs, current)
 
 	// Capture the user message timestamp early so the persisted user row keeps
 	// the request-arrival time even though persistence is deferred until after
@@ -450,11 +561,12 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// every later batch — keeping both the MySQL rows (deterministic
 	// client_msg_ids) and the Redis msgs:{sid} list free of duplicates.
 	persist := turnPersistInfo{
-		sessionID:   sessionID,
-		userID:      userID,
-		traceID:     tid,
-		userContent: req.Content,
-		userMsgTime: userMsgTime,
+		sessionID:       sessionID,
+		userID:          userID,
+		traceID:         tid,
+		userContent:     req.Content,
+		userAttachments: userAttachments,
+		userMsgTime:     userMsgTime,
 	}
 	flushed := &turnFlushState{}
 
@@ -587,7 +699,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		}
 	}
 	if err := h.sessSvc.SaveMessagesBatch(ctx, userID, []model.Message{
-		UserMessage(persist.sessionID, persist.traceID, persist.userContent, persist.userMsgTime),
+		UserMessage(persist.sessionID, persist.traceID, persist.userContent, persist.userMsgTime, persist.userAttachments...),
 	}); err != nil {
 		logger.FromContext(ctx).Warn("send-time user message persist failed; deferring the user row to the turn-end batch",
 			zap.String("op", "handler.send_message"),
@@ -974,11 +1086,12 @@ func extractContextTokens(usage map[string]any) int {
 // save so both derive byte-identical rows — same client_msg_ids, same user
 // message timestamp).
 type turnPersistInfo struct {
-	sessionID   string
-	userID      string
-	traceID     string
-	userContent string
-	userMsgTime time.Time
+	sessionID       string
+	userID          string
+	traceID         string
+	userContent     string
+	userAttachments []model.MessageAttachmentRef
+	userMsgTime     time.Time
 }
 
 // turnFlushState tracks how much of the turn's merged event stream a mid-turn

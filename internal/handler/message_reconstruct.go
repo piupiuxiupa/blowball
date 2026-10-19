@@ -91,7 +91,12 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 				continue
 			}
 			state.flush(&out, &lastRow)
-			out = append(out, agent.Message{Role: "user", Content: msg.Content})
+			// Attachment-bearing user rows degrade to deterministic text
+			// placeholders in reconstructed history (add-image-attachments,
+			// K=1 inline window): only the CURRENT turn's live message carries
+			// image bytes; every replayed turn renders the same placeholder
+			// bytes forever after.
+			out = append(out, agent.Message{Role: "user", Content: renderAttachmentPlaceholders(msg.Content, attachmentFilenames(msg.Attachments))})
 			lastRow = append(lastRow, i)
 
 		case model.EventTypeToken:

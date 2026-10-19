@@ -2,6 +2,11 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +17,105 @@ import (
 	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/tool/skill"
 )
+
+// redactImageParts rewrites every image_url content part in a marshaled
+// chat-completion request payload (add-image-attachments): the base64 data
+// URL is replaced by a structured image_url_redacted object carrying
+// mime / byte length / sha256 / attachment_id. The replacement is a
+// field-level redaction, not a truncation — the raw log's "parses to the
+// as-sent structure" and "never truncate" invariants both survive, and the
+// 16MiB MEDIUMTEXT ceiling stays safe no matter how many images a request
+// carries. attachment IDs are matched by content digest from the request's
+// in-memory message images; the vision side channel (no attachment identity)
+// redacts with an empty id.
+func redactImageParts(raw []byte, msgs []Message) []byte {
+	if !strings.Contains(string(raw), "image_url") {
+		return raw
+	}
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return raw
+	}
+	idsByDigest := map[string]string{}
+	for _, m := range msgs {
+		for _, img := range m.Images {
+			sum := sha256.Sum256(img.Data)
+			idsByDigest[fmt.Sprintf("%x", sum)] = img.AttachmentID
+		}
+	}
+	changed := redactWalk(doc, idsByDigest)
+	if !changed {
+		return raw
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// redactWalk descends the decoded payload replacing every image part (an
+// object with an image_url.url data URL) with its redacted twin. It reports
+// whether any replacement happened.
+func redactWalk(node any, idsByDigest map[string]string) bool {
+	switch v := node.(type) {
+	case map[string]any:
+		if iu, ok := v["image_url"].(map[string]any); ok {
+			if url, ok := iu["url"].(string); ok && strings.HasPrefix(url, "data:") {
+				redactImagePart(v, url, idsByDigest)
+				return true
+			}
+		}
+		changed := false
+		for k, child := range v {
+			if redactWalk(child, idsByDigest) {
+				changed = true
+				_ = k
+			}
+		}
+		return changed
+	case []any:
+		changed := false
+		for _, child := range v {
+			if redactWalk(child, idsByDigest) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
+}
+
+// redactImagePart mutates part (in place) into the redacted form for one
+// data-URL image part.
+func redactImagePart(part map[string]any, dataURL string, idsByDigest map[string]string) {
+	mime := ""
+	payload := dataURL
+	if idx := strings.Index(dataURL, ";base64,"); idx > 5 {
+		mime = strings.TrimPrefix(dataURL[5:idx], "data:")
+		payload = dataURL[idx+8:]
+	}
+	var digest string
+	var byteLen int
+	if raw, err := base64.StdEncoding.DecodeString(payload); err == nil {
+		byteLen = len(raw)
+		sum := sha256.Sum256(raw)
+		digest = fmt.Sprintf("%x", sum)
+	} else {
+		byteLen = len(payload)
+	}
+	for k := range part {
+		delete(part, k)
+	}
+	part["type"] = "image_url_redacted"
+	part["mime"] = mime
+	part["bytes"] = byteLen
+	part["sha256"] = digest
+	if id := idsByDigest[digest]; id != "" {
+		part["attachment_id"] = id
+	}
+}
 
 // This file defines the raw-capture (llm-raw-capture capability) contract the
 // OpenAI client consumes: the context values that carry capture metadata down

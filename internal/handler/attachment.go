@@ -254,6 +254,47 @@ func sanitizeAttachmentFilename(name string) string {
 	return name
 }
 
+// attachmentPlaceholder renders the deterministic text stand-in for one
+// attachment in MODEL-facing history (add-image-attachments). The format is
+// fixed and must never change between turns: once a past turn's image is
+// rendered as a placeholder, every later turn re-renders the same bytes so
+// the append-only replay contract (and provider prefix caching from that
+// point on) holds.
+func attachmentPlaceholder(filename string) string {
+	return "[图片: " + filename + "]"
+}
+
+// renderAttachmentPlaceholders appends one placeholder line per attachment to
+// content, preserving the original text verbatim. It is the single renderer
+// for history reconstruction and the current-turn missing-file fallback.
+func renderAttachmentPlaceholders(content string, filenames []string) string {
+	if len(filenames) == 0 {
+		return content
+	}
+	var b strings.Builder
+	b.WriteString(content)
+	for _, f := range filenames {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(attachmentPlaceholder(f))
+	}
+	return b.String()
+}
+
+// attachmentFilenames projects refs onto their display filenames for the
+// placeholder renderer, preserving the reference order.
+func attachmentFilenames(refs []model.MessageAttachmentRef) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.Filename
+	}
+	return out
+}
+
 // logAttachment emits a structured error log for an attachment operation.
 func logAttachment(ctx context.Context, op, path string, err error) {
 	fields := []zap.Field{

@@ -76,7 +76,7 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 		from = len(merged)
 	}
 	if from == 0 && !userPersisted {
-		batch.msgs = append(batch.msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime))
+		batch.msgs = append(batch.msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime, p.userAttachments...))
 	}
 
 	// spawnInstances maps a spawn tool_call id to the sub-agent instance it

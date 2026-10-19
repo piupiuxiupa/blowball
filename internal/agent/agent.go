@@ -187,12 +187,53 @@ func usageObject(u Usage) map[string]any {
 // openai-go, keeping the public Agent interface SDK-agnostic. Callers that
 // hold openai-go types convert at the boundary (see openai_client.go).
 type Message struct {
-	Role             string     `json:"role"` // "system" | "user" | "assistant" | "tool"
-	Content          string     `json:"content,omitempty"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"` // set on role="tool"
-	Name             string     `json:"name,omitempty"`         // optional, set on role="tool"
+	Role    string `json:"role"` // "system" | "user" | "assistant" | "tool"
+	Content string `json:"content,omitempty"`
+	// Images carries the CURRENT TURN's inline image payloads
+	// (add-image-attachments): populated only on the live user message handed
+	// to the orchestrator, rendered by the OpenAI client as image_url content
+	// parts after the text part. It is deliberately excluded from JSON — the
+	// bytes exist only in memory for the duration of the turn and must never
+	// leak into persistence, logs, or cache payloads. History reconstruction
+	// renders deterministic text placeholders instead (K=1 inline window).
+	Images           []MessageImage `json:"-"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"` // set on role="tool"
+	Name             string         `json:"name,omitempty"`         // optional, set on role="tool"
+}
+
+// MessageImage is one raw image payload bound for an image_url content part
+// on a user message. Data is the immutable on-disk byte slice read at turn
+// start; base64 encoding happens per LLM call and is deterministic for
+// identical bytes (base64.StdEncoding), keeping the inline window's
+// prefix-cache rendering byte-stable across rounds.
+type MessageImage struct {
+	AttachmentID string
+	MIMEType     string
+	Data         []byte
+}
+
+// StripImages returns a copy of msgs with every Images payload removed — the
+// text-only projection consumed by sub-agent dispatch and compaction summary
+// calls (image-attachments: history images degrade to placeholders, and no
+// derived context ever re-sends image bytes).
+func StripImages(msgs []Message) []Message {
+	out := make([]Message, len(msgs))
+	copied := false
+	for i, m := range msgs {
+		if len(m.Images) == 0 {
+			out[i] = m
+			continue
+		}
+		copied = true
+		m.Images = nil
+		out[i] = m
+	}
+	if !copied {
+		return msgs
+	}
+	return out
 }
 
 // ToolCall represents one function-calling invocation emitted by the model.

@@ -261,6 +261,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		if raw, err := json.Marshal(params); err != nil {
 			logger.FromContext(ctx).Warn("raw capture: marshal request params failed; skipping request row", zap.Error(err))
 		} else {
+			raw = redactImageParts(raw, req.Messages)
 			c.capture(ctx, callID, seq, 0, rawKindRequest, req.Model, "", 0, 0, string(raw))
 		}
 	}
@@ -501,6 +502,25 @@ func toOpenAIMessage(m Message) openai.ChatCompletionMessageParamUnion {
 			},
 		}
 	case "user":
+		if len(m.Images) > 0 {
+			// Multimodal user message (add-image-attachments): the text part
+			// comes first so the model reads the question before the images,
+			// then one image_url part per attachment in reference order.
+			parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Images)+1)
+			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+				OfText: &openai.ChatCompletionContentPartTextParam{Text: m.Content},
+			})
+			for _, img := range m.Images {
+				parts = append(parts, imageContentPart(img.MIMEType, img.Data))
+			}
+			return openai.ChatCompletionMessageParamUnion{
+				OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.ChatCompletionUserMessageParamContentUnion{
+						OfArrayOfContentParts: parts,
+					},
+				},
+			}
+		}
 		return openai.ChatCompletionMessageParamUnion{
 			OfUser: &openai.ChatCompletionUserMessageParam{
 				Content: openai.ChatCompletionUserMessageParamContentUnion{
@@ -548,13 +568,7 @@ func toOpenAIMessage(m Message) openai.ChatCompletionMessageParamUnion {
 // the question first. When no user message exists (a malformed in-package
 // request), a user message holding just the image is appended.
 func withVisionImage(msgs []openai.ChatCompletionMessageParamUnion, img *visionImage) []openai.ChatCompletionMessageParamUnion {
-	imagePart := openai.ChatCompletionContentPartUnionParam{
-		OfImageURL: &openai.ChatCompletionContentPartImageParam{
-			ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-				URL: "data:" + img.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(img.Data),
-			},
-		},
-	}
+	imagePart := imageContentPart(img.MIMEType, img.Data)
 	idx := -1
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].OfUser != nil {
@@ -584,6 +598,20 @@ func withVisionImage(msgs []openai.ChatCompletionMessageParamUnion, img *visionI
 	}
 	msgs[idx] = openai.ChatCompletionMessageParamUnion{OfUser: &user}
 	return msgs
+}
+
+// imageContentPart renders one raw image payload as an image_url content
+// part carrying a base64 data URL — the shared renderer for the vision side
+// channel (xizhi-view-image) and main-pipeline message images
+// (add-image-attachments).
+func imageContentPart(mime string, data []byte) openai.ChatCompletionContentPartUnionParam {
+	return openai.ChatCompletionContentPartUnionParam{
+		OfImageURL: &openai.ChatCompletionContentPartImageParam{
+			ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+				URL: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data),
+			},
+		},
+	}
 }
 
 func toOpenAIToolCalls(calls []ToolCall) []openai.ChatCompletionMessageToolCallUnionParam {
