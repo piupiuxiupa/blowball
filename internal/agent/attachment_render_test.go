@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"testing"
+
+	"github.com/openai/openai-go/v3"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,31 +74,56 @@ func TestStripImages(t *testing.T) {
 	assert.Equal(t, plain[0].Content, stripped[0].Content)
 }
 
-func TestRedactImageParts(t *testing.T) {
+func TestCaptureRequestJSON_RedactsAtBuildTime(t *testing.T) {
 	imgData := []byte("secret-image-bytes")
-	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imgData)
-	raw := []byte(`{"model":"m","messages":[` +
-		`{"role":"user","content":[` +
-		`{"type":"text","text":"hello"},` +
-		`{"type":"image_url","image_url":{"url":"` + dataURL + `"}}` +
-		`]},{"role":"assistant","content":"hi"}]}`)
+	msgs := []Message{
+		{Role: "user", Content: "hello", Images: []MessageImage{
+			{AttachmentID: "att-1", MIMEType: "image/png", Data: imgData},
+		}},
+		{Role: "assistant", Content: "hi"},
+	}
+	params := openai.ChatCompletionNewParams{
+		Model:    "m",
+		Messages: toOpenAIMessages(msgs),
+	}
 
-	out := redactImageParts(raw, []Message{{
-		Role:   "user",
-		Images: []MessageImage{{AttachmentID: "att-1", MIMEType: "image/png", Data: imgData}},
-	}})
+	out, err := captureRequestJSON(LLMRequest{Model: "m", Messages: msgs}, params)
+	require.NoError(t, err)
 
 	s := string(out)
 	assert.NotContains(t, s, "base64,")
-	assert.NotContains(t, s, dataURL)
 	assert.Contains(t, s, `"type":"image_url_redacted"`)
 	assert.Contains(t, s, `"attachment_id":"att-1"`)
 	assert.Contains(t, s, `"bytes":18`)
-	assert.Contains(t, s, "sha256")
+	sum := sha256.Sum256(imgData)
+	assert.Contains(t, s, fmt.Sprintf(`"sha256":"%x"`, sum))
 	assert.Contains(t, s, `"text":"hello"`, "text parts stay verbatim")
 	assert.Contains(t, s, `"assistant"`)
+	assert.Contains(t, s, `"model":"m"`, "non-message wire fields survive the shadow struct")
 
-	// No image_url anywhere → payload returned untouched.
-	plain := []byte(`{"model":"m","messages":[{"role":"user","content":"plain"}]}`)
-	assert.Equal(t, plain, redactImageParts(plain, nil))
+	// No images → the wire params marshal directly (byte-identical capture).
+	plainMsgs := []Message{{Role: "user", Content: "plain"}}
+	plainParams := openai.ChatCompletionNewParams{Model: "m", Messages: toOpenAIMessages(plainMsgs)}
+	direct, err := json.Marshal(plainParams)
+	require.NoError(t, err)
+	viaCapture, err := captureRequestJSON(LLMRequest{Messages: plainMsgs}, plainParams)
+	require.NoError(t, err)
+	assert.Equal(t, string(direct), string(viaCapture))
+}
+
+func TestCaptureRequestJSON_VisionSideChannelImageRedacted(t *testing.T) {
+	img := []byte("vision-bytes")
+	msgs := []Message{{Role: "user", Content: "what is this?"}}
+	params := openai.ChatCompletionNewParams{Model: "vm", Messages: toOpenAIMessages(msgs)}
+	params.Messages = withVisionImage(params.Messages, &visionImage{MIMEType: "image/png", Data: img})
+
+	out, err := captureRequestJSON(LLMRequest{Messages: msgs, vision: &visionImage{MIMEType: "image/png", Data: img}}, params)
+	require.NoError(t, err)
+
+	s := string(out)
+	assert.NotContains(t, s, "base64,")
+	assert.NotContains(t, s, "attachment_id", "the side channel has no attachment identity")
+	assert.Contains(t, s, `"type":"image_url_redacted"`)
+	assert.Contains(t, s, `"bytes":12`)
+	assert.Contains(t, s, `"text":"what is this?"`)
 }

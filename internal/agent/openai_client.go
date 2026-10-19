@@ -258,10 +258,10 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 	start = time.Now()
 	if c.sink != nil {
 		callID, seq = newRawCall()
-		if raw, err := json.Marshal(params); err != nil {
-			logger.FromContext(ctx).Warn("raw capture: marshal request params failed; skipping request row", zap.Error(err))
+		raw, cerr := captureRequestJSON(req, params)
+		if cerr != nil {
+			logger.FromContext(ctx).Warn("raw capture: render request params failed; skipping request row", zap.Error(cerr))
 		} else {
-			raw = redactImageParts(raw, req.Messages)
 			c.capture(ctx, callID, seq, 0, rawKindRequest, req.Model, "", 0, 0, string(raw))
 		}
 	}

@@ -235,7 +235,9 @@ func (h *AttachmentHandler) Content(c *gin.Context) {
 	c.Header("Content-Type", att.MIME)
 	c.Header("ETag", `"`+att.ID+`"`)
 	c.Header("Cache-Control", "private, max-age=31536000, immutable")
-	c.Header("Content-Disposition", `inline; filename="`+sanitizeAttachmentFilename(att.Filename)+`"`)
+	// RFC 6266/5987 encoding (ASCII fallback + filename*): raw or non-ASCII
+	// client filenames must never produce a malformed header.
+	c.Header("Content-Disposition", contentDisposition(att.Filename, true))
 	c.File(path)
 }
 

@@ -369,18 +369,15 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	// Attachment validation (add-image-attachments). Everything here happens
 	// BEFORE the turn-slot claim and any persistence: an invalid reference
-	// never occupies the run slot. Order: count cap → vision capability →
-	// per-id ownership triple.
+	// never occupies the run slot. Order: count cap → per-id ownership triple
+	// → vision capability — ownership (a 404 resource question per the HTTP
+	// contract) outranks the model-capability rejection (400), so a foreign
+	// id on a non-vision model still surfaces the 404.
 	var userAttachments []model.MessageAttachmentRef
 	if len(req.AttachmentIDs) > 0 {
 		if len(req.AttachmentIDs) > maxAttachmentsPerMessage {
 			c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST",
 				fmt.Sprintf("at most %d attachments are allowed per message", maxAttachmentsPerMessage)))
-			return
-		}
-		if !sel.Vision {
-			c.JSON(http.StatusBadRequest, errorBody("MODEL_NOT_VISION",
-				fmt.Sprintf("model %q does not support image attachments", turnModel)))
 			return
 		}
 		if h.attachments == nil {
@@ -412,6 +409,11 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			userAttachments = append(userAttachments, model.MessageAttachmentRef{
 				ID: att.ID, Filename: att.Filename, MIME: att.MIME,
 			})
+		}
+		if !sel.Vision {
+			c.JSON(http.StatusBadRequest, errorBody("MODEL_NOT_VISION",
+				fmt.Sprintf("model %q does not support image attachments", turnModel)))
+			return
 		}
 	}
 

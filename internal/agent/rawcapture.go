@@ -3,14 +3,13 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openai/openai-go/v3"
 
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/reqctx"
@@ -18,102 +17,145 @@ import (
 	"github.com/lush/blowball/internal/tool/skill"
 )
 
-// redactImageParts rewrites every image_url content part in a marshaled
-// chat-completion request payload (add-image-attachments): the base64 data
-// URL is replaced by a structured image_url_redacted object carrying
-// mime / byte length / sha256 / attachment_id. The replacement is a
-// field-level redaction, not a truncation — the raw log's "parses to the
-// as-sent structure" and "never truncate" invariants both survive, and the
-// 16MiB MEDIUMTEXT ceiling stays safe no matter how many images a request
-// carries. attachment IDs are matched by content digest from the request's
-// in-memory message images; the vision side channel (no attachment identity)
-// redacts with an empty id.
-func redactImageParts(raw []byte, msgs []Message) []byte {
-	if !strings.Contains(string(raw), "image_url") {
-		return raw
-	}
-	var doc any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return raw
-	}
-	idsByDigest := map[string]string{}
-	for _, m := range msgs {
-		for _, img := range m.Images {
-			sum := sha256.Sum256(img.Data)
-			idsByDigest[fmt.Sprintf("%x", sum)] = img.AttachmentID
+// captureTextPart is the text content part inside a redacted user message.
+type captureTextPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// captureRedactedPart is the structured stand-in for one image_url content
+// part: the base64 payload is replaced by mime / byte length / sha256 /
+// attachment_id. Field-level redaction, not truncation — the raw log's
+// "parses to the as-sent structure" and "never truncate" invariants both
+// survive, and the 16MiB MEDIUMTEXT ceiling stays safe no matter how many
+// images a request carries.
+type captureRedactedPart struct {
+	Type         string `json:"type"`
+	MIME         string `json:"mime"`
+	Bytes        int    `json:"bytes"`
+	SHA256       string `json:"sha256"`
+	AttachmentID string `json:"attachment_id,omitempty"`
+}
+
+// captureUserMessage is the re-rendered form of an image-bearing user
+// message: text part first, then one redacted part per image.
+type captureUserMessage struct {
+	Role    string `json:"role"`
+	Content []any  `json:"content"`
+}
+
+// captureRequestJSON renders the raw-capture request row. Image-bearing
+// user messages are re-rendered at BUILD time with their image_url parts
+// already redacted, so the multi-megabyte base64 payloads never enter the
+// capture document — nor any decode/re-encode intermediate. This keeps the
+// capture path's peak memory proportional to the (tiny) redacted document
+// even when several maximum-size images ride one request concurrently.
+// sha256 is computed over the original image bytes directly (no base64
+// round-trip). The vision side channel's injected image (req.vision)
+// redacts the same way, without an attachment id.
+//
+// Assembly: the wire params are marshaled with Messages cleared (a small,
+// image-free document holding every other as-sent field through the SDK's
+// own marshaler — the params type has a custom MarshalJSON, so embedding it
+// in a shadow struct would silently bypass any field override), then the
+// per-message renderings are spliced in as the "messages" value.
+func captureRequestJSON(req LLMRequest, params openai.ChatCompletionNewParams) ([]byte, error) {
+	hasImages := req.vision != nil
+	for _, m := range req.Messages {
+		if len(m.Images) > 0 {
+			hasImages = true
+			break
 		}
 	}
-	changed := redactWalk(doc, idsByDigest)
-	if !changed {
-		return raw
+	if !hasImages {
+		return json.Marshal(params)
 	}
-	out, err := json.Marshal(doc)
+
+	// The vision side channel attached its image to the LAST user message
+	// in params (withVisionImage appends one when no user message exists).
+	visionTarget := -1
+	if req.vision != nil {
+		for i := len(params.Messages) - 1; i >= 0; i-- {
+			if params.Messages[i].OfUser != nil {
+				visionTarget = i
+				break
+			}
+		}
+	}
+
+	msgs := make([]json.RawMessage, len(params.Messages))
+	for i := range params.Messages {
+		var imgs []MessageImage
+		if i < len(req.Messages) {
+			imgs = req.Messages[i].Images
+		}
+		if len(imgs) == 0 && i != visionTarget {
+			raw, err := json.Marshal(params.Messages[i])
+			if err != nil {
+				return nil, fmt.Errorf("raw capture: marshal message %d: %w", i, err)
+			}
+			msgs[i] = raw
+			continue
+		}
+		raw, err := json.Marshal(redactedUserMessage(req, params, i, imgs, i == visionTarget))
+		if err != nil {
+			return nil, fmt.Errorf("raw capture: render redacted message %d: %w", i, err)
+		}
+		msgs[i] = raw
+	}
+	msgsJSON, err := json.Marshal(msgs)
 	if err != nil {
-		return raw
+		return nil, fmt.Errorf("raw capture: marshal redacted messages: %w", err)
+	}
+
+	sansMessages := params
+	sansMessages.Messages = nil
+	base, err := json.Marshal(sansMessages)
+	if err != nil {
+		return nil, fmt.Errorf("raw capture: marshal message-less params: %w", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(base, &doc); err != nil {
+		return nil, fmt.Errorf("raw capture: decode message-less params: %w", err)
+	}
+	doc["messages"] = msgsJSON
+	return json.Marshal(doc)
+}
+
+// redactedUserMessage renders the image-bearing user message at index i:
+// its text part (from the wire rendering when available, else the request's
+// message content) followed by one redacted part per image. The vision side
+// channel contributes its own image when includeVision is set.
+func redactedUserMessage(req LLMRequest, params openai.ChatCompletionNewParams, i int, imgs []MessageImage, includeVision bool) captureUserMessage {
+	text := ""
+	if i < len(req.Messages) {
+		text = req.Messages[i].Content
+	}
+	if u := params.Messages[i].OfUser; u != nil && u.Content.OfString.Valid() {
+		text = u.Content.OfString.Value
+	}
+	out := captureUserMessage{Role: "user"}
+	if text != "" {
+		out.Content = append(out.Content, captureTextPart{Type: "text", Text: text})
+	}
+	for _, img := range imgs {
+		out.Content = append(out.Content, redactedImagePart(img.MIMEType, img.Data, img.AttachmentID))
+	}
+	if includeVision && req.vision != nil {
+		out.Content = append(out.Content, redactedImagePart(req.vision.MIMEType, req.vision.Data, ""))
 	}
 	return out
 }
 
-// redactWalk descends the decoded payload replacing every image part (an
-// object with an image_url.url data URL) with its redacted twin. It reports
-// whether any replacement happened.
-func redactWalk(node any, idsByDigest map[string]string) bool {
-	switch v := node.(type) {
-	case map[string]any:
-		if iu, ok := v["image_url"].(map[string]any); ok {
-			if url, ok := iu["url"].(string); ok && strings.HasPrefix(url, "data:") {
-				redactImagePart(v, url, idsByDigest)
-				return true
-			}
-		}
-		changed := false
-		for k, child := range v {
-			if redactWalk(child, idsByDigest) {
-				changed = true
-				_ = k
-			}
-		}
-		return changed
-	case []any:
-		changed := false
-		for _, child := range v {
-			if redactWalk(child, idsByDigest) {
-				changed = true
-			}
-		}
-		return changed
-	default:
-		return false
-	}
-}
-
-// redactImagePart mutates part (in place) into the redacted form for one
-// data-URL image part.
-func redactImagePart(part map[string]any, dataURL string, idsByDigest map[string]string) {
-	mime := ""
-	payload := dataURL
-	if idx := strings.Index(dataURL, ";base64,"); idx > 5 {
-		mime = strings.TrimPrefix(dataURL[5:idx], "data:")
-		payload = dataURL[idx+8:]
-	}
-	var digest string
-	var byteLen int
-	if raw, err := base64.StdEncoding.DecodeString(payload); err == nil {
-		byteLen = len(raw)
-		sum := sha256.Sum256(raw)
-		digest = fmt.Sprintf("%x", sum)
-	} else {
-		byteLen = len(payload)
-	}
-	for k := range part {
-		delete(part, k)
-	}
-	part["type"] = "image_url_redacted"
-	part["mime"] = mime
-	part["bytes"] = byteLen
-	part["sha256"] = digest
-	if id := idsByDigest[digest]; id != "" {
-		part["attachment_id"] = id
+// redactedImagePart builds the metadata stand-in for one image payload.
+func redactedImagePart(mime string, data []byte, attachmentID string) captureRedactedPart {
+	sum := sha256.Sum256(data)
+	return captureRedactedPart{
+		Type:         "image_url_redacted",
+		MIME:         mime,
+		Bytes:        len(data),
+		SHA256:       fmt.Sprintf("%x", sum),
+		AttachmentID: attachmentID,
 	}
 }
 
