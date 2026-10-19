@@ -54,6 +54,15 @@ type RouteDeps struct {
 	// SendMessage handles POST /api/v1/sessions/:session_id/messages (SSE). Required.
 	SendMessage gin.HandlerFunc
 
+	// AttachmentUpload handles POST /api/v1/sessions/:session_id/attachments
+	// (Bearer auth, multipart) — chat image upload (add-image-attachments).
+	AttachmentUpload gin.HandlerFunc
+
+	// AttachmentContent serves GET /api/v1/sessions/:session_id/attachments/:attachment_id/content.
+	// Authenticated via QueryTokenAuthMW (the <img> pattern), like
+	// WorkspaceTokenDownload. Required.
+	AttachmentContent gin.HandlerFunc
+
 	// TurnCancel handles POST /api/v1/sessions/:session_id/turns/:run_id/cancel
 	// (turn-detach-resume): cancels the running turn and releases its
 	// resources. Required for the agent partition.
@@ -250,10 +259,19 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.POST("/sessions", deps.SessionCreate)
 	authed.GET("/sessions/:session_id", deps.SessionGet)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
+	authed.POST("/sessions/:session_id/attachments", deps.AttachmentUpload)
 	authed.GET("/sessions/:session_id/subagents/:agent_instance_id/runs", deps.SubAgentRuns)
 	authed.GET("/sessions/:session_id/subagents/:agent_instance_id/runs/:run_id", deps.SubAgentRunDetail)
 	authed.PATCH("/sessions/:session_id", deps.SessionUpdateTitle)
 	authed.DELETE("/sessions/:session_id", deps.SessionDelete)
+
+	// Attachment content read (add-image-attachments): browser-native
+	// elements (<img>) cannot send the Authorization header, so this one
+	// session route opts into the query-token middleware — the same
+	// convention as the workspace token download and the artifact version
+	// content. Ownership is re-validated inside the handler against the
+	// (user, session, attachment) registry triple.
+	v1.GET("/sessions/:session_id/attachments/:attachment_id/content", deps.QueryTokenAuthMW, deps.AttachmentContent)
 
 	authed.GET("/workspace/files", deps.WorkspaceList)
 	authed.POST("/workspace/upload", deps.WorkspaceUpload)

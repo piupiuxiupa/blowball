@@ -507,6 +507,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
 	llmTokenHandler := handler.NewLLMTokenHandler(service.NewLLMTokenService(rt.mysqlStore))
 	artifactHandler := handler.NewArtifactHandler(newArtifactService(rt))
+	attachmentHandler := handler.NewAttachmentHandler(rt.mysqlStore, sessSvc, rt.fsStore)
 
 	return handler.RouteDeps{
 		AuthMW:                           middleware.AuthMiddleware(cfg.JWT.Secret),
@@ -516,6 +517,8 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		SessionCreate:                    sessionHandler.CreateSession,
 		SessionGet:                       sessionHandler.GetSession,
 		SessionMessages:                  sessionHandler.GetSessionMessages,
+		AttachmentUpload:                 attachmentHandler.Upload,
+		AttachmentContent:                attachmentHandler.Content,
 		SubAgentRuns:                     subAgentHandler.ListRuns,
 		SubAgentRunDetail:                subAgentHandler.GetRun,
 		SessionDelete:                    sessionHandler.DeleteSession,

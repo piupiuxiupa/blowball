@@ -44,10 +44,12 @@ type viewImageResult struct {
 	Description string `json:"description"`
 }
 
-// sniffImageMIME reports the image MIME type implied by the file's leading
+// SniffImageMIME reports the image MIME type implied by the file's leading
 // magic bytes (never the extension — an extension can lie). Only the four
-// formats the sidecar accepts are recognized.
-func sniffImageMIME(data []byte) (string, bool) {
+// formats the image paths accept are recognized. Exported for the chat
+// attachment upload path (add-image-attachments), which enforces the same
+// format allowlist.
+func SniffImageMIME(data []byte) (string, bool) {
 	switch {
 	case bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}):
 		return "image/png", true
@@ -61,6 +63,9 @@ func sniffImageMIME(data []byte) (string, bool) {
 		return "", false
 	}
 }
+
+// sniffImageMIME is the internal spelling kept for this package's call sites.
+func sniffImageMIME(data []byte) (string, bool) { return SniffImageMIME(data) }
 
 // ViewImage reads the image at relPath inside workspaceRoot and returns the
 // designated vision model's text description of it. cfg is the resolved

@@ -12,10 +12,10 @@
 
 ## 3. 上传与内容端点
 
-- [ ] 3.1 `internal/handler/attachment.go`：`POST /sessions/:sid/attachments`——会话所有权校验、魔数嗅探（png/jpeg/webp/gif）、8MiB 上限、落盘（attachment_id 命名，filename 不参与路径）、注册表 INSERT
-- [ ] 3.2 附件内容端点 `GET /sessions/:sid/attachments/:aid/content`：`QueryTokenAuthMiddleware` 挂载、行归属校验、inline 返回、`ETag` + `Cache-Control: private, max-age=31536000, immutable`、304 支持
-- [ ] 3.3 `router.go` 注册两条路由（上传走 Bearer 分区、内容端点走 query-token 分区），`cmd/blowball/serve.go` 完成装配
-- [ ] 3.4 handler 单元测试：成功上传、非图片拒绝、超限拒绝、非所有者 404、ETag/304、跨用户 404
+- [x] 3.1 `internal/handler/attachment.go`：`POST /sessions/:sid/attachments`——会话所有权校验、魔数嗅探（png/jpeg/webp/gif）、8MiB 上限、落盘（attachment_id 命名，filename 不参与路径）、注册表 INSERT
+- [x] 3.2 附件内容端点 `GET /sessions/:sid/attachments/:aid/content`：`QueryTokenAuthMiddleware` 挂载、行归属校验、inline 返回、`ETag` + `Cache-Control: private, max-age=31536000, immutable`、304 支持
+- [x] 3.3 `router.go` 注册两条路由（上传走 Bearer 分区、内容端点走 query-token 分区），`cmd/blowball/serve.go` 完成装配
+- [x] 3.4 handler 单元测试：成功上传、非图片拒绝、超限拒绝、非所有者 404、ETag/304、跨用户 404
 
 ## 4. 发送链路
 
