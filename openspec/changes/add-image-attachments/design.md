@@ -89,7 +89,7 @@ ALTER TABLE messages ADD COLUMN attachments_json MEDIUMTEXT NULL;
 - `POST /api/v1/sessions/:session_id/attachments`（Bearer，multipart `file` 字段）：校验会话所有权 → 魔数嗅探 MIME（仅 `image/png|jpeg|webp|gif`，与 view_image 一致）→ 大小上限（默认 8MiB）→ 落盘 + INSERT 注册表 → 返回 `{attachment_id, filename, mime, size}`。上传即占用 session 附件命名空间，不与消息绑定。
 - `POST /messages` 请求体新增可选 `attachment_ids: []string`（≤4）：三元组所有权校验（不属于本用户/本会话 → 404），为空等价于现状。
 - `GET /api/v1/sessions/:session_id/attachments/:attachment_id/content?token=<jwt>&inline=1`：挂 `QueryTokenAuthMiddleware`（route-level opt-in，模式同 workspace TokenDownload），校验行归属后 `c.File`。响应头：`ETag: "{attachment_id}"`、`Cache-Control: private, max-age=31536000, immutable`、`Content-Disposition: inline`。附件不可变（重传=新 ID），故比 TokenDownload 的 `no-store` 更激进且安全。
-- `GET /sessions/:id/messages` 每条消息新增 `attachments: [{id, filename, mime}]`（来自 attachments_json，无 join）；SSE 用户消息回显事件同步携带。
+- `GET /sessions/:id/messages` 每条消息新增 `attachments: [{id, filename, mime}]`（来自 attachments_json，无 join）。本系统本无 SSE 用户消息回显事件——发送期间前端以本地粘贴状态渲染，刷新/重放后凭历史端点的 attachments 元数据恢复图片。
 
 ### D7. raw log 脱敏：图片 part 以元数据替代
 

@@ -41,6 +41,6 @@
 
 ## 8. 契约与端到端验证
 
-- [ ] 8.1 更新 `api/openapi.yaml`：新增两条附件端点、`attachment_ids` 请求字段、消息/SSE 响应 `attachments`、models `vision` 字段
-- [ ] 8.2 集成测试：上传 → 携附件发送 → 模型请求含 image part → 下一轮历史为占位符 → 历史列表返回 attachments → 删除会话后附件行/目录消失
-- [ ] 8.3 `gofmt` + `go vet ./...` + `make test` 全量通过
+- [x] 8.1 更新 `api/openapi.yaml`：新增两条附件端点、`attachment_ids` 请求字段、消息/SSE 响应 `attachments`、models `vision` 字段
+- [x] 8.2 集成测试：上传 → 携附件发送 → 模型请求含 image part → 下一轮历史为占位符 → 历史列表返回 attachments → 删除会话后附件行/目录消失
+- [x] 8.3 `gofmt` + `go vet ./...` + `make test` 全量通过

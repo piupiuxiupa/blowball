@@ -102,7 +102,7 @@
 - **THEN** 系统返回 HTTP 404
 
 ### Requirement: 消息读取契约携带附件元数据
-`GET /api/v1/sessions/:session_id/messages` 的每条消息 SHALL 在携带附件时包含 `attachments: [{id, filename, mime}]` 数组（来自消息行引用，无表 join）；SSE 用户消息回显事件 SHALL 携带相同结构。无附件消息 SHALL 省略该字段或返回空数组，与变更前响应兼容。
+`GET /api/v1/sessions/:session_id/messages` 的每条消息 SHALL 在携带附件时包含 `attachments: [{id, filename, mime}]` 数组（来自消息行引用，无表 join）。无附件消息 SHALL 省略该字段，与变更前响应兼容。本系统不产生 SSE 用户消息回显事件：发送期间前端以本地粘贴状态渲染，重放/刷新后凭本端点的 `attachments` 元数据恢复图片渲染。
 
 #### Scenario: 历史列表返回附件元数据
 - **WHEN** 会话包含带图用户消息且客户端请求消息列表

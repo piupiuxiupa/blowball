@@ -21,8 +21,9 @@ var pngVisionHeader = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 
 // capture requirement end-to-end at the client level: the vision sidecar call
 // rides the shared StreamChat capture path, so llm_raw_log sees request +
 // response rows attributed to the "vision" pseudo-agent with the triggering
-// turn's trace/session/user correlation, and the request row carries the
-// base64 data-URL image part verbatim.
+// turn's trace/session/user correlation. Since add-image-attachments the
+// request row's image part is captured in its image_url_redacted form (the
+// redaction is structural metadata, not a truncation).
 func TestVisionClient_RawCaptureAttribution(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -68,8 +69,9 @@ func TestVisionClient_RawCaptureAttribution(t *testing.T) {
 	require.Len(t, sent.Messages[0].Content, 2)
 	assert.Equal(t, "text", sent.Messages[0].Content[0]["type"])
 	assert.Equal(t, "what is in this image?", sent.Messages[0].Content[0]["text"])
-	assert.Equal(t, "image_url", sent.Messages[0].Content[1]["type"])
-	imageURL, ok := sent.Messages[0].Content[1]["image_url"].(map[string]any)
-	require.True(t, ok)
-	assert.Contains(t, imageURL["url"], "data:image/png;base64,", "the captured request row keeps the base64 image payload verbatim (never truncated)")
+	assert.Equal(t, "image_url_redacted", sent.Messages[0].Content[1]["type"])
+	assert.Equal(t, "image/png", sent.Messages[0].Content[1]["mime"])
+	assert.Equal(t, float64(len(pngVisionHeader)), sent.Messages[0].Content[1]["bytes"])
+	assert.NotEmpty(t, sent.Messages[0].Content[1]["sha256"])
+	assert.NotContains(t, recs[0].Raw, "base64,", "the captured request row must not persist base64 payload bytes")
 }

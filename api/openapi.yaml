@@ -193,6 +193,18 @@ components:
           enum: [message, token, tool_call, tool_result, plan_updated, agent_start, agent_end, agent_error, reasoning]
         content:
           type: string
+        attachments:
+          type: array
+          description: >
+            Image attachment references (add-image-attachments). Present only
+            on attachment-bearing user rows; omitted otherwise. The client
+            renders images from
+            `GET /api/v1/sessions/{session_id}/attachments/{id}/content`
+            (query-token auth) using the id — it never parses the model-facing
+            placeholder text inside `content`. Base64 bytes are never part of
+            any response.
+          items:
+            $ref: '#/components/schemas/AttachmentRef'
         reasoning_content:
           type: string
           nullable: true
@@ -293,6 +305,46 @@ components:
     SubAgentToolCall:
       type: object
       required: [id, name, arguments]
+    AttachmentRef:
+      type: object
+      required: [id, filename, mime]
+      description: >
+        One image attachment reference embedded in a message row
+        (messages.attachments_json, add-image-attachments). filename/mime are
+        denormalized from the registry at send time; attachment metadata is
+        immutable so the copy never drifts.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The attachment registry id — also the content-endpoint key.
+        filename:
+          type: string
+          description: Original client filename (display only).
+        mime:
+          type: string
+          enum: [image/png, image/jpeg, image/webp, image/gif]
+    AttachmentUploadResponse:
+      type: object
+      required: [attachment_id, filename, mime, size]
+      description: >
+        A registered chat image attachment. The bytes live at
+        `data/{user}/attachments/{session}/{id}.{ext}` and are immutable —
+        re-uploading the same image yields a NEW id.
+      properties:
+        attachment_id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+          description: Sanitized original filename (display only).
+        mime:
+          type: string
+          enum: [image/png, image/jpeg, image/webp, image/gif]
+          description: MIME sniffed from the file header magic bytes (never the client declaration or extension).
+        size:
+          type: integer
+          format: int64
       properties:
         id:
           type: string
@@ -480,6 +532,23 @@ components:
             `thinking: false` entry returns 400 `INVALID_EFFORT`; a
             non-`none` deployment default landing on such an entry is clamped
             to `none` (WARN) and the turn proceeds.
+        attachment_ids:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+            format: uuid
+          description: |
+            Image attachments previously uploaded to this session via
+            `POST /api/v1/sessions/{session_id}/attachments`
+            (add-image-attachments). Each id must resolve against the
+            attachment registry's (id, user, session) ownership triple — an
+            unknown or foreign id returns 404. The turn's resolved model must
+            carry the catalog `vision` capability; otherwise the request is
+            rejected with 400 `MODEL_NOT_VISION` before any persistence. The
+            current turn's model request inlines the images as `image_url`
+            content parts; from the next turn on they replay as deterministic
+            text placeholders. Empty/omitted is the plain-text request.
     TurnStatusResponse:
       type: object
       required: [run_id, status]
@@ -994,7 +1063,7 @@ components:
           description: The deployment default reasoning effort applied to requests that omit `reasoning_effort`.
     ModelEntry:
       type: object
-      required: [name, max_context_tokens, max_completion_tokens, thinking]
+      required: [name, max_context_tokens, max_completion_tokens, thinking, vision]
       properties:
         name:
           type: string
@@ -1014,6 +1083,14 @@ components:
         thinking:
           type: boolean
           description: Whether the model supports reasoning (gates non-`none` reasoning_effort values).
+        vision:
+          type: boolean
+          description: >
+            Whether the model accepts image attachments on user messages
+            (add-image-attachments). Requests carrying `attachment_ids` that
+            resolve to a `vision: false` entry are rejected with 400
+            `MODEL_NOT_VISION`. Defaults to false in configuration
+            (`openai.models[].vision`).
     LLMTokenStatus:
       type: object
       required: [configured]
@@ -1314,14 +1391,15 @@ paths:
       tags: [Session]
       summary: Delete a session owned by the authenticated user.
       description: |
-        Archives the session and all of its titles/messages verbatim into the
-        `*_deleted` mirror tables, purges the live rows (archive + purge is a
-        single atomic transaction), and removes the warm-tier session file.
-        Redis cache entries (`session:{id}`, `msgs:{id}`) are intentionally not
-        cleared; every read path re-validates ownership against MySQL first, so
-        stale cache keys are unreachable until they expire on TTL. Deleting a
-        session that does not exist or belongs to another user returns 404; the
-        existence of another user's session is never disclosed.
+        Drains the write-behind queue, archives the session and all of its
+        titles/messages/attachments verbatim into the `*_deleted` mirror
+        tables, purges the live rows (archive + purge is a single atomic
+        transaction), clears the Redis cache keys (`session:{id}`,
+        `msgs:{id}`), then removes the session's image-attachment directory
+        (add-image-attachments; a directory-removal failure is logged and
+        never fails the delete). Deleting a session that does not exist or
+        belongs to another user returns 404; the existence of another user's
+        session is never disclosed.
       parameters:
         - name: session_id
           in: path
@@ -1436,6 +1514,114 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+  /api/v1/sessions/{session_id}/attachments:
+    post:
+      tags: [Session]
+      summary: Upload a chat image attachment to a session (add-image-attachments).
+      description: |
+        Registers one chat image for the session: the session must belong to
+        the authenticated user. The MIME type is sniffed from the file header
+        magic bytes — the client-declared content type and extension are
+        ignored — and only `image/png`, `image/jpeg`, `image/webp`, and
+        `image/gif` are accepted. The size cap is 8 MiB. Bytes land at
+        `data/{user}/attachments/{session}/{uuid}.{ext}` and are immutable
+        (never re-encoded, stripped, or compressed); the original filename is
+        display-only metadata and never participates in the storage path.
+        Upload does NOT attach the image to any message — reference the
+        returned id from `POST .../messages` `attachment_ids` (at most 4 per
+        message, on a `vision`-capable model).
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The image bytes (≤ 8 MiB; magic-byte sniffed).
+      responses:
+        '200':
+          description: Attachment registered.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AttachmentUploadResponse'}
+        '400':
+          description: "`UNSUPPORTED_IMAGE_TYPE`: the sniffed type is not one of the four accepted image formats."
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          description: "`FILE_TOO_LARGE`: the file exceeds 8 MiB."
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500':
+          $ref: '#/components/responses/Internal'
+  /api/v1/sessions/{session_id}/attachments/{attachment_id}/content:
+    get:
+      tags: [Session]
+      summary: Read one attachment's image bytes (query-token auth).
+      description: |
+        Serves the immutable original bytes for `<img>` and other
+        browser-native elements that cannot send an Authorization header.
+        Authentication is the URL query parameter `token` (the caller's login
+        JWT — the same opt-in convention as the workspace token download);
+        ownership is re-validated against the registry's
+        (id, user, session) triple, with a miss mapping to 404. Because
+        attachment content never changes, responses carry
+        `ETag: "{attachment_id}"` and
+        `Cache-Control: private, max-age=31536000, immutable`; conditional
+        requests with a matching `If-None-Match` return 304.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: attachment_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - name: token
+          in: query
+          required: true
+          schema: {type: string}
+          description: The caller's login JWT (query-token auth for browser-native elements).
+        - name: inline
+          in: query
+          required: false
+          schema: {type: string, enum: ['1']}
+          description: Present for `<img>` usage; the response is always inline.
+      responses:
+        '200':
+          description: The immutable image bytes.
+          headers:
+            ETag:
+              description: '`"<attachment_id>"` — content-addressed; the id never changes.'
+              schema: {type: string}
+            Cache-Control:
+              description: '`private, max-age=31536000, immutable`.'
+              schema: {type: string}
+          content:
+            image/*:
+              schema: {type: string, format: binary}
+        '304':
+          description: Not modified (If-None-Match matched the ETag).
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/sessions/{session_id}/messages:
     get:
       tags: [Session]

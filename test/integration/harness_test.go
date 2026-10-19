@@ -224,7 +224,11 @@ type memoryMySQL struct {
 	titles    map[string]model.Title
 	messages  map[string][]model.Message
 	toolCalls map[string][]model.ToolCall
-	nextID    int64
+	// attachments is the image-attachment registry (add-image-attachments);
+	// deletedAttachments mirrors the session-delete archive step.
+	attachments        map[string]model.Attachment
+	deletedAttachments map[string]model.Attachment
+	nextID             int64
 
 	// insertAttempts counts every row handed to AppendMessages including the
 	// ones INSERT IGNORE would drop (duplicate client_msg_id).
@@ -254,18 +258,20 @@ type memoryMySQL struct {
 
 func newMemoryMySQL() *memoryMySQL {
 	return &memoryMySQL{
-		sessions:          map[string]*model.Session{},
-		titles:            map[string]model.Title{},
-		messages:          map[string][]model.Message{},
-		turnUsages:        map[string][]model.TurnUsage{},
-		deletedSessions:   map[string]model.Session{},
-		deletedTitles:     map[string]model.Title{},
-		deletedMessages:   map[string][]model.Message{},
-		deletionIDs:       map[string]string{},
-		compactions:       map[string][]model.ContextCompaction{},
-		compacted:         map[string]bool{},
-		subagentInstances: map[string]model.SubAgentInstance{},
-		subagentRuns:      map[string][]model.SubAgentRun{},
+		sessions:           map[string]*model.Session{},
+		titles:             map[string]model.Title{},
+		messages:           map[string][]model.Message{},
+		turnUsages:         map[string][]model.TurnUsage{},
+		deletedSessions:    map[string]model.Session{},
+		deletedTitles:      map[string]model.Title{},
+		deletedMessages:    map[string][]model.Message{},
+		deletedAttachments: map[string]model.Attachment{},
+		deletionIDs:        map[string]string{},
+		compactions:        map[string][]model.ContextCompaction{},
+		compacted:          map[string]bool{},
+		subagentInstances:  map[string]model.SubAgentInstance{},
+		subagentRuns:       map[string][]model.SubAgentRun{},
+		attachments:        map[string]model.Attachment{},
 	}
 }
 
@@ -310,6 +316,12 @@ func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
 		copy(cp, msgs)
 		m.deletedMessages[sessionID] = cp
 	}
+	for id, a := range m.attachments {
+		if a.SessionID == sessionID {
+			m.deletedAttachments[id] = a
+			delete(m.attachments, id)
+		}
+	}
 	// Purge the live rows (mirrors the source tables' ON DELETE CASCADE).
 	delete(m.sessions, sessionID)
 	delete(m.titles, sessionID)
@@ -323,6 +335,23 @@ func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
 	delete(m.subagentInstances, sessionID)
 	delete(m.subagentRuns, sessionID)
 	return nil
+}
+
+func (m *memoryMySQL) InsertAttachment(_ context.Context, a model.Attachment) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.attachments[a.ID] = a
+	return nil
+}
+
+func (m *memoryMySQL) GetAttachment(_ context.Context, id, userID, sessionID string) (*model.Attachment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a, ok := m.attachments[id]; ok && a.UserID == userID && a.SessionID == sessionID {
+		cp := a
+		return &cp, nil
+	}
+	return nil, nil
 }
 
 func (m *memoryMySQL) UpdateSessionTime(_ context.Context, sessionID string) error {
@@ -935,7 +964,7 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 		FS:    fsSvc,
 		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
-	sessSvc := service.NewSessionService(deps)
+	sessSvc := service.NewSessionService(deps).WithAttachmentDir(fsSvc.UserAttachmentDir)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	// TitleService is given the same scripted LLM; for these tests we never
 	// script a title round so it falls back to the first-20-chars heuristic.
@@ -953,8 +982,10 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0).
+		WithAttachmentStore(mysqlFake)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
+	attachmentH := handler.NewAttachmentHandler(mysqlFake, sessSvc, fsSvc)
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace, nil)
 	skillH := handler.NewSkillHandler(fsSvc, nil)
 
@@ -970,6 +1001,8 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
 		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
+		AttachmentUpload:       attachmentH.Upload,
+		AttachmentContent:      attachmentH.Content,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,
@@ -1034,7 +1067,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		FS:    fsSvc,
 		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
-	sessSvc := service.NewSessionService(deps)
+	sessSvc := service.NewSessionService(deps).WithAttachmentDir(fsSvc.UserAttachmentDir)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
@@ -1049,8 +1082,10 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0).
+		WithAttachmentStore(mysqlFake)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
+	attachmentH := handler.NewAttachmentHandler(mysqlFake, sessSvc, fsSvc)
 	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace, nil)
 	skillH := handler.NewSkillHandler(fsSvc, nil)
 
@@ -1066,6 +1101,8 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
 		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
+		AttachmentUpload:       attachmentH.Upload,
+		AttachmentContent:      attachmentH.Content,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,
@@ -1138,7 +1175,7 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 		FS:    fsSvc,
 		// Drain hook retired with the ingest queue (refactor-message-storage).
 	}
-	sessSvc := service.NewSessionService(deps)
+	sessSvc := service.NewSessionService(deps).WithAttachmentDir(fsSvc.UserAttachmentDir)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
 	titleSvc := service.NewTitleService(llm, mysqlFake, config.OpenAIConfig{TitleModel: "title-model"})
 
@@ -1149,8 +1186,10 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0).
+		WithAttachmentStore(mysqlFake)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
+	attachmentH := handler.NewAttachmentHandler(mysqlFake, sessSvc, fsSvc)
 	mcpH := handler.NewMCPHandler(tool.NewRegistry(), nil, fsSvc.UserWorkspace, nil)
 	skillH := handler.NewSkillHandler(fsSvc, nil)
 	modelsH := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
@@ -1167,6 +1206,8 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
 		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
 		SendMessage:            streamH.SendMessage,
+		AttachmentUpload:       attachmentH.Upload,
+		AttachmentContent:      attachmentH.Content,
 		TurnCancel:             turnRunH.CancelTurn,
 		TurnEvents:             turnRunH.TurnEvents,
 		SessionDelete:          sessH.DeleteSession,

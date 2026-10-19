@@ -25,7 +25,8 @@ var expectedDBTags = map[string][]string{
 	},
 	"Message": {
 		"id", "session_id", "msg_time", "agent", "msg_index",
-		"tool_call_id", "role", "event_type", "status", "content", "reasoning_content",
+		"tool_call_id", "role", "event_type", "status", "content", "attachments_json", "-",
+		"reasoning_content",
 		"trace_id", "client_msg_id", "run_id", "agent_instance_id", "update_time",
 	},
 	"TurnUsage": {
