@@ -305,6 +305,29 @@ components:
     SubAgentToolCall:
       type: object
       required: [id, name, arguments]
+      properties:
+        id:
+          type: string
+          description: Tool call id used for result pairing.
+        name:
+          type: string
+          description: Tool function name.
+        arguments:
+          type: object
+          additionalProperties: true
+          description: Decoded tool-call arguments. Empty arguments are `{}`.
+        sub_agent_instance_id:
+          type: string
+          description: >
+            Present only on spawn_subagent tool calls whose dispatched child
+            instance has a durable terminal run row in the same session: the
+            child instance id the frontend uses to recursively lazy-load the
+            next tree level through the sub-agent run APIs. Omitted on ordinary
+            tool calls and on spawns without a terminal child row (bad-args or
+            budget failures, still-running children, legacy identities).
+        sub_agent_name:
+          type: string
+          description: Stable attribution label of the linked child instance.
     AttachmentRef:
       type: object
       required: [id, filename, mime]
@@ -345,29 +368,6 @@ components:
         size:
           type: integer
           format: int64
-      properties:
-        id:
-          type: string
-          description: Tool call id used for result pairing.
-        name:
-          type: string
-          description: Tool function name.
-        arguments:
-          type: object
-          additionalProperties: true
-          description: Decoded tool-call arguments. Empty arguments are `{}`.
-        sub_agent_instance_id:
-          type: string
-          description: >
-            Present only on spawn_subagent tool calls whose dispatched child
-            instance has a durable terminal run row in the same session: the
-            child instance id the frontend uses to recursively lazy-load the
-            next tree level through the sub-agent run APIs. Omitted on ordinary
-            tool calls and on spawns without a terminal child row (bad-args or
-            budget failures, still-running children, legacy identities).
-        sub_agent_name:
-          type: string
-          description: Stable attribution label of the linked child instance.
     SubAgentTranscriptItem:
       type: object
       required: [type]
