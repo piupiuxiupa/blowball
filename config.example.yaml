@@ -78,6 +78,12 @@ openai:
       max_context_tokens: 400000
       max_completion_tokens: 16384
       thinking: true
+      # Vision (add-image-attachments): whether user messages may carry
+      # image attachments on turns that select this entry. A request with
+      # attachment_ids resolving to a vision:false entry is rejected with
+      # 400 MODEL_NOT_VISION (no silent degradation); unset/false keeps the
+      # plain-text behavior. Exposed to the frontend via GET /api/v1/models.
+      vision: true
       # finish_reason=length auto-continuation (llm-length-continuation
       # capability, per-entry since per-model-completion-budget): when a
       # round's LLM response is cut by the output token limit, keep the
@@ -104,6 +110,7 @@ openai:
       max_context_tokens: 200000
       max_completion_tokens: 8192
       thinking: false
+      # No vision here → image attachments are rejected on glm-4.7 turns.
       # This entry configures no length_continue → continuation is off for
       # turns that select glm-4.7 (a length round terminates the turn).
   default_model: gpt-5
