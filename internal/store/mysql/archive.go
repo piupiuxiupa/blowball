@@ -36,9 +36,20 @@ WHERE session_id = ?
 // enters Go memory, keeping memory pressure bounded regardless of how large a
 // session's history is. Placeholders are (deletion_id, deleted_at, session_id).
 const archiveMessagesSQL = `
-INSERT INTO messages_deleted (id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time, deletion_id, deleted_at)
-SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, trace_id, update_time, ?, ?
+INSERT INTO messages_deleted (id, session_id, msg_time, agent, msg_index, role, event_type, content, attachments_json, trace_id, update_time, deletion_id, deleted_at)
+SELECT id, session_id, msg_time, agent, msg_index, role, event_type, content, attachments_json, trace_id, update_time, ?, ?
 FROM messages
+WHERE session_id = ?
+`
+
+// archiveAttachmentsSQL copies every attachment registry row belonging to
+// sessionID into attachments_deleted (add-image-attachments). The live rows
+// are purged by the sessions-row delete via the ON DELETE CASCADE foreign
+// key, exactly like titles/messages.
+const archiveAttachmentsSQL = `
+INSERT INTO attachments_deleted (id, user_id, session_id, filename, mime, size, message_id, create_time, deleted_at, deletion_id)
+SELECT id, user_id, session_id, filename, mime, size, message_id, create_time, ?, ?
+FROM attachments
 WHERE session_id = ?
 `
 
@@ -78,7 +89,7 @@ func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
 		_ = tx.Rollback()
 	}()
 
-	for _, q := range []string{archiveSessionsSQL, archiveTitlesSQL, archiveMessagesSQL} {
+	for _, q := range []string{archiveSessionsSQL, archiveTitlesSQL, archiveMessagesSQL, archiveAttachmentsSQL} {
 		if _, err := tx.ExecContext(ctx, q, deletionID, deletedAt, sessionID); err != nil {
 			return fmt.Errorf("mysql.DeleteSession: archive: %w", err)
 		}

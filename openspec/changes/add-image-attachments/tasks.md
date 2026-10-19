@@ -1,14 +1,14 @@
 ## 1. 数据层与模型
 
-- [ ] 1.1 新增 migration `021_image_attachments.sql`：`attachments` 表、`attachments_deleted` 归档镜像、`messages.attachments_json` MEDIUMTEXT 列
-- [ ] 1.2 `internal/model`：新增 `Attachment`（attachments 表行）与 `MessageAttachmentRef`（消息内引用）类型；`Message` 增加 `Attachments` 字段（db/json 映射，存量 NULL 等同无附件）
-- [ ] 1.3 `internal/store/mysql`：attachments 表的 Insert / 按 id+user+session 查询 / 按 session 归档删除（事务内）方法及单元测试
-- [ ] 1.4 `internal/store/fs`：`UserAttachment(userID, sessionID, attachmentID)` 路径解析与 attachments 目录惰性创建，路径校验拒绝逃逸
+- [x] 1.1 新增 migration `021_image_attachments.sql`：`attachments` 表、`attachments_deleted` 归档镜像、`messages.attachments_json` MEDIUMTEXT 列
+- [x] 1.2 `internal/model`：新增 `Attachment`（attachments 表行）与 `MessageAttachmentRef`（消息内引用）类型；`Message` 增加 `Attachments` 字段（db/json 映射，存量 NULL 等同无附件）
+- [x] 1.3 `internal/store/mysql`：attachments 表的 Insert / 按 id+user+session 查询 / 按 session 归档删除（事务内）方法及单元测试
+- [x] 1.4 `internal/store/fs`：`UserAttachment(userID, sessionID, attachmentID)` 路径解析与 attachments 目录惰性创建，路径校验拒绝逃逸
 
 ## 2. 模型能力位
 
-- [ ] 2.1 `internal/config`：`ModelCatalogEntry` 增加 `Vision bool`（yaml `vision`，缺省 false），`resolveModelSelection` 结果携带该位
-- [ ] 2.2 `internal/handler/model_list.go`：`GET /api/v1/models` 每项输出 `vision` 字段并补测试
+- [x] 2.1 `internal/config`：`ModelCatalogEntry` 增加 `Vision bool`（yaml `vision`，缺省 false），`resolveModelSelection` 结果携带该位
+- [x] 2.2 `internal/handler/model_list.go`：`GET /api/v1/models` 每项输出 `vision` 字段并补测试
 
 ## 3. 上传与内容端点
 

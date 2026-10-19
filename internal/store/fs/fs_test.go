@@ -110,6 +110,28 @@ func TestUserSkillsLivesUnderWorkspace(t *testing.T) {
 	}
 }
 
+// TestUserAttachmentDir_SessionScopedLayout verifies the chat-attachment
+// directory layout (add-image-attachments): a sibling of workspace/ scoped
+// per session, outside the workspace the agent file tools operate in.
+func TestUserAttachmentDir_SessionScopedLayout(t *testing.T) {
+	store, root := newTestStore(t)
+
+	got := store.UserAttachmentDir("u-1", "s-1")
+	want := filepath.Join(root, "u-1", "attachments", "s-1")
+	if got != want {
+		t.Fatalf("UserAttachmentDir = %q, want %q", got, want)
+	}
+	// Two sessions must map to two disjoint directories.
+	if store.UserAttachmentDir("u-1", "s-2") == got {
+		t.Fatal("attachment dirs must be session-scoped")
+	}
+	// The directory is outside the workspace (agent file tools cannot reach it).
+	ws := store.UserWorkspace("u-1")
+	if strings.HasPrefix(got, ws+string(filepath.Separator)) {
+		t.Fatalf("attachment dir %q must not live beneath workspace %q", got, ws)
+	}
+}
+
 func TestEnsureUserDirs_Idempotent(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()

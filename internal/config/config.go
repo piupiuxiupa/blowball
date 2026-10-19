@@ -693,6 +693,12 @@ type ModelCatalogEntry struct {
 	Name             string `yaml:"name"`
 	MaxContextTokens int    `yaml:"max_context_tokens"`
 	Thinking         bool   `yaml:"thinking"`
+	// Vision marks the entry as able to receive image attachments on user
+	// messages (add-image-attachments). Requests carrying attachments that
+	// resolve to a non-vision entry are rejected with 400 MODEL_NOT_VISION —
+	// no silent degradation. Defaults to false; unset entries behave exactly
+	// as before this capability existed.
+	Vision bool `yaml:"vision"`
 	// MaxCompletionTokens is the model's output-token quota — the field
 	// semantic is "output quota" and the wire family translates it: a
 	// thinking:true entry sends it as max_completion_tokens, a thinking:false

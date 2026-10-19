@@ -32,6 +32,7 @@ type modelEntry struct {
 	MaxContextTokens    int    `json:"max_context_tokens"`
 	MaxCompletionTokens int    `json:"max_completion_tokens"`
 	Thinking            bool   `json:"thinking"`
+	Vision              bool   `json:"vision"`
 }
 
 // List handles GET /api/v1/models. Returns 200 with the selectable model
@@ -49,6 +50,7 @@ func (h *ModelListHandler) List(c *gin.Context) {
 			MaxContextTokens:    e.MaxContextTokens,
 			MaxCompletionTokens: e.MaxCompletionTokens,
 			Thinking:            e.Thinking,
+			Vision:              e.Vision,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{

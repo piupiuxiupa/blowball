@@ -86,6 +86,10 @@ type modelSelection struct {
 	// reasoning_effort (literal none included) plus max_completion_tokens;
 	// false → no reasoning_effort, max_tokens.
 	Thinking bool
+	// Vision is the resolved entry's image-capability marker (a copy of
+	// entry.Vision, add-image-attachments): a request carrying attachment ids
+	// that resolves here is rejected with 400 MODEL_NOT_VISION when false.
+	Vision bool
 	// Effort is the effective effort level (request `reasoning_effort` or
 	// the deployment default), clamped to "none" on non-thinking entries.
 	Effort string
@@ -183,6 +187,7 @@ func resolveModelSelection(msc ModelSelectionConfig, model, effort string) (mode
 	return modelSelection{
 		Model:               entry.Name,
 		Thinking:            entry.Thinking,
+		Vision:              entry.Vision,
 		Effort:              effective,
 		MaxContextTokens:    entry.MaxContextTokens,
 		MaxCompletionTokens: entry.MaxCompletionTokens,

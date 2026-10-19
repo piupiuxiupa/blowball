@@ -19,15 +19,15 @@ import (
 // write-behind queue guarantees at-least-once delivery, the UNIQUE key plus
 // IGNORE makes it effectively exactly-once.
 const appendMessageSQL = `
-INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, tool_call_id, role, event_type, status, content, reasoning_content, trace_id, client_msg_id, run_id, agent_instance_id)
-VALUES (:session_id, :msg_time, :agent, :msg_index, :round_no, :role, :event_type, :status, :content, :reasoning_content, :trace_id, :client_msg_id, :run_id, :agent_instance_id)
+INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, tool_call_id, role, event_type, status, content, attachments_json, reasoning_content, trace_id, client_msg_id, run_id, agent_instance_id)
+VALUES (:session_id, :msg_time, :agent, :msg_index, :round_no, :role, :event_type, :status, :content, :attachments_json, :reasoning_content, :trace_id, :client_msg_id, :run_id, :agent_instance_id)
 `
 
 // appendMessagesSQL inserts multiple message rows in a single statement. The
 // VALUES clause is expanded at runtime by AppendMessages. INSERT IGNORE for
 // the same idempotency reason as appendMessageSQL.
 const appendMessagesSQL = `
-INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, tool_call_id, role, event_type, status, content, reasoning_content, trace_id, client_msg_id, run_id, agent_instance_id)
+INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, tool_call_id, role, event_type, status, content, attachments_json, reasoning_content, trace_id, client_msg_id, run_id, agent_instance_id)
 VALUES %s
 `
 
@@ -39,7 +39,7 @@ VALUES %s
 // the model's plain string fields (nilIfEmpty performs the inverse
 // empty→NULL mapping on write, so the round trip is stable).
 const listMessagesSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM messages msg
 INNER JOIN 
 (
@@ -80,6 +80,7 @@ func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, erro
 		"event_type":        m.EventType,
 		"status":            nilIfEmpty(m.Status),
 		"content":           m.Content,
+		"attachments_json":  model.MarshalAttachmentRefs(m.Attachments),
 		"reasoning_content": nilIfEmpty(m.ReasoningContent),
 		"trace_id":          m.TraceID,
 		"client_msg_id":     nilIfEmpty(m.ClientMsgID),
@@ -114,9 +115,9 @@ func appendMessages(ctx context.Context, q sqlx.ExtContext, msgs []model.Message
 	}
 
 	placeholders := make([]string, 0, len(msgs))
-	args := make([]any, 0, len(msgs)*14)
+	args := make([]any, 0, len(msgs)*15)
 	for _, m := range msgs {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			m.SessionID,
 			m.MsgTime,
@@ -127,6 +128,7 @@ func appendMessages(ctx context.Context, q sqlx.ExtContext, msgs []model.Message
 			m.EventType,
 			nilIfEmpty(m.Status),
 			m.Content,
+			model.MarshalAttachmentRefs(m.Attachments),
 			nilIfEmpty(m.ReasoningContent),
 			m.TraceID,
 			nilIfEmpty(m.ClientMsgID),
@@ -163,7 +165,7 @@ func appendMessages(ctx context.Context, q sqlx.ExtContext, msgs []model.Message
 // (msg_time, msg_index, id) ascending. The id tie-breaker makes the cursor
 // stable when two rows share the same msg_time and msg_index.
 const listMessagesPagedAscSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM messages msg
 INNER JOIN 
 (
@@ -181,7 +183,7 @@ INNER JOIN
 // output order — a plain INNER JOIN lets the optimizer flip the join (reading
 // the outer table first) and silently lose the descending order on MySQL 9.x.
 const listMessagesPagedDescSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM
 (
 	SELECT id FROM messages
@@ -232,7 +234,7 @@ const subagentPlaceholderFilter = `
 // listMessagesPagedPlaceholderAscSQL is the placeholder-view twin of
 // listMessagesPagedAscSQL.
 const listMessagesPagedPlaceholderAscSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM messages msg
 INNER JOIN
 (
@@ -248,7 +250,7 @@ INNER JOIN
 // listMessagesPagedPlaceholderDescSQL is the placeholder-view twin of
 // listMessagesPagedDescSQL.
 const listMessagesPagedPlaceholderDescSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM
 (
 	SELECT id FROM messages
@@ -269,7 +271,17 @@ func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Mes
 	if err := s.db.SelectContext(ctx, &messages, listMessagesSQL, sessionID); err != nil {
 		return nil, err
 	}
+	hydrateAttachments(messages)
 	return messages, nil
+}
+
+// hydrateAttachments fills each row's Attachments slice from its
+// attachments_json payload (add-image-attachments). A NULL/empty/malformed
+// payload leaves the slice nil — the pre-change rendering semantics.
+func hydrateAttachments(msgs []model.Message) {
+	for i := range msgs {
+		msgs[i].Attachments = model.UnmarshalAttachmentRefs(msgs[i].AttachmentsJSON)
+	}
 }
 
 // ListMessagesPaged returns a page of messages for sessionID ordered by
@@ -313,6 +325,7 @@ func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr stri
 	if err := s.db.SelectContext(ctx, &messages, query, sessionID, cur.MsgTime, cur.MsgIndex, cur.ID, pageSize); err != nil {
 		return nil, "", err
 	}
+	hydrateAttachments(messages)
 
 	if len(messages) == 0 {
 		return messages, "", nil

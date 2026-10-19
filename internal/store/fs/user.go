@@ -64,6 +64,15 @@ func (s *Store) UserWorkspace(userID string) string {
 	return filepath.Join(s.userDir(userID), "workspace")
 }
 
+// UserAttachmentDir returns the per-session chat-attachment directory
+// (add-image-attachments): {root}/{userID}/attachments/{sessionID}. Unlike
+// workspace/ it is NOT created eagerly for every user — the upload endpoint
+// creates it lazily on the first attachment. The directory is removed
+// wholesale when the session is deleted.
+func (s *Store) UserAttachmentDir(userID, sessionID string) string {
+	return filepath.Join(s.userDir(userID), "attachments", sessionID)
+}
+
 // UserSkills returns the absolute path of userID's per-user skills directory.
 // Skills live under the workspace in the reserved, hidden .blowball/skills/
 // namespace (data/{userID}/workspace/.blowball/skills) so they travel with the

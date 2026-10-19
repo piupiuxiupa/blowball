@@ -60,6 +60,13 @@ type Message struct {
 	EventType  string `db:"event_type"  json:"event_type"`
 	Status     string `db:"status"      json:"status,omitempty"`
 	Content    string `db:"content"     json:"content"`
+	// Attachments carries image references for attachment-bearing user rows
+	// (add-image-attachments). AttachmentsJSON is the on-disk column; the
+	// hydrated Attachments slice is filled after MySQL scans (and rides the
+	// Redis whole-row JSON cache via its json tag). Empty/NULL on all legacy
+	// rows and non-user rows — identical to the pre-change semantics.
+	AttachmentsJSON []byte                 `db:"attachments_json" json:"-"`
+	Attachments     []MessageAttachmentRef `db:"-"                json:"attachments,omitempty"`
 	// ReasoningContent holds the merged reasoning of an assistant FINAL row
 	// (event_type=message, refactor-message-storage). Legacy event rows keep
 	// it empty — their reasoning lives in separate event_type='reasoning' rows.

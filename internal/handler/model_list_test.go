@@ -40,7 +40,7 @@ func TestModelListHandler_CatalogEcho(t *testing.T) {
 	h := NewModelListHandler([]config.ModelCatalogEntry{
 		{Name: "gpt-5", MaxContextTokens: 400000, MaxCompletionTokens: 16384, Thinking: true,
 			LengthContinue: config.LengthContinueConfig{ExpandStep: 8192, MaxRetries: 2}},
-		{Name: "glm-4.7", MaxContextTokens: 200000, MaxCompletionTokens: 8192, Thinking: false},
+		{Name: "glm-4.7", MaxContextTokens: 200000, MaxCompletionTokens: 8192, Thinking: false, Vision: true},
 	}, "gpt-5", "high")
 
 	w := driveModelsList(t, h)
@@ -53,8 +53,8 @@ func TestModelListHandler_CatalogEcho(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	require.Len(t, body.Models, 2)
-	assert.Equal(t, modelEntry{Name: "gpt-5", MaxContextTokens: 400000, MaxCompletionTokens: 16384, Thinking: true}, body.Models[0])
-	assert.Equal(t, modelEntry{Name: "glm-4.7", MaxContextTokens: 200000, MaxCompletionTokens: 8192, Thinking: false}, body.Models[1])
+	assert.Equal(t, modelEntry{Name: "gpt-5", MaxContextTokens: 400000, MaxCompletionTokens: 16384, Thinking: true, Vision: false}, body.Models[0])
+	assert.Equal(t, modelEntry{Name: "glm-4.7", MaxContextTokens: 200000, MaxCompletionTokens: 8192, Thinking: false, Vision: true}, body.Models[1])
 	assert.Equal(t, "gpt-5", body.Default)
 	assert.Equal(t, "high", body.DefaultReasoningEfft)
 	assert.NotContains(t, w.Body.String(), "length_continue", "the per-entry continuation switch is operator-only and must not be exposed")
