@@ -121,7 +121,7 @@ func serve(configPath, dataRoot, role string) error {
 		Redis: rt.redisStore,
 		FS:    rt.fsStore,
 	}
-	sessSvc := service.NewSessionService(sessDeps)
+	sessSvc := service.NewSessionService(sessDeps).WithAttachmentDir(rt.fsStore.UserAttachmentDir)
 
 	// 3. Engine + health check. Each role gets its own engine with the standard
 	// middleware chain (Recovery → Trace → CORS); auth is applied per-route-group

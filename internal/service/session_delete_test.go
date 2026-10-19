@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,6 +26,70 @@ func newDeleteSvc(m *fakeMySQLStore, r *fakeRedisStore, d *fakeDrain) *SessionSe
 		FS:                &fakeFSStore{},
 		DrainMessageQueue: d.drain,
 	})
+}
+
+// TestDeleteSession_RemovesAttachmentDir verifies step ④
+// (add-image-attachments): after the archive transaction and cache clear,
+// the session's attachments/{sessionID} directory is removed wholesale; a
+// removal failure is logged only and never fails the delete.
+func TestDeleteSession_RemovesAttachmentDir(t *testing.T) {
+	const (
+		userID    = "u-del-att"
+		sessionID = "s-del-att"
+	)
+	root := t.TempDir()
+	dir := filepath.Join(root, userID, "attachments", sessionID)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "img.png"), []byte("png"), 0o644))
+
+	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
+	r := &fakeRedisStore{}
+	d := &fakeDrain{}
+	svc := newDeleteSvc(m, r, d).WithAttachmentDir(func(uid, sid string) string {
+		return filepath.Join(root, uid, "attachments", sid)
+	})
+
+	require.NoError(t, svc.DeleteSession(context.Background(), userID, sessionID))
+	_, err := os.Stat(dir)
+	require.True(t, os.IsNotExist(err), "attachment dir must be removed with the session")
+}
+
+// TestDeleteSession_AttachmentDirRemovalFailureDoesNotFailDelete: RemoveAll
+// errors (e.g. a path under a non-directory) are logged, not surfaced.
+func TestDeleteSession_AttachmentDirRemovalFailureDoesNotFailDelete(t *testing.T) {
+	const (
+		userID    = "u-del-att-err"
+		sessionID = "s-del-att-err"
+	)
+	// A path beneath a regular file makes RemoveAll fail with ENOTDIR.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+
+	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
+	r := &fakeRedisStore{}
+	d := &fakeDrain{}
+	svc := newDeleteSvc(m, r, d).WithAttachmentDir(func(string, string) string {
+		return filepath.Join(blocker, "child")
+	})
+
+	require.NoError(t, svc.DeleteSession(context.Background(), userID, sessionID))
+	require.Equal(t, 1, m.deleteSessionCalls, "the archive+purge already committed")
+}
+
+// TestDeleteSession_NoAttachmentDirWired: the unwired (nil) resolver keeps
+// the pre-attachment delete behavior exactly.
+func TestDeleteSession_NoAttachmentDirWired(t *testing.T) {
+	const (
+		userID    = "u-del-att-nil"
+		sessionID = "s-del-att-nil"
+	)
+	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
+	r := &fakeRedisStore{}
+	d := &fakeDrain{}
+	svc := newDeleteSvc(m, r, d)
+
+	require.NoError(t, svc.DeleteSession(context.Background(), userID, sessionID))
+	require.Equal(t, 1, m.deleteSessionCalls)
 }
 
 // TestDeleteSession_Success_ThreeStepOrder verifies the happy path and its

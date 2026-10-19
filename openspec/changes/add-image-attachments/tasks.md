@@ -36,8 +36,8 @@
 
 ## 7. 会话删除生命周期
 
-- [ ] 7.1 Delete session 事务内归档并删除 `attachments` 行（同 `attachments_deleted` 镜像），事务后 `RemoveAll(attachments/{sessionID})`（失败仅记日志）
-- [ ] 7.2 删除流程测试：附件随会话归档清理、无附件会话行为不变、目录删除失败不致请求失败
+- [x] 7.1 Delete session 事务内归档并删除 `attachments` 行（同 `attachments_deleted` 镜像），事务后 `RemoveAll(attachments/{sessionID})`（失败仅记日志）
+- [x] 7.2 删除流程测试：附件随会话归档清理、无附件会话行为不变、目录删除失败不致请求失败
 
 ## 8. 契约与端到端验证
 

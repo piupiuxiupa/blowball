@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,11 @@ type SessionService struct {
 	fs    FSStore
 	drain func(ctx context.Context) error
 	nudge func()
+	// attachmentDir resolves the per-session chat-attachment directory
+	// (add-image-attachments); nil skips the delete-time directory removal.
+	// Wired from the fs store rather than the FSStore interface so the small
+	// store seam stays focused on the message path.
+	attachmentDir func(userID, sessionID string) string
 }
 
 // NewSessionService wires a SessionService from the bundled deps. The same
@@ -46,6 +52,15 @@ func NewSessionService(deps SessionDeps) *SessionService {
 		drain: deps.DrainMessageQueue,
 		nudge: deps.NudgeMessageFlush,
 	}
+}
+
+// WithAttachmentDir registers the per-session attachment directory resolver
+// used by DeleteSession's step ④ (remove attachments/{sessionID} wholesale).
+// Separate setter so existing wiring/test call sites stay untouched; nil
+// (unwired) preserves the pre-attachment behavior exactly.
+func (s *SessionService) WithAttachmentDir(fn func(userID, sessionID string) string) *SessionService {
+	s.attachmentDir = fn
+	return s
 }
 
 // CreateSession creates a new session owned by userID. It mints a UUID v7
@@ -214,6 +229,19 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID st
 	}
 	if err := s.redis.DelSessionCache(ctx, sessionID); err != nil {
 		log.Warn("redis session cache clear failed; key expires on TTL", zap.Error(err))
+	}
+	// 4) Attachment directory removal (add-image-attachments). The registry
+	// rows were already archived and purged inside the step-② transaction
+	// (mysql.DeleteSession); the directory removal is idempotent best-effort —
+	// a failure leaves an orphaned directory (an operational nuisance, not a
+	// correctness issue) and MUST NOT fail the delete request.
+	if s.attachmentDir != nil {
+		dir := s.attachmentDir(userID, sessionID)
+		if err := os.RemoveAll(dir); err != nil {
+			log.Error("session attachment dir removal failed; orphaned dir left behind",
+				zap.String("dir", dir),
+				zap.Error(err))
+		}
 	}
 	log.Info("session deleted")
 	return nil
