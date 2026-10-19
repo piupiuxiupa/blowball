@@ -343,11 +343,18 @@ func (s *SubAgent) executeAndRecordToolCalls(ctx context.Context, calls []ToolCa
 // dispatchToolCalls runs every tool_call in parallel. Depth-eligible instances
 // intercept spawn_subagent; all other calls go through the narrowed registry.
 func (s *SubAgent) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub) map[string]toolResult {
-	results := make(map[string]toolResult, len(calls))
+	results := emitToolCallEvents(ctx, hub, s.Name(), calls)
+	eventFailed := make(map[string]struct{}, len(results))
+	for id := range results {
+		eventFailed[id] = struct{}{}
+	}
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tc := range calls {
 		tc := tc
+		if _, exists := eventFailed[tc.ID]; exists {
+			continue // its call event could not be sent; do not execute it
+		}
 		g.Go(func() error {
 			res := s.dispatchOne(gctx, tc, hub)
 			mu.Lock()
@@ -363,9 +370,6 @@ func (s *SubAgent) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub 
 // dispatchOne routes spawn_subagent to the shared coordinator and every other
 // tool_call straight to this instance's narrowed registry.
 func (s *SubAgent) dispatchOne(ctx context.Context, tc ToolCall, hub stream.EventHub) toolResult {
-	if !hub.SendCtx(ctx, stream.ToolCallEvent(s.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
-		return toolResult{content: "", isError: true}
-	}
 	if tc.Function.Name == UpdatePlanTool {
 		msg := fmt.Sprintf("tool %q not available: root plan updates are restricted to Confucius", tc.Function.Name)
 		streamAgentError(hub, ctx, s.Name(), msg, "unknown_tool")

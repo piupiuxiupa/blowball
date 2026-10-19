@@ -181,6 +181,68 @@ func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
 	assert.Equal(t, "update_plan", stitched[2].ToolCalls[0].Function.Name)
 }
 
+// TestStitchCompacted_MergedToolUnitStaysTogetherInTail pins the row
+// attribution for a final-row narrated tool round: the merged assistant is
+// attributed through its last placeholder, so a boundary at the final row
+// keeps the assistant call and tool result together in the retained tail.
+func TestStitchCompacted_MergedToolUnitStaysTogetherInTail(t *testing.T) {
+	msgTime := time.Unix(1_700_000_000, 0).UTC()
+	rows := append(compactionRows(2), []model.Message{
+		{
+			ID: 5, MsgTime: msgTime.Add(4 * time.Minute), MsgIndex: 0,
+			SessionID: "sess-1", Agent: model.AgentUser, Role: model.RoleUser,
+			EventType: model.EventTypeMessage, Content: "use the tool", TraceID: "trace-tool",
+		},
+		{
+			ID: 6, MsgTime: msgTime.Add(5 * time.Minute), MsgIndex: 1,
+			SessionID: "sess-1", Agent: model.AgentConfucius, Role: model.RoleAssistant,
+			EventType: model.EventTypeMessage, Content: "checking", ReasoningContent: "reason",
+			TraceID: "trace-tool",
+		},
+		{
+			ID: 7, MsgTime: msgTime.Add(5 * time.Minute), MsgIndex: 2,
+			SessionID: "sess-1", Agent: model.AgentConfucius, Role: model.RoleAssistant,
+			EventType: model.EventTypeToolCall, Content: "grep", TraceID: "trace-tool",
+			ToolCallID: "c1",
+		},
+	}...)
+	calls := []model.ToolCall{{
+		SessionID: "sess-1", TurnID: "trace-tool", ToolCallID: "c1", Name: "grep",
+		Arguments: `{ "q": "x" }`, Result: "result", Status: model.ToolCallStatusCompleted,
+	}}
+
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, calls)
+	require.NoError(t, err)
+	require.Len(t, agentMsgs, 7)
+	require.Len(t, lastRow, 7)
+	assert.Equal(t, 6, lastRow[5], "merged assistant attribution reaches its placeholder")
+
+	// Cut before the merged unit. Its attribution reaches the later placeholder,
+	// so a boundary selected on the preceding message keeps the whole unit in tail.
+	rec := &model.ContextCompaction{
+		Content:          "CHECKPOINT BODY",
+		BoundaryMsgTime:  rows[lastRow[3]].MsgTime,
+		BoundaryMsgIndex: rows[lastRow[3]].MsgIndex,
+		BoundaryMsgID:    rows[lastRow[3]].ID,
+	}
+	stitched := stitchCompacted(rows, calls, agentMsgs, rec)
+	require.NotNil(t, stitched)
+
+	found := false
+	for i := 1; i < len(stitched); i++ {
+		if len(stitched[i].ToolCalls) != 1 || stitched[i].ToolCalls[0].ID != "c1" {
+			continue
+		}
+		found = true
+		require.Less(t, i+1, len(stitched))
+		assert.Equal(t, "tool", stitched[i+1].Role)
+		assert.Equal(t, "c1", stitched[i+1].ToolCallID)
+		assert.Equal(t, "checking", stitched[i].Content)
+		assert.Equal(t, "reason", stitched[i].ReasoningContent)
+	}
+	assert.True(t, found, "the merged assistant/tool unit must survive together in the tail")
+}
+
 // TestStitchCompacted_RecallPairMiddleAndTail: the synthetic recall tool
 // pair is an ordinary transcript unit to compaction — summarized away when
 // its placeholder sits in the shadowed middle, replayed verbatim when it

@@ -101,6 +101,86 @@ func TestBuildRoundFinalBatch_ToolFirstUniquePlaceholderIDs(t *testing.T) {
 	assert.Equal(t, "trace-1:2", batch.msgs[2].ClientMsgID)
 }
 
+// TestBuildRoundFinalBatch_NarratedParallelRoundKeepsResponseOrder covers the
+// prefix-cache invariant at the persistence layer: call placeholders and
+// canonical calls stay in LLM response order even when results complete in the
+// opposite order, and the raw argument bytes survive the render.
+func TestBuildRoundFinalBatch_NarratedParallelRoundKeepsResponseOrder(t *testing.T) {
+	info := testTurnPersistInfo()
+	events := []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.ReasoningEvent(stream.AgentConfucius, "check both"),
+		stream.TokenEvent(stream.AgentConfucius, "running b then a"),
+		stream.ToolCallEvent(stream.AgentConfucius, "c-b", "grep", json.RawMessage(`{ "q": "b" }`)),
+		stream.ToolCallEvent(stream.AgentConfucius, "c-a", "grep", json.RawMessage(`{ "q": "a" }`)),
+		stream.ToolResultEvent(stream.AgentConfucius, "c-a", "A result"),
+		stream.ToolResultEvent(stream.AgentConfucius, "c-b", "B result"),
+	}
+	merged := MergeEvents(events)
+
+	batch, consumed := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(),
+		roundRenderOptions{terminal: true})
+	require.Equal(t, len(merged), consumed)
+	require.Len(t, batch.msgs, 4) // user + final + two placeholders
+	require.Len(t, batch.calls, 2)
+
+	assert.Equal(t, []string{"c-b", "c-a"}, []string{
+		batch.msgs[2].ToolCallID,
+		batch.msgs[3].ToolCallID,
+	})
+	assert.Equal(t, []string{"c-b", "c-a"}, []string{
+		batch.calls[0].ToolCallID,
+		batch.calls[1].ToolCallID,
+	})
+	assert.Equal(t, `{ "q": "b" }`, batch.calls[0].Arguments)
+	assert.Equal(t, `{ "q": "a" }`, batch.calls[1].Arguments)
+
+	got, err := MessagesToAgentMessages(batch.msgs, batch.calls)
+	require.NoError(t, err)
+	require.Len(t, got, 4) // user + one narrated assistant + two results
+	require.Len(t, got[1].ToolCalls, 2)
+	assert.Equal(t, "running b then a", got[1].Content)
+	assert.Equal(t, "check both", got[1].ReasoningContent)
+	assert.Equal(t, []string{"c-b", "c-a"}, []string{
+		got[1].ToolCalls[0].ID,
+		got[1].ToolCalls[1].ID,
+	})
+}
+
+// TestBuildRoundFinalBatch_ConsecutiveToolOnlyRoundsStaySeparate pins the
+// tool-first boundary: a call after a completed result opens a new LLM round,
+// even when neither response emitted token or reasoning text.
+func TestBuildRoundFinalBatch_ConsecutiveToolOnlyRoundsStaySeparate(t *testing.T) {
+	info := testTurnPersistInfo()
+	events := []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.ToolCallEvent(stream.AgentConfucius, "c1", "grep", json.RawMessage(`{}`)),
+		stream.ToolCallEvent(stream.AgentConfucius, "c2", "grep", json.RawMessage(`{}`)),
+		stream.ToolResultEvent(stream.AgentConfucius, "c2", "second"),
+		stream.ToolResultEvent(stream.AgentConfucius, "c1", "first"),
+		stream.ToolCallEvent(stream.AgentConfucius, "c3", "grep", json.RawMessage(`{}`)),
+		stream.ToolResultEvent(stream.AgentConfucius, "c3", "third"),
+	}
+	merged := MergeEvents(events)
+
+	mid, consumed := info.buildRoundFinalBatch(merged, 0, false, time.Now().UTC(), roundRenderOptions{})
+	require.Equal(t, 5, consumed, "c3 opens round 2 after both round-1 results")
+	require.Len(t, mid.msgs, 4) // user + round-1 final + two placeholders
+	require.Len(t, mid.calls, 2)
+	assert.Equal(t, []string{"c1", "c2"}, []string{
+		mid.calls[0].ToolCallID,
+		mid.calls[1].ToolCallID,
+	})
+
+	var flushed turnFlushState
+	flushed.mark(consumed)
+	suffix, _ := info.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(),
+		time.Now().UTC(), roundRenderOptions{terminal: true})
+	require.Len(t, suffix.msgs, 2) // round-2 final + placeholder
+	require.Len(t, suffix.calls, 1)
+	assert.Equal(t, "c3", suffix.calls[0].ToolCallID)
+}
+
 // TestBuildRoundFinalBatch_UserPersistedGating covers the send-time user-row
 // gating in three states: fresh turn (user row included), send-time write
 // landed (pure round suffix from 0), cursor past 0 (suffix only regardless of

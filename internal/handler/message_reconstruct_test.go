@@ -272,7 +272,7 @@ func TestMessagesToAgentMessages_ReasoningAndContentMerged(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-func TestMessagesToAgentMessages_ReasoningFlushedBeforeToolCall(t *testing.T) {
+func TestMessagesToAgentMessages_ReasoningStaysWithToolCall(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "search"},
 		{Agent: stream.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeReasoning, Content: "I need to search."},
@@ -285,11 +285,14 @@ func TestMessagesToAgentMessages_ReasoningFlushedBeforeToolCall(t *testing.T) {
 
 	want := []agent.Message{
 		{Role: "user", Content: "search"},
-		{Role: "assistant", ReasoningContent: "I need to search."},
-		{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID:       "tc-1",
-			Function: agent.ToolCallFunction{Name: "web_search", Arguments: `{"q":"x"}`},
-		}}},
+		{
+			Role:             "assistant",
+			ReasoningContent: "I need to search.",
+			ToolCalls: []agent.ToolCall{{
+				ID:       "tc-1",
+				Function: agent.ToolCallFunction{Name: "web_search", Arguments: `{"q":"x"}`},
+			}},
+		},
 		{Role: "tool", Content: "ok", ToolCallID: "tc-1", Name: "web_search"},
 	}
 	assert.Equal(t, want, got)
@@ -331,11 +334,14 @@ func TestMessagesToAgentMessages_MixedUserAssistantToolTurns(t *testing.T) {
 
 	want := []agent.Message{
 		{Role: "user", Content: "first"},
-		{Role: "assistant", Content: "thinking"},
-		{Role: "assistant", ToolCalls: []agent.ToolCall{{
-			ID:       "tc-1",
-			Function: agent.ToolCallFunction{Name: "web_search", Arguments: `{}`},
-		}}},
+		{
+			Role:    "assistant",
+			Content: "thinking",
+			ToolCalls: []agent.ToolCall{{
+				ID:       "tc-1",
+				Function: agent.ToolCallFunction{Name: "web_search", Arguments: `{}`},
+			}},
+		},
 		{Role: "tool", Content: "ok", ToolCallID: "tc-1", Name: "web_search"},
 		{Role: "assistant", Content: "done"},
 		{Role: "user", Content: "second"},
@@ -492,6 +498,6 @@ func TestMessagesToAgentMessages_FinalRowsMatchLegacyByteForByte(t *testing.T) {
 	finalSeq, err := MessagesToAgentMessages(finals, calls)
 	require.NoError(t, err)
 
-	require.Len(t, legacySeq, 5, "user, content, assistant+tool_calls, tool, content")
+	require.Len(t, legacySeq, 4, "user, narrated assistant+tool_calls, tool, content")
 	require.Equal(t, legacySeq, finalSeq, "final-row reconstruction must be byte-identical to legacy")
 }

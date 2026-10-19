@@ -84,14 +84,7 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 			// placeholder rows carry the wire-format tool unit.
 			if msg.Role == model.RoleAssistant && msg.EventType == model.EventTypeMessage {
 				state.flush(&out, &lastRow)
-				if msg.Content != "" || msg.ReasoningContent != "" {
-					out = append(out, agent.Message{
-						Role:             "assistant",
-						Content:          msg.Content,
-						ReasoningContent: msg.ReasoningContent,
-					})
-					lastRow = append(lastRow, i)
-				}
+				state.beginFinal(msg.Content, msg.ReasoningContent, i)
 				continue
 			}
 			if msg.Role != model.RoleUser {
@@ -105,18 +98,20 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 			if msg.Role != model.RoleAssistant {
 				continue
 			}
-			if state.toolCallsPending() {
-				state.flushToolCalls(&out, &lastRow)
+			if state.afterResult {
+				state.flush(&out, &lastRow)
 			}
+			state.noteTextTrace(msg.TraceID)
 			state.appendToken(runGroupKeyOf(msg), msg.Content, i)
 
 		case model.EventTypeReasoning:
 			if msg.Role != model.RoleAssistant {
 				continue
 			}
-			if state.toolCallsPending() {
-				state.flushToolCalls(&out, &lastRow)
+			if state.afterResult {
+				state.flush(&out, &lastRow)
 			}
+			state.noteTextTrace(msg.TraceID)
 			state.appendReasoning(runGroupKeyOf(msg), msg.Content, i)
 
 		case model.EventTypeToolCall:
@@ -127,8 +122,11 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 			// result both come from the canonical tool_calls row; the
 			// placeholder's own position is the ordering anchor.
 			if msg.ToolCallID != "" {
-				if state.tokensPending() {
-					state.flushTokensAndReasoning(&out, &lastRow)
+				if state.tokensPending() && state.textTraceSet && msg.TraceID != state.textTraceID {
+					// Text from another turn (for example, the exchange before a
+					// send-time recall pair) is already complete; only same-turn
+					// narration joins the following tool unit.
+					state.flush(&out, &lastRow)
 				}
 				c, ok := callsByID[msg.TraceID+""+msg.ToolCallID]
 				if !ok || (c.Result == "" && c.Status != model.ToolCallStatusCompleted) {
@@ -149,10 +147,14 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 					output:     c.Result,
 					row:        i,
 				})
+				state.afterResult = true
 				continue
 			}
-			if state.tokensPending() {
-				state.flushTokensAndReasoning(&out, &lastRow)
+			if state.afterResult {
+				state.flush(&out, &lastRow)
+			}
+			if state.tokensPending() && state.textTraceSet && msg.TraceID != state.textTraceID {
+				state.flush(&out, &lastRow)
 			}
 			// Tool-call batching keys on the agent name alone, NOT the
 			// (agent, run_id) composite: results may interleave arbitrarily
@@ -161,7 +163,9 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 			// arrived yet. Pairing is by tool_call_id inside the batch —
 			// unaffected by run grouping by construction.
 			if msg.Agent != state.toolCallAgent {
-				state.flushToolCalls(&out, &lastRow)
+				if state.toolCallsPending() {
+					state.flush(&out, &lastRow)
+				}
 				state.toolCallAgent = msg.Agent
 			}
 			call, err := parseToolCall(msg.Content)
@@ -191,6 +195,7 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 				output:     output,
 				row:        i,
 			})
+			state.afterResult = true
 
 		default:
 			// Other event types are not part of the prompt history.
@@ -212,9 +217,23 @@ type reconstructState struct {
 	// pre-change single-accumulator behavior.
 	tokenRuns     []runFragment
 	tokenRunIndex map[runGroupKey]int
+	// final is the provider-native assistant prefix of a final-row round. It
+	// stays buffered until the round's adjacent placeholders are known so a
+	// narrated response reconstructs as one assistant message.
+	final         *assistantFragment
+	textTraceID   string
+	textTraceSet  bool
+	afterResult   bool
 	toolCalls     []toolCallEntry
 	toolCallAgent string
 	toolResults   []toolResultEntry
+}
+
+// assistantFragment is the text half of one assistant round.
+type assistantFragment struct {
+	content   string
+	reasoning string
+	row       int
 }
 
 // runFragment is one run's accumulated token/reasoning text. lastRow is the
@@ -307,9 +326,49 @@ func (s *reconstructState) tokensPending() bool {
 }
 func (s *reconstructState) toolCallsPending() bool { return len(s.toolCalls) > 0 }
 
+func (s *reconstructState) beginFinal(content, reasoning string, row int) {
+	s.final = &assistantFragment{content: content, reasoning: reasoning, row: row}
+}
+
+func (s *reconstructState) noteTextTrace(traceID string) {
+	if len(s.tokenRuns) > 0 {
+		return
+	}
+	s.textTraceID = traceID
+	s.textTraceSet = true
+}
+
 func (s *reconstructState) flush(out *[]agent.Message, lastRow *[]int) {
-	s.flushToolCalls(out, lastRow)
+	prefix, hasPrefix, multipleRuns := s.assistantPrefix()
+	if hasPrefix {
+		s.flushToolCallsWithPrefix(out, lastRow, prefix)
+		s.final = nil
+		if !multipleRuns {
+			s.tokenRuns = nil
+			s.tokenRunIndex = nil
+			s.afterResult = false
+			return
+		}
+	} else {
+		s.flushToolCallsWithPrefix(out, lastRow, nil)
+	}
 	s.flushTokensAndReasoning(out, lastRow)
+	s.afterResult = false
+}
+
+// assistantPrefix selects the text to combine with a pending tool unit. A
+// final row is authoritative. Legacy token rows combine when there is exactly
+// one run (the normal top-level case); multiple identity-carrying runs remain
+// separate to avoid garbling concurrent sub-agent histories.
+func (s *reconstructState) assistantPrefix() (*assistantFragment, bool, bool) {
+	if s.final != nil {
+		return s.final, true, len(s.tokenRuns) > 0
+	}
+	if len(s.tokenRuns) == 1 {
+		f := s.tokenRuns[0]
+		return &assistantFragment{content: f.content, reasoning: f.reasoning, row: f.lastRow}, true, false
+	}
+	return nil, false, len(s.tokenRuns) > 1
 }
 
 // flushTokensAndReasoning emits every accumulated run fragment as its own
@@ -329,8 +388,16 @@ func (s *reconstructState) flushTokensAndReasoning(out *[]agent.Message, lastRow
 	s.tokenRunIndex = nil
 }
 
-func (s *reconstructState) flushToolCalls(out *[]agent.Message, lastRow *[]int) {
+func (s *reconstructState) flushToolCallsWithPrefix(out *[]agent.Message, lastRow *[]int, prefix *assistantFragment) {
 	if len(s.toolCalls) == 0 {
+		if prefix != nil && (prefix.content != "" || prefix.reasoning != "") {
+			*out = append(*out, agent.Message{
+				Role:             "assistant",
+				Content:          prefix.content,
+				ReasoningContent: prefix.reasoning,
+			})
+			*lastRow = append(*lastRow, prefix.row)
+		}
 		return
 	}
 
@@ -378,13 +445,25 @@ func (s *reconstructState) flushToolCalls(out *[]agent.Message, lastRow *[]int) 
 				unitLast = row
 			}
 		}
-		*out = append(*out, agent.Message{
-			Role:      "assistant",
-			ToolCalls: paired,
-		})
+		assistant := agent.Message{Role: "assistant", ToolCalls: paired}
+		if prefix != nil {
+			assistant.Content = prefix.content
+			assistant.ReasoningContent = prefix.reasoning
+			if prefix.row > unitLast {
+				unitLast = prefix.row
+			}
+		}
+		*out = append(*out, assistant)
 		*lastRow = append(*lastRow, unitLast)
 		*out = append(*out, toolMsgs...)
 		*lastRow = append(*lastRow, toolMsgRows...)
+	} else if prefix != nil && (prefix.content != "" || prefix.reasoning != "") {
+		*out = append(*out, agent.Message{
+			Role:             "assistant",
+			Content:          prefix.content,
+			ReasoningContent: prefix.reasoning,
+		})
+		*lastRow = append(*lastRow, prefix.row)
 	}
 
 	s.toolCalls = nil

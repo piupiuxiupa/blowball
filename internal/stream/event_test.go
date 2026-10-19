@@ -62,6 +62,16 @@ func TestEventConstructors(t *testing.T) {
 		assert.Equal(t, "rw", got["mode"])
 	})
 
+	t.Run("ToolCallEvent raw arguments preserve bytes", func(t *testing.T) {
+		raw := json.RawMessage(`{ "nested": { "a": 1,  "b": [2, 3] }, "text": "x" }`)
+		e := ToolCallEvent(AgentConfucius, "tc-raw", "mcp_call", raw)
+
+		got, ok := e.Meta[MetaArgs].(json.RawMessage)
+		require.True(t, ok, "raw args should stay json.RawMessage, got %T", e.Meta[MetaArgs])
+		assert.Equal(t, string(raw), string(got),
+			"provider-authored argument bytes must not be compacted before persistence")
+	})
+
 	t.Run("ToolCallEvent nil args", func(t *testing.T) {
 		e := ToolCallEvent(AgentConfucius, "tc-nil", "noop", nil)
 		require.NotNil(t, e.Meta)

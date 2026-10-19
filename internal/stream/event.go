@@ -98,9 +98,10 @@ func AgentErrorEvent(agent, message, code string) StreamEvent {
 }
 
 // ToolCallEvent reports that an agent invoked a tool. `toolCallID` correlates
-// the call with its result event(s); `args` is marshaled to Meta["args"]; if
-// marshaling fails the raw value is stored under Meta["args_raw"] and the
-// marshal error under Meta["args_error"].
+// the call with its result event(s); `args` is marshaled to Meta["args"]; an
+// input that is already json.RawMessage is retained verbatim so provider
+// argument bytes survive persistence. If marshaling fails the raw value is
+// stored under Meta["args_raw"] and the marshal error under Meta["args_error"].
 func ToolCallEvent(agent, toolCallID, toolName string, args any) StreamEvent {
 	e := StreamEvent{
 		Type:    EventToolCall,
@@ -109,6 +110,12 @@ func ToolCallEvent(agent, toolCallID, toolName string, args any) StreamEvent {
 		Meta:    map[string]any{MetaToolCallID: toolCallID},
 	}
 	if args != nil {
+		if raw, ok := args.(json.RawMessage); ok {
+			if raw != nil {
+				e.Meta[MetaArgs] = raw
+			}
+			return e
+		}
 		b, err := json.Marshal(args)
 		if err != nil {
 			e.Meta[MetaArgs+"_error"] = err.Error()

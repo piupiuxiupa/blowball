@@ -50,6 +50,52 @@ func TestRecoverMessages_RedisHit_ShortCircuits(t *testing.T) {
 	assert.Equal(t, 0, m.appendMessagesCalls)
 }
 
+func TestRecoverMessages_RedisAndMySQL_FinalRowsAreIdentical(t *testing.T) {
+	const sessionID = "s-final-rows"
+	rows := []model.Message{
+		{
+			SessionID: sessionID, Agent: model.AgentUser, Role: model.RoleUser,
+			EventType: model.EventTypeMessage, Content: "question", MsgIndex: 0,
+		},
+		{
+			SessionID: sessionID, Agent: model.AgentConfucius, Role: model.RoleAssistant,
+			EventType: model.EventTypeMessage, Content: "checking", ReasoningContent: "reason", MsgIndex: 1,
+		},
+		{
+			SessionID: sessionID, Agent: model.AgentConfucius, Role: model.RoleAssistant,
+			EventType: model.EventTypeToolCall, Content: "grep", ToolCallID: "c1", MsgIndex: 2,
+		},
+	}
+	raws := make([][]byte, len(rows))
+	for i := range rows {
+		raws[i] = marshalled(t, rows[i])
+	}
+
+	redisSvc := NewMessageService(newDeps(
+		&fakeMySQLStore{listMessagesRows: []model.Message{{Content: "must not be read"}}},
+		&fakeRedisStore{getResult: raws},
+		&fakeFSStore{},
+	), nil)
+	mysqlSvc := NewMessageService(newDeps(
+		&fakeMySQLStore{listMessagesRows: rows},
+		&fakeRedisStore{},
+		&fakeFSStore{},
+	), nil)
+
+	fromRedis, err := redisSvc.RecoverMessages(context.Background(), "u", sessionID)
+	require.NoError(t, err)
+	fromMySQL, err := mysqlSvc.RecoverMessages(context.Background(), "u", sessionID)
+	require.NoError(t, err)
+
+	require.Equal(t, rows, fromRedis)
+	require.Equal(t, fromRedis, fromMySQL)
+	redisJSON, err := json.Marshal(fromRedis)
+	require.NoError(t, err)
+	mysqlJSON, err := json.Marshal(fromMySQL)
+	require.NoError(t, err)
+	assert.Equal(t, string(redisJSON), string(mysqlJSON))
+}
+
 // TestRecoverMessages_MissDrainsBeforeMySQLRead verifies the miss path runs
 // the bounded drain BEFORE the MySQL read, then backfills the Redis cache.
 func TestRecoverMessages_MissDrainsBeforeMySQLRead(t *testing.T) {

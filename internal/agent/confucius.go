@@ -360,17 +360,32 @@ type toolResult struct {
 // can react. Returns a map keyed by tool_call.ID. budget carries the per-turn
 // retry token budget shared across all parallel dispatches (concurrency-safe).
 func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub stream.EventHub, budget *retryBudget) map[string]toolResult {
-	results := make(map[string]toolResult, len(calls))
+	results := emitToolCallEvents(ctx, hub, c.Name(), calls)
 	var mu sync.Mutex
 
 	planCalls, executionCalls := splitUpdatePlanCalls(calls)
-	for id, result := range c.dispatchUpdatePlanCalls(ctx, planCalls, hub) {
-		results[id] = result
+	eventFailed := make(map[string]struct{}, len(results))
+	for id := range results {
+		eventFailed[id] = struct{}{}
+	}
+	dispatchablePlanCalls := make([]ToolCall, 0, len(planCalls))
+	for _, tc := range planCalls {
+		if _, exists := results[tc.ID]; !exists {
+			dispatchablePlanCalls = append(dispatchablePlanCalls, tc)
+		}
+	}
+	for id, result := range c.dispatchUpdatePlanCalls(ctx, dispatchablePlanCalls, hub) {
+		if _, exists := results[id]; !exists {
+			results[id] = result
+		}
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tc := range executionCalls {
 		tc := tc // capture for goroutine
+		if _, exists := eventFailed[tc.ID]; exists {
+			continue // its call event could not be sent; do not execute it
+		}
 		g.Go(func() error {
 			// errgroup cancels gctx on first non-nil return; we never want
 			// one tool failure to abort the others, so we always return nil
@@ -417,11 +432,6 @@ func (c *Confucius) dispatchUpdatePlanCalls(ctx context.Context, calls []ToolCal
 	}
 
 	tc := calls[0]
-	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
-		results[tc.ID] = toolResult{content: "", isError: true, resultEventSent: true}
-		return results
-	}
-
 	args, parseResult := parseUpdatePlanArgs(tc)
 	result := parseResult
 	if !result.isError {
@@ -505,9 +515,6 @@ func (c *Confucius) executeAndRecordToolCalls(ctx context.Context, calls []ToolC
 // dispatchOne resolves a single tool_call. spawn_subagent is intercepted by the
 // turn-wide coordinator; all other names go through Confucius's registry.
 func (c *Confucius) dispatchOne(ctx context.Context, tc ToolCall, hub stream.EventHub, budget *retryBudget) toolResult {
-	if !hub.SendCtx(ctx, stream.ToolCallEvent(c.Name(), tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))) {
-		return toolResult{content: "", isError: true}
-	}
 	if IsInvokeTool(tc.Function.Name) {
 		parent := spawnParent{agentName: c.Name(), registry: c.coordinator.rootRegistry, toolNames: c.coordinator.rootToolNames}
 		return c.coordinator.dispatch(ctx, tc, hub, budget, parent)

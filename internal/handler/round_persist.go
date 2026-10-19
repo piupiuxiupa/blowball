@@ -52,8 +52,10 @@ type roundRenderOptions struct {
 //
 // A round closes when the next round's first token/reasoning event arrives —
 // by then all of its tool results have landed (the agent loop awaits
-// parallel results before the next LLM call). opts.terminal closes the
-// trailing round unconditionally. Each closed round emits: one assistant
+// parallel results before the next LLM call) — or when a tool call follows a
+// completed result (a tool-first response opening the next round). opts.
+// terminal closes the trailing round unconditionally. Each closed round emits:
+// one assistant
 // final row (event_type=message, carries merged content/reasoning), then one
 // PLACEHOLDER row per tool call (event_type=tool_call, carries only
 // tool_call_id + name; its msg_index position anchors the interaction in the
@@ -187,6 +189,15 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			}
 
 		case stream.EventToolCall:
+			if cur != nil && afterResult {
+				// Tool-first round boundary. All calls in one response are
+				// emitted before any result, so a call seen after a result
+				// cannot belong to the completed response.
+				emit(cur, false)
+				consumed = i
+				cur = nil
+				afterResult = false
+			}
 			if cur == nil {
 				// Defensive: a call with no preceding narration still owns a
 				// round (models may open with tool_calls directly).
