@@ -12,9 +12,9 @@
 
 ## 3. 发送时认领与绑定
 
-- [ ] 3.1 `internal/handler/message_stream.go`：附件校验改为 `GetAttachmentByUser`；按行状态分流（本会话已绑定→放行 / 已绑定他人→404 / 暂存态→`ClaimAttachment` 认领，失败 404）
-- [ ] 3.2 认领成功后 `os.MkdirAll` 会话目录 + `os.Rename` 暂存文件；rename 失败时 `UnclaimAttachment` best-effort 回滚 + ERROR 日志 + 该附件走既有缺失降级（占位符），turn 不中断
-- [ ] 3.3 `internal/handler/message_stream_persist_test.go` / `turn_run_test.go`：认领成功、并发抢占仅一方成功（可用串行模拟两次认领）、同会话重复引用幂等、跨会话引用已绑定附件 404、rename 失败降级 等用例
+- [x] 3.1 `internal/handler/message_stream.go`：附件校验改为 `GetAttachmentByUser`；按行状态分流（本会话已绑定→放行 / 已绑定他人→404 / 暂存态→`ClaimAttachment` 认领，失败 404）
+- [x] 3.2 认领成功后 `os.MkdirAll` 会话目录 + `os.Rename` 暂存文件；rename 失败时 `UnclaimAttachment` best-effort 回滚 + ERROR 日志 + 该附件走既有缺失降级（占位符），turn 不中断
+- [x] 3.3 `internal/handler/message_stream_persist_test.go` / `turn_run_test.go`：认领成功、并发抢占仅一方成功（可用串行模拟两次认领）、同会话重复引用幂等、跨会话引用已绑定附件 404、rename 失败降级 等用例
 
 ## 4. 孤儿清扫后台任务
 

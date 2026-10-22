@@ -25,6 +25,7 @@ import (
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/skillmarket"
+	"github.com/lush/blowball/internal/store/fs"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -138,6 +139,97 @@ func (h *MessageStreamHandler) WithArtifactService(s *artifact.Service) *Message
 func (h *MessageStreamHandler) WithAttachmentStore(store attachmentStore) *MessageStreamHandler {
 	h.attachments = store
 	return h
+}
+
+// resolveSendAttachment validates one requested attachment id for the send
+// path (add-image-attachments + add-staged-attachment-upload), claiming a
+// staged row into this session when needed. It writes the HTTP error
+// response and reports ok=false when the id cannot be used. Row-state
+// semantics:
+//   - unknown id / foreign owner    → 404 (no existence leak)
+//   - bound to THIS session         → usable as-is (idempotent resend)
+//   - bound to ANOTHER session      → 404
+//   - staged (session_id NULL)      → atomically claimed; a lost race → 404
+func (h *MessageStreamHandler) resolveSendAttachment(c *gin.Context, ctx context.Context, userID, sessionID, id string) (*model.Attachment, bool) {
+	att, err := h.attachments.GetAttachmentByUser(ctx, id, userID)
+	if err != nil {
+		logger.FromContext(ctx).Error("attachment lookup failed",
+			zap.String("op", "handler.send_message"),
+			zap.String("attachment_id", id),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "attachment lookup failed"))
+		return nil, false
+	}
+	if att == nil {
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+id))
+		return nil, false
+	}
+	if att.SessionID != nil {
+		if *att.SessionID == sessionID {
+			return att, true
+		}
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+id))
+		return nil, false
+	}
+	claimed, err := h.attachments.ClaimAttachment(ctx, id, userID, sessionID)
+	if err != nil {
+		logger.FromContext(ctx).Error("attachment claim failed",
+			zap.String("op", "handler.send_message"),
+			zap.String("attachment_id", id),
+			zap.Error(err))
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "attachment claim failed"))
+		return nil, false
+	}
+	if !claimed {
+		// Lost the race: another session claimed (or the sweeper reaped) the
+		// staged row between lookup and claim — indistinguishable from a
+		// foreign id, so the same 404 keeps the no-leak contract.
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+id))
+		return nil, false
+	}
+	h.bindStagedFile(ctx, userID, sessionID, att)
+	return att, true
+}
+
+// bindStagedFile moves a just-claimed attachment file from the staging
+// sentinel directory into the claiming session's directory. The registry row
+// already points at the session, so a rename failure never fails the turn:
+// the claim is rolled back best-effort and the attachment degrades to the
+// deterministic placeholder via the usual missing-file read path
+// (loadCurrentTurnImages).
+func (h *MessageStreamHandler) bindStagedFile(ctx context.Context, userID, sessionID string, att *model.Attachment) {
+	ext, ok := attachmentMimeExt[att.MIME]
+	if !ok {
+		return
+	}
+	src := filepath.Join(h.dataDir, userID, "attachments", fs.AttachmentStagingScope, att.ID+ext)
+	dstDir := filepath.Join(h.dataDir, userID, "attachments", sessionID)
+	dst := filepath.Join(dstDir, att.ID+ext)
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		h.rollbackClaim(ctx, userID, sessionID, att.ID, err)
+		return
+	}
+	if err := os.Rename(src, dst); err != nil {
+		h.rollbackClaim(ctx, userID, sessionID, att.ID, err)
+	}
+}
+
+// rollbackClaim best-effort restores a just-claimed row to staged after the
+// file bind failed, so the sweeper's TTL reclaims the orphaned staging file.
+// A rollback failure leaves a bound row whose file lives under _staging —
+// the read path degrades to the placeholder and the row follows the
+// session-delete lifecycle.
+func (h *MessageStreamHandler) rollbackClaim(ctx context.Context, userID, sessionID, id string, cause error) {
+	logger.FromContext(ctx).Error("staged attachment bind failed; rolling claim back",
+		zap.String("op", "handler.send_message"),
+		zap.String("attachment_id", id),
+		zap.Error(cause))
+	if err := h.attachments.UnclaimAttachment(ctx, id, userID, sessionID); err != nil {
+		logger.FromContext(ctx).Error("attachment claim rollback failed",
+			zap.String("op", "handler.send_message"),
+			zap.String("attachment_id", id),
+			zap.Error(err))
+	}
 }
 
 // loadCurrentTurnImages reads the live turn's attachment files into in-memory
@@ -367,12 +459,14 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		return
 	}
 
-	// Attachment validation (add-image-attachments). Everything here happens
-	// BEFORE the turn-slot claim and any persistence: an invalid reference
-	// never occupies the run slot. Order: count cap → per-id ownership triple
-	// → vision capability — ownership (a 404 resource question per the HTTP
-	// contract) outranks the model-capability rejection (400), so a foreign
-	// id on a non-vision model still surfaces the 404.
+	// Attachment validation (add-image-attachments, relaxed by
+	// add-staged-attachment-upload). Everything here happens BEFORE the
+	// turn-slot claim and any persistence: an invalid reference never
+	// occupies the run slot. Order: count cap → per-id ownership +
+	// staged-claim (resolveSendAttachment) → vision capability — ownership
+	// (a 404 resource question per the HTTP contract) outranks the
+	// model-capability rejection (400), so a foreign id on a non-vision
+	// model still surfaces the 404.
 	var userAttachments []model.MessageAttachmentRef
 	if len(req.AttachmentIDs) > 0 {
 		if len(req.AttachmentIDs) > maxAttachmentsPerMessage {
@@ -393,17 +487,8 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				return
 			}
 			seen[id] = true
-			att, aerr := h.attachments.GetAttachment(ctx, id, userID, sessionID)
-			if aerr != nil {
-				logger.FromContext(ctx).Error("attachment lookup failed",
-					zap.String("op", "handler.send_message"),
-					zap.String("attachment_id", id),
-					zap.Error(aerr))
-				c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "attachment lookup failed"))
-				return
-			}
-			if att == nil {
-				c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+id))
+			att, ok := h.resolveSendAttachment(c, ctx, userID, sessionID, id)
+			if !ok {
 				return
 			}
 			userAttachments = append(userAttachments, model.MessageAttachmentRef{

@@ -18,6 +18,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/run"
+	"github.com/lush/blowball/internal/store/fs"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -212,4 +213,90 @@ func TestMessagesToAgentMessages_AttachmentPlaceholderStable(t *testing.T) {
 	second, _, err := MessagesToAgentMessagesIndexed([]model.Message{row}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, first[0].Content, second[0].Content)
+}
+
+// plantStaged plants an uploaded-but-unbound attachment (session_id NULL) and
+// its file under the _staging sentinel directory (add-staged-attachment-
+// upload). data nil plants the registry row only (no file).
+func (e *attachmentSendEnv) plantStaged(t *testing.T, id, filename string, data []byte) {
+	t.Helper()
+	e.atts.rows[id] = model.Attachment{ID: id, UserID: "user-1", SessionID: nil, Filename: filename, MIME: "image/png", Size: int64(len(data))}
+	if data != nil {
+		dir := filepath.Join(e.dataDir, "user-1", "attachments", fs.AttachmentStagingScope)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, id+".png"), data, 0o644))
+	}
+}
+
+// TestSendMessage_Attachments_StagedClaimed: a staged id sent to a (possibly
+// brand-new) session is claimed atomically, the file moves into the session
+// directory, and the image rides the current turn inline — the whole point of
+// add-staged-attachment-upload.
+func TestSendMessage_Attachments_StagedClaimed(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "shot.png", pngBytes)
+
+	w := env.post(t, attachmentBody(att1))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Row bound to the session; file moved out of staging.
+	row := env.atts.rows[att1]
+	require.NotNil(t, row.SessionID)
+	assert.Equal(t, "sess-1", *row.SessionID)
+	stagedPath := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope, att1+".png")
+	_, err := os.Stat(stagedPath)
+	require.True(t, os.IsNotExist(err), "claimed file must leave the staging dir")
+	boundPath := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1", att1+".png")
+	got, err := os.ReadFile(boundPath)
+	require.NoError(t, err)
+	assert.Equal(t, pngBytes, got)
+
+	// The turn carried the image inline.
+	last := env.stub.gotMessages[len(env.stub.gotMessages)-1]
+	require.Len(t, last.Images, 1)
+	assert.Equal(t, att1, last.Images[0].AttachmentID)
+	assert.Equal(t, pngBytes, last.Images[0].Data)
+}
+
+// TestSendMessage_Attachments_BoundToOtherSessionRejected: once claimed, an
+// attachment is that session's forever — another session's reference 404s.
+func TestSendMessage_Attachments_BoundToOtherSessionRejected(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.atts.rows[att1] = model.Attachment{ID: att1, UserID: "user-1", SessionID: ptrStr("sess-2"), Filename: "x.png", MIME: "image/png"}
+
+	w := env.post(t, attachmentBody(att1))
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "attachment not found")
+	assert.Empty(t, env.redis.dualBatches, "rejection must precede any persistence")
+}
+
+// TestSendMessage_Attachments_StagedClaimRaceLost: the row looked staged at
+// lookup time but the atomic claim lost (a concurrent send in another
+// session won) — indistinguishable from a foreign id by contract.
+func TestSendMessage_Attachments_StagedClaimRaceLost(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "shot.png", pngBytes)
+	env.atts.claimHook = func(_, _, _ string) (bool, error) { return false, nil }
+
+	w := env.post(t, attachmentBody(att1))
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Empty(t, env.redis.dualBatches, "a lost claim must not occupy the turn or persist")
+	assert.Nil(t, env.atts.rows[att1].SessionID, "lost claim leaves the row staged")
+}
+
+// TestSendMessage_Attachments_StagedBindFailureDegrades: the claim won but
+// the file vanished before the rename — the claim rolls back and the turn
+// continues with the deterministic placeholder (attachments never kill a
+// turn).
+func TestSendMessage_Attachments_StagedBindFailureDegrades(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "gone.png", nil) // row only, no staged file
+
+	w := env.post(t, attachmentBody(att1))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	last := env.stub.gotMessages[len(env.stub.gotMessages)-1]
+	assert.Empty(t, last.Images)
+	assert.Contains(t, last.Content, "[图片: gone.png]")
+	assert.Nil(t, env.atts.rows[att1].SessionID, "failed bind must roll the claim back to staged")
 }
