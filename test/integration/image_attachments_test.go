@@ -199,7 +199,8 @@ func TestImageAttachments_EndToEnd(t *testing.T) {
 	env.mysqlFake.mu.Unlock()
 	assert.False(t, liveRow, "live registry row purged")
 	require.True(t, archived, "registry row archived")
-	assert.Equal(t, defaultSessionID, archivedRow.SessionID)
+	require.NotNil(t, archivedRow.SessionID)
+	assert.Equal(t, defaultSessionID, *archivedRow.SessionID)
 }
 
 // findLLMRequest returns the first recorded LLM request containing a message
@@ -216,4 +217,119 @@ func findLLMRequest(t *testing.T, llm *scriptedLLMClient, pred func(agent.Messag
 	}
 	t.Fatalf("no recorded LLM request matches the predicate among %d calls", len(llm.requests()))
 	return agent.LLMRequest{}
+}
+
+// uploadStagedAttachment posts one image to the session-independent staged
+// endpoint (add-staged-attachment-upload) and returns its attachment id.
+func uploadStagedAttachment(t *testing.T, env *testEnv, token string) string {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", "staged.png")
+	require.NoError(t, err)
+	_, err = fw.Write(chatPNG)
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/attachments", &body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "staged upload body: %s", w.Body.String())
+
+	var up struct {
+		AttachmentID string `json:"attachment_id"`
+		MIME         string `json:"mime"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &up))
+	require.NotEmpty(t, up.AttachmentID)
+	return up.AttachmentID
+}
+
+// TestImageAttachments_StagedEndToEnd drives the add-staged-attachment-upload
+// flow through the real stack: upload WITHOUT a session → the staged row is
+// invisible to the content endpoint → the first message of a (possibly new)
+// session claims it → the file moves into the session directory and the LLM
+// request carries the image inline → history and the content endpoint behave
+// exactly like a session-scoped upload → deleting the session removes the
+// claimed file but leaves OTHER staged uploads untouched.
+func TestImageAttachments_StagedEndToEnd(t *testing.T) {
+	llm := newScriptedLLMClient(
+		scriptedLLMResponse{
+			tokens: []string{"a staged screenshot"}, content: "a staged screenshot", finishReason: "stop",
+			usage: agent.Usage{PromptTokens: 30, CompletionTokens: 5, TotalTokens: 35},
+		},
+		scriptedLLMResponse{content: "Staged chat", finishReason: "stop",
+			usage: agent.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2}},
+	)
+	env := newTestEnvWithConfig(t, llm, imageAttachmentsTestConfig())
+	token := authToken(t, defaultUserID)
+
+	// 1) Staged upload: no session involved, file parked under _staging.
+	attID := uploadStagedAttachment(t, env, token)
+	stagedPath := filepath.Join(env.fsSvc.UserAttachmentStagingDir(defaultUserID), attID+".png")
+	_, err := os.Stat(stagedPath)
+	require.NoError(t, err, "staged bytes must land under the _staging sentinel")
+
+	// A second staged upload stays behind after the session delete (step 6).
+	keepID := uploadStagedAttachment(t, env, token)
+
+	// 2) The content endpoint never serves a staged row.
+	stagedContent := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/"+defaultSessionID+"/attachments/"+attID+"/content?token="+token, nil)
+	scw := httptest.NewRecorder()
+	env.engine.ServeHTTP(scw, stagedContent)
+	require.Equal(t, http.StatusNotFound, scw.Code)
+
+	// 3) The first message claims the staged id: file moves into the session
+	// directory and the model sees the image inline.
+	w := env.postMessage(fmt.Sprintf(`{"content":"what is in this screenshot?","model":%q,"attachment_ids":[%q]}`,
+		visionChatModel, attID), token)
+	require.Equal(t, http.StatusOK, w.Code, "sse body: %s", w.Body.String())
+	types, _ := parseSSEBody(t, w.Body.String())
+	requireEventPresent(t, types, stream.EventDone)
+	env.waitForPersistedTurn(t, defaultSessionID, 1)
+
+	_, err = os.Stat(stagedPath)
+	require.True(t, os.IsNotExist(err), "the claim must move the file out of _staging")
+	boundPath := filepath.Join(env.fsSvc.UserAttachmentDir(defaultUserID, defaultSessionID), attID+".png")
+	got, err := os.ReadFile(boundPath)
+	require.NoError(t, err)
+	assert.Equal(t, chatPNG, got)
+
+	req1 := findLLMRequest(t, llm, func(m agent.Message) bool {
+		return m.Role == "user" && strings.HasPrefix(m.Content, "what is in this screenshot?")
+	})
+	last := req1.Messages[len(req1.Messages)-1]
+	require.Len(t, last.Images, 1)
+	assert.Equal(t, attID, last.Images[0].AttachmentID)
+	assert.Equal(t, chatPNG, last.Images[0].Data)
+
+	// 4) History carries the structured reference.
+	hist := env.getSessionMessages(defaultSessionID, "", token)
+	require.Equal(t, http.StatusOK, hist.Code)
+	assert.Contains(t, hist.Body.String(), attID)
+
+	// 5) Once claimed, the content endpoint serves it like any bound upload.
+	contentURL := "/api/v1/sessions/" + defaultSessionID + "/attachments/" + attID + "/content?token=" + token
+	cw := httptest.NewRecorder()
+	env.engine.ServeHTTP(cw, httptest.NewRequest(http.MethodGet, contentURL, nil))
+	require.Equal(t, http.StatusOK, cw.Code)
+	assert.Equal(t, chatPNG, cw.Body.Bytes())
+
+	// 6) Deleting the session removes the claimed attachment but leaves the
+	// still-staged one (and its file) alone.
+	del := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+defaultSessionID, nil)
+	del.Header.Set("Authorization", "Bearer "+token)
+	dw := httptest.NewRecorder()
+	env.engine.ServeHTTP(dw, del)
+	require.Equal(t, http.StatusNoContent, dw.Code, "delete body: %s", dw.Body.String())
+
+	_, err = os.Stat(env.fsSvc.UserAttachmentDir(defaultUserID, defaultSessionID))
+	require.True(t, os.IsNotExist(err), "session delete must remove the claimed attachment dir")
+	keepPath := filepath.Join(env.fsSvc.UserAttachmentStagingDir(defaultUserID), keepID+".png")
+	keepBytes, err := os.ReadFile(keepPath)
+	require.NoError(t, err, "session delete must not touch other staged uploads")
+	assert.Equal(t, chatPNG, keepBytes)
 }

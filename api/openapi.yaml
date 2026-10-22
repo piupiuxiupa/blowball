@@ -539,16 +539,20 @@ components:
             type: string
             format: uuid
           description: |
-            Image attachments previously uploaded to this session via
+            Image attachments uploaded either to this session via
             `POST /api/v1/sessions/{session_id}/attachments`
-            (add-image-attachments). Each id must resolve against the
-            attachment registry's (id, user, session) ownership triple — an
-            unknown or foreign id returns 404. The turn's resolved model must
-            carry the catalog `vision` capability; otherwise the request is
-            rejected with 400 `MODEL_NOT_VISION` before any persistence. The
-            current turn's model request inlines the images as `image_url`
-            content parts; from the next turn on they replay as deterministic
-            text placeholders. Empty/omitted is the plain-text request.
+            (add-image-attachments) or staged session-independently via
+            `POST /api/v1/attachments` (add-staged-attachment-upload). Each
+            id must belong to the authenticated user AND be bound to this
+            session or still be staged; a staged id is claimed into this
+            session atomically on send (first claimant wins). Unknown,
+            foreign, already-claimed-elsewhere, or claim-lost ids return 404.
+            The turn's resolved model must carry the catalog `vision`
+            capability; otherwise the request is rejected with 400
+            `MODEL_NOT_VISION` before any persistence. The current turn's
+            model request inlines the images as `image_url` content parts;
+            from the next turn on they replay as deterministic text
+            placeholders. Empty/omitted is the plain-text request.
     TurnStatusResponse:
       type: object
       required: [run_id, status]
@@ -1268,6 +1272,64 @@ paths:
                   status:
                     type: string
                     example: ok
+  /api/v1/attachments:
+    post:
+      tags: [Session]
+      summary: Upload a chat image attachment without a session (add-staged-attachment-upload).
+      description: |
+        Registers one chat image BEFORE any session exists, so clients can
+        upload the moment an image is picked instead of blocking the first
+        send on a slow network. The MIME sniffing, format allowlist
+        (`image/png`, `image/jpeg`, `image/webp`, `image/gif`), 8 MiB cap,
+        and immutability contract are identical to the session-scoped
+        endpoint. Bytes land at
+        `data/{user}/attachments/_staging/{uuid}.{ext}` and the registry row
+        is born STAGED (`session_id` NULL): it is not served by the content
+        endpoint and not attached to any message until
+        `POST .../sessions/{session_id}/messages` references the id, which
+        claims the attachment into that session atomically (first claimant
+        wins; every later session gets 404).
+
+        Staged attachments are a bounded resource: at most 20 unbound uploads
+        per user (429 past that), and any staged image still unclaimed after
+        24 hours is reaped by the orphan sweeper.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The image bytes (≤ 8 MiB; magic-byte sniffed).
+      responses:
+        '200':
+          description: Attachment registered (staged, unbound).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AttachmentUploadResponse'}
+        '400':
+          description: "`UNSUPPORTED_IMAGE_TYPE`: the sniffed type is not one of the four accepted image formats."
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: "`FILE_TOO_LARGE`: the file exceeds 8 MiB."
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429':
+          description: "`TOO_MANY_STAGED_ATTACHMENTS`: the per-user staged quota (20 unbound uploads) is exhausted."
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500':
+          $ref: '#/components/responses/Internal'
   /api/v1/auth/login:
     post:
       tags: [Auth]

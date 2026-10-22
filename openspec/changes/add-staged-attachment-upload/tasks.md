@@ -23,7 +23,7 @@
 
 ## 5. 契约与验证
 
-- [ ] 5.1 `api/openapi.yaml`：新增 `POST /api/v1/attachments`（响应/错误码），更新 `attachment_ids` 描述为接受本会话已绑定或暂存附件
-- [ ] 5.2 `test/integration/`：端到端——暂存上传 → 新会话首条消息认领绑定 → 历史读取附件元数据 → 内容端点可读；删会话不触碰其他暂存附件
-- [ ] 5.3 `make test`（race）与 `make lint` 全绿；确认 `loadCurrentTurnImages`、内容端点、删会话 `RemoveAll` 路径未被改动
-- [ ] 5.4 归档前确认 `add-image-attachments` 已归档/同步（本变更 spec delta 的基线）
+- [x] 5.1 `api/openapi.yaml`：新增 `POST /api/v1/attachments`（响应/错误码），更新 `attachment_ids` 描述为接受本会话已绑定或暂存附件
+- [x] 5.2 `test/integration/`：端到端——暂存上传 → 新会话首条消息认领绑定 → 历史读取附件元数据 → 内容端点可读；删会话不触碰其他暂存附件
+- [x] 5.3 `make test`（race）与 `make lint` 全绿；确认 `loadCurrentTurnImages`、内容端点、删会话 `RemoveAll` 路径未被改动
+- [x] 5.4 归档前确认 `add-image-attachments` 已归档/同步（本变更 spec delta 的基线）
