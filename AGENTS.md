@@ -33,8 +33,8 @@ Tests use Go's `testing` package, with Testify and lightweight fakes available. 
 
 History follows Conventional Commits with imperative, lowercase subjects, for example `feat(agent): ...`, `fix(handler): ...`, or `test(llmraw): ...`. Keep commits scoped to one concern. Pull requests should explain the change and rationale, list tests run, call out API/schema/config migrations, and link related issues. Include logs or screenshots when runtime behavior changes.
 
-Commit immediately after finishing each feature (or self-contained piece of one). Do not leave completed work uncommitted in the working tree; run the relevant tests first, then create a scoped Conventional Commit for the change.
+Commit immediately after finishing each feature (or self-contained piece of one). Do not leave completed work uncommitted in the working tree; run the relevant tests first, then create a scoped Conventional Commit for the change. Never commit build artifacts such as the `bin/` output of `make build`; commits should contain only source, tests, docs, and config examples.
 
 ## Security & Configuration
 
-Never commit `config.yaml`, credentials, runtime data, or logs. Keep secret examples in `config.example.yaml` and use `${ENV_VAR}` expansion. Preserve JWT checks and per-user workspace path scoping when changing handlers or tools.
+Never commit `config.yaml`, credentials, runtime data, logs, or build artifacts (e.g. `bin/`). Keep secret examples in `config.example.yaml` and use `${ENV_VAR}` expansion. Preserve JWT checks and per-user workspace path scoping when changing handlers or tools.
