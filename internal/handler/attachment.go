@@ -40,15 +40,9 @@ const maxAttachmentsPerMessage = 4
 // concurrent uploads.
 const maxStagedAttachmentsPerUser = 20
 
-// attachmentMimeExt maps the four sniffed image formats onto the on-disk
-// extension. The extension derives from the SNIFFED type (never the client
-// filename), so the stored file always matches its bytes.
-var attachmentMimeExt = map[string]string{
-	"image/png":  ".png",
-	"image/jpeg": ".jpg",
-	"image/webp": ".webp",
-	"image/gif":  ".gif",
-}
+// attachmentMimeExt is the shared MIME→extension table (model.AttachmentMIMEExt)
+// under its historical local name.
+var attachmentMimeExt = model.AttachmentMIMEExt
 
 // attachmentStore is the registry subset the attachment and streaming
 // handlers need; satisfied by *mysql.Store and fakes in tests.

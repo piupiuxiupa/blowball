@@ -18,8 +18,8 @@
 
 ## 4. 孤儿清扫后台任务
 
-- [ ] 4.1 新增清扫组件（参照 `internal/run/drain.go` keeper 模式）：ticker 每 10 分钟执行一轮，删除 `session_id IS NULL AND create_time < now()-24h` 的行与对应 `_staging` 文件；单行失败记日志继续；服务启动时注册、关停时退出
-- [ ] 4.2 清扫单测：过期删除、未过期跳过、已绑定不触碰、文件缺失时删行继续
+- [x] 4.1 新增清扫组件（参照 `internal/run/drain.go` keeper 模式）：ticker 每 10 分钟执行一轮，删除 `session_id IS NULL AND create_time < now()-24h` 的行与对应 `_staging` 文件；单行失败记日志继续；服务启动时注册、关停时退出
+- [x] 4.2 清扫单测：过期删除、未过期跳过、已绑定不触碰、文件缺失时删行继续
 
 ## 5. 契约与验证
 

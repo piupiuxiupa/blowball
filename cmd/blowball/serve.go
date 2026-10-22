@@ -163,6 +163,18 @@ func serve(configPath, dataRoot, role string) error {
 		}()
 	}
 
+	// Staged-attachment orphan sweeper (add-staged-attachment-upload): staged
+	// uploads never get a session-delete cleanup, so roles serving the API
+	// partition run the TTL reaper. The agent role never does — in a split
+	// deployment exactly one api node owns the sweep. Best-effort: the loop
+	// logs and survives its own failures.
+	if role != "agent" {
+		sweepCtx, sweepCancel := context.WithCancel(context.Background())
+		defer sweepCancel()
+		go service.NewAttachmentSweeper(rt.mysqlStore, rt.fsStore.UserAttachmentStagingDir).Start(sweepCtx)
+		log.Info("staged attachment sweeper started", zap.String("role", role))
+	}
+
 	// 5. Per-role listener. all and api listen on server.port; agent listens on
 	// server.agent_port. D2: all keeps a single listener on server.port so any
 	// existing caller (tests, dev proxy, monitoring) keeps working unchanged.

@@ -31,6 +31,18 @@ type Attachment struct {
 	CreateTime time.Time `db:"create_time" json:"create_time"`
 }
 
+// AttachmentMIMEExt maps the four sniffed image formats onto the on-disk
+// extension. The extension derives from the SNIFFED type (never the client
+// filename), so the stored file always matches its bytes. Shared by the
+// upload handlers (write), the send path (read), and the staged-attachment
+// sweeper (delete).
+var AttachmentMIMEExt = map[string]string{
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/webp": ".webp",
+	"image/gif":  ".gif",
+}
+
 // MessageAttachmentRef is one image reference embedded in a message row's
 // attachments_json column. Filename/MIME are denormalized from the registry
 // row at send time — attachment metadata is immutable, so the copy can never
