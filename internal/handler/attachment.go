@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -31,6 +32,14 @@ const maxAttachmentBytes = 8 << 20
 // both a cost backstop and a guard against gateway per-request image limits.
 const maxAttachmentsPerMessage = 4
 
+// maxStagedAttachmentsPerUser bounds how many unbound (staged) images one
+// user may hold at once (add-staged-attachment-upload). Staged uploads never
+// get a session-delete cleanup, so this quota plus the orphan sweeper's TTL
+// are the two guards against unbounded accumulation. A cost backstop, not a
+// hard guarantee: the count-then-insert window can overshoot slightly under
+// concurrent uploads.
+const maxStagedAttachmentsPerUser = 20
+
 // attachmentMimeExt maps the four sniffed image formats onto the on-disk
 // extension. The extension derives from the SNIFFED type (never the client
 // filename), so the stored file always matches its bytes.
@@ -41,11 +50,16 @@ var attachmentMimeExt = map[string]string{
 	"image/gif":  ".gif",
 }
 
-// attachmentStore is the registry subset AttachmentHandler needs; satisfied
-// by *mysql.Store and fakes in tests.
+// attachmentStore is the registry subset the attachment and streaming
+// handlers need; satisfied by *mysql.Store and fakes in tests.
 type attachmentStore interface {
 	InsertAttachment(ctx context.Context, a model.Attachment) error
 	GetAttachment(ctx context.Context, id, userID, sessionID string) (*model.Attachment, error)
+	// add-staged-attachment-upload: staged upload quota + send-time claim.
+	CountStagedAttachments(ctx context.Context, userID string) (int, error)
+	GetAttachmentByUser(ctx context.Context, id, userID string) (*model.Attachment, error)
+	ClaimAttachment(ctx context.Context, id, userID, sessionID string) (bool, error)
+	UnclaimAttachment(ctx context.Context, id, userID, sessionID string) error
 }
 
 // sessionGetter is the session-ownership subset needed here; satisfied by
@@ -75,6 +89,10 @@ func NewAttachmentHandler(store attachmentStore, sessions sessionGetter, fsStore
 // size is capped at 8 MiB, and the bytes land at
 // data/{user}/attachments/{session}/{uuid}.{ext} — the original filename is
 // metadata only and never participates in the path.
+//
+// Kept as the "upload-and-immediately-bind" alias of the staged upload
+// (add-staged-attachment-upload): same pipeline, but the row is born bound to
+// the session in the URL.
 func (h *AttachmentHandler) Upload(c *gin.Context) {
 	userID := middleware.UserIDFromCtx(c)
 	sessionID := c.Param("session_id")
@@ -92,6 +110,58 @@ func (h *AttachmentHandler) Upload(c *gin.Context) {
 		return
 	}
 
+	filename, data, mime, ok := h.readUploadedImage(c)
+	if !ok {
+		return
+	}
+	att, ok := h.persistAttachment(c, ctx, userID, h.fs.UserAttachmentDir(userID, sessionID), &sessionID, filename, data, mime)
+	if !ok {
+		return
+	}
+	respondAttachment(c, att)
+}
+
+// UploadStaged handles POST /api/v1/attachments
+// (add-staged-attachment-upload): the session-independent variant that lets
+// clients upload the moment an image is picked, before any session exists.
+// The pipeline is identical to Upload except the row is born STAGED
+// (session_id NULL) and the file lands under
+// data/{user}/attachments/_staging/; the send path claims it into a session
+// later. The per-user staged quota is the cost backstop for an upload
+// surface that never gets a session-delete cleanup.
+func (h *AttachmentHandler) UploadStaged(c *gin.Context) {
+	userID := middleware.UserIDFromCtx(c)
+	tid := middleware.TraceIDFromCtx(c)
+	ctx := trace.WithContext(c.Request.Context(), tid)
+
+	staged, err := h.store.CountStagedAttachments(ctx, userID)
+	if err != nil {
+		logAttachment(ctx, "attachment.upload_staged.count", userID, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "staged attachment count failed"))
+		return
+	}
+	if staged >= maxStagedAttachmentsPerUser {
+		c.JSON(http.StatusTooManyRequests, errorBody("TOO_MANY_STAGED_ATTACHMENTS",
+			fmt.Sprintf("at most %d staged attachments are allowed per user", maxStagedAttachmentsPerUser)))
+		return
+	}
+
+	filename, data, mime, ok := h.readUploadedImage(c)
+	if !ok {
+		return
+	}
+	att, ok := h.persistAttachment(c, ctx, userID, h.fs.UserAttachmentStagingDir(userID), nil, filename, data, mime)
+	if !ok {
+		return
+	}
+	respondAttachment(c, att)
+}
+
+// readUploadedImage validates the multipart body of one attachment upload and
+// returns the raw bytes, the sniffed MIME, and the display filename. On any
+// validation failure it writes the error response itself and reports ok=false
+// (the error branch is identical for both upload endpoints).
+func (h *AttachmentHandler) readUploadedImage(c *gin.Context) (filename string, data []byte, mime string, ok bool) {
 	// Cap the body before multipart parsing (the upload-endpoint convention):
 	// an oversized image is rejected as it arrives. The slack covers the
 	// multipart framing overhead around the 8 MiB payload.
@@ -100,81 +170,91 @@ func (h *AttachmentHandler) Upload(c *gin.Context) {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
-			return
+			return "", nil, "", false
 		}
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", err.Error()))
-		return
+		return "", nil, "", false
 	}
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "file field is required"))
-		return
+		return "", nil, "", false
 	}
 	if fileHeader.Size > maxAttachmentBytes {
 		c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
-		return
+		return "", nil, "", false
 	}
 
 	f, err := fileHeader.Open()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "cannot open uploaded file"))
-		return
+		return "", nil, "", false
 	}
 	defer f.Close()
-	data, err := io.ReadAll(f)
+	data, err = io.ReadAll(f)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", "cannot read uploaded file"))
-		return
+		return "", nil, "", false
 	}
 	if int64(len(data)) > maxAttachmentBytes {
 		c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
-		return
+		return "", nil, "", false
 	}
 
-	mime, ok := xizhi.SniffImageMIME(data)
+	mime, ok = xizhi.SniffImageMIME(data)
 	if !ok {
 		c.JSON(http.StatusBadRequest, errorBody("UNSUPPORTED_IMAGE_TYPE",
 			"unsupported image format (supported: image/png, image/jpeg, image/webp, image/gif)"))
-		return
+		return "", nil, "", false
 	}
+	return sanitizeAttachmentFilename(fileHeader.Filename), data, mime, true
+}
 
+// persistAttachment writes the image bytes under dir and registers the row.
+// sessionID nil inserts a STAGED row (add-staged-attachment-upload). On any
+// failure it writes the error response and reports ok=false; a failed
+// registry insert also removes the just-written file so disk and table never
+// disagree about which ids exist.
+func (h *AttachmentHandler) persistAttachment(c *gin.Context, ctx context.Context, userID, dir string, sessionID *string, filename string, data []byte, mime string) (model.Attachment, bool) {
 	attachmentID, err := uuid.NewV7()
 	if err != nil {
-		logAttachment(ctx, "attachment.upload.uuid", sessionID, err)
+		logAttachment(ctx, "attachment.upload.uuid", dir, err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "generate attachment id failed"))
-		return
+		return model.Attachment{}, false
 	}
 
-	dir := h.fs.UserAttachmentDir(userID, sessionID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		logAttachment(ctx, "attachment.upload.mkdir", dir, err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create attachment dir failed"))
-		return
+		return model.Attachment{}, false
 	}
 	dst := filepath.Join(dir, attachmentID.String()+attachmentMimeExt[mime])
 	if err := os.WriteFile(dst, data, 0o644); err != nil {
 		logAttachment(ctx, "attachment.upload.write", dst, err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "save attachment failed"))
-		return
+		return model.Attachment{}, false
 	}
 
 	att := model.Attachment{
 		ID:        attachmentID.String(),
 		UserID:    userID,
-		SessionID: &sessionID,
-		Filename:  sanitizeAttachmentFilename(fileHeader.Filename),
+		SessionID: sessionID,
+		Filename:  filename,
 		MIME:      mime,
 		Size:      int64(len(data)),
 	}
 	if err := h.store.InsertAttachment(ctx, att); err != nil {
-		// Registry insert failed — remove the just-written file so disk and
-		// table never disagree about which ids exist.
 		_ = os.Remove(dst)
 		logAttachment(ctx, "attachment.upload.insert", att.ID, err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "register attachment failed"))
-		return
+		return model.Attachment{}, false
 	}
+	return att, true
+}
 
+// respondAttachment renders the shared upload response (identical for the
+// session-scoped and the staged endpoint).
+func respondAttachment(c *gin.Context, att model.Attachment) {
 	c.JSON(http.StatusOK, gin.H{
 		"attachment_id": att.ID,
 		"filename":      att.Filename,

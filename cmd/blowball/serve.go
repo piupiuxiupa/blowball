@@ -518,6 +518,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		SessionGet:                       sessionHandler.GetSession,
 		SessionMessages:                  sessionHandler.GetSessionMessages,
 		AttachmentUpload:                 attachmentHandler.Upload,
+		AttachmentStagedUpload:           attachmentHandler.UploadStaged,
 		AttachmentContent:                attachmentHandler.Content,
 		SubAgentRuns:                     subAgentHandler.ListRuns,
 		SubAgentRunDetail:                subAgentHandler.GetRun,

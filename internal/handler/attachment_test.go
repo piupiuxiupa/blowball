@@ -18,6 +18,8 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/store/fs"
+
+	"github.com/google/uuid"
 )
 
 // pngBytes is a minimal PNG-magic payload — sniffing checks the leading
@@ -46,6 +48,45 @@ func (f *fakeAttachmentStore) GetAttachment(_ context.Context, id, userID, sessi
 	}
 	cp := a
 	return &cp, nil
+}
+
+func (f *fakeAttachmentStore) CountStagedAttachments(_ context.Context, userID string) (int, error) {
+	n := 0
+	for _, a := range f.rows {
+		if a.UserID == userID && a.SessionID == nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeAttachmentStore) GetAttachmentByUser(_ context.Context, id, userID string) (*model.Attachment, error) {
+	a, ok := f.rows[id]
+	if !ok || a.UserID != userID {
+		return nil, nil
+	}
+	cp := a
+	return &cp, nil
+}
+
+func (f *fakeAttachmentStore) ClaimAttachment(_ context.Context, id, userID, sessionID string) (bool, error) {
+	a, ok := f.rows[id]
+	if !ok || a.UserID != userID || a.SessionID != nil {
+		return false, nil
+	}
+	a.SessionID = ptrStr(sessionID)
+	f.rows[id] = a
+	return true, nil
+}
+
+func (f *fakeAttachmentStore) UnclaimAttachment(_ context.Context, id, userID, sessionID string) error {
+	a, ok := f.rows[id]
+	if !ok || a.UserID != userID || a.SessionID == nil || *a.SessionID != sessionID {
+		return nil
+	}
+	a.SessionID = nil
+	f.rows[id] = a
+	return nil
 }
 
 type fakeSessionGetter struct {
@@ -80,6 +121,7 @@ func newAttachmentTestEnv(t *testing.T, owner string) (*AttachmentHandler, *fake
 		c.Next()
 	})
 	authed.POST("/sessions/:session_id/attachments", h.Upload)
+	authed.POST("/attachments", h.UploadStaged)
 	// Query-token partition (same simulation).
 	v1.GET("/sessions/:session_id/attachments/:attachment_id/content", func(c *gin.Context) {
 		c.Set(middleware.UserIDKey, owner)
@@ -207,4 +249,81 @@ func TestAttachmentContent_CrossUserAndBadID(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, w.Code, "id %q", aid)
 	}
 	_ = fsStore
+}
+
+func postStagedAttachment(t *testing.T, r *gin.Engine, filename string, content []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", filename)
+	require.NoError(t, err)
+	_, err = fw.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/attachments", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// TestAttachmentUploadStaged_Success verifies the session-independent upload
+// (add-staged-attachment-upload): no session lookup, the row is born staged
+// (nil session) and the file lands under the _staging sentinel directory.
+func TestAttachmentUploadStaged_Success(t *testing.T) {
+	_, store, fsStore, r := newAttachmentTestEnv(t, "u-1")
+
+	w := postStagedAttachment(t, r, "shot.png", pngBytes)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		AttachmentID string `json:"attachment_id"`
+		Filename     string `json:"filename"`
+		MIME         string `json:"mime"`
+		Size         int64  `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "image/png", body.MIME)
+	assert.Equal(t, int64(len(pngBytes)), body.Size)
+
+	row, ok := store.rows[body.AttachmentID]
+	require.True(t, ok)
+	assert.Equal(t, "u-1", row.UserID)
+	assert.Nil(t, row.SessionID, "staged upload must be born unbound")
+	dst := filepath.Join(fsStore.UserAttachmentStagingDir("u-1"), body.AttachmentID+".png")
+	got, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	assert.Equal(t, pngBytes, got)
+}
+
+// TestAttachmentUploadStaged_QuotaExceeded: the per-user staged quota rejects
+// the 21st unbound upload with 429 and leaves disk/table untouched.
+func TestAttachmentUploadStaged_QuotaExceeded(t *testing.T) {
+	_, store, fsStore, r := newAttachmentTestEnv(t, "u-1")
+	store.rows = map[string]model.Attachment{}
+	for range maxStagedAttachmentsPerUser {
+		id := uuid.NewString()
+		store.rows[id] = model.Attachment{ID: id, UserID: "u-1", SessionID: nil, Filename: "x.png", MIME: "image/png"}
+	}
+	// A bound row and another user's staged row must not count against u-1.
+	store.rows["bound"] = model.Attachment{ID: "bound", UserID: "u-1", SessionID: ptrStr("s-1"), MIME: "image/png"}
+	store.rows["other"] = model.Attachment{ID: "other", UserID: "u-2", SessionID: nil, MIME: "image/png"}
+
+	w := postStagedAttachment(t, r, "shot.png", pngBytes)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Contains(t, w.Body.String(), "TOO_MANY_STAGED_ATTACHMENTS")
+	entries, err := os.ReadDir(fsStore.UserAttachmentStagingDir("u-1"))
+	require.True(t, err != nil || len(entries) == 0, "no file must be written past the quota")
+}
+
+// TestAttachmentUploadStaged_RejectsBadImage: the staged endpoint enforces
+// the same magic-byte sniffing as the session-scoped one.
+func TestAttachmentUploadStaged_RejectsBadImage(t *testing.T) {
+	_, store, _, r := newAttachmentTestEnv(t, "u-1")
+
+	w := postStagedAttachment(t, r, "evil.png", []byte("%PDF-1.7 fake"))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "UNSUPPORTED_IMAGE_TYPE")
+	assert.Empty(t, store.rows)
 }

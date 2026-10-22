@@ -6,9 +6,9 @@
 
 ## 2. 暂存上传端点
 
-- [ ] 2.1 `internal/handler/attachment.go`：抽取上传核心（魔数嗅探/大小上限/写盘/插行）为共享辅助函数，供新旧两端点复用；新增 `UploadStaged` handler——配额 COUNT 检查（20 个，超限 429）→ 写 `_staging` 目录 → 插入 `session_id` 为 NULL 的行
-- [ ] 2.2 `internal/handler/router.go`：注册 `POST /api/v1/attachments`（Bearer）；旧端点保持原路由原行为（上传即绑定）
-- [ ] 2.3 `internal/handler/attachment_test.go`：暂存上传成功/格式拒绝/超限 413/配额 429/会话归属不影响暂存上传 等用例
+- [x] 2.1 `internal/handler/attachment.go`：抽取上传核心（魔数嗅探/大小上限/写盘/插行）为共享辅助函数，供新旧两端点复用；新增 `UploadStaged` handler——配额 COUNT 检查（20 个，超限 429）→ 写 `_staging` 目录 → 插入 `session_id` 为 NULL 的行
+- [x] 2.2 `internal/handler/router.go`：注册 `POST /api/v1/attachments`（Bearer）；旧端点保持原路由原行为（上传即绑定）
+- [x] 2.3 `internal/handler/attachment_test.go`：暂存上传成功/格式拒绝/超限 413/配额 429/会话归属不影响暂存上传 等用例
 
 ## 3. 发送时认领与绑定
 

@@ -58,6 +58,11 @@ type RouteDeps struct {
 	// (Bearer auth, multipart) — chat image upload (add-image-attachments).
 	AttachmentUpload gin.HandlerFunc
 
+	// AttachmentStagedUpload handles POST /api/v1/attachments (Bearer auth,
+	// multipart) — session-independent staged chat image upload
+	// (add-staged-attachment-upload).
+	AttachmentStagedUpload gin.HandlerFunc
+
 	// AttachmentContent serves GET /api/v1/sessions/:session_id/attachments/:attachment_id/content.
 	// Authenticated via QueryTokenAuthMW (the <img> pattern), like
 	// WorkspaceTokenDownload. Required.
@@ -260,6 +265,9 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.GET("/sessions/:session_id", deps.SessionGet)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
 	authed.POST("/sessions/:session_id/attachments", deps.AttachmentUpload)
+	// Staged upload (add-staged-attachment-upload): upload images before any
+	// session exists; the send path claims them into the session by id.
+	authed.POST("/attachments", deps.AttachmentStagedUpload)
 	authed.GET("/sessions/:session_id/subagents/:agent_instance_id/runs", deps.SubAgentRuns)
 	authed.GET("/sessions/:session_id/subagents/:agent_instance_id/runs/:run_id", deps.SubAgentRunDetail)
 	authed.PATCH("/sessions/:session_id", deps.SessionUpdateTitle)

@@ -354,6 +354,52 @@ func (m *memoryMySQL) GetAttachment(_ context.Context, id, userID, sessionID str
 	return nil, nil
 }
 
+func (m *memoryMySQL) CountStagedAttachments(_ context.Context, userID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, a := range m.attachments {
+		if a.UserID == userID && a.SessionID == nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (m *memoryMySQL) GetAttachmentByUser(_ context.Context, id, userID string) (*model.Attachment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a, ok := m.attachments[id]; ok && a.UserID == userID {
+		cp := a
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (m *memoryMySQL) ClaimAttachment(_ context.Context, id, userID, sessionID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.attachments[id]
+	if !ok || a.UserID != userID || a.SessionID != nil {
+		return false, nil
+	}
+	a.SessionID = &sessionID
+	m.attachments[id] = a
+	return true, nil
+}
+
+func (m *memoryMySQL) UnclaimAttachment(_ context.Context, id, userID, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.attachments[id]
+	if !ok || a.UserID != userID || a.SessionID == nil || *a.SessionID != sessionID {
+		return nil
+	}
+	a.SessionID = nil
+	m.attachments[id] = a
+	return nil
+}
+
 func (m *memoryMySQL) UpdateSessionTime(_ context.Context, sessionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
