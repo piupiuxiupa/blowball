@@ -317,7 +317,7 @@ func (m *memoryMySQL) DeleteSession(_ context.Context, sessionID string) error {
 		m.deletedMessages[sessionID] = cp
 	}
 	for id, a := range m.attachments {
-		if a.SessionID == sessionID {
+		if a.SessionID != nil && *a.SessionID == sessionID {
 			m.deletedAttachments[id] = a
 			delete(m.attachments, id)
 		}
@@ -347,7 +347,7 @@ func (m *memoryMySQL) InsertAttachment(_ context.Context, a model.Attachment) er
 func (m *memoryMySQL) GetAttachment(_ context.Context, id, userID, sessionID string) (*model.Attachment, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if a, ok := m.attachments[id]; ok && a.UserID == userID && a.SessionID == sessionID {
+	if a, ok := m.attachments[id]; ok && a.UserID == userID && a.SessionID != nil && *a.SessionID == sessionID {
 		cp := a
 		return &cp, nil
 	}

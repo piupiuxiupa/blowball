@@ -75,7 +75,7 @@ func newAttachmentSendEnv(t *testing.T) *attachmentSendEnv {
 
 func (e *attachmentSendEnv) plant(t *testing.T, id, filename, mime string, data []byte, userID string) {
 	t.Helper()
-	e.atts.rows[id] = model.Attachment{ID: id, UserID: userID, SessionID: "sess-1", Filename: filename, MIME: mime, Size: int64(len(data))}
+	e.atts.rows[id] = model.Attachment{ID: id, UserID: userID, SessionID: ptrStr("sess-1"), Filename: filename, MIME: mime, Size: int64(len(data))}
 	if userID == "user-1" {
 		dir := filepath.Join(e.dataDir, userID, "attachments", "sess-1")
 		require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -187,7 +187,7 @@ func TestSendMessage_Attachments_NonVisionModelRejected(t *testing.T) {
 func TestSendMessage_Attachments_MissingFileDegradesToPlaceholder(t *testing.T) {
 	env := newAttachmentSendEnv(t)
 	// Registry row exists but the file was deleted underneath it.
-	env.atts.rows[att1] = model.Attachment{ID: att1, UserID: "user-1", SessionID: "sess-1", Filename: "gone.png", MIME: "image/png"}
+	env.atts.rows[att1] = model.Attachment{ID: att1, UserID: "user-1", SessionID: ptrStr("sess-1"), Filename: "gone.png", MIME: "image/png"}
 
 	w := env.post(t, attachmentBody(att1))
 	require.Equal(t, http.StatusOK, w.Code)

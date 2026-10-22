@@ -161,7 +161,7 @@ func (h *AttachmentHandler) Upload(c *gin.Context) {
 	att := model.Attachment{
 		ID:        attachmentID.String(),
 		UserID:    userID,
-		SessionID: sessionID,
+		SessionID: &sessionID,
 		Filename:  sanitizeAttachmentFilename(fileHeader.Filename),
 		MIME:      mime,
 		Size:      int64(len(data)),

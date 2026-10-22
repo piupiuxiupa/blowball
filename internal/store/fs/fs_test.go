@@ -110,6 +110,27 @@ func TestUserSkillsLivesUnderWorkspace(t *testing.T) {
 	}
 }
 
+// TestUserAttachmentStagingDir_Layout verifies the staged-attachment
+// directory (add-staged-attachment-upload): one per-user sentinel directory
+// shared across sessions, disjoint from every real session directory.
+func TestUserAttachmentStagingDir_Layout(t *testing.T) {
+	store, root := newTestStore(t)
+
+	got := store.UserAttachmentStagingDir("u-1")
+	want := filepath.Join(root, "u-1", "attachments", AttachmentStagingScope)
+	if got != want {
+		t.Fatalf("UserAttachmentStagingDir = %q, want %q", got, want)
+	}
+	// Two users get disjoint staging directories.
+	if store.UserAttachmentStagingDir("u-2") == got {
+		t.Fatal("staging dirs must be user-scoped")
+	}
+	// The sentinel can never collide with a session-scoped directory.
+	if got == store.UserAttachmentDir("u-1", "s-1") {
+		t.Fatal("staging dir must not equal a session dir")
+	}
+}
+
 // TestUserAttachmentDir_SessionScopedLayout verifies the chat-attachment
 // directory layout (add-image-attachments): a sibling of workspace/ scoped
 // per session, outside the workspace the agent file tools operate in.

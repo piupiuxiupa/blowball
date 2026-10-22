@@ -5,19 +5,25 @@ import (
 	"time"
 )
 
-// Attachment mirrors the `attachments` registry table (migration
-// 021_image_attachments.sql): one row per uploaded chat image. The registry
-// owns upload-time metadata, the ownership triple (id + user + session) used
-// at send time, and the session-delete lifecycle. Image BYTES live only on
-// disk under data/{user}/attachments/{session}/{id}.{ext} — base64 is never
-// persisted anywhere and is computed from the immutable file at request time.
+// Attachment mirrors the `attachments` registry table (migrations
+// 021_image_attachments.sql and 022_staged_attachments.sql): one row per
+// uploaded chat image. The registry owns upload-time metadata, the ownership
+// check used at send time, and the session-delete lifecycle. Image BYTES live
+// only on disk under data/{user}/attachments/{session}/{id}.{ext} — base64 is
+// never persisted anywhere and is computed from the immutable file at request
+// time.
+//
+// SessionID is nil while the attachment is STAGED (add-staged-attachment-
+// upload): uploaded via POST /api/v1/attachments before any session exists,
+// parked under data/{user}/attachments/_staging/, and claimed into a session
+// at send time. A non-nil SessionID is the owning (claimed) session.
 type Attachment struct {
-	ID        string `db:"id"          json:"id"`
-	UserID    string `db:"user_id"     json:"-"`
-	SessionID string `db:"session_id"  json:"-"`
-	Filename  string `db:"filename"    json:"filename"`
-	MIME      string `db:"mime"        json:"mime"`
-	Size      int64  `db:"size"        json:"size"`
+	ID        string  `db:"id"          json:"id"`
+	UserID    string  `db:"user_id"     json:"-"`
+	SessionID *string `db:"session_id"  json:"-"`
+	Filename  string  `db:"filename"    json:"filename"`
+	MIME      string  `db:"mime"        json:"mime"`
+	Size      int64   `db:"size"        json:"size"`
 	// MessageID is a best-effort backfill reserved for orphan-cleanup stats
 	// (uploaded but never sent). The authoritative message linkage is the
 	// attachments_json reference list on the message row itself.

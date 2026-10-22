@@ -24,6 +24,9 @@ import (
 // signature only, so this suffices without being a real decodable image.
 var pngBytes = append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 1, 2, 3, 4)
 
+// ptrStr returns a *string for nullable-session fixtures.
+func ptrStr(s string) *string { return &s }
+
 type fakeAttachmentStore struct {
 	rows map[string]model.Attachment
 }
@@ -38,7 +41,7 @@ func (f *fakeAttachmentStore) InsertAttachment(_ context.Context, a model.Attach
 
 func (f *fakeAttachmentStore) GetAttachment(_ context.Context, id, userID, sessionID string) (*model.Attachment, error) {
 	a, ok := f.rows[id]
-	if !ok || a.UserID != userID || a.SessionID != sessionID {
+	if !ok || a.UserID != userID || a.SessionID == nil || *a.SessionID != sessionID {
 		return nil, nil
 	}
 	cp := a
@@ -123,7 +126,8 @@ func TestAttachmentUpload_Success(t *testing.T) {
 	row, ok := store.rows[body.AttachmentID]
 	require.True(t, ok)
 	assert.Equal(t, "u-1", row.UserID)
-	assert.Equal(t, "s-1", row.SessionID)
+	require.NotNil(t, row.SessionID)
+	assert.Equal(t, "s-1", *row.SessionID)
 	dst := filepath.Join(fsStore.UserAttachmentDir("u-1", "s-1"), body.AttachmentID+".png")
 	got, err := os.ReadFile(dst)
 	require.NoError(t, err)
@@ -194,7 +198,7 @@ func TestAttachmentContent_CrossUserAndBadID(t *testing.T) {
 	// even if the file existed — the registry triple rejects it first.
 	id := "01953c5e-7f9e-7cc8-8db5-2f4a5b6c7d8e"
 	store.rows = map[string]model.Attachment{}
-	store.rows[id] = model.Attachment{ID: id, UserID: "u-2", SessionID: "s-1", Filename: "x.png", MIME: "image/png"}
+	store.rows[id] = model.Attachment{ID: id, UserID: "u-2", SessionID: ptrStr("s-1"), Filename: "x.png", MIME: "image/png"}
 
 	for _, aid := range []string{id, "../../etc/passwd", "not-a-uuid"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/s-1/attachments/"+aid+"/content", nil)

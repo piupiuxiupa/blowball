@@ -1,8 +1,8 @@
 ## 1. Schema 与存储层
 
-- [ ] 1.1 新建 `migrations/022_staged_attachments.sql`：`attachments.session_id` 改为 NULLABLE，新增 `KEY idx_session_created (session_id, create_time)`，`attachments_deleted` 镜像列同步可空
-- [ ] 1.2 `internal/store/fs/user.go`：新增 `UserAttachmentStagingDir(userID)`（`{root}/{userID}/attachments/_staging`），补 `fs_test.go` 用例
-- [ ] 1.3 `internal/store/mysql/attachment.go`：新增 `GetAttachmentByUser(ctx, id, userID)`（不带 session 的归属查询）、`ClaimAttachment(ctx, id, userID, sessionID) (bool, error)`（条件 UPDATE，affected rows 判成功）、`UnclaimAttachment(ctx, id, userID)`（best-effort 回滚为 NULL）、`CountStagedAttachments(ctx, userID)`、`ListExpiredStagedAttachments(ctx, cutoff)`、`DeleteAttachment(ctx, id)`；补单测
+- [x] 1.1 新建 `migrations/022_staged_attachments.sql`：`attachments.session_id` 改为 NULLABLE，新增 `KEY idx_session_created (session_id, create_time)`，`attachments_deleted` 镜像列同步可空
+- [x] 1.2 `internal/store/fs/user.go`：新增 `UserAttachmentStagingDir(userID)`（`{root}/{userID}/attachments/_staging`），补 `fs_test.go` 用例
+- [x] 1.3 `internal/store/mysql/attachment.go`：新增 `GetAttachmentByUser(ctx, id, userID)`（不带 session 的归属查询）、`ClaimAttachment(ctx, id, userID, sessionID) (bool, error)`（条件 UPDATE，affected rows 判成功）、`UnclaimAttachment(ctx, id, userID)`（best-effort 回滚为 NULL）、`CountStagedAttachments(ctx, userID)`、`ListExpiredStagedAttachments(ctx, cutoff)`、`DeleteAttachment(ctx, id)`；补单测
 
 ## 2. 暂存上传端点
 

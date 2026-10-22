@@ -73,6 +73,22 @@ func (s *Store) UserAttachmentDir(userID, sessionID string) string {
 	return filepath.Join(s.userDir(userID), "attachments", sessionID)
 }
 
+// AttachmentStagingScope is the reserved directory name under a user's
+// attachments/ tree holding uploaded-but-unbound images
+// (add-staged-attachment-upload): posted before any session exists and
+// renamed into the claiming session's directory at send time. Session ids
+// are UUIDs, so the sentinel can never collide with a real session
+// directory.
+const AttachmentStagingScope = "_staging"
+
+// UserAttachmentStagingDir returns the per-user staged-attachment directory
+// (add-staged-attachment-upload): {root}/{userID}/attachments/_staging. Like
+// UserAttachmentDir it is NOT created eagerly — the staged upload endpoint
+// creates it lazily, and the orphan sweeper removes expired files from it.
+func (s *Store) UserAttachmentStagingDir(userID string) string {
+	return filepath.Join(s.userDir(userID), "attachments", AttachmentStagingScope)
+}
+
 // UserSkills returns the absolute path of userID's per-user skills directory.
 // Skills live under the workspace in the reserved, hidden .blowball/skills/
 // namespace (data/{userID}/workspace/.blowball/skills) so they travel with the

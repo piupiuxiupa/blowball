@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -27,7 +28,7 @@ func setupAttachmentStore(t *testing.T) (*Store, func()) {
 		CREATE TABLE IF NOT EXISTS attachments (
 			id          CHAR(36)     NOT NULL,
 			user_id     CHAR(36)     NOT NULL,
-			session_id  CHAR(36)     NOT NULL,
+			session_id  CHAR(36)     NULL,
 			filename    VARCHAR(255) NOT NULL,
 			mime        VARCHAR(64)  NOT NULL,
 			size        BIGINT       NOT NULL,
@@ -42,13 +43,16 @@ func setupAttachmentStore(t *testing.T) (*Store, func()) {
 	return store, cleanup
 }
 
+// strptr returns a *string for test fixtures (nullable session_id).
+func strptr(s string) *string { return &s }
+
 func TestAttachment_InsertAndGet_OwnershipTriple(t *testing.T) {
 	store, cleanup := setupAttachmentStore(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	a := model.Attachment{
-		ID: "01953c5e-7f9e-7cc8-8db5-2f4a5b6c7d8e", UserID: "u-1", SessionID: "s-1",
+		ID: "01953c5e-7f9e-7cc8-8db5-2f4a5b6c7d8e", UserID: "u-1", SessionID: strptr("s-1"),
 		Filename: "shot.png", MIME: "image/png", Size: 1234,
 	}
 	require.NoError(t, store.InsertAttachment(ctx, a))
@@ -73,4 +77,90 @@ func TestAttachment_InsertAndGet_OwnershipTriple(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, miss, "triple %v must not resolve", tc)
 	}
+}
+
+// TestAttachment_StagedLifecycle exercises the add-staged-attachment-upload
+// store primitives: insert staged (NULL session) → quota count → by-user
+// lookup → atomic claim → unclaim rollback → expiry listing → staged delete.
+func TestAttachment_StagedLifecycle(t *testing.T) {
+	store, cleanup := setupAttachmentStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	staged := model.Attachment{
+		ID: "01953c5e-8000-7000-8000-000000000001", UserID: "u-1", SessionID: nil,
+		Filename: "staged.png", MIME: "image/png", Size: 100,
+	}
+	require.NoError(t, store.InsertAttachment(ctx, staged))
+
+	// Staged row: triple lookup (content endpoint) must NOT resolve it.
+	miss, err := store.GetAttachment(ctx, staged.ID, "u-1", "s-1")
+	require.NoError(t, err)
+	require.Nil(t, miss, "staged row must not resolve via the session triple")
+
+	// By-user lookup resolves and reports the staged state.
+	got, err := store.GetAttachmentByUser(ctx, staged.ID, "u-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Nil(t, got.SessionID)
+	foreign, err := store.GetAttachmentByUser(ctx, staged.ID, "u-2")
+	require.NoError(t, err)
+	require.Nil(t, foreign)
+
+	// Quota counts staged rows only.
+	n, err := store.CountStagedAttachments(ctx, "u-1")
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	// Claim: first wins, second loses — regardless of session.
+	ok, err := store.ClaimAttachment(ctx, staged.ID, "u-1", "s-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = store.ClaimAttachment(ctx, staged.ID, "u-1", "s-2")
+	require.NoError(t, err)
+	require.False(t, ok, "already-claimed row must not be claimable again")
+
+	// Claimed rows leave the staged quota and the expiry listing.
+	n, err = store.CountStagedAttachments(ctx, "u-1")
+	require.NoError(t, err)
+	require.Equal(t, 0, n)
+
+	// Unclaim rolls back only for the claiming session.
+	require.NoError(t, store.UnclaimAttachment(ctx, staged.ID, "u-1", "s-2"))
+	got, err = store.GetAttachmentByUser(ctx, staged.ID, "u-1")
+	require.NoError(t, err)
+	require.NotNil(t, got.SessionID, "wrong-session unclaim must be a no-op")
+	require.NoError(t, store.UnclaimAttachment(ctx, staged.ID, "u-1", "s-1"))
+	got, err = store.GetAttachmentByUser(ctx, staged.ID, "u-1")
+	require.NoError(t, err)
+	require.Nil(t, got.SessionID, "owning-session unclaim must restore staged")
+
+	// Expiry listing: future cutoff lists it, past cutoff does not.
+	expired, err := store.ListExpiredStagedAttachments(ctx, time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	require.Len(t, expired, 1)
+	fresh, err := store.ListExpiredStagedAttachments(ctx, time.Now().Add(-time.Hour), 10)
+	require.NoError(t, err)
+	require.Empty(t, fresh)
+
+	// DeleteStagedAttachment: staged → deleted; re-delete reports false.
+	deleted, err := store.DeleteStagedAttachment(ctx, staged.ID)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	deleted, err = store.DeleteStagedAttachment(ctx, staged.ID)
+	require.NoError(t, err)
+	require.False(t, deleted)
+
+	// A claimed row must survive DeleteStagedAttachment (claim-vs-sweep race).
+	bound := model.Attachment{
+		ID: "01953c5e-8000-7000-8000-000000000002", UserID: "u-1", SessionID: strptr("s-9"),
+		Filename: "bound.png", MIME: "image/png", Size: 50,
+	}
+	require.NoError(t, store.InsertAttachment(ctx, bound))
+	deleted, err = store.DeleteStagedAttachment(ctx, bound.ID)
+	require.NoError(t, err)
+	require.False(t, deleted)
+	kept, err := store.GetAttachmentByUser(ctx, bound.ID, "u-1")
+	require.NoError(t, err)
+	require.NotNil(t, kept)
 }
