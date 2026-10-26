@@ -366,6 +366,35 @@ func (m *memoryMySQL) CountStagedAttachments(_ context.Context, userID string) (
 	return n, nil
 }
 
+func (m *memoryMySQL) InsertStagedAttachment(_ context.Context, a model.Attachment, limit int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit > 0 {
+		n := 0
+		for _, row := range m.attachments {
+			if row.UserID == a.UserID && row.SessionID == nil {
+				n++
+			}
+		}
+		if n >= limit {
+			return false, nil
+		}
+	}
+	m.attachments[a.ID] = a
+	return true, nil
+}
+
+func (m *memoryMySQL) DeleteStagedAttachment(_ context.Context, id string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.attachments[id]
+	if !ok || row.SessionID != nil {
+		return false, nil
+	}
+	delete(m.attachments, id)
+	return true, nil
+}
+
 func (m *memoryMySQL) GetAttachmentByUser(_ context.Context, id, userID string) (*model.Attachment, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

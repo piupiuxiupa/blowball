@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,4 +176,59 @@ func TestAttachment_StagedLifecycle(t *testing.T) {
 	kept, err := store.GetAttachmentByUser(ctx, bound.ID, "u-1")
 	require.NoError(t, err)
 	require.NotNil(t, kept)
+}
+
+func TestInsertStagedAttachment_ConcurrentQuota(t *testing.T) {
+	store, cleanup := setupAttachmentStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	const userID = "u-quota"
+
+	for i := 0; i < 19; i++ {
+		require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
+			ID:       fmt.Sprintf("existing-%02d", i),
+			UserID:   userID,
+			Filename: "existing.png",
+			MIME:     "image/png",
+			Size:     1,
+		}))
+	}
+
+	type result struct {
+		ok  bool
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 12)
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			ok, err := store.InsertStagedAttachment(ctx, model.Attachment{
+				ID:       fmt.Sprintf("concurrent-%02d", i),
+				UserID:   userID,
+				Filename: "new.png",
+				MIME:     "image/png",
+				Size:     1,
+			}, 20)
+			results <- result{ok: ok, err: err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for result := range results {
+		require.NoError(t, result.err)
+		if result.ok {
+			successes++
+		}
+	}
+	assert.Equal(t, 1, successes, "exactly one concurrent upload may reserve the final slot")
+	staged, err := store.CountStagedAttachments(ctx, userID)
+	require.NoError(t, err)
+	assert.Equal(t, 20, staged)
 }

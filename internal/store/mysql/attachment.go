@@ -2,7 +2,9 @@ package mysql
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -97,6 +99,11 @@ SELECT COUNT(*) FROM attachments
 WHERE user_id = ? AND session_id IS NULL
 `
 
+const (
+	stagedAttachmentQuotaLockPrefix = "blowball:staged-attachments:"
+	stagedAttachmentQuotaLockWait   = 2
+)
+
 // listExpiredStagedAttachmentsSQL feeds the orphan sweeper
 // (add-staged-attachment-upload): staged rows older than the cutoff, oldest
 // first, bounded per sweep round.
@@ -182,6 +189,71 @@ func (s *Store) CountStagedAttachments(ctx context.Context, userID string) (int,
 		return 0, fmt.Errorf("mysql.CountStagedAttachments: %w", err)
 	}
 	return n, nil
+}
+
+// InsertStagedAttachment atomically reserves one staged-attachment slot for a
+// user. A MySQL named lock serializes count+insert across service instances;
+// the caller writes the file only after the slot is reserved.
+func (s *Store) InsertStagedAttachment(ctx context.Context, a model.Attachment, limit int) (bool, error) {
+	conn, err := s.db.Connx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("mysql.InsertStagedAttachment connection: %w", err)
+	}
+	defer conn.Close()
+
+	sum := sha256.Sum256([]byte(a.UserID))
+	lockName := stagedAttachmentQuotaLockPrefix + hex.EncodeToString(sum[:16])
+	var acquired sql.NullInt64
+	if err := conn.GetContext(ctx, &acquired, "SELECT GET_LOCK(?, ?)", lockName, stagedAttachmentQuotaLockWait); err != nil {
+		return false, fmt.Errorf("mysql.InsertStagedAttachment acquire lock: %w", err)
+	}
+	if !acquired.Valid || acquired.Int64 != 1 {
+		return false, fmt.Errorf("mysql.InsertStagedAttachment lock timeout for user %s", a.UserID)
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(releaseCtx, "SELECT RELEASE_LOCK(?)", lockName)
+	}
+	defer release()
+
+	tx, err := conn.BeginTxx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("mysql.InsertStagedAttachment begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if limit > 0 {
+		var staged int
+		if err := tx.GetContext(ctx, &staged, countStagedAttachmentsSQL, a.UserID); err != nil {
+			return false, fmt.Errorf("mysql.InsertStagedAttachment count: %w", err)
+		}
+		if staged >= limit {
+			return false, nil
+		}
+	}
+	logQuery(ctx, "attachment.insert_staged", insertAttachmentSQL, a.ID)
+	params := map[string]any{
+		"id":         a.ID,
+		"user_id":    a.UserID,
+		"session_id": a.SessionID,
+		"filename":   a.Filename,
+		"mime":       a.MIME,
+		"size":       a.Size,
+	}
+	if _, err := tx.NamedExecContext(ctx, insertAttachmentSQL, params); err != nil {
+		return false, fmt.Errorf("mysql.InsertStagedAttachment insert: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("mysql.InsertStagedAttachment commit: %w", err)
+	}
+	release()
+	return true, nil
 }
 
 // ListExpiredStagedAttachments returns up to limit staged rows created before

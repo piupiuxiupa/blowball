@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -35,9 +36,9 @@ const maxAttachmentsPerMessage = 4
 // maxStagedAttachmentsPerUser bounds how many unbound (staged) images one
 // user may hold at once (add-staged-attachment-upload). Staged uploads never
 // get a session-delete cleanup, so this quota plus the orphan sweeper's TTL
-// are the two guards against unbounded accumulation. A cost backstop, not a
-// hard guarantee: the count-then-insert window can overshoot slightly under
-// concurrent uploads.
+// are the two guards against unbounded accumulation. The count is a fast
+// preflight; InsertStagedAttachment performs the authoritative atomic quota
+// reservation before any file is written.
 const maxStagedAttachmentsPerUser = 20
 
 // attachmentMimeExt is the shared MIME→extension table (model.AttachmentMIMEExt)
@@ -51,6 +52,8 @@ type attachmentStore interface {
 	GetAttachment(ctx context.Context, id, userID, sessionID string) (*model.Attachment, error)
 	// add-staged-attachment-upload: staged upload quota + send-time claim.
 	CountStagedAttachments(ctx context.Context, userID string) (int, error)
+	InsertStagedAttachment(ctx context.Context, a model.Attachment, limit int) (bool, error)
+	DeleteStagedAttachment(ctx context.Context, id string) (bool, error)
 	GetAttachmentByUser(ctx context.Context, id, userID string) (*model.Attachment, error)
 	ClaimAttachment(ctx context.Context, id, userID, sessionID string) (bool, error)
 	UnclaimAttachment(ctx context.Context, id, userID, sessionID string) error
@@ -144,11 +147,66 @@ func (h *AttachmentHandler) UploadStaged(c *gin.Context) {
 	if !ok {
 		return
 	}
-	att, ok := h.persistAttachment(c, ctx, userID, h.fs.UserAttachmentStagingDir(userID), nil, filename, data, mime)
+	att, ok := h.persistStagedAttachment(c, ctx, userID, h.fs.UserAttachmentStagingDir(userID), filename, data, mime)
 	if !ok {
 		return
 	}
 	respondAttachment(c, att)
+}
+
+// persistStagedAttachment reserves the quota row before writing bytes, so
+// concurrent uploads cannot create more than the configured number of staged
+// files. If the file write fails, the reservation is removed on a detached
+// bounded context.
+func (h *AttachmentHandler) persistStagedAttachment(c *gin.Context, ctx context.Context, userID, dir, filename string, data []byte, mime string) (model.Attachment, bool) {
+	attachmentID, err := uuid.NewV7()
+	if err != nil {
+		logAttachment(ctx, "attachment.upload_staged.uuid", dir, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "generate attachment id failed"))
+		return model.Attachment{}, false
+	}
+	att := model.Attachment{
+		ID:       attachmentID.String(),
+		UserID:   userID,
+		Filename: filename,
+		MIME:     mime,
+		Size:     int64(len(data)),
+	}
+	reserved, err := h.store.InsertStagedAttachment(ctx, att, maxStagedAttachmentsPerUser)
+	if err != nil {
+		logAttachment(ctx, "attachment.upload_staged.reserve", att.ID, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "reserve staged attachment failed"))
+		return model.Attachment{}, false
+	}
+	if !reserved {
+		c.JSON(http.StatusTooManyRequests, errorBody("TOO_MANY_STAGED_ATTACHMENTS",
+			fmt.Sprintf("at most %d staged attachments are allowed per user", maxStagedAttachmentsPerUser)))
+		return model.Attachment{}, false
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		h.rollbackStagedReservation(ctx, att.ID)
+		logAttachment(ctx, "attachment.upload_staged.mkdir", dir, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create attachment dir failed"))
+		return model.Attachment{}, false
+	}
+	dst := filepath.Join(dir, att.ID+attachmentMimeExt[mime])
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		_ = os.Remove(dst)
+		h.rollbackStagedReservation(ctx, att.ID)
+		logAttachment(ctx, "attachment.upload_staged.write", dst, err)
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "save attachment failed"))
+		return model.Attachment{}, false
+	}
+	return att, true
+}
+
+func (h *AttachmentHandler) rollbackStagedReservation(ctx context.Context, attachmentID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := h.store.DeleteStagedAttachment(cleanupCtx, attachmentID); err != nil {
+		logAttachment(cleanupCtx, "attachment.upload_staged.rollback", attachmentID, err)
+	}
 }
 
 // readUploadedImage validates the multipart body of one attachment upload and

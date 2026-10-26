@@ -32,8 +32,10 @@ func ptrStr(s string) *string { return &s }
 type fakeAttachmentStore struct {
 	rows map[string]model.Attachment
 	// claimHook overrides ClaimAttachment when set (race injection for tests).
-	claimHook  func(id, userID, sessionID string) (bool, error)
-	unclaimErr error
+	claimHook         func(id, userID, sessionID string) (bool, error)
+	insertStagedHook  func(a model.Attachment) (bool, error)
+	unclaimErr        error
+	deleteStagedError error
 }
 
 func (f *fakeAttachmentStore) InsertAttachment(_ context.Context, a model.Attachment) error {
@@ -61,6 +63,40 @@ func (f *fakeAttachmentStore) CountStagedAttachments(_ context.Context, userID s
 		}
 	}
 	return n, nil
+}
+
+func (f *fakeAttachmentStore) InsertStagedAttachment(_ context.Context, a model.Attachment, limit int) (bool, error) {
+	if f.insertStagedHook != nil {
+		return f.insertStagedHook(a)
+	}
+	if f.rows == nil {
+		f.rows = map[string]model.Attachment{}
+	}
+	if limit > 0 {
+		n := 0
+		for _, row := range f.rows {
+			if row.UserID == a.UserID && row.SessionID == nil {
+				n++
+			}
+		}
+		if n >= limit {
+			return false, nil
+		}
+	}
+	f.rows[a.ID] = a
+	return true, nil
+}
+
+func (f *fakeAttachmentStore) DeleteStagedAttachment(_ context.Context, id string) (bool, error) {
+	if f.deleteStagedError != nil {
+		return false, f.deleteStagedError
+	}
+	row, ok := f.rows[id]
+	if !ok || row.SessionID != nil {
+		return false, nil
+	}
+	delete(f.rows, id)
+	return true, nil
 }
 
 func (f *fakeAttachmentStore) GetAttachmentByUser(_ context.Context, id, userID string) (*model.Attachment, error) {
@@ -324,6 +360,22 @@ func TestAttachmentUploadStaged_QuotaExceeded(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "TOO_MANY_STAGED_ATTACHMENTS")
 	entries, err := os.ReadDir(fsStore.UserAttachmentStagingDir("u-1"))
 	require.True(t, err != nil || len(entries) == 0, "no file must be written past the quota")
+}
+
+func TestAttachmentUploadStaged_AtomicReservationLosesRace(t *testing.T) {
+	_, store, fsStore, r := newAttachmentTestEnv(t, "u-1")
+	store.insertStagedHook = func(model.Attachment) (bool, error) {
+		return false, nil
+	}
+
+	w := postStagedAttachment(t, r, "shot.png", pngBytes)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Contains(t, w.Body.String(), "TOO_MANY_STAGED_ATTACHMENTS")
+	require.Empty(t, store.rows)
+	entries, err := os.ReadDir(fsStore.UserAttachmentStagingDir("u-1"))
+	require.True(t, err != nil || len(entries) == 0,
+		"a lost atomic reservation must not write a staged file")
 }
 
 // TestAttachmentUploadStaged_RejectsBadImage: the staged endpoint enforces
