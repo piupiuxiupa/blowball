@@ -140,6 +140,73 @@ func TestApplyLiveOverlay_BoundsSummarizedLongMessage(t *testing.T) {
 
 	require.Len(t, got, 2)
 	assert.Less(t, len([]rune(got[1].Content)), liveReplayContentRunes+100)
-	assert.Contains(t, got[1].Content, "full text is preserved in the compacted checkpoint")
+	assert.Contains(t, got[1].Content, "earlier content is summarized in the checkpoint")
 	require.Len(t, got[1].Images, 1)
+}
+
+func TestApplyLiveOverlay_NoDurableCounterpartPreservesFullContent(t *testing.T) {
+	longText := strings.Repeat("problem-", 1000)
+	live := Message{Role: "user", Content: longText}
+	source := []Message{{Role: "assistant", Content: "unrelated history"}}
+	projected := []Message{{Role: "user", Content: "checkpoint summary"}}
+
+	got := ApplyLiveOverlay(source, projected, []Message{live})
+
+	require.Len(t, got, 2)
+	assert.Equal(t, longText, got[1].Content,
+		"a message absent from both durable history and the checkpoint must never be truncated")
+	assert.NotContains(t, got[1].Content, liveReplayMarker)
+}
+
+func TestApplyLiveOverlay_UpgradesPriorBoundedReplay(t *testing.T) {
+	longText := strings.Repeat("长", 3000)
+	live := Message{
+		Role:    "user",
+		Content: longText,
+		Images: []MessageImage{{
+			AttachmentID: "att-long",
+			Filename:     "long.png",
+			MIMEType:     "image/png",
+			Data:         []byte{1},
+		}},
+	}
+	replay := replayableLiveMessage(live)
+	source := []Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "user", Content: FrameCompactedSummary("previous")},
+		replay,
+		{Role: "assistant", Content: "answer"},
+	}
+	projected := []Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "user", Content: FrameCompactedSummary("new")},
+		{Role: "user", Content: longText + "\n[图片: long.png]"},
+		{Role: "assistant", Content: "answer"},
+	}
+
+	got := ApplyLiveOverlay(source, projected, []Message{live})
+
+	require.Len(t, got, 4)
+	assert.Equal(t, longText, got[2].Content,
+		"a bounded replay from the prior compaction must map back to the retained full message")
+	require.Len(t, got[2].Images, 1)
+}
+
+func TestCollectLiveMessages_UsesCurrentUserAfterToolRound(t *testing.T) {
+	original := []Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "user", Content: FrameCompactedSummary("previous")},
+		{Role: "user", Content: "current question"},
+		{Role: "assistant", Content: "calling", ToolCalls: []ToolCall{{
+			ID:       "call-1",
+			Function: ToolCallFunction{Name: "lookup", Arguments: `{}`},
+		}}},
+		{Role: "tool", ToolCallID: "call-1", Name: "lookup", Content: "result"},
+	}
+
+	got := collectLiveMessages(original)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "current question", got[0].Content,
+		"the current user question must be identified by position among user turns, not by being the final message")
 }

@@ -42,6 +42,14 @@ The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope c
 - **WHEN** a live image message corresponds to a reconstructed placeholder
 - **THEN** matching uses its durable source position and persisted placeholder identity, a retained occurrence is replaced in place, and a summarized occurrence never overwrites an older same-content message
 
+#### Scenario: Live input has no durable counterpart
+- **WHEN** a live message is absent from durable reconstruction and therefore from the checkpoint
+- **THEN** the overlay keeps its full content and the candidate is rejected if that content does not fit, rather than truncating and claiming it was preserved elsewhere
+
+#### Scenario: Current question survives mid-turn and repeated compaction
+- **WHEN** tool messages follow the current user message or an earlier compaction has already rewritten it as a bounded replay
+- **THEN** every compaction attempt reuses the full live input captured at turn start, without recollecting from or locating it in the mutable round
+
 ### Requirement: Compaction is triggered before a request exceeds the budget
 The system SHALL begin compaction when either the existing percentage threshold or the preflight request-budget threshold is reached, and the compressible middle is non-empty. The effective trigger SHALL be the lower of the applicable safe thresholds. The system SHALL reserve space for the completion quota and the next appended message set.
 

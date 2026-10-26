@@ -1,10 +1,13 @@
 package agent
 
-import "strings"
+import (
+	"bytes"
+	"strings"
+)
 
 const (
 	liveReplayContentRunes = 2000
-	liveReplayMarker       = "\n... [live message text truncated; full text is preserved in the compacted checkpoint] ...\n"
+	liveReplayMarker       = "\n... [live message text truncated for replay; earlier content is summarized in the checkpoint] ...\n"
 )
 
 type livePlacement struct {
@@ -76,11 +79,13 @@ func ApplyLiveOverlay(source, projected, live []Message) []Message {
 	}
 	out = append(out, tail...)
 
-	// A live message with no durable counterpart cannot replace an older
-	// same-content row. Preserve it as an append-only bounded replay instead.
+	// A live message with no durable counterpart was not included in the
+	// checkpoint either. Truncating it here would silently discard the user's
+	// current question, so preserve the full value; candidate budgeting will
+	// reject a compaction that cannot fit it.
 	for _, placement := range placements {
 		if placement.sourceIndex < 0 {
-			out = append(out, replayableLiveMessage(placement.message))
+			out = append(out, placement.message)
 		}
 	}
 	return out
@@ -121,8 +126,17 @@ func persistedSuffix(source, projected []Message) int {
 }
 
 func liveMatchesStoredMessage(stored, live Message) bool {
-	return stored.Role == "user" && live.Role == "user" &&
-		userContentMatches(stored.Content, live)
+	if stored.Role != "user" || live.Role != "user" {
+		return false
+	}
+	if userContentMatches(stored.Content, live) {
+		return true
+	}
+	// A previous compaction may already have replaced the live source with
+	// its bounded replay. That replay is still the same message and must be
+	// upgraded back to the full value if the current candidate retains it.
+	replay := replayableLiveMessage(live)
+	return stored.Content == replay.Content && imagesEqual(stored.Images, live.Images)
 }
 
 // samePersistedIdentity compares the fields persistence can reconstruct.
@@ -148,8 +162,7 @@ func samePersistedIdentity(stored, candidate Message) bool {
 // placeholder lines persistence appends. Extra non-placeholder text is never
 // treated as the same message, preventing same-prefix prompts from aliasing.
 func userContentMatches(candidateContent string, live Message) bool {
-	if strings.HasPrefix(candidateContent, CompactedSummaryLeadIn) &&
-		strings.Contains(candidateContent, "<compacted-summary>") {
+	if isCompactedSummary(candidateContent) {
 		return false
 	}
 	if candidateContent == live.Content {
@@ -197,6 +210,26 @@ func containsAllFilenames(content string, filenames []string) bool {
 	return true
 }
 
+func isCompactedSummary(content string) bool {
+	return strings.HasPrefix(content, CompactedSummaryLeadIn) &&
+		strings.Contains(content, "<compacted-summary>")
+}
+
+func imagesEqual(a, b []MessageImage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].AttachmentID != b[i].AttachmentID ||
+			a[i].Filename != b[i].Filename ||
+			a[i].MIMEType != b[i].MIMEType ||
+			!bytes.Equal(a[i].Data, b[i].Data) {
+			return false
+		}
+	}
+	return true
+}
+
 func equalToolCalls(a, b []ToolCall) bool {
 	if len(a) != len(b) {
 		return false
@@ -212,10 +245,16 @@ func equalToolCalls(a, b []ToolCall) bool {
 }
 
 func collectLiveMessages(original []Message) []Message {
+	currentUser := -1
+	for i := len(original) - 1; i >= 0; i-- {
+		if original[i].Role == "user" && !isCompactedSummary(original[i].Content) {
+			currentUser = i
+			break
+		}
+	}
 	live := make([]Message, 0)
 	for i, msg := range original {
-		isFinalUser := i == len(original)-1 && msg.Role == "user"
-		if len(msg.Images) == 0 && !isFinalUser {
+		if len(msg.Images) == 0 && i != currentUser {
 			continue
 		}
 		live = append(live, msg)
@@ -223,8 +262,8 @@ func collectLiveMessages(original []Message) []Message {
 	return live
 }
 
-func restoreLiveMessages(original, compacted []Message) []Message {
-	return ApplyLiveOverlay(original, compacted, collectLiveMessages(original))
+func restoreLiveMessages(original, compacted, live []Message) []Message {
+	return ApplyLiveOverlay(original, compacted, live)
 }
 
 func replayableLiveMessage(live Message) Message {

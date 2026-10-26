@@ -111,3 +111,9 @@
 - [x] 14.1 Measure each candidate with the same live replacement/summarized-replay overlay the agent will send.
 - [x] 14.2 Align live messages by durable source position so repeated prompts or uploads cannot replace an older message.
 - [x] 14.3 Report the rebuilt wrap-up estimate when the second provider overflow occurs.
+
+## 15. Lossless Live Input
+
+- [x] 15.1 Keep unmatched live messages at full length instead of truncating content absent from the checkpoint.
+- [x] 15.2 Capture the current question and live fields once per Run and reuse them across every compaction attempt.
+- [x] 15.3 Recognize a prior bounded replay as the same live source when a later retained candidate upgrades it back to full content.

@@ -77,7 +77,12 @@ final projection, so retained replacements and summarized replays are neither
 double-counted nor hidden behind an additive estimate. Live messages are
 aligned to durable source positions: the retained occurrence is replaced in
 place, while a summarized occurrence is inserted without mutating an older
-same-content prompt or upload.
+same-content prompt or upload. The live set is captured once when the turn
+starts because later tool messages and prior compaction rewrites can remove the
+current user from the final position or replace it with a bounded replay. A
+live message with no durable counterpart is never truncated: it is absent from
+the checkpoint as well, so keeping it whole (or refusing the candidate) is the
+only non-lossy behavior.
 
 **Alternative rejected:** retain the last five messages then truncate individual tool results in place without re-planning. A few huge results can still exceed the window, while a small conversational tail needlessly discards useful continuity.
 

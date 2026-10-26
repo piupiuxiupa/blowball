@@ -169,7 +169,7 @@ func TestRestoreLiveMessages_UsesUniqueAttachmentPlaceholders(t *testing.T) {
 		{Role: "user", Content: "same question\n[图片: current.png]"},
 		{Role: "assistant", Content: "answer"},
 	}
-	got := restoreLiveMessages([]Message{live, {Role: "assistant", Content: "answer"}}, compacted)
+	got := restoreLiveMessages([]Message{live, {Role: "assistant", Content: "answer"}}, compacted, []Message{live})
 	require.Len(t, got, 3)
 	assert.Empty(t, got[0].Images, "the unrelated same-content message must not be overwritten")
 	require.Len(t, got[1].Images, 1)
@@ -186,7 +186,7 @@ func TestRestoreLiveMessages_UnknownAttachmentDoesNotOverwriteSameContent(t *tes
 		{Role: "user", Content: "same question\n[图片: old.png]"},
 		{Role: "assistant", Content: "answer"},
 	}
-	got := restoreLiveMessages([]Message{live, {Role: "assistant", Content: "next"}}, compacted)
+	got := restoreLiveMessages([]Message{live, {Role: "assistant", Content: "next"}}, compacted, []Message{live})
 	require.Len(t, got, 3)
 	assert.Empty(t, got[0].Images)
 	require.Len(t, got[2].Images, 1, "an unmatched live identity must be inserted, not mapped to a different message")
@@ -345,4 +345,54 @@ func TestConfucius_WrapUpSecondOverflowReportsRebuiltEstimate(t *testing.T) {
 	assert.Equal(t, want, uncompactable.EstimatedTokens,
 		"the second overflow must report the rebuilt wrap-up request, not the pre-compaction estimate")
 	assert.Less(t, uncompactable.EstimatedTokens, 7000)
+}
+
+func TestConfucius_LiveMessagesStayFullAcrossRepeatedCompactions(t *testing.T) {
+	current := strings.Repeat("x", 30000)
+	client := newFake(
+		fakeResponse{
+			content:      "calling",
+			finishReason: "tool_calls",
+			toolCalls: []ToolCall{{
+				ID:       "small-1",
+				Function: ToolCallFunction{Name: "small_tool", Arguments: `{}`},
+			}},
+		},
+		fakeResponse{err: ErrContextOverflow},
+		fakeResponse{content: "final", finishReason: "stop"},
+	)
+	c := newTestConfucius(t, client, nil)
+	c.maxRounds = 1
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
+	if err := c.toolRegistry.Register(&tool.ToolSpec{
+		Name:           "small_tool",
+		Description:    "returns a small payload",
+		ParametersJSON: json.RawMessage(`{"type":"object","properties":{}}`),
+		Execute: func(context.Context, json.RawMessage) (any, error) {
+			return "ok", nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var forcedLive [][]Message
+	c.SetRoundHook(func(ctx context.Context, _ Usage) []Message {
+		_, forced := ForcedCompactionFromContext(ctx)
+		if !forced {
+			return nil
+		}
+		forcedLive = append(forcedLive, LiveMessagesFromContext(ctx))
+		return []Message{{Role: "user", Content: "compacted"}}
+	})
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+
+	content, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: current}}, hub)
+	require.NoError(t, err)
+	assert.Equal(t, "final", content)
+	require.Len(t, forcedLive, 2)
+	for _, live := range forcedLive {
+		require.Len(t, live, 1)
+		assert.Equal(t, current, live[0].Content,
+			"every compaction must receive the original question, not a truncated replay")
+	}
 }

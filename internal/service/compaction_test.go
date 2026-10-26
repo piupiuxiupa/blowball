@@ -608,6 +608,25 @@ func TestCompactionService_LiveOverlayParticipatesInFitAsFinalProjection(t *test
 	assert.True(t, found, "the measured projection must include the inline live image")
 }
 
+func TestCompactionService_UnmatchedLiveMessageRejectsInsteadOfTruncating(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(20)
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "checkpoint"}}
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 8000
+	in.LiveMessages = []agent.Message{{
+		Role:    "user",
+		Content: strings.Repeat("x", 50000),
+	}}
+
+	rec, ok := svc.Compact(context.Background(), in)
+
+	require.False(t, ok)
+	assert.Nil(t, rec)
+	assert.Equal(t, 0, llm.calls,
+		"an over-budget unmatched live message must fail candidate planning before the summary call")
+}
+
 func TestCompactionService_AnchorIsBounded(t *testing.T) {
 	anchor := agent.Message{
 		Role:             "assistant",
