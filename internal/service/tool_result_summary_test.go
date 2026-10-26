@@ -1,7 +1,10 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -22,7 +25,8 @@ func TestSummarizeToolResult_structuredIdentityAndBounds(t *testing.T) {
 	assert.Contains(t, got, `"tool_call_id":"call-123"`)
 	assert.Contains(t, got, `"status":"error"`)
 	assert.Contains(t, got, "identifier call-123 failed")
-	assert.Contains(t, got, `"retrieval_ref":"tool_calls/`)
+	assert.NotContains(t, got, `"retrieval_ref"`,
+		"a non-spilled summary must not advertise a fake retrieval path")
 	assert.LessOrEqual(t, len([]rune(got)), 80*4+1)
 }
 
@@ -82,7 +86,7 @@ func TestIndexedToolArgumentsReachSummaries(t *testing.T) {
 		}}},
 		{Role: "tool", ToolCallID: "call-args", Name: "executor_bash", Content: `{"status":0,"result":{"output":"ok","exit_code":0}}`},
 	}
-	summaries, _ := summarizeRetainedToolResults(msgs, 1)
+	summaries, _ := summarizeRetainedToolResults(msgs, 1, nil)
 	assert.Contains(t, summaries["call-args"], "go test ./internal/service")
 }
 
@@ -115,4 +119,56 @@ func TestToolResultErrorIsNotSentAsSuccess(t *testing.T) {
 	got := SummarizeToolResult(call, `{"status":1,"error":"connection refused"}`, 100)
 	assert.Contains(t, got, `"status":"error"`)
 	assert.Contains(t, got, "connection refused")
+}
+
+func TestCompactionService_SpillsReadableToolResultReference(t *testing.T) {
+	workspace := t.TempDir()
+	svc := &CompactionService{deps: SessionDeps{FS: &fakeFSStore{workspace: workspace}}}
+	call := agent.ToolCall{
+		ID:       "call-spill",
+		Function: agent.ToolCallFunction{Name: "executor_bash", Arguments: `{"command":"cat big.txt"}`},
+	}
+	full := `{"status":0,"result":{"output":"` + strings.Repeat("x", 5000) + `","exit_code":0}}`
+
+	ref, note := svc.spillRetainedToolResult(context.Background(), "user-1", "session-1", call, full)
+
+	require.Empty(t, note)
+	assert.True(t, strings.HasPrefix(ref, "tmp/compaction-outputs/"),
+		"the retrieval reference must be a workspace-relative readable path")
+	data, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(ref)))
+	require.NoError(t, err)
+	assert.Equal(t, full, string(data))
+
+	summaryJSON := summarizeToolResult(call, full, 400, ref, note)
+	var summary ToolResultSummary
+	require.NoError(t, json.Unmarshal([]byte(summaryJSON), &summary))
+	assert.Equal(t, ref, summary.RetrievalRef)
+	assert.Contains(t, summary.RetrievalHint, "xizhi_read_file")
+	assert.NotContains(t, summaryJSON, "tool_calls/")
+}
+
+func TestCompactionService_ToolResultSpillFailureOmitsFakeReference(t *testing.T) {
+	svc := &CompactionService{deps: SessionDeps{FS: &fakeFSStore{}}}
+	call := agent.ToolCall{ID: "call-nospill", Function: agent.ToolCallFunction{Name: "bash"}}
+	full := strings.Repeat("x", 5000)
+
+	ref, note := svc.spillRetainedToolResult(context.Background(), "user-1", "session-1", call, full)
+
+	assert.Empty(t, ref)
+	assert.Contains(t, note, "full result remains in persisted tool_calls")
+	summaryJSON := summarizeToolResult(call, full, 400, ref, note)
+	assert.NotContains(t, summaryJSON, `"retrieval_ref"`)
+	assert.Contains(t, summaryJSON, `"retrieval_fail_note"`)
+}
+
+func TestSummarizeToolResult_retrievalReferenceSurvivesCJKBounds(t *testing.T) {
+	call := agent.ToolCall{ID: "cjk-1", Function: agent.ToolCallFunction{Name: "unknown_tool"}}
+	ref := "tmp/compaction-outputs/session/output.txt"
+	summaryJSON := summarizeToolResult(call, strings.Repeat("界", 2000), 400, ref, "")
+
+	var summary ToolResultSummary
+	require.NoError(t, json.Unmarshal([]byte(summaryJSON), &summary),
+		"bounded summaries must remain valid JSON")
+	assert.Equal(t, ref, summary.RetrievalRef)
+	assert.Contains(t, summary.RetrievalHint, "xizhi_read_file")
 }

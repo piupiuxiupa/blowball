@@ -559,12 +559,12 @@ func (r *handlerFakeRedis) DelCompactionCache(_ context.Context, _ string) error
 	return nil
 }
 
-// handlerFakeFS records EnsureUserDirs — the FS store's only remaining duty
-// after the warm-tier removal.
+// handlerFakeFS supplies the per-user directory and compaction spill paths.
 type handlerFakeFS struct {
 	mu          sync.Mutex
 	ensureCalls int
 	ensureErr   error
+	workspace   string
 }
 
 func newHandlerFakeFS() *handlerFakeFS {
@@ -576,6 +576,10 @@ func (f *handlerFakeFS) EnsureUserDirs(_ context.Context, _ string) error {
 	defer f.mu.Unlock()
 	f.ensureCalls++
 	return f.ensureErr
+}
+
+func (f *handlerFakeFS) UserWorkspace(_ string) string {
+	return f.workspace
 }
 
 // sessionHandlerTestEnv bundles a configured SessionHandler (CRUD) and

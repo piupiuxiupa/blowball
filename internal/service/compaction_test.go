@@ -497,16 +497,64 @@ func TestPlanCompactionTail_firstPostBoundaryToolUnitMovesIntoMiddle(t *testing.
 	}
 	const scopeStart = 3
 
-	for _, inputBudget := range []int{0, 4000} {
-		plan := planCompactionTail(msgs, scopeStart, 5, inputBudget)
-		assert.Greater(t, plan.TailStart, scopeStart,
-			"the planner must move the complete first post-boundary unit into the middle")
-		assert.GreaterOrEqual(t, plan.TailStart, 7,
-			"all three parallel tool results must precede the new tail")
-		if plan.TailStart < len(msgs) {
-			assert.NotEqual(t, "tool", msgs[plan.TailStart].Role)
-		}
+	legacy := planCompactionTail(msgs, scopeStart, 5, 0)
+	assert.Equal(t, scopeStart, legacy.TailStart,
+		"zero-budget compatibility must not replay the legacy fixed tail")
+	assert.Equal(t, "no_compressible_middle", legacy.Reason)
+
+	budgeted := planCompactionTail(msgs, scopeStart, 5, 4000)
+	assert.Greater(t, budgeted.TailStart, scopeStart,
+		"the planner must move the complete first post-boundary unit into the middle")
+	assert.GreaterOrEqual(t, budgeted.TailStart, 7,
+		"all three parallel tool results must precede the new tail")
+	if budgeted.TailStart < len(msgs) {
+		assert.NotEqual(t, "tool", msgs[budgeted.TailStart].Role)
 	}
+}
+
+func TestPlanCompactionTail_doesNotLoopAcrossToolUnits(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "assistant", Content: "running", ToolCalls: []agent.ToolCall{
+			{ID: "old-1", Function: agent.ToolCallFunction{Name: "bash"}},
+		}},
+		{Role: "tool", ToolCallID: "old-1", Name: "bash", Content: "old result"},
+		{Role: "assistant", Content: "old answer"},
+		{Role: "user", Content: "next question"},
+		{Role: "assistant", Content: "running", ToolCalls: []agent.ToolCall{
+			{ID: "new-1", Function: agent.ToolCallFunction{Name: "bash"}},
+		}},
+		{Role: "tool", ToolCallID: "new-1", Name: "bash", Content: "new result"},
+		{Role: "assistant", Content: "recent prose"},
+	}
+
+	done := make(chan compactionTailPlan, 1)
+	go func() {
+		done <- planCompactionTail(msgs, 1, 2, 100000)
+	}()
+
+	select {
+	case plan := <-done:
+		assert.Equal(t, 3, plan.TailStart)
+	case <-time.After(2 * time.Second):
+		t.Fatal("tail planning did not advance across assistant + tool-result units")
+	}
+}
+
+func TestPlanCompactionTail_zeroBudgetFirstAndFiveTailIsNoOp(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "q2"},
+		{Role: "assistant", Content: "a2"},
+		{Role: "assistant", Content: "tail"},
+	}
+
+	plan := planCompactionTail(msgs, 1, 5, 0)
+
+	assert.Equal(t, 1, plan.TailStart, "legacy mode must signal an empty middle")
+	assert.Equal(t, "no_compressible_middle", plan.Reason)
 }
 
 func TestCompactRecordsBudgetObservations(t *testing.T) {

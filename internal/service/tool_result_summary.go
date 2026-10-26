@@ -1,13 +1,10 @@
 package service
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/tokens"
@@ -33,6 +30,7 @@ type ToolResultSummary struct {
 	OriginalTokens    int    `json:"original_token_estimate"`
 	Outcome           string `json:"outcome"`
 	RetrievalRef      string `json:"retrieval_ref,omitempty"`
+	RetrievalHint     string `json:"retrieval_hint,omitempty"`
 	RetrievalFailNote string `json:"retrieval_fail_note,omitempty"`
 }
 
@@ -40,6 +38,12 @@ type ToolResultSummary struct {
 // a retained role=tool message. call supplies the original arguments/name; full
 // is the complete result body stored for the call.
 func SummarizeToolResult(call agent.ToolCall, full string, maxTokens int) string {
+	return summarizeToolResult(call, full, maxTokens, "", "")
+}
+
+func summarizeToolResult(
+	call agent.ToolCall, full string, maxTokens int, retrievalRef, retrievalFailNote string,
+) string {
 	if full == "" {
 		full = "{}"
 	}
@@ -92,16 +96,47 @@ func SummarizeToolResult(call agent.ToolCall, full string, maxTokens int) string
 		summary.Outcome = "(no textual output; see retrieval reference)"
 	}
 	summary.Outcome = truncateRunes(summary.Outcome, toolSummaryOutcomeRunes)
-	summary.RetrievalRef = toolResultRetrievalRef(call)
+	summary.RetrievalRef = retrievalRef
+	summary.RetrievalFailNote = retrievalFailNote
+	if retrievalRef != "" {
+		summary.RetrievalHint = "Read with xizhi_read_file (offset/limit) or search with xizhi_grep."
+	}
 	summary.Truncated = summary.Truncated || summary.OriginalTokens > maxTokens
 	encoded, err := json.Marshal(summary)
 	if err != nil {
 		return fmt.Sprintf(`{"tool_name":%q,"tool_call_id":%q,"status":%q,"outcome":%q,"original_bytes":%d}`,
 			call.Function.Name, call.ID, summary.Status, truncateRunes(summary.Outcome, toolSummaryFallbackRunes), len(full))
 	}
-	// Even a type-aware summary can be large if a provider returns pathological
-	// identifiers. The outer cap is a final safety net, not the normal shape.
-	return truncateUTF8Bytes(string(encoded), maxTokens*4)
+	return boundedToolSummaryJSON(summary, encoded, maxTokens)
+}
+
+// boundedToolSummaryJSON keeps the summary valid JSON while honoring the byte
+// safety cap. The outcome is reduced before any identity or retrieval fields,
+// so a large tool body can never truncate away the readable spill path.
+func boundedToolSummaryJSON(summary ToolResultSummary, encoded []byte, maxTokens int) string {
+	if maxTokens <= 0 {
+		maxTokens = 400
+	}
+	limit := maxTokens * 4
+	if len(encoded) <= limit {
+		return string(encoded)
+	}
+	for len([]rune(summary.Outcome)) > 0 {
+		runes := []rune(summary.Outcome)
+		keep := len(runes) * 3 / 4
+		if keep < 16 {
+			keep = 0
+		}
+		summary.Outcome = string(runes[:keep])
+		if keep > 0 {
+			summary.Outcome += "…"
+		}
+		encoded, _ = json.Marshal(summary)
+		if len(encoded) <= limit {
+			return string(encoded)
+		}
+	}
+	return string(encoded)
 }
 
 // summarizeToolOutcome prioritizes exact errors/identifiers and falls back to
@@ -200,28 +235,6 @@ func truncateRunes(s string, limit int) string {
 		return s
 	}
 	return string(r[:limit]) + "…"
-}
-
-func truncateUTF8Bytes(s string, limit int) string {
-	if len(s) <= limit {
-		return s
-	}
-	b := []byte(s)
-	if limit > len(b) {
-		limit = len(b)
-	}
-	for limit > 0 && !utf8.Valid(b[:limit]) {
-		limit--
-	}
-	return string(b[:limit]) + "…"
-}
-
-// toolResultRetrievalRef points at the persisted source of truth. The stable
-// identifier is deterministic, so replaying the summary does not churn the
-// prompt prefix or leak arbitrary paths.
-func toolResultRetrievalRef(call agent.ToolCall) string {
-	sum := sha256.Sum256([]byte(call.ID + "\x00" + call.Function.Name))
-	return "tool_calls/" + hex.EncodeToString(sum[:8]) + "/result"
 }
 
 // ToolActivity is the bounded ledger entry for tool calls that move into the

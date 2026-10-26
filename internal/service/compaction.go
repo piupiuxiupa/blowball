@@ -339,7 +339,10 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	if !ok {
 		return nil, false
 	}
-	retained, activityCount := summarizeRetainedToolResults(in.AgentMsgs, tailStart)
+	retained, activityCount := summarizeRetainedToolResults(in.AgentMsgs, tailStart,
+		func(call agent.ToolCall, full string) (string, string) {
+			return s.spillRetainedToolResult(ctx, in.UserID, in.SessionID, call, full)
+		})
 	if activity := renderScopeToolActivity(middle); activity != "" {
 		content += "\n\n## Tool Activity\n" + activity
 	}
@@ -672,11 +675,14 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 		if start < 0 {
 			start = 0
 		}
-		if start <= scopeStart {
-			// A first+tail-only conversation has nothing to shadow.
-			start = len(msgs)
-		}
 		start = alignTailToUnitStart(msgs, scopeStart, start)
+		if start <= scopeStart {
+			return compactionTailPlan{
+				TailStart: scopeStart,
+				Strategy:  "legacy_message_count",
+				Reason:    "no_compressible_middle",
+			}
+		}
 		return compactionTailPlan{TailStart: start, Strategy: "legacy_message_count"}
 	}
 	// Reserve a small fraction for the checkpoint and fixed prompt framing.
@@ -719,11 +725,8 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 		for unitStart > scopeStart && msgs[unitStart].Role == "tool" {
 			unitStart--
 		}
-		if unitStart > scopeStart && msgs[unitStart].Role == "assistant" && len(msgs[unitStart].ToolCalls) > 0 {
-			// Include the complete parallel result run, not a dangling call.
-			for unitStart+1 < len(msgs) && msgs[unitStart+1].Role == "tool" {
-				unitStart++
-			}
+		if unitStart >= start {
+			break
 		}
 		unit := msgs[unitStart:start]
 		cost := estimateRetainedUnit(unit)
@@ -777,7 +780,10 @@ func estimateRetainedUnit(unit []agent.Message) int {
 // tool_calls storage and referenced by a stable retrieval identifier. Tool
 // result messages carry only the call id/name, so arguments are recovered from
 // the preceding assistant tool-call messages.
-func summarizeRetainedToolResults(msgs []agent.Message, tailStart int) (map[string]string, int) {
+func summarizeRetainedToolResults(
+	msgs []agent.Message, tailStart int,
+	retrieval func(call agent.ToolCall, full string) (ref, failNote string),
+) (map[string]string, int) {
 	calls := indexToolCalls(msgs)
 	results := make(map[string]string)
 	for i := tailStart; i < len(msgs); i++ {
@@ -791,7 +797,11 @@ func summarizeRetainedToolResults(msgs []agent.Message, tailStart int) (map[stri
 				Function: agent.ToolCallFunction{Name: msgs[i].Name},
 			}
 		}
-		results[msgs[i].ToolCallID] = SummarizeToolResult(call, msgs[i].Content, 400)
+		ref, failNote := "", ""
+		if retrieval != nil && tokens.Estimate(msgs[i].Content) > 400 {
+			ref, failNote = retrieval(call, msgs[i].Content)
+		}
+		results[msgs[i].ToolCallID] = summarizeToolResult(call, msgs[i].Content, 400, ref, failNote)
 	}
 	return results, len(results)
 }
@@ -966,7 +976,10 @@ func chooseTailForReservedBudget(in CompactionInput, anchor agent.Message, scope
 		if start <= scopeStart || start > len(in.AgentMsgs) {
 			return start, false
 		}
-		retained, _ := summarizeRetainedToolResults(in.AgentMsgs, start)
+		retained, _ := summarizeRetainedToolResults(in.AgentMsgs, start,
+			func(call agent.ToolCall, _ string) (string, string) {
+				return toolResultSpillRelPath(in.SessionID, call), ""
+			})
 		content := reservedSummary
 		if activity := renderScopeToolActivity(in.AgentMsgs[scopeStart:start]); activity != "" {
 			content += "\n\n## Tool Activity\n" + activity

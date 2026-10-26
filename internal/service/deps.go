@@ -79,6 +79,7 @@ type RedisStore interface {
 // CreateSession ensures. It is satisfied by *fs.Store.
 type FSStore interface {
 	EnsureUserDirs(ctx context.Context, userID string) error
+	UserWorkspace(userID string) string
 }
 
 // SessionDeps bundles the store dependencies every service in this package

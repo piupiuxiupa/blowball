@@ -478,6 +478,7 @@ type fakeFSStore struct {
 
 	ensureCalls int
 	ensureErr   error
+	workspace   string
 }
 
 func (f *fakeFSStore) EnsureUserDirs(_ context.Context, userID string) error {
@@ -485,6 +486,10 @@ func (f *fakeFSStore) EnsureUserDirs(_ context.Context, userID string) error {
 	defer f.mu.Unlock()
 	f.ensureCalls++
 	return f.ensureErr
+}
+
+func (f *fakeFSStore) UserWorkspace(userID string) string {
+	return f.workspace
 }
 
 // fakeLLMClient is an agent.LLMClient for service tests. It returns a
