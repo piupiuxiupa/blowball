@@ -52,7 +52,11 @@ The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope c
 
 #### Scenario: Final restore does not reclassify against the live round
 - **WHEN** the compaction hook returns the completed durable projection with live data already materialized
-- **THEN** agent-side restore leaves that projection unchanged, including full unmatched messages and bounded checkpoint replays
+- **THEN** that hook result carries an explicit overlay-applied marker and agent-side restore leaves it unchanged, including full unmatched messages and bounded checkpoint replays
+
+#### Scenario: Repeated same-text prompts remain distinct occurrences
+- **WHEN** the current live message has the same text as an older user message
+- **THEN** the applied marker decides whether restore runs, and content equality alone never proves that the current occurrence is present
 
 ### Requirement: Compaction is triggered before a request exceeds the budget
 The system SHALL begin compaction when either the existing percentage threshold or the preflight request-budget threshold is reached, and the compressible middle is non-empty. The effective trigger SHALL be the lower of the applicable safe thresholds. The system SHALL reserve space for the completion quota and the next appended message set.

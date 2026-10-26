@@ -121,5 +121,11 @@
 ## 16. Durable Final Projection
 
 - [x] 16.1 Apply the live overlay in the handler against durable reconstructed messages before returning the replacement conversation.
-- [x] 16.2 Make agent-side live restoration idempotent for already materialized full messages and bounded replays.
+- [x] 16.2 Mark the specific hook result as live-overlay-applied instead of inferring idempotence from global message content.
 - [x] 16.3 Verify the returned final projection matches the persisted post-compaction token measurement and does not duplicate live input.
+
+## 17. Occurrence-Safe Overlay Application
+
+- [x] 17.1 Scope the applied marker to one synchronous compaction-hook invocation.
+- [x] 17.2 Use the marker to bypass fallback restore and keep source alignment only for unmarked hooks.
+- [x] 17.3 Cover repeated identical user prompts so an older message cannot suppress the current live occurrence.

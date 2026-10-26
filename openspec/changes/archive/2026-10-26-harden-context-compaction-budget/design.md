@@ -84,9 +84,11 @@ live message with no durable counterpart is never truncated: it is absent from
 the checkpoint as well, so keeping it whole (or refusing the candidate) is the
 only non-lossy behavior. The handler materializes the overlay against the same
 durable reconstruction the compaction candidate measured before returning the
-final conversation. Agent-side restore treats an already-present full projection
-or bounded replay as authoritative and is idempotent; the mutable live round is
-never allowed to masquerade as durable source for that final result.
+final conversation and marks that specific hook result as overlay-applied.
+Agent-side restore trusts the marker and skips fallback entirely; it must not
+scan global message content for a same-text row, because an older duplicate
+would then masquerade as the current occurrence. The mutable live round is used
+only by the fallback for unmarked hooks.
 
 **Alternative rejected:** retain the last five messages then truncate individual tool results in place without re-planning. A few huge results can still exceed the window, while a small conversational tail needlessly discards useful continuity.
 
