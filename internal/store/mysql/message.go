@@ -47,6 +47,7 @@ INNER JOIN
 	WHERE session_id = ?
 	ORDER BY msg_time ASC, msg_index ASC
 ) AS sub ON msg.id = sub.id
+ORDER BY msg.msg_time ASC, msg.msg_index ASC, msg.id ASC
 `
 
 // nilIfEmpty maps an absent client_msg_id (legacy rows / callers that predate

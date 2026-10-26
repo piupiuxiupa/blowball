@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,13 @@ import (
 // no MySQL instance is available for testing.
 func testDSN() string {
 	return os.Getenv("MYSQL_TEST_DSN")
+}
+
+func TestListMessagesSQL_HasStableOuterOrder(t *testing.T) {
+	normalized := strings.Join(strings.Fields(listMessagesSQL), " ")
+	assert.Contains(t, normalized,
+		"ORDER BY msg.msg_time ASC, msg.msg_index ASC, msg.id ASC",
+		"derived-table ordering is not guaranteed to survive the outer join")
 }
 
 // setupTestStore opens a connection and creates the messages table. Tests are
@@ -38,9 +46,10 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 
 	// Create an isolated messages table without the FK constraint so tests do
 	// not require a sessions row. The column layout mirrors the production
-	// schema (migrations 004 + 005 + 012 + 014: nullable role, event_type,
+	// schema (migrations 004 + 005 + 012 + 014 + 021: nullable role, event_type,
 	// millisecond msg_time, nullable client_msg_id with its UNIQUE index,
-	// nullable run_id/agent_instance_id) so the SELECT scan paths run against the real shape —
+	// nullable run_id/agent_instance_id, nullable attachments_json) so the
+	// SELECT scan paths run against the real shape —
 	// this is exactly how the legacy-NULL scan bug escaped: an out-of-date
 	// test table.
 	_, err = store.db.ExecContext(context.Background(), `
@@ -55,6 +64,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 			event_type  VARCHAR(16)  NOT NULL DEFAULT 'token',
 			status      VARCHAR(16)  NULL,
 			content     MEDIUMTEXT   NOT NULL,
+			attachments_json MEDIUMTEXT NULL,
 			reasoning_content MEDIUMTEXT NULL,
 			trace_id    CHAR(36)     NOT NULL,
 			client_msg_id CHAR(36)   NULL,
@@ -267,6 +277,27 @@ func TestListMessages_NullClientMsgIDScansAsEmptyString(t *testing.T) {
 	require.Len(t, paged, 2)
 	assert.Empty(t, paged[0].ClientMsgID)
 	assert.Equal(t, stamped.ClientMsgID, paged[1].ClientMsgID)
+}
+
+func TestListMessages_ReturnsChronologicalOrder(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	sessionID := "aaaaaaaa-0000-7000-8000-0000000000ab"
+	base := time.Unix(1_700_000_000, 0).UTC()
+	// Insert out of chronological order so primary-key order differs from the
+	// required (msg_time, msg_index, id) order.
+	lateID := insertTestMessage(t, store, sessionID, base.Add(2*time.Second), 0, "late")
+	firstID := insertTestMessage(t, store, sessionID, base, 0, "first")
+	tieID := insertTestMessage(t, store, sessionID, base, 0, "first tie")
+	secondIndexID := insertTestMessage(t, store, sessionID, base, 1, "second index")
+
+	msgs, err := store.ListMessages(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 4)
+	assert.Equal(t, []int64{firstID, tieID, secondIndexID, lateID},
+		[]int64{msgs[0].ID, msgs[1].ID, msgs[2].ID, msgs[3].ID},
+		"ListMessages must order by the full durable cursor, including the id tie-breaker")
 }
 
 // TestAppendMessages_EmptyClientMsgIDWritesNull verifies the inverse mapping:
