@@ -60,3 +60,29 @@ func TestMergeToolActivity_RecompactionIsAdditiveAndBounded(t *testing.T) {
 	assert.Equal(t, 4, TotalToolActivityCalls(merged))
 	assert.Equal(t, 1, strings.Count(RenderToolActivityLedger(merged), "- grep:"))
 }
+
+func TestExtractToolActivity_PreservesFencedMarkdown(t *testing.T) {
+	content := strings.Join([]string{
+		"## Critical Context",
+		"```markdown",
+		"## Tool Activity",
+		"## Example",
+		"keep this code",
+		"```",
+		"after fence",
+		"",
+		"## Tool Activity",
+		"- grep: 2 calls, 1 succeeded, 1 failed",
+	}, "\n")
+
+	body, activity := ExtractToolActivity(content)
+
+	assert.Contains(t, body, "```markdown")
+	assert.Contains(t, body, "## Tool Activity\n## Example")
+	assert.Contains(t, body, "keep this code")
+	assert.Contains(t, body, "after fence")
+	assert.Equal(t, 1, strings.Count(body, "## Tool Activity"),
+		"only the fenced example heading should remain in the body")
+	require.Len(t, activity, 1)
+	assert.Equal(t, 2, activity[0].Calls)
+}

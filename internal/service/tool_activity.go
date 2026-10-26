@@ -142,6 +142,8 @@ func splitToolActivitySections(content string) (string, []string) {
 	body := make([]string, 0, len(lines))
 	sections := make([]string, 0)
 	var current []string
+	var fenceChar byte
+	fenceLen := 0
 	flush := func() {
 		if current != nil {
 			sections = append(sections, strings.Join(current, "\n"))
@@ -150,13 +152,24 @@ func splitToolActivitySections(content string) (string, []string) {
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "## Tool Activity" {
-			flush()
-			current = make([]string, 0)
-			continue
-		}
-		if current != nil && strings.HasPrefix(trimmed, "## ") {
-			flush()
+		leftTrimmed := strings.TrimLeft(line, " \t")
+		fenceRun, runLen, isFence := markdownFenceRun(leftTrimmed)
+		if fenceChar != 0 {
+			if isFence && fenceRun == fenceChar && runLen >= fenceLen {
+				fenceChar = 0
+				fenceLen = 0
+			}
+		} else {
+			if isFence {
+				fenceChar = fenceRun
+				fenceLen = runLen
+			} else if trimmed == "## Tool Activity" {
+				flush()
+				current = make([]string, 0)
+				continue
+			} else if current != nil && strings.HasPrefix(trimmed, "## ") {
+				flush()
+			}
 		}
 		if current != nil {
 			current = append(current, line)
@@ -166,6 +179,20 @@ func splitToolActivitySections(content string) (string, []string) {
 	}
 	flush()
 	return strings.TrimSpace(strings.Join(body, "\n")), sections
+}
+
+func markdownFenceRun(line string) (char byte, length int, ok bool) {
+	if len(line) < 3 {
+		return 0, 0, false
+	}
+	char = line[0]
+	if char != '`' && char != '~' {
+		return 0, 0, false
+	}
+	for length < len(line) && line[length] == char {
+		length++
+	}
+	return char, length, length >= 3
 }
 
 func parseToolActivitySections(sections []string) []ToolActivity {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -327,6 +328,40 @@ func TestCompactionService_RecompactionMergesStructuredToolActivity(t *testing.T
 		"re-compaction must keep exactly one merged activity section")
 	assert.NotContains(t, llm.lastReq.Messages[1].Content, "## Tool Activity",
 		"the model receives the cleaned prior body, not a duplicate legacy ledger")
+}
+
+func TestChooseTailForReservedBudget_IncludesPriorToolActivity(t *testing.T) {
+	msgs := make([]agent.Message, 20)
+	msgs[0] = agent.Message{Role: "user", Content: "anchor"}
+	for i := 1; i < 15; i++ {
+		msgs[i] = agent.Message{Role: "assistant", Content: fmt.Sprintf("middle-%d", i)}
+	}
+	for i := 15; i < 20; i++ {
+		msgs[i] = agent.Message{Role: "assistant", Content: strings.Repeat("tail ", 1000)}
+	}
+	in := CompactionInput{
+		SessionID:   "session-budget",
+		AgentMsgs:   msgs,
+		InputBudget: 18000,
+	}
+	prior := make([]ToolActivity, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		prior = append(prior, ToolActivity{
+			ToolName: fmt.Sprintf("tool-%04d", i),
+			Calls:    10,
+			Success:  8,
+			Errors:   2,
+		})
+	}
+
+	withoutPrior, ok := chooseTailForReservedBudget(in, msgs[0], 1, 15, nil)
+	require.True(t, ok)
+	withPrior, ok := chooseTailForReservedBudget(in, msgs[0], 1, 15, prior)
+	require.True(t, ok)
+
+	assert.Equal(t, 15, withoutPrior)
+	assert.Greater(t, withPrior, withoutPrior,
+		"the preplanner must reduce the tail to account for the merged prior ledger")
 }
 
 func TestCompactionService_Compact_SummaryFailureDegrades(t *testing.T) {

@@ -317,7 +317,7 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	initialTail := tailStart
 	if in.InputBudget > 0 {
 		var ok bool
-		tailStart, ok = chooseTailForReservedBudget(in, anchor, scopeStart, tailStart)
+		tailStart, ok = chooseTailForReservedBudget(in, anchor, scopeStart, tailStart, priorActivity)
 		if !ok {
 			log.Warn("compaction candidate remains above request budget",
 				zap.Int("tail_start", tailStart),
@@ -970,7 +970,9 @@ func advanceTailStart(msgs []agent.Message, start int) int {
 // chooseTailForReservedBudget advances the tail boundary without calling the
 // summarizer. The summary slot is represented by its maximum allowed output
 // size, so one final model call is sufficient after the tail is selected.
-func chooseTailForReservedBudget(in CompactionInput, anchor agent.Message, scopeStart, start int) (int, bool) {
+func chooseTailForReservedBudget(
+	in CompactionInput, anchor agent.Message, scopeStart, start int, priorActivity []ToolActivity,
+) (int, bool) {
 	summaryReserve := compactionSummaryMaxTokens
 	if half := in.InputBudget / 2; summaryReserve > half {
 		summaryReserve = half
@@ -988,8 +990,9 @@ func chooseTailForReservedBudget(in CompactionInput, anchor agent.Message, scope
 				return toolResultSpillRelPath(in.SessionID, call), ""
 			})
 		content := reservedSummary
-		if activity := RenderToolActivityLedger(buildScopeToolActivity(in.AgentMsgs[scopeStart:start])); activity != "" {
-			content += "\n\n## Tool Activity\n" + activity
+		activity := MergeToolActivity(priorActivity, buildScopeToolActivity(in.AgentMsgs[scopeStart:start]))
+		if rendered := RenderToolActivityLedger(activity); rendered != "" {
+			content += "\n\n## Tool Activity\n" + rendered
 		}
 		projected := buildCompactedProjection(anchor, in.AgentMsgs, start, content, retained)
 		projected = agent.ApplyLiveOverlay(in.AgentMsgs, projected, in.LiveMessages)
