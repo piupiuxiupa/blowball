@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,7 @@ type attachmentSendEnv struct {
 	atts    *fakeAttachmentStore
 	redis   *handlerFakeRedis
 	dataDir string
+	runs    *run.Manager
 }
 
 func newAttachmentSendEnv(t *testing.T) *attachmentSendEnv {
@@ -60,8 +62,9 @@ func newAttachmentSendEnv(t *testing.T) *attachmentSendEnv {
 
 	atts := &fakeAttachmentStore{rows: map[string]model.Attachment{}}
 	dataDir := t.TempDir()
+	runMgr := run.NewManager(run.NewMemStore(), run.NewRegistry())
 	streamH := NewMessageStreamHandler(sessSvc, msgSvc, nil, nil, nil, stub, dataDir,
-		run.NewManager(run.NewMemStore(), run.NewRegistry()), visionSelectionConfig(), 0).
+		runMgr, visionSelectionConfig(), 0).
 		WithAttachmentStore(atts)
 
 	r := gin.New()
@@ -71,7 +74,7 @@ func newAttachmentSendEnv(t *testing.T) *attachmentSendEnv {
 		c.Next()
 	})
 	r.POST("/api/v1/sessions/:session_id/messages", streamH.SendMessage)
-	return &attachmentSendEnv{engine: r, stub: stub, atts: atts, redis: redis, dataDir: dataDir}
+	return &attachmentSendEnv{engine: r, stub: stub, atts: atts, redis: redis, dataDir: dataDir, runs: runMgr}
 }
 
 func (e *attachmentSendEnv) plant(t *testing.T, id, filename, mime string, data []byte, userID string) {
@@ -159,7 +162,7 @@ func TestSendMessage_Attachments_TooManyRejected(t *testing.T) {
 
 func TestSendMessage_Attachments_NonVisionModelRejected(t *testing.T) {
 	env := newAttachmentSendEnv(t)
-	env.plant(t, att1, "shot.png", "image/png", pngBytes, "user-1")
+	env.plantStaged(t, att1, "shot.png", pngBytes)
 
 	// Rebuild the engine with the default (non-vision) selection config.
 	gin.SetMode(gin.TestMode)
@@ -183,6 +186,7 @@ func TestSendMessage_Attachments_NonVisionModelRejected(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "MODEL_NOT_VISION")
+	assert.Nil(t, env.atts.rows[att1].SessionID, "capability rejection must not claim a staged attachment")
 }
 
 func TestSendMessage_Attachments_MissingFileDegradesToPlaceholder(t *testing.T) {
@@ -299,4 +303,49 @@ func TestSendMessage_Attachments_StagedBindFailureDegrades(t *testing.T) {
 	assert.Empty(t, last.Images)
 	assert.Contains(t, last.Content, "[图片: gone.png]")
 	assert.Nil(t, env.atts.rows[att1].SessionID, "failed bind must roll the claim back to staged")
+}
+
+func TestSendMessage_Attachments_PartialClaimFailureRollsBack(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "first.png", pngBytes)
+	env.plantStaged(t, att2, "second.png", pngBytes)
+	claims := 0
+	env.atts.claimHook = func(id, userID, sessionID string) (bool, error) {
+		claims++
+		if claims > 1 {
+			return false, nil
+		}
+		row := env.atts.rows[id]
+		row.SessionID = ptrStr(sessionID)
+		env.atts.rows[id] = row
+		return true, nil
+	}
+
+	w := env.post(t, attachmentBody(att1, att2))
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Empty(t, env.redis.dualBatches)
+	assert.Nil(t, env.atts.rows[att1].SessionID, "first successful claim must be rolled back")
+	assert.Nil(t, env.atts.rows[att2].SessionID)
+
+	staged := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope, att1+".png")
+	bound := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1", att1+".png")
+	_, err := os.Stat(staged)
+	assert.NoError(t, err, "rolled-back file must return to staging")
+	_, err = os.Stat(bound)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestSendMessage_Attachments_SessionBusyRollsBackClaims(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "first.png", pngBytes)
+	_, claimed, err := env.runs.Store.ClaimSession(context.Background(), "sess-1", "other-run")
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	w := env.post(t, attachmentBody(att1))
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Nil(t, env.atts.rows[att1].SessionID, "SESSION_BUSY must roll the attachment claim back")
+	staged := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope, att1+".png")
+	_, err = os.Stat(staged)
+	assert.NoError(t, err)
 }

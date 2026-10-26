@@ -59,11 +59,18 @@ func SummarizeToolResult(call agent.ToolCall, full string, maxTokens int) string
 		Result json.RawMessage `json:"result"`
 		Error  string          `json:"error"`
 	}
-	decoded := json.Unmarshal([]byte(full), &envelope) == nil
-	if decoded && envelope.Status != 0 {
+	var fields map[string]json.RawMessage
+	isEnvelope := json.Unmarshal([]byte(full), &fields) == nil
+	if isEnvelope {
+		_, isEnvelope = fields["status"]
+	}
+	if isEnvelope {
+		isEnvelope = json.Unmarshal([]byte(full), &envelope) == nil
+	}
+	if isEnvelope && envelope.Status != 0 {
 		summary.Status = "error"
 	}
-	if decoded {
+	if isEnvelope {
 		summary.Outcome = summarizeToolOutcome(call.Function, envelope.Result, envelope.Error, maxTokens)
 		if call.Function.Name == "executor_bash" || call.Function.Name == "bash" {
 			var r struct {
@@ -79,7 +86,7 @@ func SummarizeToolResult(call agent.ToolCall, full string, maxTokens int) string
 			}
 		}
 	} else {
-		summary.Outcome = summarizeToolOutcome(call.Function, nil, full, maxTokens)
+		summary.Outcome = summarizeToolOutcome(call.Function, json.RawMessage(full), "", maxTokens)
 	}
 	if summary.Outcome == "" {
 		summary.Outcome = "(no textual output; see retrieval reference)"
@@ -249,7 +256,9 @@ func RenderToolActivity(calls []agent.ToolCall, results map[string]string) strin
 			entry.Success++
 		}
 		if len(entry.Examples) < 3 {
-			entry.Examples = append(entry.Examples, truncateRunes(strings.TrimSpace(result), 160))
+			args := truncateRunes(strings.TrimSpace(call.Function.Arguments), 120)
+			outcome := truncateRunes(strings.TrimSpace(result), 160)
+			entry.Examples = append(entry.Examples, fmt.Sprintf("args=%s outcome=%s", args, outcome))
 		}
 	}
 	var b strings.Builder

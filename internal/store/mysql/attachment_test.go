@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/model"
@@ -150,6 +151,16 @@ func TestAttachment_StagedLifecycle(t *testing.T) {
 	deleted, err = store.DeleteStagedAttachment(ctx, staged.ID)
 	require.NoError(t, err)
 	require.False(t, deleted)
+
+	// A failed file cleanup restores the expired row for the next sweep while
+	// preserving its age so it is immediately retryable.
+	staged.CreateTime = time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	require.NoError(t, store.RestoreStagedAttachment(ctx, staged))
+	restored, err := store.GetAttachmentByUser(ctx, staged.ID, "u-1")
+	require.NoError(t, err)
+	require.NotNil(t, restored)
+	require.Nil(t, restored.SessionID)
+	assert.True(t, restored.CreateTime.Before(time.Now().Add(-24*time.Hour)))
 
 	// A claimed row must survive DeleteStagedAttachment (claim-vs-sweep race).
 	bound := model.Attachment{

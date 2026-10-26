@@ -11,6 +11,7 @@ import (
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // compactionFixture builds a synthetic persisted conversation of n agent
@@ -474,4 +475,39 @@ func TestCompactionService_ChunkedSummaryWhenInputWouldOverflow(t *testing.T) {
 	}
 	assert.Equal(t, "chunked", rec.SummaryStrategy)
 	assert.Greater(t, rec.SummaryPromptTokens, 0)
+}
+
+func TestCompactionService_RetrimsBoundaryAndMeasuresFinalProjection(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(20)
+	for i := 15; i < len(msgs); i++ {
+		msgs[i].Content = strings.Repeat("tail-", 80)
+	}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{
+		Content: strings.Repeat("S", 200),
+		Usage:   agent.Usage{PromptTokens: 100, CompletionTokens: 20},
+	}}
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 300
+	in.TriggerTokensMeasured = true
+
+	rec, ok := svc.Compact(context.Background(), in)
+	require.True(t, ok)
+	tailStart := len(msgs) - rec.RetainedTailMessages
+	require.Greater(t, tailStart, 1)
+	require.Less(t, tailStart, len(msgs))
+
+	boundary := rows[lastRow[tailStart-1]]
+	assert.Equal(t, boundary.ID, rec.BoundaryMsgID, "boundary must move with the trimmed tail")
+	assert.Equal(t, boundary.MsgIndex, rec.BoundaryMsgIndex)
+	assert.True(t, boundary.MsgTime.Equal(rec.BoundaryMsgTime))
+	require.NotEmpty(t, llm.lastReq.Messages)
+	assert.Contains(t, llm.lastReq.Messages[len(llm.lastReq.Messages)-1].Content, msgs[tailStart-1].Content,
+		"the final summary input must include every message newly moved out of the tail")
+
+	projection := buildCompactedProjection(msgs, tailStart, rec.Content, rec.RetainedResults, in.PendingMessages)
+	wantTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projection, nil).Tokens
+	assert.Equal(t, wantTokens, rec.PostCompactionTokens,
+		"persisted post-compaction size must be based on the final model projection")
+	assert.LessOrEqual(t, rec.PostCompactionTokens, in.InputBudget)
 }

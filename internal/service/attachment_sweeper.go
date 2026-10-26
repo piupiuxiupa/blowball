@@ -33,12 +33,15 @@ const (
 type AttachmentSweepStore interface {
 	ListExpiredStagedAttachments(ctx context.Context, cutoff time.Time, limit int) ([]model.Attachment, error)
 	DeleteStagedAttachment(ctx context.Context, id string) (bool, error)
+	RestoreStagedAttachment(ctx context.Context, a model.Attachment) error
 }
 
 // AttachmentSweeper reclaims staged (uploaded-but-never-claimed) attachments
 // past their TTL: delete the registry row, then the file. The row delete
 // carries a session_id IS NULL guard, so a concurrent send-time claim always
-// wins — a lost delete means the file moved on and MUST be left alone.
+// wins — a lost delete means the file moved on and MUST be left alone. If file
+// removal fails after a successful delete, the row is restored with its
+// original age so the next sweep retries instead of losing the cleanup entry.
 type AttachmentSweeper struct {
 	store      AttachmentSweepStore
 	stagingDir func(userID string) string
@@ -93,6 +96,7 @@ func (s *AttachmentSweeper) SweepOnce(ctx context.Context) {
 		}
 		ext, ok := model.AttachmentMIMEExt[row.MIME]
 		if !ok {
+			s.restore(ctx, row, errors.New("unknown attachment MIME"))
 			continue
 		}
 		path := filepath.Join(s.stagingDir(row.UserID), row.ID+ext)
@@ -101,6 +105,19 @@ func (s *AttachmentSweeper) SweepOnce(ctx context.Context) {
 				zap.String("op", "attachment.sweep"),
 				zap.String("attachment_id", row.ID),
 				zap.String("path", path), zap.Error(err))
+			s.restore(ctx, row, err)
 		}
+	}
+}
+
+func (s *AttachmentSweeper) restore(ctx context.Context, row model.Attachment, cause error) {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.store.RestoreStagedAttachment(restoreCtx, row); err != nil {
+		logger.FromContext(ctx).Error("staged attachment sweep: restore retry row failed",
+			zap.String("op", "attachment.sweep"),
+			zap.String("attachment_id", row.ID),
+			zap.Error(cause),
+			zap.NamedError("restore_error", err))
 	}
 }

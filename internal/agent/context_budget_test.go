@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
+	"github.com/lush/blowball/internal/stream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -75,4 +77,51 @@ func TestContextBudgetErrors_carryActionableValues(t *testing.T) {
 func TestSanitizeBudgetReason_boundsAndTrims(t *testing.T) {
 	assert.Equal(t, "reason", sanitizeBudgetReason(" reason \n"))
 	assert.LessOrEqual(t, len(sanitizeBudgetReason(strings.Repeat("x", 300))), 240)
+}
+
+func TestConfucius_InvalidBudgetRejectedBeforeModelCall(t *testing.T) {
+	client := newFake()
+	c := newTestConfucius(t, client, nil)
+	c.turn.MaxContextTokens = 1000
+	c.turn.MaxCompletionTokens = 500
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+
+	_, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: "hi"}}, hub)
+	var invalid *InvalidRequestBudgetError
+	require.ErrorAs(t, err, &invalid)
+	assert.Equal(t, 0, client.requestCount())
+}
+
+func TestConfucius_OversizedFirstRequestCompactedBeforeModelCall(t *testing.T) {
+	client := newFake(fakeResponse{content: "recovered", finishReason: "stop"})
+	c := newTestConfucius(t, client, nil)
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
+	compactions := 0
+	c.SetRoundHook(func(context.Context, Usage) []Message {
+		compactions++
+		return []Message{{Role: "user", Content: "compacted"}}
+	})
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+
+	content, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: strings.Repeat("x", 30000)}}, hub)
+	require.NoError(t, err)
+	assert.Equal(t, "recovered", content)
+	assert.Equal(t, 1, compactions)
+	require.Equal(t, 1, client.requestCount())
+	assert.Contains(t, client.calls[0].Messages[len(client.calls[0].Messages)-1].Content, "compacted")
+}
+
+func TestConfucius_UndecompactableFirstRequestRejectedBeforeModelCall(t *testing.T) {
+	client := newFake()
+	c := newTestConfucius(t, client, nil)
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
+	c.SetRoundHook(func(context.Context, Usage) []Message { return nil })
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+
+	_, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: strings.Repeat("x", 30000)}}, hub)
+	var tooLarge *RequestTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	assert.Equal(t, 0, client.requestCount(), "an over-budget first request must never reach the provider")
 }

@@ -11,9 +11,10 @@ const (
 	CompactionTriggerTurnStart = "turn_start"
 )
 
-// ContextCompaction mirrors the `context_compactions` table (migration
-// 013_context_compaction.sql). One row records one completed context
-// compaction: the checkpoint summary that replaced a shadowed span of history,
+// ContextCompaction mirrors the `context_compactions` table (migrations
+// 013_context_compaction.sql and 023_context_compaction_budget.sql). One row
+// records one completed context compaction: the checkpoint summary that
+// replaced a shadowed span of history,
 // the composite cursor of the last shadowed messages row (the stitch boundary),
 // and the observation columns for the summarization call.
 //

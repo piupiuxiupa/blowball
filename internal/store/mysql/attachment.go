@@ -118,6 +118,16 @@ DELETE FROM attachments
 WHERE id = ? AND session_id IS NULL
 `
 
+// restoreStagedAttachmentSQL recreates the registry row after a successful
+// guarded delete whose staging-file removal failed. Preserving create_time
+// makes the row immediately eligible for the next sweep, keeping cleanup
+// retryable instead of leaving an untracked file behind.
+const restoreStagedAttachmentSQL = `
+INSERT INTO attachments (id, user_id, session_id, filename, mime, size, message_id, create_time)
+VALUES (:id, :user_id, NULL, :filename, :mime, :size, :message_id, :create_time)
+ON DUPLICATE KEY UPDATE id = VALUES(id)
+`
+
 // GetAttachmentByUser returns the attachment row for the (id, userID)
 // ownership pair regardless of session binding, or (nil, nil) when no such
 // row exists. Callers branch on SessionID: nil = staged, equal = bound to
@@ -200,4 +210,24 @@ func (s *Store) DeleteStagedAttachment(ctx context.Context, id string) (bool, er
 		return false, fmt.Errorf("mysql.DeleteStagedAttachment: rows affected: %w", err)
 	}
 	return affected == 1, nil
+}
+
+// RestoreStagedAttachment re-registers an expired staged row after the sweeper
+// won the delete race but could not remove the file. The duplicate-key branch
+// is a no-op so a concurrently recreated/claimed row is never clobbered.
+func (s *Store) RestoreStagedAttachment(ctx context.Context, a model.Attachment) error {
+	logQuery(ctx, "attachment.restore_staged", restoreStagedAttachmentSQL, a.ID)
+	params := map[string]any{
+		"id":          a.ID,
+		"user_id":     a.UserID,
+		"filename":    a.Filename,
+		"mime":        a.MIME,
+		"size":        a.Size,
+		"message_id":  a.MessageID,
+		"create_time": a.CreateTime,
+	}
+	if _, err := sqlx.NamedExecContext(ctx, s.db, restoreStagedAttachmentSQL, params); err != nil {
+		return fmt.Errorf("mysql.RestoreStagedAttachment: %w", err)
+	}
+	return nil
 }

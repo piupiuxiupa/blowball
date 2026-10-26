@@ -326,6 +326,7 @@ type ModelOverride struct {
 	Model               string
 	Thinking            bool
 	ReasoningEffort     string
+	MaxContextTokens    int
 	MaxCompletionTokens int
 	LengthContinue      config.LengthContinueConfig
 }

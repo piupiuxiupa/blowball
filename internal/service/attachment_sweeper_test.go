@@ -41,6 +41,13 @@ func (f *fakeSweepStore) DeleteStagedAttachment(_ context.Context, id string) (b
 	return true, nil
 }
 
+func (f *fakeSweepStore) RestoreStagedAttachment(_ context.Context, a model.Attachment) error {
+	if _, exists := f.rows[a.ID]; !exists {
+		f.rows[a.ID] = a
+	}
+	return nil
+}
+
 func TestAttachmentSweeper_ExpiredStagedReaped(t *testing.T) {
 	root := t.TempDir()
 	staging := func(userID string) string { return filepath.Join(root, userID, "attachments", "_staging") }
@@ -90,6 +97,33 @@ func TestAttachmentSweeper_MissingFileStillDeletesRow(t *testing.T) {
 
 	assert.NotContains(t, store.rows, "gone", "row must be deleted even when the file is already missing")
 	assert.NotContains(t, store.rows, "expired", "the round must continue past the missing file")
+}
+
+func TestAttachmentSweeper_FileDeleteFailureRestoresRetryRow(t *testing.T) {
+	root := t.TempDir()
+	staging := func(userID string) string { return filepath.Join(root, userID, "attachments", "_staging") }
+	old := time.Now().Add(-25 * time.Hour)
+	store := &fakeSweepStore{rows: map[string]model.Attachment{
+		"retry": {ID: "retry", UserID: "u-1", MIME: "image/png", CreateTime: old},
+	}}
+	dir := staging("u-1")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "retry.png"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "retry.png", "blocker"), []byte("x"), 0o644))
+
+	sweeper := NewAttachmentSweeper(store, staging)
+	sweeper.SweepOnce(context.Background())
+
+	row, ok := store.rows["retry"]
+	require.True(t, ok, "failed file cleanup must restore an expired staged row for retry")
+	assert.Equal(t, old, row.CreateTime)
+
+	// The next sweep can finish once the obstruction is gone.
+	require.NoError(t, os.RemoveAll(filepath.Join(dir, "retry.png")))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "retry.png"), []byte("x"), 0o644))
+	sweeper.SweepOnce(context.Background())
+	assert.NotContains(t, store.rows, "retry")
+	_, err := os.Stat(filepath.Join(dir, "retry.png"))
+	assert.True(t, os.IsNotExist(err))
 }
 
 // TestAttachmentSweeper_ClaimRaceKeepsFile: when the row delete loses the

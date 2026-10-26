@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/lush/blowball/internal/model"
 )
@@ -60,19 +61,80 @@ ORDER BY id DESC
 LIMIT 1
 `
 
+// compactionRecordRow keeps every post-013 observation column nullable at the
+// scan boundary. Existing records predate migration 023, and NULLIF writes use
+// NULL for absent observations; scanning those directly into Go strings/ints
+// would make the latest authoritative record unreadable.
+type compactionRecordRow struct {
+	ID                      int64          `db:"id"`
+	SessionID               string         `db:"session_id"`
+	UserID                  string         `db:"user_id"`
+	TraceID                 string         `db:"trace_id"`
+	TriggerKind             string         `db:"trigger_kind"`
+	TriggerTokens           int            `db:"trigger_tokens"`
+	Content                 string         `db:"content"`
+	BoundaryMsgTime         time.Time      `db:"boundary_msg_time"`
+	BoundaryMsgIndex        int            `db:"boundary_msg_index"`
+	BoundaryMsgID           int64          `db:"boundary_msg_id"`
+	ShadowedTokens          int            `db:"shadowed_tokens"`
+	SummaryModel            string         `db:"summary_model"`
+	SummaryPromptTokens     int            `db:"summary_prompt_tokens"`
+	SummaryCompletionTokens int            `db:"summary_completion_tokens"`
+	RetainedResultsJSON     []byte         `db:"retained_results_json"`
+	MeasurementBasis        sql.NullString `db:"measurement_basis"`
+	PreCompactionTokens     sql.NullInt64  `db:"pre_compaction_tokens"`
+	InputBudgetTokens       sql.NullInt64  `db:"input_budget_tokens"`
+	PostCompactionTokens    sql.NullInt64  `db:"post_compaction_tokens"`
+	RetainedTailMessages    sql.NullInt64  `db:"retained_tail_messages"`
+	SummaryStrategy         sql.NullString `db:"summary_strategy"`
+	ToolSummaryCount        sql.NullInt64  `db:"tool_summary_count"`
+	ToolActivityCount       sql.NullInt64  `db:"tool_activity_count"`
+	CreateTime              time.Time      `db:"create_time"`
+}
+
+func (r compactionRecordRow) model() model.ContextCompaction {
+	return model.ContextCompaction{
+		ID:                      r.ID,
+		SessionID:               r.SessionID,
+		UserID:                  r.UserID,
+		TraceID:                 r.TraceID,
+		TriggerKind:             r.TriggerKind,
+		TriggerTokens:           r.TriggerTokens,
+		Content:                 r.Content,
+		BoundaryMsgTime:         r.BoundaryMsgTime,
+		BoundaryMsgIndex:        r.BoundaryMsgIndex,
+		BoundaryMsgID:           r.BoundaryMsgID,
+		ShadowedTokens:          r.ShadowedTokens,
+		SummaryModel:            r.SummaryModel,
+		SummaryPromptTokens:     r.SummaryPromptTokens,
+		SummaryCompletionTokens: r.SummaryCompletionTokens,
+		RetainedResultsJSON:     r.RetainedResultsJSON,
+		MeasurementBasis:        r.MeasurementBasis.String,
+		PreCompactionTokens:     int(r.PreCompactionTokens.Int64),
+		InputBudgetTokens:       int(r.InputBudgetTokens.Int64),
+		PostCompactionTokens:    int(r.PostCompactionTokens.Int64),
+		RetainedTailMessages:    int(r.RetainedTailMessages.Int64),
+		SummaryStrategy:         r.SummaryStrategy.String,
+		ToolSummaryCount:        int(r.ToolSummaryCount.Int64),
+		ToolActivityCount:       int(r.ToolActivityCount.Int64),
+		CreateTime:              r.CreateTime,
+	}
+}
+
 // LatestCompaction returns the newest compaction record for sessionID, or
 // (nil, nil) when the session has never been compacted.
 func (s *Store) LatestCompaction(ctx context.Context, sessionID string) (*model.ContextCompaction, error) {
 	logQuery(ctx, "compaction.latest", latestCompactionSQL, sessionID)
 
-	var rec model.ContextCompaction
-	err := s.db.GetContext(ctx, &rec, latestCompactionSQL, sessionID)
+	var row compactionRecordRow
+	err := s.db.GetContext(ctx, &row, latestCompactionSQL, sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	rec := row.model()
 	rec.DecodeRetainedResults()
 	return &rec, nil
 }

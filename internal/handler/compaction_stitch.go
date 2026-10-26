@@ -11,13 +11,13 @@ import (
 // (context-compaction capability, design D9). English engineering prose
 // regardless of the conversation language — same choice as the checkpoint
 // template itself — because it is an instruction to the model, not content.
-const summaryLeadIn = "This is an automatically generated checkpoint condensing an earlier span of the conversation. Treat it as authoritative context for everything below it."
+const summaryLeadIn = agent.CompactedSummaryLeadIn
 
 // frameCompactedSummary wraps the bare checkpoint record content in the
 // stable <compacted-summary> wire frame. The frame is applied at stitch time
 // (not stored) so the record stays framing-agnostic.
 func frameCompactedSummary(content string) string {
-	return summaryLeadIn + "\n\n<compacted-summary>\n" + content + "\n</compacted-summary>"
+	return agent.FrameCompactedSummary(content)
 }
 
 // stitchCompacted builds the model context for a compacted session:

@@ -468,6 +468,17 @@ func TestSendMessage_TurnStartPreventiveCompaction(t *testing.T) {
 	}
 }
 
+func TestSendMessage_InvalidContextBudgetRejectedBeforeClaims(t *testing.T) {
+	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "unused"}, 100000)
+	env.stream.selection.Catalog[0].MaxCompletionTokens = 100000
+
+	w := postToSession(t, env, "must not reach model")
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "INVALID_CONTEXT_BUDGET")
+	assert.Empty(t, env.redis.dualBatches)
+	assert.Empty(t, env.stub.gotMessages)
+}
+
 // TestTurnEventTap_SnapshotAndClose covers the tap contract: a served
 // snapshot returns the collected events; after close (turn over) Snapshot
 // returns nil so callers abort the flush.

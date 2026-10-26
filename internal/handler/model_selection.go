@@ -113,6 +113,7 @@ func (s modelSelection) override() agent.ModelOverride {
 		Model:               s.Model,
 		Thinking:            s.Thinking,
 		ReasoningEffort:     s.Effort,
+		MaxContextTokens:    s.MaxContextTokens,
 		MaxCompletionTokens: s.MaxCompletionTokens,
 		LengthContinue:      s.LengthContinue,
 	}

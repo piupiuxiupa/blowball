@@ -48,10 +48,11 @@ type Confucius struct {
 	// requestEstimator is the per-turn budget seam. It is intentionally
 	// separate from roundHook so a forced compaction hook can be installed on
 	// the same agent without changing the hook's signature.
-	requestEstimator     RoundRequestEstimator
-	lastRequestEstimate  ContextRequestEstimate
-	overflowRecoveryUsed bool
-	budgetedRoundHook    BudgetedRoundHook
+	requestEstimator        RoundRequestEstimator
+	lastRequestEstimate     ContextRequestEstimate
+	overflowRecoveryUsed    bool
+	preflightCompactionUsed bool
+	budgetedRoundHook       BudgetedRoundHook
 }
 
 // SetRoundHook implements RoundHookSetter. The orchestrator calls it on the
@@ -169,6 +170,18 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	c.plan = &planLedger{}
 	c.hitCapThisRun = false
 	c.overflowRecoveryUsed = false
+	c.preflightCompactionUsed = false
+	requestBudget := NewRequestBudget(c.turn.MaxContextTokens, c.turn.MaxCompletionTokens)
+	if c.turn.MaxContextTokens > 0 && c.turn.MaxCompletionTokens > 0 && !requestBudget.Valid() {
+		budgetErr := &InvalidRequestBudgetError{
+			ModelWindow:       requestBudget.ModelWindow,
+			CompletionReserve: requestBudget.CompletionReserve,
+			SafetyMargin:      requestBudget.SafetyMargin,
+		}
+		hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), budgetErr.Error(), "invalid_context_budget"))
+		hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
+		return "", Usage{}, buildBreakdown(byAgent, tmeta), budgetErr
+	}
 	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
 	for i := 0; i < c.maxRounds; i++ {
@@ -187,6 +200,26 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		}
 		if c.toolsIsNotNil {
 			req.Tools = c.toolsJSON
+		}
+		if requestBudget.Valid() {
+			next := EstimateRenderedRequest(c.cfg.SystemPrompt, round, c.toolsJSON)
+			if next.Tokens > requestBudget.InputTokens {
+				if c.roundHook != nil && !c.preflightCompactionUsed {
+					c.preflightCompactionUsed = true
+					if recovered := c.roundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), Usage{}); recovered != nil {
+						round = recovered
+						continue
+					}
+				}
+				budgetErr := &RequestTooLargeError{
+					EstimatedTokens: next.Tokens,
+					InputBudget:     requestBudget.InputTokens,
+				}
+				hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), budgetErr.Error(), "context_budget_exceeded"))
+				hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
+				return finalContent, total, buildBreakdown(byAgent, tmeta), budgetErr
+			}
+			c.lastRequestEstimate = next
 		}
 
 		// Capture streamed tokens into assistantText as the model emits them
@@ -224,7 +257,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			if errors.Is(err, ErrContextOverflow) && c.roundHook != nil {
 				if !c.overflowRecoveryUsed {
 					c.overflowRecoveryUsed = true
-					if recovered := c.roundHook(ctx, Usage{}); recovered != nil {
+					if recovered := c.roundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), Usage{}); recovered != nil {
 						round = recovered
 						continue
 					}
@@ -311,7 +344,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				c.lastRequestEstimate = est
 			}
 			if c.budgetedRoundHook != nil {
-				if replaced := c.budgetedRoundHook(ctx, resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON); replaced != nil {
+				if replaced := c.budgetedRoundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON); replaced != nil {
 					round = replaced
 					// The preflight hook already compacted this round; do not
 					// invoke the legacy pressure hook again for the same
@@ -328,7 +361,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				// starting point for diagnostics.
 				lastUsage = resp.Usage
 			}
-			if replaced := c.roundHook(ctx, lastUsage); replaced != nil {
+			if replaced := c.roundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), lastUsage); replaced != nil {
 				round = replaced
 			}
 		}

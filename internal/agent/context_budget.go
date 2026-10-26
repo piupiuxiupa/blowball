@@ -1,12 +1,38 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/lush/blowball/internal/tokens"
 )
+
+type requestEnvelopeContextKey struct{}
+
+// RequestEnvelope is the fixed part of the outgoing model request that is not
+// represented in conversation messages: system prompt and serialized tools.
+type RequestEnvelope struct {
+	System string
+	Tools  []byte
+}
+
+// WithRequestEnvelope carries the exact system/tool envelope into compaction
+// hooks so candidate budgeting can measure the same request the agent will
+// send.
+func WithRequestEnvelope(ctx context.Context, system string, tools []byte) context.Context {
+	return context.WithValue(ctx, requestEnvelopeContextKey{}, RequestEnvelope{System: system, Tools: tools})
+}
+
+// RequestEnvelopeFromContext returns the installed request envelope, if any.
+func RequestEnvelopeFromContext(ctx context.Context) (RequestEnvelope, bool) {
+	if ctx == nil {
+		return RequestEnvelope{}, false
+	}
+	env, ok := ctx.Value(requestEnvelopeContextKey{}).(RequestEnvelope)
+	return env, ok
+}
 
 const (
 	// contextSafetyMarginTokens reserves room for provider-side framing and
@@ -191,6 +217,19 @@ type RequestTooLargeError struct {
 
 func (e *RequestTooLargeError) Error() string {
 	return fmt.Sprintf("request input estimate %d exceeds model input budget %d", e.EstimatedTokens, e.InputBudget)
+}
+
+// InvalidRequestBudgetError marks a catalog entry whose context window cannot
+// accommodate its own completion quota and the safety margin.
+type InvalidRequestBudgetError struct {
+	ModelWindow       int
+	CompletionReserve int
+	SafetyMargin      int
+}
+
+func (e *InvalidRequestBudgetError) Error() string {
+	return fmt.Sprintf("model context window %d cannot accommodate completion reservation %d and safety margin %d",
+		e.ModelWindow, e.CompletionReserve, e.SafetyMargin)
 }
 
 // sanitizeBudgetReason keeps diagnostic reasons bounded and single-line.

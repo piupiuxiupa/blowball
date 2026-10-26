@@ -68,3 +68,14 @@
 - [x] 9.2 Document and validate the operator requirement that each `max_context_tokens` value matches the real gateway model window.
 - [x] 9.3 Add a rollout check that compares configured windows with observed provider overflow diagnostics and flags clearly unsafe catalog entries.
 - [x] 9.4 Update persisted-architecture and migration notes if new compaction fields or externalized tool-output retention are introduced.
+
+## 10. Review Hardening
+
+- [x] 10.1 Scan nullable compaction observation columns through SQL null wrappers so legacy records remain readable.
+- [x] 10.2 Recompute the final summary, boundary, tool activity, and retained-result projection after any tail reduction.
+- [x] 10.3 Measure the exact final model projection, including checkpoint framing, summarized tool bodies, pending user input, and request-envelope overhead.
+- [x] 10.4 Reject invalid model budgets and over-budget first requests before the first provider call.
+- [x] 10.5 Defer staged-attachment claims until non-mutating validation passes and roll them back on later pre-run rejection.
+- [x] 10.6 Distinguish tool envelopes from ordinary JSON results and preserve ordinary JSON content in summaries.
+- [x] 10.7 Preserve original tool-call arguments in retained summaries and activity-ledger examples.
+- [x] 10.8 Restore an expired staged row when file deletion fails so a later sweep can retry cleanup.

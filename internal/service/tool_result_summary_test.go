@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -34,6 +35,18 @@ func TestSummarizeToolResult_unknownToolHeadTailUTF8Safe(t *testing.T) {
 	assert.Less(t, len([]rune(got)), 2000)
 }
 
+func TestSummarizeToolResult_plainJSONObjectIsOutcomeNotEmptyEnvelope(t *testing.T) {
+	call := agent.ToolCall{ID: "json-1", Function: agent.ToolCallFunction{Name: "custom_tool", Arguments: `{"query":"id-42"}`}}
+	full := `{"policy":"allow","count":2,"important_identifier":"id-42"}`
+	got := SummarizeToolResult(call, full, 100)
+	assert.Contains(t, got, `"status":"success"`)
+	var decoded ToolResultSummary
+	require.NoError(t, json.Unmarshal([]byte(got), &decoded))
+	assert.Contains(t, decoded.Outcome, `"policy":"allow"`)
+	assert.Contains(t, decoded.Outcome, "id-42")
+	assert.NotContains(t, got, "no textual output")
+}
+
 func TestSummarizeToolResult_shellExitAndTruncation(t *testing.T) {
 	call := agent.ToolCall{ID: "b1", Function: agent.ToolCallFunction{Name: "executor_bash", Arguments: `{"command":"cat big.txt"}`}}
 	full := `{"status":0,"result":{"output":"head\n` + strings.Repeat("x", 3000) + `\ntail","exit_code":0,"truncated":true}}`
@@ -56,6 +69,21 @@ func TestRenderToolActivity_countsByTool(t *testing.T) {
 	got := RenderToolActivity(calls, results)
 	assert.Contains(t, got, "- grep: 2 calls, 1 succeeded, 1 failed")
 	assert.Contains(t, got, "- bash: 1 calls, 1 succeeded, 0 failed")
+	assert.Contains(t, got, "args=")
+}
+
+func TestIndexedToolArgumentsReachSummaries(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{
+			ID: "call-args", Function: agent.ToolCallFunction{
+				Name: "executor_bash", Arguments: `{"command":"go test ./internal/service"}`,
+			},
+		}}},
+		{Role: "tool", ToolCallID: "call-args", Name: "executor_bash", Content: `{"status":0,"result":{"output":"ok","exit_code":0}}`},
+	}
+	summaries, _ := summarizeRetainedToolResults(msgs, 1)
+	assert.Contains(t, summaries["call-args"], "go test ./internal/service")
 }
 
 func TestRenderToolActivity_recompactionMergedLedgerIsBounded(t *testing.T) {

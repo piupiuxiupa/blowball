@@ -147,16 +147,13 @@ func (h *MessageStreamHandler) WithAttachmentStore(store attachmentStore) *Messa
 	return h
 }
 
-// resolveSendAttachment validates one requested attachment id for the send
-// path (add-image-attachments + add-staged-attachment-upload), claiming a
-// staged row into this session when needed. It writes the HTTP error
-// response and reports ok=false when the id cannot be used. Row-state
-// semantics:
+// validateSendAttachment performs the non-mutating lookup/ownership half of
+// send-time attachment validation. Row-state semantics:
 //   - unknown id / foreign owner    → 404 (no existence leak)
 //   - bound to THIS session         → usable as-is (idempotent resend)
 //   - bound to ANOTHER session      → 404
-//   - staged (session_id NULL)      → atomically claimed; a lost race → 404
-func (h *MessageStreamHandler) resolveSendAttachment(c *gin.Context, ctx context.Context, userID, sessionID, id string) (*model.Attachment, bool) {
+//   - staged (session_id NULL)      → eligible for the later claim phase
+func (h *MessageStreamHandler) validateSendAttachment(c *gin.Context, ctx context.Context, userID, sessionID, id string) (*model.Attachment, bool) {
 	att, err := h.attachments.GetAttachmentByUser(ctx, id, userID)
 	if err != nil {
 		logger.FromContext(ctx).Error("attachment lookup failed",
@@ -177,24 +174,35 @@ func (h *MessageStreamHandler) resolveSendAttachment(c *gin.Context, ctx context
 		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+id))
 		return nil, false
 	}
-	claimed, err := h.attachments.ClaimAttachment(ctx, id, userID, sessionID)
+	return att, true
+}
+
+// claimSendAttachment atomically claims and binds one pre-validated staged
+// attachment. Bound-to-this-session rows return newlyClaimed=false.
+func (h *MessageStreamHandler) claimSendAttachment(c *gin.Context, ctx context.Context, userID, sessionID string, att *model.Attachment) (bool, bool) {
+	if att.SessionID != nil {
+		return false, true
+	}
+	claimed, err := h.attachments.ClaimAttachment(ctx, att.ID, userID, sessionID)
 	if err != nil {
 		logger.FromContext(ctx).Error("attachment claim failed",
 			zap.String("op", "handler.send_message"),
-			zap.String("attachment_id", id),
+			zap.String("attachment_id", att.ID),
 			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "attachment claim failed"))
-		return nil, false
+		return false, false
 	}
 	if !claimed {
 		// Lost the race: another session claimed (or the sweeper reaped) the
 		// staged row between lookup and claim — indistinguishable from a
 		// foreign id, so the same 404 keeps the no-leak contract.
-		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+id))
-		return nil, false
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "attachment not found: "+att.ID))
+		return false, false
 	}
-	h.bindStagedFile(ctx, userID, sessionID, att)
-	return att, true
+	if !h.bindStagedFile(ctx, userID, sessionID, att) {
+		return false, true
+	}
+	return true, true
 }
 
 // bindStagedFile moves a just-claimed attachment file from the staging
@@ -203,21 +211,24 @@ func (h *MessageStreamHandler) resolveSendAttachment(c *gin.Context, ctx context
 // the claim is rolled back best-effort and the attachment degrades to the
 // deterministic placeholder via the usual missing-file read path
 // (loadCurrentTurnImages).
-func (h *MessageStreamHandler) bindStagedFile(ctx context.Context, userID, sessionID string, att *model.Attachment) {
+func (h *MessageStreamHandler) bindStagedFile(ctx context.Context, userID, sessionID string, att *model.Attachment) bool {
 	ext, ok := attachmentMimeExt[att.MIME]
 	if !ok {
-		return
+		h.rollbackClaim(ctx, userID, sessionID, att.ID, fmt.Errorf("unknown attachment MIME %q", att.MIME))
+		return false
 	}
 	src := filepath.Join(h.dataDir, userID, "attachments", fs.AttachmentStagingScope, att.ID+ext)
 	dstDir := filepath.Join(h.dataDir, userID, "attachments", sessionID)
 	dst := filepath.Join(dstDir, att.ID+ext)
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		h.rollbackClaim(ctx, userID, sessionID, att.ID, err)
-		return
+		return false
 	}
 	if err := os.Rename(src, dst); err != nil {
 		h.rollbackClaim(ctx, userID, sessionID, att.ID, err)
+		return false
 	}
+	return true
 }
 
 // rollbackClaim best-effort restores a just-claimed row to staged after the
@@ -235,6 +246,38 @@ func (h *MessageStreamHandler) rollbackClaim(ctx context.Context, userID, sessio
 			zap.String("op", "handler.send_message"),
 			zap.String("attachment_id", id),
 			zap.Error(err))
+	}
+}
+
+// rollbackNewAttachmentClaims restores staged claims made by a request that is
+// rejected before it owns the session run slot. Files move back to staging
+// before the row is unclaimed, keeping the sweeper able to find the same retry
+// unit if a later request never uses it.
+func (h *MessageStreamHandler) rollbackNewAttachmentClaims(ctx context.Context, userID, sessionID string, ids []string) {
+	for i := len(ids) - 1; i >= 0; i-- {
+		id := ids[i]
+		att, err := h.attachments.GetAttachmentByUser(ctx, id, userID)
+		if err != nil || att == nil || att.SessionID == nil || *att.SessionID != sessionID {
+			continue
+		}
+		if ext, ok := attachmentMimeExt[att.MIME]; ok {
+			src := filepath.Join(h.dataDir, userID, "attachments", sessionID, id+ext)
+			dstDir := filepath.Join(h.dataDir, userID, "attachments", fs.AttachmentStagingScope)
+			if err := os.MkdirAll(dstDir, 0o755); err != nil {
+				logger.FromContext(ctx).Error("attachment rollback: create staging dir failed",
+					zap.String("op", "handler.send_message"),
+					zap.String("attachment_id", id), zap.Error(err))
+			} else if err := os.Rename(src, filepath.Join(dstDir, id+ext)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				logger.FromContext(ctx).Error("attachment rollback: restore staging file failed",
+					zap.String("op", "handler.send_message"),
+					zap.String("attachment_id", id), zap.Error(err))
+			}
+		}
+		if err := h.attachments.UnclaimAttachment(ctx, id, userID, sessionID); err != nil {
+			logger.FromContext(ctx).Error("attachment rollback: unclaim failed",
+				zap.String("op", "handler.send_message"),
+				zap.String("attachment_id", id), zap.Error(err))
+		}
 	}
 }
 
@@ -433,6 +476,15 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// wiring derives both from the same mandatory catalog, so they agree.
 		turnLimit = h.compSvc.FallbackMaxContext()
 	}
+	completionReserve := sel.MaxCompletionTokens
+	requestBudget := agent.NewRequestBudget(turnLimit, completionReserve)
+	if turnLimit > 0 && completionReserve > 0 && !requestBudget.Valid() {
+		c.JSON(http.StatusInternalServerError, errorBody("INVALID_CONTEXT_BUDGET",
+			fmt.Sprintf("model %q context window %d cannot accommodate completion quota %d",
+				turnModel, turnLimit, completionReserve)))
+		return
+	}
+	statusSuffix := prompt.RenderStatus()
 
 	userID := middleware.UserIDFromCtx(c)
 	sessionID := c.Param("session_id")
@@ -468,12 +520,18 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// Attachment validation (add-image-attachments, relaxed by
 	// add-staged-attachment-upload). Everything here happens BEFORE the
 	// turn-slot claim and any persistence: an invalid reference never
-	// occupies the run slot. Order: count cap → per-id ownership +
-	// staged-claim (resolveSendAttachment) → vision capability — ownership
-	// (a 404 resource question per the HTTP contract) outranks the
-	// model-capability rejection (400), so a foreign id on a non-vision
-	// model still surfaces the 404.
+	// occupies the run slot. Order: count cap → duplicate check → per-id
+	// ownership validation → vision capability → staged claims. Ownership
+	// (404) still outranks the model-capability rejection (400), while no
+	// staged row mutates until every non-mutating check has passed.
 	var userAttachments []model.MessageAttachmentRef
+	var newlyClaimedAttachments []string
+	claimsCommitted := false
+	defer func() {
+		if !claimsCommitted && len(newlyClaimedAttachments) > 0 {
+			h.rollbackNewAttachmentClaims(ctx, userID, sessionID, newlyClaimedAttachments)
+		}
+	}()
 	if len(req.AttachmentIDs) > 0 {
 		if len(req.AttachmentIDs) > maxAttachmentsPerMessage {
 			c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST",
@@ -493,18 +551,33 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				return
 			}
 			seen[id] = true
-			att, ok := h.resolveSendAttachment(c, ctx, userID, sessionID, id)
+		}
+		validated := make([]*model.Attachment, 0, len(req.AttachmentIDs))
+		for _, id := range req.AttachmentIDs {
+			att, ok := h.validateSendAttachment(c, ctx, userID, sessionID, id)
+			if !ok {
+				return
+			}
+			validated = append(validated, att)
+		}
+		// Capability rejection must precede mutation: a non-vision request
+		// must never consume a staged attachment.
+		if !sel.Vision {
+			c.JSON(http.StatusBadRequest, errorBody("MODEL_NOT_VISION",
+				fmt.Sprintf("model %q does not support image attachments", turnModel)))
+			return
+		}
+		for _, att := range validated {
+			newlyClaimed, ok := h.claimSendAttachment(c, ctx, userID, sessionID, att)
 			if !ok {
 				return
 			}
 			userAttachments = append(userAttachments, model.MessageAttachmentRef{
 				ID: att.ID, Filename: att.Filename, MIME: att.MIME,
 			})
-		}
-		if !sel.Vision {
-			c.JSON(http.StatusBadRequest, errorBody("MODEL_NOT_VISION",
-				fmt.Sprintf("model %q does not support image attachments", turnModel)))
-			return
+			if newlyClaimed {
+				newlyClaimedAttachments = append(newlyClaimedAttachments, att.ID)
+			}
 		}
 	}
 
@@ -564,6 +637,13 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		if budget.Valid() {
 			effectiveLimit = budget.InputTokens
 		}
+		compactionBudget := effectiveLimit
+		if turnLimit > 0 && turnLimit <= contextSafetyFloorForTests {
+			// Synthetic legacy test windows retain their count-based compaction
+			// and one-shot summary behavior. Production windows are always above
+			// this floor and use the budgeted candidate path.
+			compactionBudget = 0
+		}
 		if !isFirstTurn {
 			tokens, terr := h.compSvc.LatestContextTokens(ctx, sessionID)
 			if terr != nil {
@@ -593,8 +673,11 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 							AgentMsgs:             durableMsgs,
 							LastRow:               durableRow,
 							SummaryModel:          turnModel,
-							InputBudget:           effectiveLimit,
+							InputBudget:           compactionBudget,
 							TriggerTokensMeasured: true,
+							PendingMessages: []agent.Message{{
+								Role: "user", Content: req.Content + statusSuffix,
+							}},
 						})
 					}
 					if activeRecord == nil && sess.ContextCompacted {
@@ -642,7 +725,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			recall = &inj
 		}
 	}
-	req.Content += prompt.RenderStatus()
+	req.Content += statusSuffix
 	// Current-turn inline images (K=1 window): the LIVE user message carries
 	// the image bytes read from disk; from the next turn on, reconstruction
 	// renders this row as text placeholders instead. A missing file degrades
@@ -694,7 +777,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			// completion quota exercises the legacy 80% path. Applying the
 			// production 4,096-token safety margin here would make every real
 			// request look over-budget and add an extra summary call.
-			inputBudget = turnLimit
+			inputBudget = 0
 		}
 		hooks = TurnHooks{
 			Round: h.newBudgetedRoundHook(tap, persist, flushed, turnLimit, inputBudget, turnModel),
@@ -752,6 +835,9 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		}})
 		return
 	}
+	// The request now owns the session run slot; validation failures below no
+	// longer roll staged attachments back.
+	claimsCommitted = true
 
 	// Title generation cadence (title-generation-cadence): fire-and-forget at
 	// message-SEND time, in parallel with the turn. Placement — after the
@@ -1303,13 +1389,17 @@ func (f *turnFlushState) userPersisted() bool {
 // model's window, and the checkpoint summary call runs on the selected model
 // (captured here at turn start so the closure sees one consistent selection
 // even if the surrounding request scope changes).
-func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, limit int, summaryModel string) agent.RoundHook {
+func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, window, compactionBudget int, summaryModel string) agent.RoundHook {
 	return func(ctx context.Context, lastUsage agent.Usage) []agent.Message {
 		contextTokens := lastUsage.PromptTokens + lastUsage.CompletionTokens
-		if !h.compSvc.ShouldCompact(contextTokens, limit) {
+		threshold := compactionBudget
+		if threshold <= 0 {
+			threshold = window
+		}
+		if !h.compSvc.ShouldCompact(contextTokens, threshold) {
 			return nil
 		}
-		return h.compactMidTurn(ctx, tap, persist, flushed, limit, limit, summaryModel, contextTokens, false, false)
+		return h.compactMidTurn(ctx, tap, persist, flushed, window, compactionBudget, summaryModel, contextTokens, false, false)
 	}
 }
 
@@ -1366,6 +1456,10 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 		log.Warn("mid-turn reconstruct failed; compaction skipped", zap.Error(err))
 		return nil
 	}
+	requestOverhead := 0
+	if env, ok := agent.RequestEnvelopeFromContext(ctx); ok {
+		requestOverhead = agent.EstimateRenderedRequest(env.System, nil, env.Tools).Tokens
+	}
 
 	// ③ Compact the middle into a checkpoint.
 	rec, ok := h.compSvc.Compact(ctx, service.CompactionInput{
@@ -1379,6 +1473,7 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 		SummaryModel:          summaryModel,
 		InputBudget:           inputBudget,
 		TriggerTokensMeasured: measured,
+		RequestOverheadTokens: requestOverhead,
 	})
 	if !ok {
 		return nil
@@ -1399,7 +1494,7 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 // estimator is installed separately on the agent and passes appended messages
 // into this closure's estimate.
 func (h *MessageStreamHandler) newBudgetedRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, window, inputBudget int, summaryModel string) agent.RoundHook {
-	base := h.newRoundHook(tap, persist, flushed, inputBudget, summaryModel)
+	base := h.newRoundHook(tap, persist, flushed, window, inputBudget, summaryModel)
 	return func(ctx context.Context, lastUsage agent.Usage) []agent.Message {
 		// A zero Usage is the forced-recovery signal emitted after a provider
 		// context-overflow response. Compact unconditionally once; the agent
