@@ -115,7 +115,47 @@ func TestConfucius_OversizedFirstRequestCompactedBeforeModelCall(t *testing.T) {
 	assert.Equal(t, "recovered", content)
 	assert.Equal(t, 1, compactions)
 	require.Equal(t, 1, client.requestCount())
-	assert.Contains(t, client.calls[0].Messages[len(client.calls[0].Messages)-1].Content, "compacted")
+	foundSummary := false
+	for _, msg := range client.calls[0].Messages {
+		if strings.Contains(msg.Content, "compacted") {
+			foundSummary = true
+			break
+		}
+	}
+	assert.True(t, foundSummary)
+}
+
+func TestConfucius_PreflightCompactionPreservesLiveCurrentMessage(t *testing.T) {
+	client := newFake(fakeResponse{content: "recovered", finishReason: "stop"})
+	c := newTestConfucius(t, client, nil)
+	c.maxRounds = 1
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
+	c.SetRoundHook(func(context.Context, Usage) []Message {
+		return []Message{{Role: "user", Content: "checkpoint summary"}}
+	})
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+	live := Message{
+		Role:    "user",
+		Content: strings.Repeat("x", 30000),
+		Images: []MessageImage{{
+			AttachmentID: "att-live",
+			MIMEType:     "image/png",
+			Data:         []byte{1, 2, 3},
+		}},
+	}
+
+	_, _, _, err := c.Run(context.Background(), []Message{live}, hub)
+	require.NoError(t, err)
+	require.Equal(t, 1, client.requestCount())
+	found := false
+	for _, msg := range client.calls[0].Messages {
+		if len(msg.Images) == 1 && msg.Images[0].AttachmentID == "att-live" {
+			found = true
+			assert.Less(t, len([]rune(msg.Content)), 2100, "compacted live-message text must stay bounded")
+		}
+	}
+	assert.True(t, found, "preflight compaction must retain live inline images for the current turn")
 }
 
 func TestConfucius_UndecompactableFirstRequestRejectedBeforeModelCall(t *testing.T) {
@@ -172,4 +212,49 @@ func TestConfucius_WrapUpIsBudgetCheckedAndCompacted(t *testing.T) {
 	require.Equal(t, 2, client.requestCount())
 	wrap := client.calls[1]
 	assert.LessOrEqual(t, EstimateRenderedRequest("", wrap.Messages, nil).Tokens, 8000-100-contextSafetyMarginTokens)
+}
+
+func TestConfucius_WrapUpProviderOverflowRecoversOnce(t *testing.T) {
+	client := newFake(
+		fakeResponse{
+			content:      "calling",
+			finishReason: "tool_calls",
+			toolCalls: []ToolCall{{
+				ID:       "small-1",
+				Function: ToolCallFunction{Name: "small_tool", Arguments: `{}`},
+			}},
+		},
+		fakeResponse{err: ErrContextOverflow},
+		fakeResponse{content: "recovered wrap-up", finishReason: "stop"},
+	)
+	c := newTestConfucius(t, client, nil)
+	c.maxRounds = 1
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
+	if err := c.toolRegistry.Register(&tool.ToolSpec{
+		Name:           "small_tool",
+		Description:    "returns a small payload",
+		ParametersJSON: json.RawMessage(`{"type":"object","properties":{}}`),
+		Execute: func(context.Context, json.RawMessage) (any, error) {
+			return "ok", nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recoveries := 0
+	c.SetRoundHook(func(ctx context.Context, _ Usage) []Message {
+		force, forced := ForcedCompactionFromContext(ctx)
+		if !forced || force.Reason != "wrap_up_overflow" {
+			return nil
+		}
+		recoveries++
+		return []Message{{Role: "user", Content: "compacted wrap-up"}}
+	})
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+
+	content, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: "hi"}}, hub)
+	require.NoError(t, err)
+	assert.Equal(t, "recovered wrap-up", content)
+	assert.Equal(t, 1, recoveries)
+	assert.Equal(t, 3, client.requestCount(), "one overflow must lead to one rebuilt wrap-up request")
 }

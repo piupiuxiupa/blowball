@@ -200,17 +200,22 @@ func TestStitchCompacted_UsesBoundedAnchor(t *testing.T) {
 	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, nil)
 	require.NoError(t, err)
 	boundary := rows[lastRow[6]]
+	projectedAnchor, err := json.Marshal(agent.Message{
+		Role:    "user",
+		Content: "bounded anchor with messages/first reference",
+	})
+	require.NoError(t, err)
 	rec := &model.ContextCompaction{
 		Content:          "CHECKPOINT",
 		BoundaryMsgTime:  boundary.MsgTime,
 		BoundaryMsgIndex: boundary.MsgIndex,
 		BoundaryMsgID:    boundary.ID,
-		AnchorContent:    "bounded anchor with messages/first reference",
+		AnchorJSON:       string(projectedAnchor),
 		AnchorTruncated:  true,
 	}
 	stitched := stitchCompacted(rows, nil, agentMsgs, rec)
 	require.NotNil(t, stitched)
-	assert.Equal(t, rec.AnchorContent, stitched[0].Content)
+	assert.Equal(t, "bounded anchor with messages/first reference", stitched[0].Content)
 	assert.NotEqual(t, agentMsgs[0].Content, stitched[0].Content)
 }
 

@@ -241,6 +241,16 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		log.Warn("compaction input malformed: agent messages and row attribution out of sync; skipping")
 		return nil, false
 	}
+	if len(in.AgentMsgs) == 0 {
+		log.Debug("compaction skipped: durable history is empty")
+		return nil, false
+	}
+	for _, rowIndex := range in.LastRow {
+		if rowIndex < 0 || rowIndex >= len(in.Rows) {
+			log.Warn("compaction input malformed: row attribution is out of range; skipping")
+			return nil, false
+		}
+	}
 
 	// Prior record: merged into the summary input on re-compaction. A read
 	// failure degrades to "no prior" (the summary then re-covers the whole
@@ -272,11 +282,16 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	}
 	anchor := in.AgentMsgs[0]
 	anchorTruncated := false
-	storedAnchorContent := ""
+	storedAnchorJSON := ""
 	if in.InputBudget > 0 {
 		anchor, anchorTruncated = boundedCompactionAnchor(anchor, in.InputBudget)
 		if anchorTruncated {
-			storedAnchorContent = anchor.Content
+			if encoded, err := json.Marshal(anchor); err == nil {
+				storedAnchorJSON = string(encoded)
+			} else {
+				log.Warn("bounded anchor marshal failed; compaction skipped", zap.Error(err))
+				return nil, false
+			}
 		}
 	}
 
@@ -342,7 +357,7 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		BoundaryMsgTime:  boundaryRow.MsgTime,
 		BoundaryMsgIndex: boundaryRow.MsgIndex,
 		BoundaryMsgID:    boundaryRow.ID,
-		AnchorContent:    storedAnchorContent,
+		AnchorJSON:       storedAnchorJSON,
 		AnchorTruncated:  anchorTruncated,
 		// The summary prompt IS the shadowed span (+ prior checkpoint +
 		// instruction), so its prompt size is the faithful measured proxy for
@@ -832,7 +847,7 @@ func boundedCompactionAnchor(anchor agent.Message, inputBudget int) (agent.Messa
 		return anchor, false
 	}
 	notice := fmt.Sprintf(
-		"\n\n... [first message excerpted; original ~%d tokens; full text remains persisted as messages/first] ...\n\n",
+		"\n\n... [first message projection excerpted; original ~%d tokens; full message remains persisted as messages/first] ...\n\n",
 		fullTokens,
 	)
 	noticeTokens := tokens.Estimate(notice)
@@ -840,9 +855,46 @@ func boundedCompactionAnchor(anchor agent.Message, inputBudget int) (agent.Messa
 	if bodyBudget < 16 {
 		bodyBudget = 16
 	}
-	excerpt := boundedRunesToTokens(anchor.Content, bodyBudget)
-	anchor.Content = excerpt + notice
-	return anchor, true
+
+	projection := anchor
+	projection.Images = nil
+	projection.Content = boundedRunesToTokens(anchor.Content, bodyBudget*3/5)
+	projection.ReasoningContent = boundedRunesToTokens(anchor.ReasoningContent, bodyBudget/5)
+
+	// Historical tool calls in the anchor cannot remain protocol-valid without
+	// their paired results. Preserve their names as text and omit the structural
+	// calls instead of emitting truncated/invalid JSON or orphan calls.
+	if len(projection.ToolCalls) > 0 {
+		names := make([]string, 0, len(projection.ToolCalls))
+		for _, call := range projection.ToolCalls {
+			names = append(names, call.Function.Name)
+		}
+		projection.ToolCalls = nil
+		projection.Content += "\n[omitted anchor tool calls: " + strings.Join(names, ", ") + "]"
+	}
+	projection.Content += notice
+
+	// Estimator overhead can still push a pathologically ID-heavy projection
+	// over the target; reduce variable fields deterministically until it fits.
+	for agent.EstimateRenderedRequest("", []agent.Message{projection}, nil).Tokens > budget {
+		switch {
+		case projection.Content != "":
+			projection.Content = boundedRunesToTokens(
+				projection.Content,
+				tokens.Estimate(projection.Content)*3/4,
+			)
+		case projection.ReasoningContent != "":
+			projection.ReasoningContent = boundedRunesToTokens(
+				projection.ReasoningContent,
+				tokens.Estimate(projection.ReasoningContent)*3/4,
+			)
+		case len(projection.ToolCalls) > 0:
+			projection.ToolCalls = nil
+		default:
+			return projection, true
+		}
+	}
+	return projection, true
 }
 
 func boundedRunesToTokens(s string, maxTokens int) string {

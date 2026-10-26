@@ -68,6 +68,11 @@ The planner walks backward from the newest message while tracking a separate tai
 
 It never cuts an assistant tool-call message away from all of its tool results, never splits a parallel result set, and never drops the synthetic recall-memory pairing. A complete unit either stays paired or moves wholly into the summarized/checkpoint material. Token size, not the count five, determines where the tail starts.
 
+Current-turn live-only fields that persistence reconstructs as placeholders
+(notably inline images) are overlaid onto the compacted projection before the
+next model call. If their user message moved into the checkpoint, replay text is
+bounded because the checkpoint already carries the textual intent.
+
 **Alternative rejected:** retain the last five messages then truncate individual tool results in place without re-planning. A few huge results can still exceed the window, while a small conversational tail needlessly discards useful continuity.
 
 ### D3: Retained tool results become deterministic summaries with stable identity
@@ -124,6 +129,11 @@ If the first attempt does not fit, apply bounded deterministic reductions in ord
 
 The initial first-message anchor may itself be bounded only when it exceeds the reserved anchor budget. Preserve a head/tail excerpt plus size/retrieval reference in the checkpoint, while retaining the original persisted row unchanged. This changes the existing “first message verbatim under all circumstances” guarantee and requires a deliberate spec modification.
 
+The bounded anchor is stored as the complete model-facing message projection,
+not only content. Reasoning, tool-call arguments, and images are therefore
+subject to the same bound; images are removed and tool arguments are reduced or
+the structurally incomplete call set is omitted.
+
 ### D6: Summary generation is chunked to fit the summary model
 
 The summarizer partitions the shadowed middle plus prior checkpoint into budgeted chunks. It processes them serially as `prior/accumulated summary + chunk → consolidated summary`, leaving room for the fixed system prompt and output quota. This replaces the current one-shot transcript that can overflow before compaction completes.
@@ -135,6 +145,10 @@ If a chunk is still oversized because of a single exceptional payload, externali
 The OpenAI adapter classifies a provider context-overflow error into a typed sentinel while retaining the raw status/body through the existing error capture. It is not retried by the transient retry loop.
 
 The agent-level recovery path receives an error before it has a valid next-round usage observation. It triggers one forced compaction attempt against the current turn snapshot and reconstructs the request. A second overflow terminates with an actionable uncompactable-context error and is recorded in logs/metrics; it does not re-enter the unchanged request or repeatedly summarize on every turn.
+
+The tool-disabled round-cap wrap-up request follows the same one-attempt
+overflow recovery path. Compaction-triggered recovery does not consume the
+agent's model-round budget.
 
 **Alternative rejected:** treat all 400s as context overflow. That would turn malformed requests or unsupported parameters into expensive forced compactions and could mask contract errors.
 

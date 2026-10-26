@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/lush/blowball/internal/agent"
@@ -57,8 +58,11 @@ func stitchCompacted(rows []model.Message, calls []model.ToolCall, agentMsgs []a
 	}
 	out := make([]agent.Message, 0, 2+len(tailMsgs))
 	anchor := agentMsgs[0]
-	if rec.AnchorTruncated && strings.TrimSpace(rec.AnchorContent) != "" {
-		anchor.Content = rec.AnchorContent
+	if rec.AnchorTruncated && strings.TrimSpace(rec.AnchorJSON) != "" {
+		var projected agent.Message
+		if err := json.Unmarshal([]byte(rec.AnchorJSON), &projected); err == nil {
+			anchor = projected
+		}
 	}
 	out = append(out, anchor)
 	out = append(out, agent.Message{Role: "user", Content: frameCompactedSummary(rec.Content)})

@@ -4,7 +4,7 @@
 -- excerpt plus original-size/retrieval metadata.
 
 ALTER TABLE `context_compactions`
-    ADD COLUMN `anchor_content` MEDIUMTEXT NULL
-        COMMENT 'Bounded first-message excerpt when the full anchor exceeds its budget' AFTER `boundary_msg_id`,
+    ADD COLUMN `anchor_json` MEDIUMTEXT NULL
+        COMMENT 'Bounded first-message agent.Message JSON when the full anchor exceeds its budget' AFTER `boundary_msg_id`,
     ADD COLUMN `anchor_truncated` TINYINT(1) NOT NULL DEFAULT 0
-        COMMENT '1 when anchor_content supersedes the original first message for model context' AFTER `anchor_content`;
+        COMMENT '1 when anchor_json supersedes the original first message for model context' AFTER `anchor_json`;

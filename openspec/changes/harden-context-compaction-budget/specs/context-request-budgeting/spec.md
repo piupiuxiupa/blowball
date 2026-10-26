@@ -30,6 +30,10 @@ The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope c
 - **WHEN** a provider response omits usage or reports zero prompt and completion tokens
 - **THEN** the system records that observation without treating it as a forced-compaction command
 
+#### Scenario: Preflight compaction preserves live-only current-turn data
+- **WHEN** preflight compaction rewrites a context containing live inline message fields that persistence reconstructs only as placeholders
+- **THEN** the rewritten request retains those live fields while bounding any replayed text
+
 ### Requirement: Compaction is triggered before a request exceeds the budget
 The system SHALL begin compaction when either the existing percentage threshold or the preflight request-budget threshold is reached, and the compressible middle is non-empty. The effective trigger SHALL be the lower of the applicable safe thresholds. The system SHALL reserve space for the completion quota and the next appended message set.
 
@@ -57,6 +61,10 @@ The system SHALL NOT retry the unchanged oversized request through the ordinary 
 #### Scenario: Second overflow stops with a diagnostic
 - **WHEN** the rebuilt request is also rejected for context overflow
 - **THEN** the system stops bounded recovery and reports an actionable failure rather than repeatedly retrying
+
+#### Scenario: Wrap-up overflow uses the same bounded recovery
+- **WHEN** the tool-disabled round-cap wrap-up request is rejected for context overflow
+- **THEN** the system attempts one forced compaction and rebuilds the wrap-up request before reporting exhaustion
 
 ### Requirement: Request-budget outcomes are observable
 The system SHALL record or emit structured diagnostics for the selected model window, completion reservation, safety margin, estimated request size, measurement basis, compaction trigger, pre/post compaction size, and the reason for any uncompactable result. Diagnostics SHALL NOT expose full tool-result payloads or secrets.

@@ -38,10 +38,10 @@ type ContextCompaction struct {
 	BoundaryMsgTime  time.Time `db:"boundary_msg_time"          json:"boundary_msg_time"`
 	BoundaryMsgIndex int       `db:"boundary_msg_index"         json:"boundary_msg_index"`
 	BoundaryMsgID    int64     `db:"boundary_msg_id"            json:"boundary_msg_id"`
-	// AnchorContent is set only when the original first message was too large
-	// to include verbatim. Empty + AnchorTruncated=false means legacy/full
-	// anchor behavior.
-	AnchorContent           string `db:"anchor_content"              json:"anchor_content,omitempty"`
+	// AnchorJSON is the complete bounded agent.Message projection when the
+	// original first message is too large. Empty + AnchorTruncated=false means
+	// legacy/full anchor behavior.
+	AnchorJSON              string `db:"anchor_json"                 json:"anchor_json,omitempty"`
 	AnchorTruncated         bool   `db:"anchor_truncated"            json:"anchor_truncated,omitempty"`
 	ShadowedTokens          int    `db:"shadowed_tokens"            json:"shadowed_tokens"`
 	SummaryModel            string `db:"summary_model"              json:"summary_model"`

@@ -16,7 +16,7 @@ const insertCompactionSQL = `
 INSERT INTO context_compactions (
     session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
     boundary_msg_time, boundary_msg_index, boundary_msg_id,
-    anchor_content, anchor_truncated,
+    anchor_json, anchor_truncated,
     shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens,
     retained_results_json, measurement_basis, pre_compaction_tokens, input_budget_tokens,
     post_compaction_tokens, retained_tail_messages, summary_strategy,
@@ -24,7 +24,7 @@ INSERT INTO context_compactions (
 ) VALUES (
     :session_id, :user_id, :trace_id, :trigger_kind, :trigger_tokens, :content,
     :boundary_msg_time, :boundary_msg_index, :boundary_msg_id,
-    NULLIF(:anchor_content, ''), :anchor_truncated,
+    NULLIF(:anchor_json, ''), :anchor_truncated,
     :shadowed_tokens, :summary_model, :summary_prompt_tokens, :summary_completion_tokens,
     NULLIF(:retained_results_json, ''), NULLIF(:measurement_basis, ''),
     NULLIF(:pre_compaction_tokens, 0), NULLIF(:input_budget_tokens, 0),
@@ -52,7 +52,7 @@ func (s *Store) InsertCompaction(ctx context.Context, rec model.ContextCompactio
 const latestCompactionSQL = `
 SELECT id, session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
        boundary_msg_time, boundary_msg_index, boundary_msg_id,
-       anchor_content, anchor_truncated,
+       anchor_json, anchor_truncated,
        shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens,
        retained_results_json, measurement_basis, pre_compaction_tokens, input_budget_tokens,
        post_compaction_tokens, retained_tail_messages, summary_strategy,
@@ -79,7 +79,7 @@ type compactionRecordRow struct {
 	BoundaryMsgTime         time.Time      `db:"boundary_msg_time"`
 	BoundaryMsgIndex        int            `db:"boundary_msg_index"`
 	BoundaryMsgID           int64          `db:"boundary_msg_id"`
-	AnchorContent           sql.NullString `db:"anchor_content"`
+	AnchorJSON              sql.NullString `db:"anchor_json"`
 	AnchorTruncated         sql.NullBool   `db:"anchor_truncated"`
 	ShadowedTokens          int            `db:"shadowed_tokens"`
 	SummaryModel            string         `db:"summary_model"`
@@ -109,7 +109,7 @@ func (r compactionRecordRow) model() model.ContextCompaction {
 		BoundaryMsgTime:         r.BoundaryMsgTime,
 		BoundaryMsgIndex:        r.BoundaryMsgIndex,
 		BoundaryMsgID:           r.BoundaryMsgID,
-		AnchorContent:           r.AnchorContent.String,
+		AnchorJSON:              r.AnchorJSON.String,
 		AnchorTruncated:         r.AnchorTruncated.Bool,
 		ShadowedTokens:          r.ShadowedTokens,
 		SummaryModel:            r.SummaryModel,

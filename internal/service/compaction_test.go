@@ -363,6 +363,20 @@ func TestCompactionService_Compact_MalformedAttributionSkips(t *testing.T) {
 	}
 }
 
+func TestCompactionService_EmptyDurableHistoryDoesNotPanic(t *testing.T) {
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, &fakeLLMClient{resp: agent.LLMResponse{Content: "unused"}}, 100000)
+	in := CompactionInput{
+		SessionID:   "sess-empty",
+		UserID:      "user-1",
+		InputBudget: 80000,
+	}
+	require.NotPanics(t, func() {
+		rec, ok := svc.Compact(context.Background(), in)
+		assert.Nil(t, rec)
+		assert.False(t, ok)
+	})
+}
+
 func TestCompactionService_LatestCompactionRecord(t *testing.T) {
 	rec := model.ContextCompaction{ID: 7, SessionID: "s", Content: "c"}
 	raw, _ := json.Marshal(rec)
@@ -518,7 +532,7 @@ func TestCompactionService_RetrimsBoundaryAndMeasuresFinalProjection(t *testing.
 
 	anchor := msgs[0]
 	if rec.AnchorTruncated {
-		anchor.Content = rec.AnchorContent
+		require.NoError(t, json.Unmarshal([]byte(rec.AnchorJSON), &anchor))
 	}
 	projection := buildCompactedProjection(anchor, msgs, tailStart, rec.Content, rec.RetainedResults)
 	wantTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projection, nil).Tokens
@@ -545,7 +559,19 @@ func TestCompactionService_ReservedPlanningMakesSingleSummaryCall(t *testing.T) 
 }
 
 func TestCompactionService_AnchorIsBounded(t *testing.T) {
-	anchor := agent.Message{Role: "user", Content: strings.Repeat("界", 20000)}
+	anchor := agent.Message{
+		Role:             "assistant",
+		Content:          strings.Repeat("界", 20000),
+		ReasoningContent: strings.Repeat("思考", 10000),
+		ToolCalls: []agent.ToolCall{{
+			ID: "call-anchor",
+			Function: agent.ToolCallFunction{
+				Name:      "bash",
+				Arguments: `{"command":"` + strings.Repeat("x", 30000) + `"}`,
+			},
+		}},
+		Images: []agent.MessageImage{{Data: make([]byte, 4096)}},
+	}
 	full := agent.EstimateRenderedRequest("", []agent.Message{anchor}, nil).Tokens
 	bounded, truncated := boundedCompactionAnchor(anchor, 4000)
 	require.True(t, truncated)
@@ -554,6 +580,11 @@ func TestCompactionService_AnchorIsBounded(t *testing.T) {
 	assert.Less(t, boundedTokens, full)
 	assert.LessOrEqual(t, boundedTokens, 4000/8+64)
 	assert.Contains(t, bounded.Content, "messages/first")
+	assert.Empty(t, bounded.Images)
+	assert.Less(t, tokens.Estimate(bounded.ReasoningContent), tokens.Estimate(anchor.ReasoningContent))
+	if len(bounded.ToolCalls) > 0 {
+		assert.Less(t, tokens.Estimate(bounded.ToolCalls[0].Function.Arguments), tokens.Estimate(anchor.ToolCalls[0].Function.Arguments))
+	}
 }
 
 func TestCompactionService_PersistsBoundedAnchorProjection(t *testing.T) {
@@ -567,8 +598,10 @@ func TestCompactionService_PersistsBoundedAnchorProjection(t *testing.T) {
 	rec, ok := svc.Compact(context.Background(), in)
 	require.True(t, ok)
 	assert.True(t, rec.AnchorTruncated)
-	assert.Contains(t, rec.AnchorContent, "messages/first")
-	assert.Less(t, tokens.Estimate(rec.AnchorContent), tokens.Estimate(original))
+	var projected agent.Message
+	require.NoError(t, json.Unmarshal([]byte(rec.AnchorJSON), &projected))
+	assert.Contains(t, projected.Content, "messages/first")
+	assert.Less(t, tokens.Estimate(projected.Content), tokens.Estimate(original))
 }
 
 func TestSummaryChunksRespectActualInputBudget(t *testing.T) {

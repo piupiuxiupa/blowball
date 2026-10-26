@@ -232,11 +232,13 @@ func (h *MessageStreamHandler) bindStagedFile(ctx context.Context, userID, sessi
 // the read path degrades to the placeholder and the row follows the
 // session-delete lifecycle.
 func (h *MessageStreamHandler) rollbackClaim(ctx context.Context, userID, sessionID, id string, cause error) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	logger.FromContext(ctx).Error("staged attachment bind failed; rolling claim back",
 		zap.String("op", "handler.send_message"),
 		zap.String("attachment_id", id),
 		zap.Error(cause))
-	if err := h.attachments.UnclaimAttachment(ctx, id, userID, sessionID); err != nil {
+	if err := h.attachments.UnclaimAttachment(rollbackCtx, id, userID, sessionID); err != nil {
 		logger.FromContext(ctx).Error("attachment claim rollback failed",
 			zap.String("op", "handler.send_message"),
 			zap.String("attachment_id", id),
@@ -249,6 +251,9 @@ func (h *MessageStreamHandler) rollbackClaim(ctx context.Context, userID, sessio
 // before the row is unclaimed, keeping the sweeper able to find the same retry
 // unit if a later request never uses it.
 func (h *MessageStreamHandler) rollbackNewAttachmentClaims(ctx context.Context, userID, sessionID string, ids []string) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	ctx = rollbackCtx
 	for i := len(ids) - 1; i >= 0; i-- {
 		id := ids[i]
 		att, err := h.attachments.GetAttachmentByUser(ctx, id, userID)
@@ -722,14 +727,16 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			Estimate: func(_ context.Context, lastUsage agent.Usage, appended []agent.Message) agent.ContextRequestEstimate {
 				return agent.EstimateRequestFromUsage(lastUsage.PromptTokens, lastUsage.CompletionTokens, appended)
 			},
-			BudgetedRound: func(ctx context.Context, _ agent.Usage, estimate agent.ContextRequestEstimate, system string, msgs []agent.Message, tools []byte) []agent.Message {
+			BudgetedRound: func(ctx context.Context, _ agent.Usage, estimate agent.ContextRequestEstimate, _ string, msgs []agent.Message, tools []byte) []agent.Message {
 				if estimate.Tokens <= 0 || inputBudget <= 0 {
 					return nil
 				}
 				// Only the preflight near-hard-budget path belongs here. The
 				// ordinary 80% compression policy remains on Round above; firing
 				// both for every measured round would summarize twice.
-				if agent.EstimateRequestOverBudget(system, msgs, tools, inputBudget) {
+				// msgs already carries the system prompt; passing it again as a
+				// separate envelope would double-count prompt tokens.
+				if agent.EstimateRequestOverBudget("", msgs, tools, inputBudget) {
 					return h.compactMidTurn(ctx, tap, persist, flushed, turnLimit, inputBudget, turnModel, estimate.Tokens, true, model.CompactionTriggerMidTurn)
 				}
 				return nil

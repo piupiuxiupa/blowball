@@ -90,3 +90,12 @@
 - [x] 11.6 Roll back attachment claims without leaving a staged row paired with a session-owned file.
 - [x] 11.7 Remove window-size test heuristics; budget mode is selected by configured context/completion values alone.
 - [x] 11.8 Replace repeated summary retries with zero-cost worst-case tail planning and one final summary call.
+
+## 12. Third Review Hardening
+
+- [x] 12.1 Preserve current-turn live messages, including inline images, across preflight compaction while bounding replay text.
+- [x] 12.2 Make empty or malformed durable history a safe no-op before any compaction indexing.
+- [x] 12.3 Persist and replay the complete bounded anchor projection, including reasoning, tool calls, and image removal.
+- [x] 12.4 Recover once from provider context overflow during the round-cap wrap-up request.
+- [x] 12.5 Avoid double-counting the system prompt in the budgeted round hook.
+- [x] 12.6 Run attachment rollback on a detached bounded context so request cancellation cannot prevent cleanup.

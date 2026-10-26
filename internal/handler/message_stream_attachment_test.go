@@ -395,3 +395,23 @@ func TestAttachmentRollback_FileMoveFailureKeepsRowBound(t *testing.T) {
 	_, err := os.Stat(filepath.Join(sessionDir, att1+".png"))
 	assert.NoError(t, err)
 }
+
+func TestAttachmentRollback_IgnoresCancelledRequestContext(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "shot.png", pngBytes)
+	row := env.atts.rows[att1]
+	row.SessionID = ptrStr("sess-1")
+	env.atts.rows[att1] = row
+	stagedDir := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope)
+	sessionDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.Rename(filepath.Join(stagedDir, att1+".png"), filepath.Join(sessionDir, att1+".png")))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	env.stream.rollbackNewAttachmentClaims(ctx, "user-1", "sess-1", []string{att1})
+
+	assert.Nil(t, env.atts.rows[att1].SessionID)
+	_, err := os.Stat(filepath.Join(stagedDir, att1+".png"))
+	assert.NoError(t, err)
+}

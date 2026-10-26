@@ -26,7 +26,7 @@ func TestCompactionRecordRow_NullObservationsRemainReadable(t *testing.T) {
 		BoundaryMsgTime:         created,
 		BoundaryMsgIndex:        3,
 		BoundaryMsgID:           42,
-		AnchorContent:           sql.NullString{String: "bounded anchor", Valid: true},
+		AnchorJSON:              sql.NullString{String: `{"role":"user","content":"bounded anchor"}`, Valid: true},
 		AnchorTruncated:         sql.NullBool{Bool: true, Valid: true},
 		ShadowedTokens:          100,
 		SummaryModel:            "model-1",
@@ -48,7 +48,7 @@ func TestCompactionRecordRow_NullObservationsRemainReadable(t *testing.T) {
 	rec.DecodeRetainedResults()
 
 	assert.Equal(t, int64(7), rec.ID)
-	assert.Equal(t, "bounded anchor", rec.AnchorContent)
+	assert.JSONEq(t, `{"role":"user","content":"bounded anchor"}`, rec.AnchorJSON)
 	assert.True(t, rec.AnchorTruncated)
 	assert.Empty(t, rec.MeasurementBasis)
 	assert.Zero(t, rec.PreCompactionTokens)

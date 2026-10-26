@@ -44,7 +44,11 @@ Every retained assistant message containing `tool_calls` SHALL be accompanied by
 
 #### Scenario: First message exceeds its anchor budget
 - **WHEN** the original first message alone cannot fit in the anchor budget
-- **THEN** the checkpoint retains a bounded excerpt, original size, and retrieval reference while the persisted message row is untouched
+- **THEN** the checkpoint retains a bounded complete message projection, original size, and retrieval reference while the persisted message row is untouched
+
+#### Scenario: Anchor has multiple oversized fields
+- **WHEN** an oversized anchor carries large content, reasoning, tool arguments, or inline images
+- **THEN** the bounded projection removes image payloads and bounds every model-facing field rather than truncating only content
 
 #### Scenario: Display history is untouched
 - **WHEN** any compaction has occurred
