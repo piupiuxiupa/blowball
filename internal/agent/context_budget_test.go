@@ -57,6 +57,21 @@ func TestEstimateRenderedRequest_countsToolsAndImages(t *testing.T) {
 	assert.False(t, withTools.MeasuredUsage)
 }
 
+func TestEstimateRenderedRequest_usesJSONDensityForToolResults(t *testing.T) {
+	payload := `{"status":0,"result":{"items":[` +
+		strings.Repeat(`{"id":"0123456789abcdef","path":"internal/agent/context_budget.go"},`, 2000) +
+		`{"id":"final"}]}}`
+	msgs := []Message{{Role: "tool", ToolCallID: "call-dense", Content: payload}}
+
+	got := EstimateRenderedRequest("", msgs, nil).Tokens
+	want := 8 + estimateContent("call-dense") + estimateJSONContent(payload)
+	generic := 8 + estimateContent("call-dense") + estimateContent(payload)
+
+	assert.Equal(t, want, got)
+	assert.Greater(t, got, generic+1000,
+		"dense tool JSON must use the conservative JSON envelope density")
+}
+
 func TestEstimateRequestFromUsage_includesNewToolResult(t *testing.T) {
 	base := EstimateRequestFromUsage(100, 10, nil)
 	withResult := EstimateRequestFromUsage(100, 10, []Message{{Role: "tool", Content: strings.Repeat("x", 4000)}})

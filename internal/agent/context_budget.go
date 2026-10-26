@@ -203,7 +203,11 @@ func estimateMessages(msgs []Message) int {
 	total := 0
 	for _, m := range msgs {
 		total += 8 // message envelope / role / protocol markers
-		total += estimateContent(m.Content)
+		if m.Role == "tool" {
+			total += estimateJSONContent(m.Content)
+		} else {
+			total += estimateContent(m.Content)
+		}
 		total += estimateContent(m.ReasoningContent)
 		if m.ToolCallID != "" {
 			total += tokens.Estimate(m.ToolCallID)
