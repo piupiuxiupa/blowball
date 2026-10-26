@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,54 @@ import (
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/skill"
 )
+
+type compactionBudgetLLM struct {
+	mu           sync.Mutex
+	requests     []agent.LLMRequest
+	mainCalls    int
+	summaryCalls int
+	firstMainErr error
+}
+
+func (c *compactionBudgetLLM) StreamChat(
+	_ context.Context, req agent.LLMRequest,
+	onToken func(string) error, _ func(string) error,
+) (agent.LLMResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests = append(c.requests, req)
+	if req.Model == scriptedTitleModel {
+		return agent.LLMResponse{Content: "Budget Test Title", FinishReason: "stop"}, nil
+	}
+	if len(req.Messages) > 0 && strings.Contains(req.Messages[0].Content, "maintaining the checkpoint") {
+		c.summaryCalls++
+		return agent.LLMResponse{Content: "BUDGET CHECKPOINT", FinishReason: "stop"}, nil
+	}
+	c.mainCalls++
+	if c.mainCalls == 1 && c.firstMainErr != nil {
+		return agent.LLMResponse{}, c.firstMainErr
+	}
+	content := "done"
+	if c.mainCalls > 1 {
+		content = "recovered"
+	}
+	if onToken != nil {
+		if err := onToken(content); err != nil {
+			return agent.LLMResponse{}, err
+		}
+	}
+	return agent.LLMResponse{
+		Content:      content,
+		FinishReason: "stop",
+		Usage:        agent.Usage{PromptTokens: 120, CompletionTokens: 10},
+	}, nil
+}
+
+func (c *compactionBudgetLLM) snapshot() (main, summary int, requests []agent.LLMRequest) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mainCalls, c.summaryCalls, append([]agent.LLMRequest(nil), c.requests...)
+}
 
 // seedHistory inserts n alternating user/assistant turns directly into the
 // fake MySQL tier, mirroring what prior real turns would have left behind.
@@ -72,7 +121,10 @@ func seedHistory(t *testing.T, m *memoryMySQL, sessionID string, n int) {
 // turn-start compaction run end-to-end through the real orchestrator,
 // adapter, event tap, and persistence path (model-effort-v2: the threshold
 // follows the turn-resolved catalog entry's window).
-func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Registry, confuciusTools []string, maxContextTokens int) *testEnv {
+func newCompactionTestEnv(
+	t *testing.T, llm agent.LLMClient, baseReg *tool.Registry, confuciusTools []string,
+	maxContextTokens, maxCompletionTokens int,
+) *testEnv {
 	t.Helper()
 
 	// Register goleak FIRST so it runs LAST in the LIFO cleanup chain.
@@ -109,7 +161,12 @@ func newCompactionTestEnv(t *testing.T, llm agent.LLMClient, baseReg *tool.Regis
 		OpenAI: config.OpenAIConfig{
 			APIKey: "test",
 			Models: []config.ModelCatalogEntry{
-				{Name: "gpt-test", MaxContextTokens: maxContextTokens, Thinking: false},
+				{
+					Name:                "gpt-test",
+					MaxContextTokens:    maxContextTokens,
+					MaxCompletionTokens: maxCompletionTokens,
+					Thinking:            false,
+				},
 			},
 		},
 		JWT:    config.JWTConfig{Secret: integrationTestSecret, Expire: "1h"},
@@ -247,7 +304,7 @@ func TestCompaction_MidTurnTrigger_EndToEnd(t *testing.T) {
 		scriptedLLMResponse{tokens: []string{"all done"}, content: "all done", finishReason: "stop", usage: agent.Usage{PromptTokens: 200, CompletionTokens: 20}},
 	)
 
-	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 1000)
+	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 1000, 0)
 	token := authToken(t, defaultUserID)
 	seedHistory(t, env.mysqlFake, defaultSessionID, 8) // 8 prior user/assistant pairs
 
@@ -324,6 +381,75 @@ func TestCompaction_MidTurnTrigger_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestCompaction_TurnStartPreflight_Budgeted(t *testing.T) {
+	llm := &compactionBudgetLLM{}
+	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 24000, 1024)
+	token := authToken(t, defaultUserID)
+	seedHistory(t, env.mysqlFake, defaultSessionID, 120)
+	for i := range env.mysqlFake.messages[defaultSessionID] {
+		env.mysqlFake.messages[defaultSessionID][i].Content = strings.Repeat("history detail ", 30)
+	}
+
+	w := env.postMessage(`{"content":"current task"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	env.waitForPersistedTurn(t, defaultSessionID, 240+2)
+
+	recs := env.mysqlFake.compactionsFor(defaultSessionID)
+	require.Len(t, recs, 1)
+	rec := recs[0]
+	assert.Equal(t, model.CompactionTriggerTurnStart, rec.TriggerKind)
+	assert.Equal(t, 24000-1024-4096, rec.InputBudgetTokens)
+	assert.Equal(t, "estimated", rec.MeasurementBasis)
+	assert.LessOrEqual(t, rec.PostCompactionTokens, rec.InputBudgetTokens)
+
+	mainCalls, summaryCalls, requests := llm.snapshot()
+	assert.Equal(t, 1, mainCalls)
+	assert.GreaterOrEqual(t, summaryCalls, 1)
+	var mainRequest *agent.LLMRequest
+	for i := range requests {
+		req := &requests[i]
+		for _, msg := range req.Messages {
+			if strings.Contains(msg.Content, "<compacted-summary>") {
+				mainRequest = req
+			}
+		}
+	}
+	require.NotNil(t, mainRequest, "the budgeted preflight must rewrite the first model request")
+}
+
+func TestCompaction_ProviderOverflow_BudgetedRecovery(t *testing.T) {
+	llm := &compactionBudgetLLM{firstMainErr: agent.ErrContextOverflow}
+	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 24000, 1024)
+	token := authToken(t, defaultUserID)
+	seedHistory(t, env.mysqlFake, defaultSessionID, 8)
+
+	w := env.postMessage(`{"content":"recover this turn"}`, token)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	env.waitForPersistedTurn(t, defaultSessionID, 16+2)
+
+	recs := env.mysqlFake.compactionsFor(defaultSessionID)
+	require.Len(t, recs, 1)
+	rec := recs[0]
+	assert.Equal(t, model.CompactionTriggerTurnStart, rec.TriggerKind)
+	assert.Equal(t, 24000-1024-4096, rec.InputBudgetTokens)
+	assert.Equal(t, "estimated", rec.MeasurementBasis)
+	assert.LessOrEqual(t, rec.PostCompactionTokens, rec.InputBudgetTokens)
+	mainCalls, summaryCalls, requests := llm.snapshot()
+	assert.Equal(t, 2, mainCalls, "overflow + rebuilt main request")
+	assert.GreaterOrEqual(t, summaryCalls, 1)
+
+	var recovered *agent.LLMRequest
+	for i := range requests {
+		req := &requests[i]
+		for _, msg := range req.Messages {
+			if strings.Contains(msg.Content, "<compacted-summary>") {
+				recovered = req
+			}
+		}
+	}
+	require.NotNil(t, recovered, "the rebuilt request must use the compacted projection")
+}
+
 // TestCompaction_SubsequentTurnStitches: after a mid-turn compaction, the
 // NEXT turn's model context is stitched from the record (first + summary +
 // tail), while the display path keeps returning everything.
@@ -344,7 +470,7 @@ func TestCompaction_SubsequentTurnStitches(t *testing.T) {
 		scriptedLLMResponse{content: "plain answer", finishReason: "stop", usage: agent.Usage{PromptTokens: 120, CompletionTokens: 10}},
 	)
 
-	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 1000)
+	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 1000, 0)
 	token := authToken(t, defaultUserID)
 	seedHistory(t, env.mysqlFake, defaultSessionID, 8)
 
@@ -413,7 +539,7 @@ func TestCompaction_RecompactionMergesPrior(t *testing.T) {
 		scriptedLLMResponse{content: "final answer", finishReason: "stop", usage: agent.Usage{PromptTokens: 100, CompletionTokens: 5}},
 	)
 
-	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 1000)
+	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 1000, 0)
 	token := authToken(t, defaultUserID)
 	seedHistory(t, env.mysqlFake, defaultSessionID, 8)
 
@@ -510,7 +636,7 @@ func TestCompaction_DisabledByDefault(t *testing.T) {
 		scriptedLLMResponse{content: "done", finishReason: "stop", usage: agent.Usage{PromptTokens: 10, CompletionTokens: 5}},
 	)
 
-	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 0)
+	env := newCompactionTestEnv(t, llm, echoTool(t), []string{"echo"}, 0, 0)
 	token := authToken(t, defaultUserID)
 	seedHistory(t, env.mysqlFake, defaultSessionID, 8)
 
