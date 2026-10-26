@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,12 +29,6 @@ import (
 	"github.com/lush/blowball/internal/store/fs"
 	"github.com/lush/blowball/internal/stream"
 )
-
-// contextSafetyFloorForTests keeps compact synthetic catalog windows (used by
-// hand-built handler tests) on the legacy effective window. Production windows
-// are far above this floor, so the completion reservation and safety margin
-// always apply there.
-const contextSafetyFloorForTests = 10000
 
 // MessageStreamHandler owns the streaming message endpoint
 // POST /api/v1/sessions/:session_id/messages. It is the only handler that
@@ -260,23 +255,47 @@ func (h *MessageStreamHandler) rollbackNewAttachmentClaims(ctx context.Context, 
 		if err != nil || att == nil || att.SessionID == nil || *att.SessionID != sessionID {
 			continue
 		}
-		if ext, ok := attachmentMimeExt[att.MIME]; ok {
-			src := filepath.Join(h.dataDir, userID, "attachments", sessionID, id+ext)
-			dstDir := filepath.Join(h.dataDir, userID, "attachments", fs.AttachmentStagingScope)
-			if err := os.MkdirAll(dstDir, 0o755); err != nil {
-				logger.FromContext(ctx).Error("attachment rollback: create staging dir failed",
-					zap.String("op", "handler.send_message"),
-					zap.String("attachment_id", id), zap.Error(err))
-			} else if err := os.Rename(src, filepath.Join(dstDir, id+ext)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		ext, ok := attachmentMimeExt[att.MIME]
+		if !ok {
+			logger.FromContext(ctx).Error("attachment rollback: unknown MIME; keeping row bound",
+				zap.String("op", "handler.send_message"),
+				zap.String("attachment_id", id))
+			continue
+		}
+		renamed := false
+		src := filepath.Join(h.dataDir, userID, "attachments", sessionID, id+ext)
+		dstDir := filepath.Join(h.dataDir, userID, "attachments", fs.AttachmentStagingScope)
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+			logger.FromContext(ctx).Error("attachment rollback: create staging dir failed",
+				zap.String("op", "handler.send_message"),
+				zap.String("attachment_id", id), zap.Error(err))
+			continue
+		}
+		if err := os.Rename(src, filepath.Join(dstDir, id+ext)); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
 				logger.FromContext(ctx).Error("attachment rollback: restore staging file failed",
 					zap.String("op", "handler.send_message"),
 					zap.String("attachment_id", id), zap.Error(err))
+				// Keep the row bound rather than creating a staged row whose
+				// file still lives under the session directory.
+				continue
 			}
+		} else {
+			renamed = true
 		}
 		if err := h.attachments.UnclaimAttachment(ctx, id, userID, sessionID); err != nil {
 			logger.FromContext(ctx).Error("attachment rollback: unclaim failed",
 				zap.String("op", "handler.send_message"),
 				zap.String("attachment_id", id), zap.Error(err))
+			if renamed {
+				stagingPath := filepath.Join(h.dataDir, userID, "attachments", fs.AttachmentStagingScope, id+ext)
+				sessionPath := filepath.Join(h.dataDir, userID, "attachments", sessionID, id+ext)
+				if moveErr := os.Rename(stagingPath, sessionPath); moveErr != nil {
+					logger.FromContext(ctx).Error("attachment rollback: compensate moved file failed",
+						zap.String("op", "handler.send_message"),
+						zap.String("attachment_id", id), zap.Error(moveErr))
+				}
+			}
 		}
 	}
 }
@@ -588,8 +607,6 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 			zap.Error(err))
 		prior = nil
 	}
-	isFirstTurn := len(prior) == 0
-
 	priorCalls, cerr := h.msgSvc.ListToolCalls(ctx, sessionID)
 	if cerr != nil {
 		logger.FromContext(ctx).Warn("recover tool calls failed; proceeding without",
@@ -606,94 +623,26 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		agentMsgs = nil
 	}
 
-	// Context-compaction stitching (context-compaction capability). Two ways
-	// the model context becomes the stitched form:
-	//
-	//  a) turn-start preventive compaction — the previous turn ended over the
-	//     80% threshold (turn_usage.context_tokens), so compact NOW, before
-	//     the first LLM call of this turn, saving a doomed full-window
-	//     request. Only for non-first turns (a new session has no usage row).
-	//  b) the session was compacted on an earlier turn
-	//     (sessions.context_compacted) — stitch from the latest record.
-	//
-	// Both paths operate on the DURABLE history (drain + MySQL read): the
-	// Redis-first view above may serve rows whose id is still 0 (ids are
-	// minted by the MySQL flusher), and a boundary cursor must reference a
-	// durable row identity. Both degrade to the full recovered history on any
-	// miss (compaction skipped, record unavailable, boundary not locatable):
-	// never block the turn.
-	var activeRecord *model.ContextCompaction
-	if h.compSvc.Enabled() {
-		overThreshold := false
-		lastContextTokens := 0
-		completionReserve := sel.MaxCompletionTokens
-		budget := agent.NewRequestBudget(turnLimit, completionReserve)
-		// Synthetic test windows are already budget-sized; production windows
-		// exceed this floor, where the completion reserve always applies.
-		if turnLimit > 0 && turnLimit <= contextSafetyFloorForTests {
-			budget.InputTokens = turnLimit
-		}
-		effectiveLimit := turnLimit
-		if budget.Valid() {
-			effectiveLimit = budget.InputTokens
-		}
-		compactionBudget := effectiveLimit
-		if turnLimit > 0 && turnLimit <= contextSafetyFloorForTests {
-			// Synthetic legacy test windows retain their count-based compaction
-			// and one-shot summary behavior. Production windows are always above
-			// this floor and use the budgeted candidate path.
-			compactionBudget = 0
-		}
-		if !isFirstTurn {
-			tokens, terr := h.compSvc.LatestContextTokens(ctx, sessionID)
-			if terr != nil {
-				logger.FromContext(ctx).Warn("turn-start context tokens read failed; skipping preventive compaction",
+	// Existing compacted sessions are stitched from the DURABLE tier. The
+	// turn-start pressure check now runs inside the built agent just before its
+	// first model call, where the exact system prompt, tools, current user
+	// message, and budget are available.
+	if h.compSvc.Enabled() && sess.ContextCompacted {
+		if durable, durableCalls, derr := h.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
+			durableMsgs, _, rerr := MessagesToAgentMessagesIndexed(durable, durableCalls)
+			if rerr != nil {
+				logger.FromContext(ctx).Warn("durable reconstruct failed; using full recovered history",
 					zap.String("op", "handler.send_message"),
-					zap.Error(terr))
-			} else {
-				lastContextTokens = tokens
-				overThreshold = h.compSvc.ShouldCompact(tokens, effectiveLimit)
-			}
-		}
-		if overThreshold || sess.ContextCompacted {
-			if durable, durableCalls, derr := h.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
-				durableMsgs, durableRow, rerr := MessagesToAgentMessagesIndexed(durable, durableCalls)
-				if rerr != nil {
-					logger.FromContext(ctx).Warn("durable reconstruct failed; using full recovered history",
-						zap.String("op", "handler.send_message"),
-						zap.Error(rerr))
-				} else {
-					if overThreshold {
-						activeRecord, _ = h.compSvc.Compact(ctx, service.CompactionInput{
-							SessionID:             sessionID,
-							UserID:                userID,
-							TriggerKind:           model.CompactionTriggerTurnStart,
-							TriggerTokens:         lastContextTokens,
-							Rows:                  durable,
-							AgentMsgs:             durableMsgs,
-							LastRow:               durableRow,
-							SummaryModel:          turnModel,
-							InputBudget:           compactionBudget,
-							TriggerTokensMeasured: true,
-							PendingMessages: []agent.Message{{
-								Role: "user", Content: req.Content + statusSuffix,
-							}},
-						})
-					}
-					if activeRecord == nil && sess.ContextCompacted {
-						activeRecord = h.compSvc.LatestCompactionRecord(ctx, sessionID)
-					}
-					if activeRecord != nil {
-						if stitched := stitchCompacted(durable, durableCalls, durableMsgs, activeRecord); stitched != nil {
-							agentMsgs = stitched
-						}
-					}
+					zap.Error(rerr))
+			} else if activeRecord := h.compSvc.LatestCompactionRecord(ctx, sessionID); activeRecord != nil {
+				if stitched := stitchCompacted(durable, durableCalls, durableMsgs, activeRecord); stitched != nil {
+					agentMsgs = stitched
 				}
-			} else {
-				logger.FromContext(ctx).Warn("durable recovery failed; using full recovered history",
-					zap.String("op", "handler.send_message"),
-					zap.Error(derr))
 			}
+		} else {
+			logger.FromContext(ctx).Warn("durable recovery failed; using full recovered history",
+				zap.String("op", "handler.send_message"),
+				zap.Error(derr))
 		}
 	}
 
@@ -767,18 +716,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	var hooks TurnHooks
 	tap := NewTurnEventTap()
 	if h.compSvc.Enabled() {
-		budget := agent.NewRequestBudget(turnLimit, sel.MaxCompletionTokens)
-		inputBudget := turnLimit
-		if budget.Valid() {
-			inputBudget = budget.InputTokens
-		}
-		if turnLimit > 0 && turnLimit <= 1000 && sel.MaxCompletionTokens == 0 {
-			// Integration harness: a 1,000-token synthetic window with no
-			// completion quota exercises the legacy 80% path. Applying the
-			// production 4,096-token safety margin here would make every real
-			// request look over-budget and add an extra summary call.
-			inputBudget = 0
-		}
+		inputBudget := configuredInputBudget(turnLimit, sel.MaxCompletionTokens)
 		hooks = TurnHooks{
 			Round: h.newBudgetedRoundHook(tap, persist, flushed, turnLimit, inputBudget, turnModel),
 			Estimate: func(_ context.Context, lastUsage agent.Usage, appended []agent.Message) agent.ContextRequestEstimate {
@@ -788,17 +726,11 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				if estimate.Tokens <= 0 || inputBudget <= 0 {
 					return nil
 				}
-				if turnLimit <= 1000 && sel.MaxCompletionTokens == 0 {
-					// Hand-built legacy test harness: the budgeted hook is
-					// installed only so the estimator exists; the old 80% hook
-					// owns compaction in this shape.
-					return nil
-				}
 				// Only the preflight near-hard-budget path belongs here. The
 				// ordinary 80% compression policy remains on Round above; firing
 				// both for every measured round would summarize twice.
 				if agent.EstimateRequestOverBudget(system, msgs, tools, inputBudget) {
-					return h.compactMidTurn(ctx, tap, persist, flushed, turnLimit, inputBudget, turnModel, estimate.Tokens, true, true)
+					return h.compactMidTurn(ctx, tap, persist, flushed, turnLimit, inputBudget, turnModel, estimate.Tokens, true, model.CompactionTriggerMidTurn)
 				}
 				return nil
 			},
@@ -1353,6 +1285,16 @@ func (f *turnFlushState) mark(n int) {
 	}
 }
 
+// configuredInputBudget arms request budgeting only when the catalog entry
+// provides both a context window and completion quota. Window size itself is
+// not used as a production/test switch.
+func configuredInputBudget(window, completion int) int {
+	if window <= 0 || completion <= 0 {
+		return 0
+	}
+	return agent.NewRequestBudget(window, completion).InputTokens
+}
+
 // count returns the number of merged events already persisted.
 func (f *turnFlushState) count() int {
 	f.mu.Lock()
@@ -1399,19 +1341,19 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 		if !h.compSvc.ShouldCompact(contextTokens, threshold) {
 			return nil
 		}
-		return h.compactMidTurn(ctx, tap, persist, flushed, window, compactionBudget, summaryModel, contextTokens, false, false)
+		return h.compactMidTurn(ctx, tap, persist, flushed, window, compactionBudget, summaryModel, contextTokens, false, model.CompactionTriggerMidTurn)
 	}
 }
 
 // compactMidTurn performs the flush-first compaction sequence shared by the
 // pressure trigger and forced overflow recovery. force bypasses the threshold
 // check but still requires a valid usable compaction candidate.
-func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, window, inputBudget int, summaryModel string, contextTokens int, measured, force bool) []agent.Message {
+func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, window, inputBudget int, summaryModel string, contextTokens int, measured bool, triggerKind string) []agent.Message {
 	log := logger.FromContext(ctx).With(
 		zap.String("op", "handler.round_hook"),
 		zap.Int("context_tokens", contextTokens),
 		zap.Int("input_budget_tokens", inputBudget),
-		zap.Bool("forced", force),
+		zap.String("trigger_kind", triggerKind),
 	)
 
 	// ① Flush-first: persist the turn so far as round finals through the
@@ -1465,7 +1407,7 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 	rec, ok := h.compSvc.Compact(ctx, service.CompactionInput{
 		SessionID:             persist.sessionID,
 		UserID:                persist.userID,
-		TriggerKind:           model.CompactionTriggerMidTurn,
+		TriggerKind:           triggerKind,
 		TriggerTokens:         contextTokens,
 		Rows:                  rows,
 		AgentMsgs:             agentMsgs,
@@ -1496,11 +1438,18 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 func (h *MessageStreamHandler) newBudgetedRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, window, inputBudget int, summaryModel string) agent.RoundHook {
 	base := h.newRoundHook(tap, persist, flushed, window, inputBudget, summaryModel)
 	return func(ctx context.Context, lastUsage agent.Usage) []agent.Message {
-		// A zero Usage is the forced-recovery signal emitted after a provider
-		// context-overflow response. Compact unconditionally once; the agent
-		// loop enforces the one-attempt bound.
-		if lastUsage.PromptTokens == 0 && lastUsage.CompletionTokens == 0 {
-			return h.compactMidTurn(ctx, tap, persist, flushed, window, inputBudget, summaryModel, 0, false, true)
+		if force, forced := agent.ForcedCompactionFromContext(ctx); forced {
+			// Explicit control-plane signal; zero provider usage is valid data
+			// and must still follow the ordinary pressure policy below.
+			triggerKind := model.CompactionTriggerMidTurn
+			if strings.HasPrefix(force.Reason, "turn_start") {
+				triggerKind = model.CompactionTriggerTurnStart
+			}
+			forceBudget := inputBudget
+			if force.InputBudget > 0 {
+				forceBudget = force.InputBudget
+			}
+			return h.compactMidTurn(ctx, tap, persist, flushed, window, forceBudget, summaryModel, force.EstimatedTokens, false, triggerKind)
 		}
 		return base(ctx, lastUsage)
 	}

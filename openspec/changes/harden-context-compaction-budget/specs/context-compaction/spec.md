@@ -1,5 +1,22 @@
 ## MODIFIED Requirements
 
+### Requirement: Context pressure is measured from authoritative token usage
+The system SHALL use the most recent provider report's `prompt_tokens + completion_tokens` as the base for mid-turn pressure checks and SHALL add a conservative estimate for assistant/tool messages appended after that report. The system SHALL NOT use cumulative `turn_usage.total_tokens`.
+
+The first request of each turn SHALL be evaluated from the complete rendered request, including the selected system prompt, tool descriptors, reconstructed or stitched messages, and current user message. `turn_usage.context_tokens` SHALL remain a provider-observed historical measurement and observability field; it SHALL NOT by itself determine whether the current turn's differently constructed request fits.
+
+#### Scenario: Mid-turn measurement extends last round usage
+- **WHEN** a tool round completes inside a turn and tool results are appended
+- **THEN** the pressure check uses that round's provider usage plus the conservative appended-message estimate
+
+#### Scenario: Turn-start measurement uses the built request
+- **WHEN** a turn reaches its first model call after the agent has built its actual system prompt and tools
+- **THEN** the preventive check measures that complete rendered request against the current model budget
+
+#### Scenario: Cumulative turn usage is never the measure
+- **WHEN** a turn made multiple LLM calls
+- **THEN** the sum of all rounds' usage is not used as the context pressure measure
+
 ### Requirement: Compaction preserves the first message, the last five agent messages, and tool pairing boundaries
 The system SHALL select the retained tail by an estimated-token budget rather than a fixed message count. It SHALL prioritize recent user messages, assistant prose, and assistant reasoning, while preserving recent tool invocations as complete protocol units with their result bodies replaced by bounded deterministic summaries.
 

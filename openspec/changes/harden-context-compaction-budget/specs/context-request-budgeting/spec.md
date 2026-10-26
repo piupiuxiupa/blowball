@@ -14,7 +14,7 @@ The system SHALL verify that each catalog entry's configured window is the opera
 - **THEN** the request is rejected before any model call
 
 ### Requirement: The next request is estimated after each tool round
-Before each LLM request, the system SHALL estimate the request size from the latest provider-observed prompt and completion usage plus conservatively estimated newly appended assistant and tool messages and protocol overhead. When no prior provider measurement is available, it SHALL conservatively estimate the complete rendered request.
+Before each LLM request, the system SHALL estimate the complete request currently being sent, including system prompt, tools, conversation messages, and protocol overhead. Mid-turn budget extensions SHALL use the latest provider-observed prompt and completion usage plus conservatively estimated newly appended assistant and tool messages. Provider usage SHALL be treated as data and SHALL NOT be overloaded as a forced-compaction control signal.
 
 The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope content. The system SHALL NOT rely solely on the previous round's provider usage when tool results have been appended since that measurement.
 
@@ -24,7 +24,11 @@ The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope c
 
 #### Scenario: First request has no prior usage
 - **WHEN** a new turn has no provider observation to extend
-- **THEN** the system estimates the complete request and applies the input budget
+- **THEN** the system estimates the complete rendered request and applies the input budget before the first provider call
+
+#### Scenario: Provider reports zero usage
+- **WHEN** a provider response omits usage or reports zero prompt and completion tokens
+- **THEN** the system records that observation without treating it as a forced-compaction command
 
 ### Requirement: Compaction is triggered before a request exceeds the budget
 The system SHALL begin compaction when either the existing percentage threshold or the preflight request-budget threshold is reached, and the compressible middle is non-empty. The effective trigger SHALL be the lower of the applicable safe thresholds. The system SHALL reserve space for the completion quota and the next appended message set.

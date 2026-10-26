@@ -12,7 +12,8 @@ const (
 )
 
 // ContextCompaction mirrors the `context_compactions` table (migrations
-// 013_context_compaction.sql and 023_context_compaction_budget.sql). One row
+// 013_context_compaction.sql, 023_context_compaction_budget.sql, and
+// 024_context_compaction_anchor.sql). One row
 // records one completed context compaction: the checkpoint summary that
 // replaced a shadowed span of history,
 // the composite cursor of the last shadowed messages row (the stitch boundary),
@@ -33,14 +34,19 @@ type ContextCompaction struct {
 	// Content is the BARE summary text. The <compacted-summary> framing and
 	// lead-in are applied at stitch time (a prompt-engineering concern), so
 	// the stored value stays reusable across framing changes.
-	Content                 string    `db:"content"                    json:"content"`
-	BoundaryMsgTime         time.Time `db:"boundary_msg_time"          json:"boundary_msg_time"`
-	BoundaryMsgIndex        int       `db:"boundary_msg_index"         json:"boundary_msg_index"`
-	BoundaryMsgID           int64     `db:"boundary_msg_id"            json:"boundary_msg_id"`
-	ShadowedTokens          int       `db:"shadowed_tokens"            json:"shadowed_tokens"`
-	SummaryModel            string    `db:"summary_model"              json:"summary_model"`
-	SummaryPromptTokens     int       `db:"summary_prompt_tokens"      json:"summary_prompt_tokens"`
-	SummaryCompletionTokens int       `db:"summary_completion_tokens"  json:"summary_completion_tokens"`
+	Content          string    `db:"content"                    json:"content"`
+	BoundaryMsgTime  time.Time `db:"boundary_msg_time"          json:"boundary_msg_time"`
+	BoundaryMsgIndex int       `db:"boundary_msg_index"         json:"boundary_msg_index"`
+	BoundaryMsgID    int64     `db:"boundary_msg_id"            json:"boundary_msg_id"`
+	// AnchorContent is set only when the original first message was too large
+	// to include verbatim. Empty + AnchorTruncated=false means legacy/full
+	// anchor behavior.
+	AnchorContent           string `db:"anchor_content"              json:"anchor_content,omitempty"`
+	AnchorTruncated         bool   `db:"anchor_truncated"            json:"anchor_truncated,omitempty"`
+	ShadowedTokens          int    `db:"shadowed_tokens"            json:"shadowed_tokens"`
+	SummaryModel            string `db:"summary_model"              json:"summary_model"`
+	SummaryPromptTokens     int    `db:"summary_prompt_tokens"      json:"summary_prompt_tokens"`
+	SummaryCompletionTokens int    `db:"summary_completion_tokens"  json:"summary_completion_tokens"`
 	// RetainedResults holds deterministic tool-result summaries for the
 	// retained tail, keyed by tool_call_id. It is JSON because call ids are
 	// provider-generated strings and the tail can contain parallel calls.

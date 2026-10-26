@@ -10,6 +10,32 @@ import (
 )
 
 type requestEnvelopeContextKey struct{}
+type forcedCompactionContextKey struct{}
+
+// ForcedCompaction carries an explicit force signal to compaction hooks.
+// Provider usage is not used as a control signal: gateways may legitimately
+// report zero, or omit usage entirely.
+type ForcedCompaction struct {
+	Reason          string
+	EstimatedTokens int
+	InputBudget     int
+}
+
+func WithForcedCompactionEstimate(ctx context.Context, reason string, estimatedTokens, inputBudget int) context.Context {
+	return context.WithValue(ctx, forcedCompactionContextKey{}, ForcedCompaction{
+		Reason:          reason,
+		EstimatedTokens: estimatedTokens,
+		InputBudget:     inputBudget,
+	})
+}
+
+func ForcedCompactionFromContext(ctx context.Context) (ForcedCompaction, bool) {
+	if ctx == nil {
+		return ForcedCompaction{}, false
+	}
+	force, ok := ctx.Value(forcedCompactionContextKey{}).(ForcedCompaction)
+	return force, ok
+}
 
 // RequestEnvelope is the fixed part of the outgoing model request that is not
 // represented in conversation messages: system prompt and serialized tools.

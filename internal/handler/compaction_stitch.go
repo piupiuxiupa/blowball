@@ -56,7 +56,11 @@ func stitchCompacted(rows []model.Message, calls []model.ToolCall, agentMsgs []a
 		return nil
 	}
 	out := make([]agent.Message, 0, 2+len(tailMsgs))
-	out = append(out, agentMsgs[0])
+	anchor := agentMsgs[0]
+	if rec.AnchorTruncated && strings.TrimSpace(rec.AnchorContent) != "" {
+		anchor.Content = rec.AnchorContent
+	}
+	out = append(out, anchor)
 	out = append(out, agent.Message{Role: "user", Content: frameCompactedSummary(rec.Content)})
 	applyRetainedResultSummaries(tailMsgs, calls, rec)
 	out = append(out, tailMsgs...)

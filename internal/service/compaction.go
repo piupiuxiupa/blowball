@@ -28,6 +28,7 @@ const (
 	compactionThresholdDenominator = 10
 	compactionRetainedTail         = 5
 	compactionSummaryMaxTokens     = 4096
+	compactionAnchorMaxTokens      = 8192
 )
 
 // compactionSystemPrompt is the structured checkpoint instruction handed to
@@ -203,10 +204,6 @@ type CompactionInput struct {
 	// TriggerTokensMeasured records whether TriggerTokens came from a provider
 	// usage observation rather than a local estimate.
 	TriggerTokensMeasured bool
-	// PendingMessages are model messages that will be appended after the
-	// compacted projection. Turn-start compaction uses this for the current
-	// user message, which is persisted only after this preprocessing step.
-	PendingMessages []agent.Message
 	// RequestOverheadTokens is fixed prompt/tool/protocol overhead not present
 	// in AgentMsgs. Zero falls back to the rendered-message estimate alone.
 	RequestOverheadTokens int
@@ -273,62 +270,62 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	if summaryModel == "" {
 		summaryModel = s.defaultSummaryModel
 	}
-
-	var (
-		content       string
-		usage         agent.Usage
-		strategy      string
-		retained      map[string]string
-		activityCount int
-		boundaryRow   model.Message
-		projected     []agent.Message
-		postTokens    int
-		shadowedCount int
-	)
-	const maxCandidateAttempts = 16
-	for attempt := 0; attempt < maxCandidateAttempts; attempt++ {
-		if tailStart <= scopeStart || tailStart > len(in.AgentMsgs) {
-			log.Warn("compaction skipped: compressible middle is empty",
-				zap.Int("scope_start", scopeStart),
-				zap.Int("tail_start", tailStart),
-				zap.String("reason", plan.Reason))
-			return nil, false
+	anchor := in.AgentMsgs[0]
+	anchorTruncated := false
+	storedAnchorContent := ""
+	if in.InputBudget > 0 {
+		anchor, anchorTruncated = boundedCompactionAnchor(anchor, in.InputBudget)
+		if anchorTruncated {
+			storedAnchorContent = anchor.Content
 		}
-
-		// Summary input never carries image payloads (add-image-attachments):
-		// reconstructed history already renders placeholders, but StripImages
-		// future-proofs any caller handing in live messages with Images set.
-		middle := agent.StripImages(in.AgentMsgs[scopeStart:tailStart])
-		shadowedCount = len(middle)
-		boundaryRow = in.Rows[in.LastRow[tailStart-1]]
-
-		var ok bool
-		content, usage, strategy, ok = s.summarize(ctx, log, prior, middle, summaryModel, in.InputBudget)
-		if !ok {
-			return nil, false
-		}
-		retained, activityCount = summarizeRetainedToolResults(in.AgentMsgs, tailStart)
-		if activity := renderScopeToolActivity(middle); activity != "" {
-			content += "\n\n## Tool Activity\n" + activity
-		}
-		projected = buildCompactedProjection(in.AgentMsgs, tailStart, content, retained, in.PendingMessages)
-		postTokens = in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
-		if in.InputBudget <= 0 || postTokens <= in.InputBudget {
-			break
-		}
-		log.Warn("compaction candidate exceeds request budget; reducing retained tail",
-			zap.Int("attempt", attempt+1),
-			zap.Int("tail_start", tailStart),
-			zap.Int("post_compaction_tokens", postTokens),
-			zap.Int("input_budget_tokens", in.InputBudget))
-		next := advanceTailStart(in.AgentMsgs, tailStart)
-		if next <= tailStart {
-			break
-		}
-		tailStart = next
 	}
+
+	if tailStart <= scopeStart || tailStart > len(in.AgentMsgs) {
+		log.Warn("compaction skipped: compressible middle is empty",
+			zap.Int("scope_start", scopeStart),
+			zap.Int("tail_start", tailStart),
+			zap.String("reason", plan.Reason))
+		return nil, false
+	}
+
+	// Select the tail against a worst-case checkpoint budget before making any
+	// model call. This keeps retries cheap and ensures the one final summary
+	// already covers the final boundary.
+	initialTail := tailStart
+	if in.InputBudget > 0 {
+		var ok bool
+		tailStart, ok = chooseTailForReservedBudget(in, anchor, scopeStart, tailStart)
+		if !ok {
+			log.Warn("compaction candidate remains above request budget",
+				zap.Int("tail_start", tailStart),
+				zap.Int("input_budget_tokens", in.InputBudget))
+			return nil, false
+		}
+		if tailStart != initialTail {
+			log.Info("compaction tail reduced before summary",
+				zap.Int("initial_tail_start", initialTail),
+				zap.Int("final_tail_start", tailStart))
+		}
+	}
+
+	// Summary input never carries image payloads (add-image-attachments):
+	// reconstructed history already renders placeholders, but StripImages
+	// future-proofs any caller handing in live messages with Images set.
+	middle := agent.StripImages(in.AgentMsgs[scopeStart:tailStart])
+	shadowedCount := len(middle)
+	boundaryRow := in.Rows[in.LastRow[tailStart-1]]
+	content, usage, strategy, ok := s.summarize(ctx, log, prior, middle, summaryModel, in.InputBudget)
+	if !ok {
+		return nil, false
+	}
+	retained, activityCount := summarizeRetainedToolResults(in.AgentMsgs, tailStart)
+	if activity := renderScopeToolActivity(middle); activity != "" {
+		content += "\n\n## Tool Activity\n" + activity
+	}
+	projected := buildCompactedProjection(anchor, in.AgentMsgs, tailStart, content, retained)
+	postTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
 	if in.InputBudget > 0 && postTokens > in.InputBudget {
-		log.Warn("compaction candidate remains above request budget",
+		log.Warn("compaction summary exceeded its reserved candidate budget",
 			zap.Int("post_compaction_tokens", postTokens),
 			zap.Int("input_budget_tokens", in.InputBudget))
 		return nil, false
@@ -345,6 +342,8 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		BoundaryMsgTime:  boundaryRow.MsgTime,
 		BoundaryMsgIndex: boundaryRow.MsgIndex,
 		BoundaryMsgID:    boundaryRow.ID,
+		AnchorContent:    storedAnchorContent,
+		AnchorTruncated:  anchorTruncated,
 		// The summary prompt IS the shadowed span (+ prior checkpoint +
 		// instruction), so its prompt size is the faithful measured proxy for
 		// the shadowed content.
@@ -460,10 +459,13 @@ func (s *CompactionService) summarizeChunked(ctx context.Context, log *zap.Logge
 	}
 	var total agent.Usage
 	user := req.Messages[len(req.Messages)-1].Content
-	const chunkRunes = 24000
 	runes := []rune(user)
 	var accumulated string
 	for start := 0; start < len(runes); {
+		chunkRunes := summaryChunkRunes(inputBudget, accumulated)
+		if chunkRunes <= 0 {
+			return "", total, fmt.Errorf("summary input budget leaves no room for a transcript chunk")
+		}
 		end := start + chunkRunes
 		if end > len(runes) {
 			end = len(runes)
@@ -481,6 +483,9 @@ func (s *CompactionService) summarizeChunked(ctx context.Context, log *zap.Logge
 			},
 			MaxCompletionTokens: compactionSummaryMaxTokens,
 		}
+		if estimateSummaryRequest(partReq) > inputBudget {
+			return "", total, fmt.Errorf("summary chunk exceeds input budget")
+		}
 		resp, err := s.llm.StreamChat(agentCtx, partReq, nil, nil)
 		if err != nil {
 			return "", total, err
@@ -493,6 +498,28 @@ func (s *CompactionService) summarizeChunked(ctx context.Context, log *zap.Logge
 		start = end
 	}
 	return accumulated, total, nil
+}
+
+func summaryChunkRunes(inputBudget int, accumulated string) int {
+	if inputBudget <= 0 {
+		return 24000
+	}
+	base := estimateSummaryRequest(agent.LLMRequest{
+		Messages: []agent.Message{
+			{Role: "system", Content: compactionSystemPrompt},
+			{Role: "user"},
+		},
+		MaxCompletionTokens: compactionSummaryMaxTokens,
+	})
+	available := inputBudget - base
+	if accumulated != "" {
+		available -= tokens.Estimate("ACCUMULATED CHECKPOINT TO MERGE:\n\n" + accumulated + "\n\nNEW SPAN:\n\n")
+	}
+	if available <= 0 {
+		return 0
+	}
+	// One rune per token is the conservative CJK bound from tokens.Estimate.
+	return available
 }
 
 // LatestCompactionRecord returns the session's authoritative (latest)
@@ -771,12 +798,10 @@ func indexToolCalls(msgs []agent.Message) map[string]agent.ToolCall {
 
 // buildCompactedProjection is the exact model-facing candidate evaluated
 // against the input budget: anchor + framed checkpoint + retained tail with
-// persisted result summaries + any pending current user message.
-func buildCompactedProjection(msgs []agent.Message, tailStart int, content string, retained map[string]string, pending []agent.Message) []agent.Message {
-	out := make([]agent.Message, 0, 2+len(msgs)-tailStart+len(pending))
-	if len(msgs) > 0 {
-		out = append(out, msgs[0])
-	}
+// persisted result summaries.
+func buildCompactedProjection(anchor agent.Message, msgs []agent.Message, tailStart int, content string, retained map[string]string) []agent.Message {
+	out := make([]agent.Message, 0, 2+len(msgs)-tailStart)
+	out = append(out, anchor)
 	out = append(out, agent.Message{Role: "user", Content: agent.FrameCompactedSummary(content)})
 	for i := tailStart; i < len(msgs); i++ {
 		msg := msgs[i]
@@ -787,8 +812,62 @@ func buildCompactedProjection(msgs []agent.Message, tailStart int, content strin
 		}
 		out = append(out, msg)
 	}
-	out = append(out, pending...)
 	return out
+}
+
+// boundedCompactionAnchor keeps the original task anchor useful without
+// allowing one oversized first message to defeat every compaction. The
+// persisted message row is untouched; the checkpoint record carries only this
+// model-facing excerpt and a stable retrieval note.
+func boundedCompactionAnchor(anchor agent.Message, inputBudget int) (agent.Message, bool) {
+	fullTokens := agent.EstimateRenderedRequest("", []agent.Message{anchor}, nil).Tokens
+	budget := inputBudget / 8
+	if budget > compactionAnchorMaxTokens {
+		budget = compactionAnchorMaxTokens
+	}
+	if budget < 64 {
+		budget = 64
+	}
+	if fullTokens <= budget {
+		return anchor, false
+	}
+	notice := fmt.Sprintf(
+		"\n\n... [first message excerpted; original ~%d tokens; full text remains persisted as messages/first] ...\n\n",
+		fullTokens,
+	)
+	noticeTokens := tokens.Estimate(notice)
+	bodyBudget := budget - noticeTokens
+	if bodyBudget < 16 {
+		bodyBudget = 16
+	}
+	excerpt := boundedRunesToTokens(anchor.Content, bodyBudget)
+	anchor.Content = excerpt + notice
+	return anchor, true
+}
+
+func boundedRunesToTokens(s string, maxTokens int) string {
+	if maxTokens <= 0 {
+		return ""
+	}
+	if tokens.Estimate(s) <= maxTokens {
+		return s
+	}
+	runes := []rune(s)
+	keep := len(runes)
+	if maxTokens*2 < keep {
+		keep = maxTokens * 2
+	}
+	for keep > 2 {
+		head := keep * 2 / 3
+		tail := keep - head
+		candidate := string(runes[:head]) + "…" +
+			string(runes[len(runes)-tail:])
+		if tokens.Estimate(candidate) <= maxTokens {
+			return candidate
+		}
+		keep = keep * 3 / 4
+	}
+	return string(runes[:1])
 }
 
 // advanceTailStart removes one complete unit from the compacted middle
@@ -803,6 +882,40 @@ func advanceTailStart(msgs []agent.Message, start int) int {
 		next++
 	}
 	return next
+}
+
+// chooseTailForReservedBudget advances the tail boundary without calling the
+// summarizer. The summary slot is represented by its maximum allowed output
+// size, so one final model call is sufficient after the tail is selected.
+func chooseTailForReservedBudget(in CompactionInput, anchor agent.Message, scopeStart, start int) (int, bool) {
+	summaryReserve := compactionSummaryMaxTokens
+	if half := in.InputBudget / 2; summaryReserve > half {
+		summaryReserve = half
+	}
+	if summaryReserve < 128 {
+		summaryReserve = 128
+	}
+	reservedSummary := strings.Repeat("x", summaryReserve*4)
+	for {
+		if start <= scopeStart || start > len(in.AgentMsgs) {
+			return start, false
+		}
+		retained, _ := summarizeRetainedToolResults(in.AgentMsgs, start)
+		content := reservedSummary
+		if activity := renderScopeToolActivity(in.AgentMsgs[scopeStart:start]); activity != "" {
+			content += "\n\n## Tool Activity\n" + activity
+		}
+		projected := buildCompactedProjection(anchor, in.AgentMsgs, start, content, retained)
+		cost := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
+		if cost <= in.InputBudget {
+			return start, true
+		}
+		next := advanceTailStart(in.AgentMsgs, start)
+		if next <= start {
+			return start, false
+		}
+		start = next
+	}
 }
 
 func measurementBasis(measured bool) string {

@@ -492,7 +492,9 @@ func (f *fakeFSStore) EnsureUserDirs(_ context.Context, userID string) error {
 type fakeLLMClient struct {
 	mu       sync.Mutex
 	lastReq  agent.LLMRequest
+	requests []agent.LLMRequest
 	gotCall  bool
+	calls    int
 	resp     agent.LLMResponse
 	err      error
 	onTokens []string
@@ -501,7 +503,9 @@ type fakeLLMClient struct {
 func (c *fakeLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	c.mu.Lock()
 	c.lastReq = req
+	c.requests = append(c.requests, req)
 	c.gotCall = true
+	c.calls++
 	c.mu.Unlock()
 	if c.err != nil {
 		return agent.LLMResponse{}, c.err

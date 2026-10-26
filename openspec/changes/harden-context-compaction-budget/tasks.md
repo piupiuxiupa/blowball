@@ -79,3 +79,14 @@
 - [x] 10.6 Distinguish tool envelopes from ordinary JSON results and preserve ordinary JSON content in summaries.
 - [x] 10.7 Preserve original tool-call arguments in retained summaries and activity-ledger examples.
 - [x] 10.8 Restore an expired staged row when file deletion fails so a later sweep can retry cleanup.
+
+## 11. Second Review Hardening
+
+- [x] 11.1 Replace zero-usage inference with an explicit forced-compaction context marker and preserve zero provider usage as ordinary data.
+- [x] 11.2 Move turn-start pressure/preflight measurement to the built agent's first request so the real system prompt, tools, stitched history, and current message are measured.
+- [x] 11.3 Persist and replay a bounded first-message anchor when the full anchor exceeds its budget.
+- [x] 11.4 Derive summary chunks from the actual input budget, fixed prompt, accumulated checkpoint, and completion reserve.
+- [x] 11.5 Keep compaction recovery out of the model-round budget and budget-check the round-cap wrap-up request.
+- [x] 11.6 Roll back attachment claims without leaving a staged row paired with a session-owned file.
+- [x] 11.7 Remove window-size test heuristics; budget mode is selected by configured context/completion values alone.
+- [x] 11.8 Replace repeated summary retries with zero-cost worst-case tail planning and one final summary call.

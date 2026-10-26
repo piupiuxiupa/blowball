@@ -30,7 +30,7 @@ The persistent transcript and message-history API are not changed. Compaction re
 
 ### D1: A request budget combines authoritative usage with a conservative delta
 
-The next-request estimate is:
+The mid-turn next-request estimate is:
 
 ```text
 estimatedNextInput =
@@ -45,7 +45,13 @@ requestHeadroom =
   - safetyMargin
 ```
 
-The estimator's current mixed-text and JSON bias is documented in `internal/tokens/tokens.go`; JSON-dense tool envelopes need a conservative multiplier rather than assuming all non-CJK text is four characters per token. When a request has no prior authoritative measurement, use the conservative estimator over the rendered messages and system/tool descriptors.
+The estimator's current mixed-text and JSON bias is documented in
+`internal/tokens/tokens.go`; JSON-dense tool envelopes need a conservative
+multiplier rather than assuming all non-CJK text is four characters per token.
+The first request of each turn uses the conservative estimator over the actual
+rendered messages, system prompt, tool descriptors, and current user message.
+This check runs after the per-turn agent is built, so it measures the real
+request rather than the previous turn's stored usage.
 
 Compaction begins at the lower of the existing 80% threshold and a configurable/deterministic preflight threshold derived from `requestHeadroom`. The output quota is reserved because a request can be rejected when input plus the requested completion budget exceeds the model window.
 
@@ -145,7 +151,10 @@ Add backward-compatible metadata to compaction records:
 - summary strategy and result;
 - tool summary/activity counts.
 
-The migration adds nullable/defaulted columns or a compact JSON observation column; old records remain valid. Existing `turn_usage.context_tokens` remains the last provider-observed round size for turn-start checks, but is not used as proof that a newly constructed request fits.
+The migration adds nullable/defaulted columns or a compact JSON observation
+column; old records remain valid. Existing `turn_usage.context_tokens` remains
+the last provider-observed round size for observability, but is not used as
+proof that a newly constructed request fits.
 
 ## Risks / Trade-offs
 

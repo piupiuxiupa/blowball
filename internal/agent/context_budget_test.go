@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/lush/blowball/internal/stream"
+	"github.com/lush/blowball/internal/tool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,10 +97,14 @@ func TestConfucius_InvalidBudgetRejectedBeforeModelCall(t *testing.T) {
 func TestConfucius_OversizedFirstRequestCompactedBeforeModelCall(t *testing.T) {
 	client := newFake(fakeResponse{content: "recovered", finishReason: "stop"})
 	c := newTestConfucius(t, client, nil)
+	c.maxRounds = 1
 	c.turn.MaxContextTokens = 8000
 	c.turn.MaxCompletionTokens = 100
 	compactions := 0
-	c.SetRoundHook(func(context.Context, Usage) []Message {
+	c.SetRoundHook(func(ctx context.Context, _ Usage) []Message {
+		if _, forced := ForcedCompactionFromContext(ctx); !forced {
+			return nil
+		}
 		compactions++
 		return []Message{{Role: "user", Content: "compacted"}}
 	})
@@ -124,4 +130,46 @@ func TestConfucius_UndecompactableFirstRequestRejectedBeforeModelCall(t *testing
 	var tooLarge *RequestTooLargeError
 	require.ErrorAs(t, err, &tooLarge)
 	assert.Equal(t, 0, client.requestCount(), "an over-budget first request must never reach the provider")
+}
+
+func TestConfucius_WrapUpIsBudgetCheckedAndCompacted(t *testing.T) {
+	client := newFake(
+		fakeResponse{
+			content:      "calling",
+			finishReason: "tool_calls",
+			toolCalls: []ToolCall{{
+				ID:       "large-1",
+				Function: ToolCallFunction{Name: "large_tool", Arguments: `{}`},
+			}},
+		},
+		fakeResponse{content: "final", finishReason: "stop"},
+	)
+	c := newTestConfucius(t, client, nil)
+	c.maxRounds = 1
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
+	if err := c.toolRegistry.Register(&tool.ToolSpec{
+		Name:           "large_tool",
+		Description:    "returns a large payload",
+		ParametersJSON: json.RawMessage(`{"type":"object","properties":{}}`),
+		Execute: func(context.Context, json.RawMessage) (any, error) {
+			return strings.Repeat("x", 30000), nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	compactions := 0
+	c.SetRoundHook(func(context.Context, Usage) []Message {
+		compactions++
+		return []Message{{Role: "user", Content: "compacted"}}
+	})
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+
+	content, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: "hi"}}, hub)
+	require.NoError(t, err)
+	assert.Equal(t, "final", content)
+	assert.Equal(t, 1, compactions, "wrap-up must be budget checked before its model call")
+	require.Equal(t, 2, client.requestCount())
+	wrap := client.calls[1]
+	assert.LessOrEqual(t, EstimateRenderedRequest("", wrap.Messages, nil).Tokens, 8000-100-contextSafetyMarginTokens)
 }

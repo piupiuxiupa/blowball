@@ -203,14 +203,28 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		}
 		if requestBudget.Valid() {
 			next := EstimateRenderedRequest(c.cfg.SystemPrompt, round, c.toolsJSON)
-			if next.Tokens > requestBudget.InputTokens {
+			compactionThreshold := requestBudget.InputTokens * 8 / 10
+			if next.Tokens >= compactionThreshold {
 				if c.roundHook != nil && !c.preflightCompactionUsed {
 					c.preflightCompactionUsed = true
-					if recovered := c.roundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), Usage{}); recovered != nil {
+					reason := "mid_turn_preflight"
+					if i == 0 {
+						reason = "turn_start_preflight"
+					}
+					hookCtx := WithForcedCompactionEstimate(
+						WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON),
+						reason,
+						next.Tokens,
+						requestBudget.InputTokens,
+					)
+					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 						round = recovered
+						i-- // compaction is not a model round
 						continue
 					}
 				}
+			}
+			if next.Tokens > requestBudget.InputTokens {
 				budgetErr := &RequestTooLargeError{
 					EstimatedTokens: next.Tokens,
 					InputBudget:     requestBudget.InputTokens,
@@ -257,8 +271,19 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			if errors.Is(err, ErrContextOverflow) && c.roundHook != nil {
 				if !c.overflowRecoveryUsed {
 					c.overflowRecoveryUsed = true
-					if recovered := c.roundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), Usage{}); recovered != nil {
+					reason := "mid_turn_overflow"
+					if i == 0 {
+						reason = "turn_start_overflow"
+					}
+					hookCtx := WithForcedCompactionEstimate(
+						WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON),
+						reason,
+						c.lastRequestEstimate.Tokens,
+						requestBudget.InputTokens,
+					)
+					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 						round = recovered
+						i-- // recovery is not a model round
 						continue
 					}
 				}
@@ -386,6 +411,37 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			Thinking:            c.turn.Thinking,
 			ReasoningEffort:     c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
+		}
+		if requestBudget.Valid() {
+			wrapMessages := append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction})
+			next := EstimateRenderedRequest("", wrapMessages, nil)
+			if next.Tokens > requestBudget.InputTokens {
+				if c.roundHook != nil && !c.preflightCompactionUsed {
+					c.preflightCompactionUsed = true
+					hookCtx := WithForcedCompactionEstimate(
+						WithRequestEnvelope(ctx, c.cfg.SystemPrompt, nil),
+						"wrap_up_request_budget",
+						next.Tokens,
+						requestBudget.InputTokens,
+					)
+					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
+						round = recovered
+						wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
+						wrapMessages = append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction})
+						next = EstimateRenderedRequest("", wrapMessages, nil)
+					}
+				}
+				if next.Tokens > requestBudget.InputTokens {
+					budgetErr := &RequestTooLargeError{
+						EstimatedTokens: next.Tokens,
+						InputBudget:     requestBudget.InputTokens,
+					}
+					hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), budgetErr.Error(), "context_budget_exceeded"))
+					hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
+					return finalContent, total, buildBreakdown(byAgent, tmeta), budgetErr
+				}
+				c.lastRequestEstimate = next
+			}
 		}
 		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue, c.cfg.Retry,
 			func(r []Message) []Message {

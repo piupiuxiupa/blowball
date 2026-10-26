@@ -110,6 +110,16 @@ func (c *cannedSummaryLLM) StreamChat(context.Context, agent.LLMRequest, func(st
 	return agent.LLMResponse{Content: c.content, Usage: agent.Usage{PromptTokens: 50, CompletionTokens: 5}}, nil
 }
 
+type countingSummaryLLM struct {
+	content string
+	calls   int
+}
+
+func (c *countingSummaryLLM) StreamChat(context.Context, agent.LLMRequest, func(string) error, func(string) error) (agent.LLMResponse, error) {
+	c.calls++
+	return agent.LLMResponse{Content: c.content, Usage: agent.Usage{PromptTokens: 50, CompletionTokens: 5}}, nil
+}
+
 // TestStitchCompacted_Unit covers the pure stitching helper: first message
 // verbatim, framed summary as a user message, tail from the post-boundary
 // rows; and the nil degradations.
@@ -183,6 +193,25 @@ func TestStitchCompacted_AppliesPersistedToolSummaries(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestStitchCompacted_UsesBoundedAnchor(t *testing.T) {
+	rows := compactionRows(8)
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, nil)
+	require.NoError(t, err)
+	boundary := rows[lastRow[6]]
+	rec := &model.ContextCompaction{
+		Content:          "CHECKPOINT",
+		BoundaryMsgTime:  boundary.MsgTime,
+		BoundaryMsgIndex: boundary.MsgIndex,
+		BoundaryMsgID:    boundary.ID,
+		AnchorContent:    "bounded anchor with messages/first reference",
+		AnchorTruncated:  true,
+	}
+	stitched := stitchCompacted(rows, nil, agentMsgs, rec)
+	require.NotNil(t, stitched)
+	assert.Equal(t, rec.AnchorContent, stitched[0].Content)
+	assert.NotEqual(t, agentMsgs[0].Content, stitched[0].Content)
 }
 
 func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
@@ -435,37 +464,30 @@ func TestSendMessage_CompactionDisabledIgnoresFlag(t *testing.T) {
 	require.Len(t, env.stub.gotMessages, 9, "disabled compaction sends full history")
 }
 
-// TestSendMessage_TurnStartPreventiveCompaction: the previous turn's recorded
-// context_tokens exceeds the threshold, so the handler compacts BEFORE the
-// orchestrator runs and stitches the same turn's context from the fresh
-// record.
-func TestSendMessage_TurnStartPreventiveCompaction(t *testing.T) {
-	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "FRESH CHECKPOINT"}, 1000)
+func TestBudgetedRoundHook_ExplicitTurnStartForceUsesTurnStartTrigger(t *testing.T) {
+	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "FRESH CHECKPOINT"}, 100000)
 	rows := compactionRows(8)
 	env.mysql.listMessagesRows = rows
-	// The effective budget subtracts the completion quota and safety margin;
-	// drive the test above that lowered threshold (legacy tests use no
-	// completion quota, so the margin alone applies).
-	env.mysql.latestContextTokens = 900
-
-	w := postToSession(t, env, "next question")
-	require.Equal(t, http.StatusOK, w.Code)
-
-	require.Len(t, env.mysql.compactions, 1, "turn-start compaction must write one record")
+	tap := NewTurnEventTap()
+	go func() {
+		select {
+		case req := <-tap.requests():
+			tap.serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
+		case <-tap.done:
+		}
+	}()
+	defer tap.close()
+	hook := env.stream.newBudgetedRoundHook(tap, turnPersistInfo{
+		sessionID: "sess-1", userID: "user-1", traceID: "trace-1",
+	}, &turnFlushState{}, 100000, 80000, "gpt-test")
+	ctx := agent.WithForcedCompactionEstimate(context.Background(), "turn_start_preflight", 81234, 80000)
+	replaced := hook(ctx, agent.Usage{})
+	require.NotNil(t, replaced)
+	require.Len(t, env.mysql.compactions, 1)
 	rec := env.mysql.compactions[0]
 	require.Equal(t, model.CompactionTriggerTurnStart, rec.TriggerKind)
-	require.Equal(t, 900, rec.TriggerTokens)
+	assert.Equal(t, 81234, rec.PreCompactionTokens)
 	require.Equal(t, 1, env.mysql.updateSessionCompactedCalls, "flag is set last")
-
-	got := env.stub.gotMessages
-	require.GreaterOrEqual(t, len(got), 4)
-	require.Contains(t, got[1].Content, "FRESH CHECKPOINT")
-	require.Contains(t, got[len(got)-1].Content, "next question")
-	// The middle was re-summarized from scratch: no prior middle content is
-	// fed to the orchestrator except inside the checkpoint frame.
-	for _, m := range got[1 : len(got)-1] {
-		require.NotEqual(t, "user turn xxxx", m.Content, "shadowed middle must not reach the orchestrator")
-	}
 }
 
 func TestSendMessage_InvalidContextBudgetRejectedBeforeClaims(t *testing.T) {
@@ -477,6 +499,13 @@ func TestSendMessage_InvalidContextBudgetRejectedBeforeClaims(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "INVALID_CONTEXT_BUDGET")
 	assert.Empty(t, env.redis.dualBatches)
 	assert.Empty(t, env.stub.gotMessages)
+}
+
+func TestConfiguredInputBudget_DoesNotDisableSmallModelsByWindowSize(t *testing.T) {
+	budget := configuredInputBudget(8000, 100)
+	assert.Greater(t, budget, 0)
+	assert.Equal(t, 8000-100-4096, budget)
+	assert.Zero(t, configuredInputBudget(8000, 0), "missing quota is the explicit legacy/no-budget shape")
 }
 
 // TestTurnEventTap_SnapshotAndClose covers the tap contract: a served
@@ -542,6 +571,28 @@ func TestBudgetedRoundHook_triggersCompactionBeforeHardLimit(t *testing.T) {
 	// raw tail as a successful compaction.
 	got := hook(context.Background(), agent.Usage{})
 	_ = got
+}
+
+func TestBudgetedRoundHook_ZeroUsageDoesNotForceCompaction(t *testing.T) {
+	llm := &countingSummaryLLM{content: "CHECKPOINT"}
+	env, _ := newCompactionHandlerEnv(t, nil, llm, 100000)
+	env.mysql.listMessagesRows = compactionRows(8)
+	tap := NewTurnEventTap()
+	go func() {
+		select {
+		case req := <-tap.requests():
+			tap.serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
+		case <-tap.done:
+		}
+	}()
+	defer tap.close()
+	hook := env.stream.newBudgetedRoundHook(tap, turnPersistInfo{
+		sessionID: "sess-1", userID: "user-1", traceID: "trace-1",
+	}, &turnFlushState{}, 100000, 80000, "gpt-test")
+
+	replaced := hook(context.Background(), agent.Usage{})
+	assert.Nil(t, replaced)
+	assert.Equal(t, 0, llm.calls, "zero provider usage without an explicit force marker is ordinary data")
 }
 
 // TestBuildTurnUsage_ContextTokens checks meta.context_tokens flows into the

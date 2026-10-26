@@ -32,7 +32,8 @@ func ptrStr(s string) *string { return &s }
 type fakeAttachmentStore struct {
 	rows map[string]model.Attachment
 	// claimHook overrides ClaimAttachment when set (race injection for tests).
-	claimHook func(id, userID, sessionID string) (bool, error)
+	claimHook  func(id, userID, sessionID string) (bool, error)
+	unclaimErr error
 }
 
 func (f *fakeAttachmentStore) InsertAttachment(_ context.Context, a model.Attachment) error {
@@ -85,6 +86,9 @@ func (f *fakeAttachmentStore) ClaimAttachment(_ context.Context, id, userID, ses
 }
 
 func (f *fakeAttachmentStore) UnclaimAttachment(_ context.Context, id, userID, sessionID string) error {
+	if f.unclaimErr != nil {
+		return f.unclaimErr
+	}
 	a, ok := f.rows[id]
 	if !ok || a.UserID != userID || a.SessionID == nil || *a.SessionID != sessionID {
 		return nil

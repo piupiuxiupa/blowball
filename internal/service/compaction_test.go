@@ -10,6 +10,7 @@ import (
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/tokens"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -479,8 +480,8 @@ func TestCompactionService_ChunkedSummaryWhenInputWouldOverflow(t *testing.T) {
 
 func TestCompactionService_RetrimsBoundaryAndMeasuresFinalProjection(t *testing.T) {
 	rows, msgs, lastRow := compactionFixture(20)
-	for i := 15; i < len(msgs); i++ {
-		msgs[i].Content = strings.Repeat("tail-", 80)
+	for i := 15; i < len(msgs)-1; i++ {
+		msgs[i].Content = strings.Repeat("tail-", 5000)
 	}
 	llm := &fakeLLMClient{resp: agent.LLMResponse{
 		Content: strings.Repeat("S", 200),
@@ -488,7 +489,7 @@ func TestCompactionService_RetrimsBoundaryAndMeasuresFinalProjection(t *testing.
 	}}
 	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
 	in := compactionInput(rows, msgs, lastRow)
-	in.InputBudget = 300
+	in.InputBudget = 8000
 	in.TriggerTokensMeasured = true
 
 	rec, ok := svc.Compact(context.Background(), in)
@@ -501,13 +502,90 @@ func TestCompactionService_RetrimsBoundaryAndMeasuresFinalProjection(t *testing.
 	assert.Equal(t, boundary.ID, rec.BoundaryMsgID, "boundary must move with the trimmed tail")
 	assert.Equal(t, boundary.MsgIndex, rec.BoundaryMsgIndex)
 	assert.True(t, boundary.MsgTime.Equal(rec.BoundaryMsgTime))
-	require.NotEmpty(t, llm.lastReq.Messages)
-	assert.Contains(t, llm.lastReq.Messages[len(llm.lastReq.Messages)-1].Content, msgs[tailStart-1].Content,
-		"the final summary input must include every message newly moved out of the tail")
+	require.NotEmpty(t, llm.requests)
+	found := false
+	probe := []rune(msgs[tailStart-1].Content)
+	if len(probe) > 128 {
+		probe = probe[:128]
+	}
+	for _, req := range llm.requests {
+		if strings.Contains(req.Messages[len(req.Messages)-1].Content, string(probe)) {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "summary input must include every message newly moved out of the tail")
 
-	projection := buildCompactedProjection(msgs, tailStart, rec.Content, rec.RetainedResults, in.PendingMessages)
+	anchor := msgs[0]
+	if rec.AnchorTruncated {
+		anchor.Content = rec.AnchorContent
+	}
+	projection := buildCompactedProjection(anchor, msgs, tailStart, rec.Content, rec.RetainedResults)
 	wantTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projection, nil).Tokens
 	assert.Equal(t, wantTokens, rec.PostCompactionTokens,
 		"persisted post-compaction size must be based on the final model projection")
 	assert.LessOrEqual(t, rec.PostCompactionTokens, in.InputBudget)
+}
+
+func TestCompactionService_ReservedPlanningMakesSingleSummaryCall(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(20)
+	for i := 15; i < len(msgs); i++ {
+		msgs[i].Content = strings.Repeat("tail", 400)
+	}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{
+		Content: "checkpoint",
+		Usage:   agent.Usage{PromptTokens: 50, CompletionTokens: 5},
+	}}
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 12000
+	_, ok := svc.Compact(context.Background(), in)
+	require.True(t, ok)
+	assert.Equal(t, 1, llm.calls, "tail planning must not call the summarizer repeatedly")
+}
+
+func TestCompactionService_AnchorIsBounded(t *testing.T) {
+	anchor := agent.Message{Role: "user", Content: strings.Repeat("界", 20000)}
+	full := agent.EstimateRenderedRequest("", []agent.Message{anchor}, nil).Tokens
+	bounded, truncated := boundedCompactionAnchor(anchor, 4000)
+	require.True(t, truncated)
+	assert.Equal(t, strings.Repeat("界", 20000), anchor.Content, "the persisted/source message must remain untouched")
+	boundedTokens := agent.EstimateRenderedRequest("", []agent.Message{bounded}, nil).Tokens
+	assert.Less(t, boundedTokens, full)
+	assert.LessOrEqual(t, boundedTokens, 4000/8+64)
+	assert.Contains(t, bounded.Content, "messages/first")
+}
+
+func TestCompactionService_PersistsBoundedAnchorProjection(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(20)
+	original := strings.Repeat("界", 30000)
+	msgs[0].Content = original
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "checkpoint"}}
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 16000
+	rec, ok := svc.Compact(context.Background(), in)
+	require.True(t, ok)
+	assert.True(t, rec.AnchorTruncated)
+	assert.Contains(t, rec.AnchorContent, "messages/first")
+	assert.Less(t, tokens.Estimate(rec.AnchorContent), tokens.Estimate(original))
+}
+
+func TestSummaryChunksRespectActualInputBudget(t *testing.T) {
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "chunk"}}
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
+	req := agent.LLMRequest{
+		Model: "gpt-test",
+		Messages: []agent.Message{
+			{Role: "system", Content: compactionSystemPrompt},
+			{Role: "user", Content: strings.Repeat("x", 50000)},
+		},
+		MaxCompletionTokens: compactionSummaryMaxTokens,
+	}
+	_, _, err := svc.summarizeChunked(context.Background(), nil, context.Background(), req, 9000)
+	require.NoError(t, err)
+	require.Greater(t, len(llm.requests), 1)
+	for _, call := range llm.requests {
+		assert.LessOrEqual(t, estimateSummaryRequest(call), 9000, "every chunk request must fit the actual summary budget")
+	}
 }

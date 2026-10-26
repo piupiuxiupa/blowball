@@ -36,7 +36,8 @@ var expectedDBTags = map[string][]string{
 	"ContextCompaction": {
 		"id", "session_id", "user_id", "trace_id", "trigger_kind",
 		"trigger_tokens", "content", "boundary_msg_time", "boundary_msg_index",
-		"boundary_msg_id", "shadowed_tokens", "summary_model",
+		"boundary_msg_id", "anchor_content", "anchor_truncated",
+		"shadowed_tokens", "summary_model",
 		"summary_prompt_tokens", "summary_completion_tokens",
 		"retained_results_json", "-",
 		"measurement_basis", "pre_compaction_tokens", "input_budget_tokens",

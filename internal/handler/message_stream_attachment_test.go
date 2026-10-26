@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,6 +43,7 @@ type attachmentSendEnv struct {
 	redis   *handlerFakeRedis
 	dataDir string
 	runs    *run.Manager
+	stream  *MessageStreamHandler
 }
 
 func newAttachmentSendEnv(t *testing.T) *attachmentSendEnv {
@@ -74,7 +76,7 @@ func newAttachmentSendEnv(t *testing.T) *attachmentSendEnv {
 		c.Next()
 	})
 	r.POST("/api/v1/sessions/:session_id/messages", streamH.SendMessage)
-	return &attachmentSendEnv{engine: r, stub: stub, atts: atts, redis: redis, dataDir: dataDir, runs: runMgr}
+	return &attachmentSendEnv{engine: r, stub: stub, atts: atts, redis: redis, dataDir: dataDir, runs: runMgr, stream: streamH}
 }
 
 func (e *attachmentSendEnv) plant(t *testing.T, id, filename, mime string, data []byte, userID string) {
@@ -347,5 +349,49 @@ func TestSendMessage_Attachments_SessionBusyRollsBackClaims(t *testing.T) {
 	assert.Nil(t, env.atts.rows[att1].SessionID, "SESSION_BUSY must roll the attachment claim back")
 	staged := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope, att1+".png")
 	_, err = os.Stat(staged)
+	assert.NoError(t, err)
+}
+
+func TestAttachmentRollback_UnclaimFailureCompensatesFile(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "shot.png", pngBytes)
+	row := env.atts.rows[att1]
+	row.SessionID = ptrStr("sess-1")
+	env.atts.rows[att1] = row
+	stagedDir := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope)
+	sessionDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.Rename(filepath.Join(stagedDir, att1+".png"), filepath.Join(sessionDir, att1+".png")))
+	env.atts.unclaimErr = errors.New("registry rollback failed")
+
+	env.stream.rollbackNewAttachmentClaims(context.Background(), "user-1", "sess-1", []string{att1})
+
+	require.NotNil(t, env.atts.rows[att1].SessionID, "failed unclaim must keep the row bound")
+	_, err := os.Stat(filepath.Join(sessionDir, att1+".png"))
+	assert.NoError(t, err, "compensation must put the file back beside the bound row")
+	_, err = os.Stat(filepath.Join(stagedDir, att1+".png"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestAttachmentRollback_FileMoveFailureKeepsRowBound(t *testing.T) {
+	env := newAttachmentSendEnv(t)
+	env.plantStaged(t, att1, "shot.png", pngBytes)
+	row := env.atts.rows[att1]
+	row.SessionID = ptrStr("sess-1")
+	env.atts.rows[att1] = row
+	stagedDir := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope)
+	sessionDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.Rename(filepath.Join(stagedDir, att1+".png"), filepath.Join(sessionDir, att1+".png")))
+
+	// A non-empty directory at the staging destination forces rename to fail.
+	blocker := filepath.Join(stagedDir, att1+".png")
+	require.NoError(t, os.MkdirAll(blocker, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blocker, "child"), []byte("x"), 0o644))
+
+	env.stream.rollbackNewAttachmentClaims(context.Background(), "user-1", "sess-1", []string{att1})
+
+	require.NotNil(t, env.atts.rows[att1].SessionID, "a failed file move must not unclaim the row")
+	_, err := os.Stat(filepath.Join(sessionDir, att1+".png"))
 	assert.NoError(t, err)
 }
