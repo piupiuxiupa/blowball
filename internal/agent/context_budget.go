@@ -12,6 +12,11 @@ import (
 type requestEnvelopeContextKey struct{}
 type forcedCompactionContextKey struct{}
 type liveMessagesContextKey struct{}
+type liveOverlayStateContextKey struct{}
+
+type liveOverlayState struct {
+	applied bool
+}
 
 // ForcedCompaction carries an explicit force signal to compaction hooks.
 // Provider usage is not used as a control signal: gateways may legitimately
@@ -75,6 +80,31 @@ func LiveMessagesFromContext(ctx context.Context) []Message {
 	}
 	live, _ := ctx.Value(liveMessagesContextKey{}).([]Message)
 	return append([]Message(nil), live...)
+}
+
+func withLiveOverlayState(ctx context.Context, state *liveOverlayState) context.Context {
+	return context.WithValue(ctx, liveOverlayStateContextKey{}, state)
+}
+
+// MarkLiveOverlayApplied records that the hook materialized the final live
+// projection from durable source. The marker is scoped to one synchronous hook
+// invocation; the agent uses it to skip fallback restoration based on the
+// mutable live round. It is a no-op outside that invocation.
+func MarkLiveOverlayApplied(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if state, ok := ctx.Value(liveOverlayStateContextKey{}).(*liveOverlayState); ok && state != nil {
+		state.applied = true
+	}
+}
+
+func liveOverlayApplied(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	state, _ := ctx.Value(liveOverlayStateContextKey{}).(*liveOverlayState)
+	return state != nil && state.applied
 }
 
 const (

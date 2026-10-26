@@ -221,8 +221,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 						next.Tokens,
 						requestBudget.InputTokens,
 					), liveMessages)
-					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
-						round = restoreLiveMessages(round, recovered, liveMessages)
+					if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
+						return c.roundHook(hctx, Usage{})
+					}); recovered != nil {
+						round = recovered
 						i-- // compaction is not a model round
 						continue
 					}
@@ -285,8 +287,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 						c.lastRequestEstimate.Tokens,
 						requestBudget.InputTokens,
 					), liveMessages)
-					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
-						round = restoreLiveMessages(round, recovered, liveMessages)
+					if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
+						return c.roundHook(hctx, Usage{})
+					}); recovered != nil {
+						round = recovered
 						i-- // recovery is not a model round
 						continue
 					}
@@ -374,8 +378,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			}
 			if c.budgetedRoundHook != nil {
 				hookCtx := WithLiveMessages(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), liveMessages)
-				if replaced := c.budgetedRoundHook(hookCtx, resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON); replaced != nil {
-					round = restoreLiveMessages(round, replaced, liveMessages)
+				if replaced := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
+					return c.budgetedRoundHook(hctx, resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON)
+				}); replaced != nil {
+					round = replaced
 					// The preflight hook already compacted this round; do not
 					// invoke the legacy pressure hook again for the same
 					// snapshot.
@@ -392,8 +398,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				lastUsage = resp.Usage
 			}
 			hookCtx := WithLiveMessages(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), liveMessages)
-			if replaced := c.roundHook(hookCtx, lastUsage); replaced != nil {
-				round = restoreLiveMessages(round, replaced, liveMessages)
+			if replaced := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
+				return c.roundHook(hctx, lastUsage)
+			}); replaced != nil {
+				round = replaced
 			}
 		}
 
@@ -430,8 +438,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 						wrapEstimate.Tokens,
 						requestBudget.InputTokens,
 					), liveMessages)
-					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
-						round = restoreLiveMessages(round, recovered, liveMessages)
+					if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
+						return c.roundHook(hctx, Usage{})
+					}); recovered != nil {
+						round = recovered
 						wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
 						wrapMessages = append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction})
 						wrapEstimate = EstimateRenderedRequest("", wrapMessages, nil)
@@ -465,8 +475,10 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				overflowEstimate,
 				requestBudget.InputTokens,
 			), liveMessages)
-			if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
-				round = restoreLiveMessages(round, recovered, liveMessages)
+			if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
+				return c.roundHook(hctx, Usage{})
+			}); recovered != nil {
+				round = recovered
 				wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
 				wrapEstimate = EstimateRenderedRequest(
 					"",

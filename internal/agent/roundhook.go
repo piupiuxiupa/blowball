@@ -22,6 +22,9 @@ import "context"
 //     rewrote the context (first message + framed summary + retained tail);
 //     a nil return keeps the loop's conversation unchanged (threshold not
 //     reached, empty middle, or any best-effort failure).
+//   - If the replacement already materializes the live overlay from durable
+//     source, it calls MarkLiveOverlayApplied on the hook context so the agent
+//     does not run the source-alignment fallback against its mutable round.
 //   - It must be quick to return nil when the threshold is not reached; the
 //     loop calls it after EVERY dispatched tool round.
 type RoundHook func(ctx context.Context, lastUsage Usage) []Message

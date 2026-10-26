@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -192,29 +193,51 @@ func TestApplyLiveOverlay_UpgradesPriorBoundedReplay(t *testing.T) {
 	require.Len(t, got[2].Images, 1)
 }
 
-func TestApplyLiveOverlay_SkipsAlreadyAppliedFinalProjection(t *testing.T) {
-	longText := strings.Repeat("长", 3000)
-	live := Message{
-		Role:    "user",
-		Content: longText,
-		Images: []MessageImage{{
-			AttachmentID: "att-long",
-			Filename:     "long.png",
-			MIMEType:     "image/png",
-			Data:         []byte{1},
-		}},
+func TestCallCompactionHook_UsesAppliedMarkerInsteadOfContentMatching(t *testing.T) {
+	source := []Message{
+		{Role: "user", Content: "continue"},
+		{Role: "assistant", Content: "previous answer"},
+		{Role: "user", Content: "continue"},
+		{Role: "assistant", Content: "calling", ToolCalls: []ToolCall{{
+			ID:       "call-1",
+			Function: ToolCallFunction{Name: "lookup", Arguments: `{}`},
+		}}},
+		{Role: "tool", ToolCallID: "call-1", Name: "lookup", Content: "result"},
 	}
-	source := []Message{live}
-	base := []Message{{Role: "user", Content: "checkpoint summary"}}
+	live := []Message{{Role: "user", Content: "continue"}}
+	projected := []Message{{Role: "user", Content: "continue"}}
 
-	applied := ApplyLiveOverlay(source, base, []Message{live})
-	require.Len(t, applied, 2)
-	require.Len(t, applied[1].Images, 1)
+	got := callCompactionHook(context.Background(), source, live, func(hctx context.Context) []Message {
+		MarkLiveOverlayApplied(hctx)
+		return projected
+	})
 
-	got := ApplyLiveOverlay(source, applied, []Message{live})
+	assert.Equal(t, projected, got,
+		"the hook-scoped marker must make the durable final projection authoritative; an older same-content row cannot suppress or trigger replay")
+}
 
-	assert.Equal(t, applied, got,
-		"final restore must be idempotent even when its source is the live round rather than durable history")
+func TestCallCompactionHook_UnmarkedFallbackKeepsCurrentDuplicate(t *testing.T) {
+	source := []Message{
+		{Role: "user", Content: "continue"},
+		{Role: "assistant", Content: "previous answer"},
+		{Role: "user", Content: "continue"},
+		{Role: "assistant", Content: "calling", ToolCalls: []ToolCall{{
+			ID:       "call-1",
+			Function: ToolCallFunction{Name: "lookup", Arguments: `{}`},
+		}}},
+		{Role: "tool", ToolCallID: "call-1", Name: "lookup", Content: "result"},
+	}
+	live := []Message{{Role: "user", Content: "continue"}}
+	projected := []Message{{Role: "user", Content: "continue"}}
+
+	got := callCompactionHook(context.Background(), source, live, func(context.Context) []Message {
+		return projected
+	})
+
+	require.Len(t, got, 2)
+	assert.Equal(t, "continue", got[0].Content)
+	assert.Equal(t, "continue", got[1].Content,
+		"without the marker, source alignment must preserve the current occurrence despite an older same-content message")
 }
 
 func TestCollectLiveMessages_UsesCurrentUserAfterToolRound(t *testing.T) {

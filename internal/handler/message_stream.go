@@ -1433,15 +1433,15 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 	// ④ Rewrite the in-memory round to first + framed summary + retained
 	// tail — the same shape later turns stitch from the record. Apply the
 	// live overlay here, against the durable reconstruction the compaction
-	// plan measured. The returned messages are already final; the agent's
-	// restore step is idempotent and must not reinterpret its mutable round
-	// as a durable source.
+	// plan measured, and mark this hook result so the agent's fallback restore
+	// does not reinterpret its mutable round as a durable source.
 	stitched := stitchCompacted(rows, calls, agentMsgs, rec)
 	if stitched == nil {
 		log.Warn("mid-turn stitch failed after compaction; keeping original context")
 		return nil
 	}
 	final := agent.ApplyLiveOverlay(agentMsgs, stitched, liveMessages)
+	agent.MarkLiveOverlayApplied(ctx)
 	return applySummaryToRoundLive(final, rec)
 }
 

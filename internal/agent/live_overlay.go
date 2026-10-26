@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"strings"
 )
 
@@ -33,16 +34,6 @@ func ApplyLiveOverlay(source, projected, live []Message) []Message {
 	if len(live) == 0 {
 		return append([]Message(nil), projected...)
 	}
-	pending := make([]Message, 0, len(live))
-	for _, msg := range live {
-		if !projectionContainsLive(projected, msg) {
-			pending = append(pending, msg)
-		}
-	}
-	if len(pending) == 0 {
-		return append([]Message(nil), projected...)
-	}
-	live = pending
 
 	placements := placeLiveMessages(source, live)
 	sourceWithLive := append([]Message(nil), source...)
@@ -102,22 +93,6 @@ func ApplyLiveOverlay(source, projected, live []Message) []Message {
 		}
 	}
 	return out
-}
-
-func projectionContainsLive(projected []Message, live Message) bool {
-	replay := replayableLiveMessage(live)
-	for _, msg := range projected {
-		if msg.Role != live.Role {
-			continue
-		}
-		if msg.Content == live.Content && imagesEqual(msg.Images, live.Images) {
-			return true
-		}
-		if msg.Content == replay.Content && imagesEqual(msg.Images, replay.Images) {
-			return true
-		}
-	}
-	return false
 }
 
 func placeLiveMessages(source, live []Message) []livePlacement {
@@ -291,11 +266,26 @@ func collectLiveMessages(original []Message) []Message {
 	return live
 }
 
-// restoreLiveMessages is the idempotent fallback for a hook that returned a
-// projection without materializing its live overlay. A final projection that
-// already contains the full message or its bounded replay is left unchanged.
+// restoreLiveMessages is the fallback for a hook that returned a projection
+// without explicitly marking its live overlay as applied.
 func restoreLiveMessages(source, projected, live []Message) []Message {
 	return ApplyLiveOverlay(source, projected, live)
+}
+
+// callCompactionHook gives one hook invocation an explicit "durable overlay
+// applied" bit. Handler-backed hooks set it after materializing the final
+// projection; unmarked hooks retain the legacy source-alignment fallback.
+func callCompactionHook(ctx context.Context, source, live []Message, call func(context.Context) []Message) []Message {
+	state := &liveOverlayState{}
+	hookCtx := withLiveOverlayState(ctx, state)
+	projected := call(hookCtx)
+	if projected == nil {
+		return nil
+	}
+	if liveOverlayApplied(hookCtx) {
+		return append([]Message(nil), projected...)
+	}
+	return restoreLiveMessages(source, projected, live)
 }
 
 func replayableLiveMessage(live Message) Message {
