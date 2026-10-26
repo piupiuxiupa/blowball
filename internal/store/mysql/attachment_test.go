@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -231,4 +232,102 @@ func TestInsertStagedAttachment_ConcurrentQuota(t *testing.T) {
 	staged, err := store.CountStagedAttachments(ctx, userID)
 	require.NoError(t, err)
 	assert.Equal(t, 20, staged)
+}
+
+func TestStagedQuotaLock_CoversUnclaimAndRestore(t *testing.T) {
+	store, cleanup := setupAttachmentStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	t.Run("unclaim", func(t *testing.T) {
+		const userID = "u-unclaim"
+		for i := 0; i < 19; i++ {
+			require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
+				ID: fmt.Sprintf("unclaim-%02d", i), UserID: userID,
+				Filename: "x.png", MIME: "image/png", Size: 1,
+			}))
+		}
+		bound := model.Attachment{
+			ID: "unclaim-bound", UserID: userID, SessionID: strptr("s-1"),
+			Filename: "bound.png", MIME: "image/png", Size: 1,
+		}
+		require.NoError(t, store.InsertAttachment(ctx, bound))
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var inserted bool
+		var insertErr error
+		var unclaimErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			inserted, insertErr = store.InsertStagedAttachment(ctx, model.Attachment{
+				ID: "unclaim-new", UserID: userID, Filename: "new.png", MIME: "image/png", Size: 1,
+			}, 20)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			unclaimErr = store.UnclaimAttachment(ctx, bound.ID, userID, "s-1")
+		}()
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, insertErr)
+		if inserted {
+			assert.ErrorIs(t, unclaimErr, ErrStagedAttachmentQuotaExceeded)
+		} else {
+			require.NoError(t, unclaimErr)
+		}
+		staged, err := store.CountStagedAttachments(ctx, userID)
+		require.NoError(t, err)
+		assert.Equal(t, 20, staged)
+	})
+
+	t.Run("restore", func(t *testing.T) {
+		const userID = "u-restore"
+		for i := 0; i < 19; i++ {
+			require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
+				ID: fmt.Sprintf("restore-%02d", i), UserID: userID,
+				Filename: "x.png", MIME: "image/png", Size: 1,
+			}))
+		}
+		restoreRow := model.Attachment{
+			ID: "restore-retry", UserID: userID, Filename: "retry.png", MIME: "image/png", Size: 1,
+			CreateTime: time.Now().Add(-48 * time.Hour),
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var inserted bool
+		var insertErr error
+		var restoreErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			inserted, insertErr = store.InsertStagedAttachment(ctx, model.Attachment{
+				ID: "restore-new", UserID: userID, Filename: "new.png", MIME: "image/png", Size: 1,
+			}, 20)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			restoreErr = store.RestoreStagedAttachment(ctx, restoreRow)
+		}()
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, insertErr)
+		if inserted {
+			assert.True(t, errors.Is(restoreErr, ErrStagedAttachmentQuotaExceeded),
+				"restore error = %v, want quota exceeded", restoreErr)
+		} else {
+			require.NoError(t, restoreErr)
+		}
+		staged, err := store.CountStagedAttachments(ctx, userID)
+		require.NoError(t, err)
+		assert.Equal(t, 20, staged)
+	})
 }

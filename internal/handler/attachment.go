@@ -39,7 +39,7 @@ const maxAttachmentsPerMessage = 4
 // are the two guards against unbounded accumulation. The count is a fast
 // preflight; InsertStagedAttachment performs the authoritative atomic quota
 // reservation before any file is written.
-const maxStagedAttachmentsPerUser = 20
+const maxStagedAttachmentsPerUser = model.MaxStagedAttachmentsPerUser
 
 // attachmentMimeExt is the shared MIME→extension table (model.AttachmentMIMEExt)
 // under its historical local name.

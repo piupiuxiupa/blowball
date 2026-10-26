@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// MaxStagedAttachmentsPerUser bounds unbound upload storage per user.
+const MaxStagedAttachmentsPerUser = 20
+
 // Attachment mirrors the `attachments` registry table (migrations
 // 021_image_attachments.sql and 022_staged_attachments.sql): one row per
 // uploaded chat image. The registry owns upload-time metadata, the ownership

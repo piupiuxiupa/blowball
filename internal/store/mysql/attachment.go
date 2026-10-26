@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -104,6 +105,8 @@ const (
 	stagedAttachmentQuotaLockWait   = 2
 )
 
+var ErrStagedAttachmentQuotaExceeded = errors.New("staged attachment quota exceeded")
+
 // listExpiredStagedAttachmentsSQL feeds the orphan sweeper
 // (add-staged-attachment-upload): staged rows older than the cutoff, oldest
 // first, bounded per sweep round.
@@ -173,8 +176,44 @@ func (s *Store) ClaimAttachment(ctx context.Context, id, userID, sessionID strin
 // rename failed. The session predicate pins the rollback to the caller's own
 // claim; a mismatch is a no-op (the row moved on and must not be clobbered).
 func (s *Store) UnclaimAttachment(ctx context.Context, id, userID, sessionID string) error {
-	logQuery(ctx, "attachment.unclaim", unclaimAttachmentSQL, id, userID, sessionID)
-	if _, err := s.db.ExecContext(ctx, unclaimAttachmentSQL, id, userID, sessionID); err != nil {
+	err := s.withStagedAttachmentQuotaLock(ctx, userID, func(conn *sqlx.Conn) error {
+		tx, err := conn.BeginTxx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin: %w", err)
+		}
+		defer tx.Rollback()
+
+		var row struct {
+			UserID    string         `db:"user_id"`
+			SessionID sql.NullString `db:"session_id"`
+		}
+		if err := tx.GetContext(ctx, &row,
+			"SELECT user_id, session_id FROM attachments WHERE id = ? FOR UPDATE", id); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("read attachment: %w", err)
+		}
+		if row.UserID != userID || !row.SessionID.Valid || row.SessionID.String != sessionID {
+			return nil
+		}
+		var staged int
+		if err := tx.GetContext(ctx, &staged, countStagedAttachmentsSQL, userID); err != nil {
+			return fmt.Errorf("count staged: %w", err)
+		}
+		if staged >= model.MaxStagedAttachmentsPerUser {
+			return ErrStagedAttachmentQuotaExceeded
+		}
+		logQuery(ctx, "attachment.unclaim", unclaimAttachmentSQL, id, userID, sessionID)
+		if _, err := tx.ExecContext(ctx, unclaimAttachmentSQL, id, userID, sessionID); err != nil {
+			return fmt.Errorf("unclaim: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("mysql.UnclaimAttachment: %w", err)
 	}
 	return nil
@@ -195,20 +234,64 @@ func (s *Store) CountStagedAttachments(ctx context.Context, userID string) (int,
 // user. A MySQL named lock serializes count+insert across service instances;
 // the caller writes the file only after the slot is reserved.
 func (s *Store) InsertStagedAttachment(ctx context.Context, a model.Attachment, limit int) (bool, error) {
+	reserved := false
+	err := s.withStagedAttachmentQuotaLock(ctx, a.UserID, func(conn *sqlx.Conn) error {
+		tx, err := conn.BeginTxx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin: %w", err)
+		}
+		defer tx.Rollback()
+
+		if limit > 0 {
+			var staged int
+			if err := tx.GetContext(ctx, &staged, countStagedAttachmentsSQL, a.UserID); err != nil {
+				return fmt.Errorf("count: %w", err)
+			}
+			if staged >= limit {
+				return nil
+			}
+		}
+		logQuery(ctx, "attachment.insert_staged", insertAttachmentSQL, a.ID)
+		params := map[string]any{
+			"id":         a.ID,
+			"user_id":    a.UserID,
+			"session_id": a.SessionID,
+			"filename":   a.Filename,
+			"mime":       a.MIME,
+			"size":       a.Size,
+		}
+		if _, err := tx.NamedExecContext(ctx, insertAttachmentSQL, params); err != nil {
+			return fmt.Errorf("insert: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		reserved = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("mysql.InsertStagedAttachment: %w", err)
+	}
+	return reserved, nil
+}
+
+func (s *Store) withStagedAttachmentQuotaLock(
+	ctx context.Context, userID string, fn func(*sqlx.Conn) error,
+) error {
 	conn, err := s.db.Connx(ctx)
 	if err != nil {
-		return false, fmt.Errorf("mysql.InsertStagedAttachment connection: %w", err)
+		return fmt.Errorf("connection: %w", err)
 	}
 	defer conn.Close()
 
-	sum := sha256.Sum256([]byte(a.UserID))
+	sum := sha256.Sum256([]byte(userID))
 	lockName := stagedAttachmentQuotaLockPrefix + hex.EncodeToString(sum[:16])
 	var acquired sql.NullInt64
 	if err := conn.GetContext(ctx, &acquired, "SELECT GET_LOCK(?, ?)", lockName, stagedAttachmentQuotaLockWait); err != nil {
-		return false, fmt.Errorf("mysql.InsertStagedAttachment acquire lock: %w", err)
+		return fmt.Errorf("acquire lock: %w", err)
 	}
 	if !acquired.Valid || acquired.Int64 != 1 {
-		return false, fmt.Errorf("mysql.InsertStagedAttachment lock timeout for user %s", a.UserID)
+		return fmt.Errorf("lock timeout")
 	}
 	released := false
 	release := func() {
@@ -221,39 +304,7 @@ func (s *Store) InsertStagedAttachment(ctx context.Context, a model.Attachment, 
 		_, _ = conn.ExecContext(releaseCtx, "SELECT RELEASE_LOCK(?)", lockName)
 	}
 	defer release()
-
-	tx, err := conn.BeginTxx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("mysql.InsertStagedAttachment begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	if limit > 0 {
-		var staged int
-		if err := tx.GetContext(ctx, &staged, countStagedAttachmentsSQL, a.UserID); err != nil {
-			return false, fmt.Errorf("mysql.InsertStagedAttachment count: %w", err)
-		}
-		if staged >= limit {
-			return false, nil
-		}
-	}
-	logQuery(ctx, "attachment.insert_staged", insertAttachmentSQL, a.ID)
-	params := map[string]any{
-		"id":         a.ID,
-		"user_id":    a.UserID,
-		"session_id": a.SessionID,
-		"filename":   a.Filename,
-		"mime":       a.MIME,
-		"size":       a.Size,
-	}
-	if _, err := tx.NamedExecContext(ctx, insertAttachmentSQL, params); err != nil {
-		return false, fmt.Errorf("mysql.InsertStagedAttachment insert: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("mysql.InsertStagedAttachment commit: %w", err)
-	}
-	release()
-	return true, nil
+	return fn(conn)
 }
 
 // ListExpiredStagedAttachments returns up to limit staged rows created before
@@ -288,17 +339,47 @@ func (s *Store) DeleteStagedAttachment(ctx context.Context, id string) (bool, er
 // won the delete race but could not remove the file. The duplicate-key branch
 // is a no-op so a concurrently recreated/claimed row is never clobbered.
 func (s *Store) RestoreStagedAttachment(ctx context.Context, a model.Attachment) error {
-	logQuery(ctx, "attachment.restore_staged", restoreStagedAttachmentSQL, a.ID)
-	params := map[string]any{
-		"id":          a.ID,
-		"user_id":     a.UserID,
-		"filename":    a.Filename,
-		"mime":        a.MIME,
-		"size":        a.Size,
-		"message_id":  a.MessageID,
-		"create_time": a.CreateTime,
-	}
-	if _, err := sqlx.NamedExecContext(ctx, s.db, restoreStagedAttachmentSQL, params); err != nil {
+	err := s.withStagedAttachmentQuotaLock(ctx, a.UserID, func(conn *sqlx.Conn) error {
+		tx, err := conn.BeginTxx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin: %w", err)
+		}
+		defer tx.Rollback()
+
+		var exists int
+		if err := tx.GetContext(ctx, &exists,
+			"SELECT COUNT(*) FROM attachments WHERE id = ?", a.ID); err != nil {
+			return fmt.Errorf("check existing: %w", err)
+		}
+		if exists > 0 {
+			return nil
+		}
+		var staged int
+		if err := tx.GetContext(ctx, &staged, countStagedAttachmentsSQL, a.UserID); err != nil {
+			return fmt.Errorf("count staged: %w", err)
+		}
+		if staged >= model.MaxStagedAttachmentsPerUser {
+			return ErrStagedAttachmentQuotaExceeded
+		}
+		logQuery(ctx, "attachment.restore_staged", restoreStagedAttachmentSQL, a.ID)
+		params := map[string]any{
+			"id":          a.ID,
+			"user_id":     a.UserID,
+			"filename":    a.Filename,
+			"mime":        a.MIME,
+			"size":        a.Size,
+			"message_id":  a.MessageID,
+			"create_time": a.CreateTime,
+		}
+		if _, err := tx.NamedExecContext(ctx, restoreStagedAttachmentSQL, params); err != nil {
+			return fmt.Errorf("insert: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("mysql.RestoreStagedAttachment: %w", err)
 	}
 	return nil
