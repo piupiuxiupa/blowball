@@ -50,6 +50,10 @@ The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope c
 - **WHEN** tool messages follow the current user message or an earlier compaction has already rewritten it as a bounded replay
 - **THEN** every compaction attempt reuses the full live input captured at turn start, without recollecting from or locating it in the mutable round
 
+#### Scenario: Final restore does not reclassify against the live round
+- **WHEN** the compaction hook returns the completed durable projection with live data already materialized
+- **THEN** agent-side restore leaves that projection unchanged, including full unmatched messages and bounded checkpoint replays
+
 ### Requirement: Compaction is triggered before a request exceeds the budget
 The system SHALL begin compaction when either the existing percentage threshold or the preflight request-budget threshold is reached, and the compressible middle is non-empty. The effective trigger SHALL be the lower of the applicable safe thresholds. The system SHALL reserve space for the completion quota and the next appended message set.
 

@@ -117,3 +117,9 @@
 - [x] 15.1 Keep unmatched live messages at full length instead of truncating content absent from the checkpoint.
 - [x] 15.2 Capture the current question and live fields once per Run and reuse them across every compaction attempt.
 - [x] 15.3 Recognize a prior bounded replay as the same live source when a later retained candidate upgrades it back to full content.
+
+## 16. Durable Final Projection
+
+- [x] 16.1 Apply the live overlay in the handler against durable reconstructed messages before returning the replacement conversation.
+- [x] 16.2 Make agent-side live restoration idempotent for already materialized full messages and bounded replays.
+- [x] 16.3 Verify the returned final projection matches the persisted post-compaction token measurement and does not duplicate live input.

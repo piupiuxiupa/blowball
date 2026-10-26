@@ -192,6 +192,31 @@ func TestApplyLiveOverlay_UpgradesPriorBoundedReplay(t *testing.T) {
 	require.Len(t, got[2].Images, 1)
 }
 
+func TestApplyLiveOverlay_SkipsAlreadyAppliedFinalProjection(t *testing.T) {
+	longText := strings.Repeat("长", 3000)
+	live := Message{
+		Role:    "user",
+		Content: longText,
+		Images: []MessageImage{{
+			AttachmentID: "att-long",
+			Filename:     "long.png",
+			MIMEType:     "image/png",
+			Data:         []byte{1},
+		}},
+	}
+	source := []Message{live}
+	base := []Message{{Role: "user", Content: "checkpoint summary"}}
+
+	applied := ApplyLiveOverlay(source, base, []Message{live})
+	require.Len(t, applied, 2)
+	require.Len(t, applied[1].Images, 1)
+
+	got := ApplyLiveOverlay(source, applied, []Message{live})
+
+	assert.Equal(t, applied, got,
+		"final restore must be idempotent even when its source is the live round rather than durable history")
+}
+
 func TestCollectLiveMessages_UsesCurrentUserAfterToolRound(t *testing.T) {
 	original := []Message{
 		{Role: "user", Content: "anchor"},

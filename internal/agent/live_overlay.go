@@ -17,8 +17,11 @@ type livePlacement struct {
 
 // ApplyLiveOverlay restores current-turn messages whose live-only fields
 // (principally inline image bytes) cannot be reconstructed from persistence.
-// source is the durable/recovered message sequence and projected is the
-// model-facing candidate built from it (anchor + checkpoint + retained tail).
+// source is the sequence used for fallback identity alignment and projected is
+// the model-facing candidate built from it (anchor + checkpoint + retained
+// tail). Production compaction passes the durable reconstruction. Agent-side
+// restore may have only the mutable round, so messages already present in
+// projected—full or bounded—are authoritative and take precedence.
 //
 // Live messages are matched to the LATEST unfilled source slot that has the
 // same persisted identity. A retained message is replaced in place with the
@@ -30,6 +33,16 @@ func ApplyLiveOverlay(source, projected, live []Message) []Message {
 	if len(live) == 0 {
 		return append([]Message(nil), projected...)
 	}
+	pending := make([]Message, 0, len(live))
+	for _, msg := range live {
+		if !projectionContainsLive(projected, msg) {
+			pending = append(pending, msg)
+		}
+	}
+	if len(pending) == 0 {
+		return append([]Message(nil), projected...)
+	}
+	live = pending
 
 	placements := placeLiveMessages(source, live)
 	sourceWithLive := append([]Message(nil), source...)
@@ -89,6 +102,22 @@ func ApplyLiveOverlay(source, projected, live []Message) []Message {
 		}
 	}
 	return out
+}
+
+func projectionContainsLive(projected []Message, live Message) bool {
+	replay := replayableLiveMessage(live)
+	for _, msg := range projected {
+		if msg.Role != live.Role {
+			continue
+		}
+		if msg.Content == live.Content && imagesEqual(msg.Images, live.Images) {
+			return true
+		}
+		if msg.Content == replay.Content && imagesEqual(msg.Images, replay.Images) {
+			return true
+		}
+	}
+	return false
 }
 
 func placeLiveMessages(source, live []Message) []livePlacement {
@@ -262,8 +291,11 @@ func collectLiveMessages(original []Message) []Message {
 	return live
 }
 
-func restoreLiveMessages(original, compacted, live []Message) []Message {
-	return ApplyLiveOverlay(original, compacted, live)
+// restoreLiveMessages is the idempotent fallback for a hook that returned a
+// projection without materializing its live overlay. A final projection that
+// already contains the full message or its bounded replay is left unchanged.
+func restoreLiveMessages(source, projected, live []Message) []Message {
+	return ApplyLiveOverlay(source, projected, live)
 }
 
 func replayableLiveMessage(live Message) Message {

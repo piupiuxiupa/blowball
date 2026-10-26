@@ -495,6 +495,71 @@ func TestBudgetedRoundHook_ExplicitTurnStartForceUsesTurnStartTrigger(t *testing
 	require.Equal(t, 1, env.mysql.updateSessionCompactedCalls, "flag is set last")
 }
 
+func TestBudgetedRoundHook_ReturnsDurableLiveProjection(t *testing.T) {
+	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "FRESH CHECKPOINT"}, 100000)
+	rows := compactionRows(8)
+	liveText := strings.Repeat("current problem ", 300)
+	last := rows[len(rows)-1]
+	rows = append(rows, model.Message{
+		ID:        last.ID + 1,
+		MsgTime:   last.MsgTime.Add(time.Minute),
+		MsgIndex:  0,
+		SessionID: "sess-1",
+		Agent:     model.AgentUser,
+		Role:      model.RoleUser,
+		EventType: model.EventTypeMessage,
+		Content:   liveText,
+		Attachments: []model.MessageAttachmentRef{{
+			ID: "att-current", Filename: "current.png", MIME: "image/png",
+		}},
+		TraceID: "trace-live",
+	})
+	env.mysql.listMessagesRows = rows
+	tap := NewTurnEventTap()
+	go func() {
+		select {
+		case req := <-tap.requests():
+			tap.serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
+		case <-tap.done:
+		}
+	}()
+	defer tap.close()
+	hook := env.stream.newBudgetedRoundHook(tap, turnPersistInfo{
+		sessionID: "sess-1", userID: "user-1", traceID: "trace-live",
+	}, &turnFlushState{}, 100000, 80000, "gpt-test")
+	live := agent.Message{
+		Role:    "user",
+		Content: liveText,
+		Images: []agent.MessageImage{{
+			AttachmentID: "att-current",
+			Filename:     "current.png",
+			MIMEType:     "image/png",
+			Data:         []byte{1},
+		}},
+	}
+	ctx := agent.WithLiveMessages(agent.WithRequestEnvelope(
+		agent.WithForcedCompactionEstimate(context.Background(), "turn_start_preflight", 90000, 80000),
+		"", nil,
+	), []agent.Message{live})
+
+	replaced := hook(ctx, agent.Usage{})
+
+	require.NotNil(t, replaced)
+	require.Len(t, env.mysql.compactions, 1)
+	assert.Equal(t, env.mysql.compactions[0].PostCompactionTokens,
+		agent.EstimateRenderedRequest("", replaced, nil).Tokens,
+		"the handler must return the durable projection it measured, with live data already applied")
+	found := false
+	for _, msg := range replaced {
+		if len(msg.Images) > 0 && msg.Images[0].AttachmentID == "att-current" {
+			found = true
+			assert.Equal(t, liveText, msg.Content)
+			assert.NotContains(t, msg.Content, "truncated for replay")
+		}
+	}
+	assert.True(t, found, "the returned final projection must contain the live inline image")
+}
+
 func TestSendMessage_InvalidContextBudgetRejectedBeforeClaims(t *testing.T) {
 	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "unused"}, 100000)
 	env.stream.selection.Catalog[0].MaxCompletionTokens = 100000

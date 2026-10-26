@@ -82,7 +82,11 @@ starts because later tool messages and prior compaction rewrites can remove the
 current user from the final position or replace it with a bounded replay. A
 live message with no durable counterpart is never truncated: it is absent from
 the checkpoint as well, so keeping it whole (or refusing the candidate) is the
-only non-lossy behavior.
+only non-lossy behavior. The handler materializes the overlay against the same
+durable reconstruction the compaction candidate measured before returning the
+final conversation. Agent-side restore treats an already-present full projection
+or bounded replay as authoritative and is idempotent; the mutable live round is
+never allowed to masquerade as durable source for that final result.
 
 **Alternative rejected:** retain the last five messages then truncate individual tool results in place without re-planning. A few huge results can still exceed the window, while a small conversational tail needlessly discards useful continuity.
 
