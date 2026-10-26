@@ -292,3 +292,57 @@ func TestConfucius_WrapUpProviderOverflowRecoversOnce(t *testing.T) {
 	assert.Equal(t, 1, recoveries)
 	assert.Equal(t, 3, client.requestCount(), "one overflow must lead to one rebuilt wrap-up request")
 }
+
+func TestConfucius_WrapUpSecondOverflowReportsRebuiltEstimate(t *testing.T) {
+	client := newFake(
+		fakeResponse{
+			content:      "calling",
+			finishReason: "tool_calls",
+			toolCalls: []ToolCall{{
+				ID:       "small-1",
+				Function: ToolCallFunction{Name: "small_tool", Arguments: `{}`},
+			}},
+			usage: Usage{PromptTokens: 7000, CompletionTokens: 100},
+		},
+		fakeResponse{err: ErrContextOverflow},
+		fakeResponse{err: ErrContextOverflow},
+	)
+	c := newTestConfucius(t, client, nil)
+	c.maxRounds = 1
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
+	c.SetRoundRequestEstimator(func(_ context.Context, lastUsage Usage, appended []Message) ContextRequestEstimate {
+		return EstimateRequestFromUsage(lastUsage.PromptTokens, lastUsage.CompletionTokens, appended)
+	})
+	if err := c.toolRegistry.Register(&tool.ToolSpec{
+		Name:           "small_tool",
+		Description:    "returns a small payload",
+		ParametersJSON: json.RawMessage(`{"type":"object","properties":{}}`),
+		Execute: func(context.Context, json.RawMessage) (any, error) {
+			return "ok", nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recoveries := 0
+	c.SetRoundHook(func(ctx context.Context, _ Usage) []Message {
+		force, forced := ForcedCompactionFromContext(ctx)
+		if forced && force.Reason == "wrap_up_overflow" {
+			recoveries++
+			return []Message{{Role: "user", Content: "short checkpoint"}}
+		}
+		return nil
+	})
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+
+	_, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: "hi"}}, hub)
+	require.Error(t, err)
+	var uncompactable *UncompactableContextError
+	require.ErrorAs(t, err, &uncompactable)
+	assert.Equal(t, 1, recoveries)
+	require.Equal(t, 3, client.requestCount())
+	want := EstimateRenderedRequest("", client.calls[2].Messages, nil).Tokens
+	assert.Equal(t, want, uncompactable.EstimatedTokens,
+		"the second overflow must report the rebuilt wrap-up request, not the pre-compaction estimate")
+	assert.Less(t, uncompactable.EstimatedTokens, 7000)
+}

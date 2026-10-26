@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -415,35 +414,35 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			ReasoningEffort:     c.turn.ReasoningEffort,
 			// Tools intentionally omitted: force a prose answer, no dispatch.
 		}
+		wrapMessages := append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction})
+		wrapEstimate := EstimateRenderedRequest("", wrapMessages, nil)
 		if requestBudget.Valid() {
-			wrapMessages := append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction})
-			next := EstimateRenderedRequest("", wrapMessages, nil)
-			if next.Tokens > requestBudget.InputTokens {
+			if wrapEstimate.Tokens > requestBudget.InputTokens {
 				if c.roundHook != nil && !c.preflightCompactionUsed {
 					c.preflightCompactionUsed = true
 					hookCtx := WithLiveMessages(WithForcedCompactionEstimate(
 						WithRequestEnvelope(ctx, c.cfg.SystemPrompt, nil),
 						"wrap_up_request_budget",
-						next.Tokens,
+						wrapEstimate.Tokens,
 						requestBudget.InputTokens,
 					), collectLiveMessages(round))
 					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 						round = restoreLiveMessages(round, recovered)
 						wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
 						wrapMessages = append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction})
-						next = EstimateRenderedRequest("", wrapMessages, nil)
+						wrapEstimate = EstimateRenderedRequest("", wrapMessages, nil)
 					}
 				}
-				if next.Tokens > requestBudget.InputTokens {
+				if wrapEstimate.Tokens > requestBudget.InputTokens {
 					budgetErr := &RequestTooLargeError{
-						EstimatedTokens: next.Tokens,
+						EstimatedTokens: wrapEstimate.Tokens,
 						InputBudget:     requestBudget.InputTokens,
 					}
 					hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), budgetErr.Error(), "context_budget_exceeded"))
 					hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
 					return finalContent, total, buildBreakdown(byAgent, tmeta), budgetErr
 				}
-				c.lastRequestEstimate = next
+				c.lastRequestEstimate = wrapEstimate
 			}
 		}
 		wrapContent, wrapUsage, wrapErr := runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue, c.cfg.Retry,
@@ -451,7 +450,8 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
 			})
 		if errors.Is(wrapErr, ErrContextOverflow) && c.roundHook != nil {
-			overflowEstimate := EstimateRenderedRequest("", append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction}), nil).Tokens
+			wrapEstimate = EstimateRenderedRequest("", append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction}), nil)
+			overflowEstimate := wrapEstimate.Tokens
 			if overflowEstimate < c.lastRequestEstimate.Tokens {
 				overflowEstimate = c.lastRequestEstimate.Tokens
 			}
@@ -464,6 +464,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 				round = restoreLiveMessages(round, recovered)
 				wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
+				wrapEstimate = EstimateRenderedRequest(
+					"",
+					append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction}),
+					nil,
+				)
+				c.lastRequestEstimate = wrapEstimate
 				wrapContent, wrapUsage, wrapErr = runWrapUpRound(ctx, c.client, c.Name(), hub, wrapReq, &round, c.turn.LengthContinue, c.cfg.Retry,
 					func(r []Message) []Message {
 						return append(withSystem(c.cfg.SystemPrompt, r), Message{Role: "user", Content: wrapUpInstruction})
@@ -478,7 +484,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), "wrap-up context remains uncompactable", "uncompactable_context"))
 				hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
 				return finalContent, total, buildBreakdown(byAgent, tmeta), &UncompactableContextError{
-					EstimatedTokens: c.lastRequestEstimate.Tokens,
+					EstimatedTokens: wrapEstimate.Tokens,
 					InputBudget:     requestBudget.InputTokens,
 					Reason:          "provider context overflow during wrap-up",
 				}
@@ -770,142 +776,6 @@ func withSystem(prompt string, msgs []Message) []Message {
 		return msgs
 	}
 	return append([]Message{{Role: "system", Content: prompt}}, msgs...)
-}
-
-// restoreLiveMessages overlays current-turn messages whose live-only fields
-// (principally inline image bytes) cannot be reconstructed from persistence.
-// Compaction may move the corresponding user row into the middle, in which case
-// the live message is inserted before the first surviving message that followed
-// it in the original conversation.
-func restoreLiveMessages(original, compacted []Message) []Message {
-	out := append([]Message(nil), compacted...)
-	for originalIndex, live := range original {
-		isFinalUser := originalIndex == len(original)-1 && live.Role == "user"
-		if len(live.Images) == 0 && !isFinalUser {
-			continue
-		}
-		if exactIndex(out, live) >= 0 {
-			continue
-		}
-		if replacement := liveUserPlaceholderIndex(out, live, isFinalUser); replacement >= 0 {
-			out[replacement] = live
-			continue
-		}
-		insertAt := len(out)
-		for next := originalIndex + 1; next < len(original); next++ {
-			if pos := exactIndex(out, original[next]); pos >= 0 {
-				insertAt = pos
-				break
-			}
-		}
-		out = append(out, Message{})
-		copy(out[insertAt+1:], out[insertAt:])
-		out[insertAt] = replayableLiveMessage(live)
-	}
-	return out
-}
-
-func collectLiveMessages(original []Message) []Message {
-	live := make([]Message, 0)
-	for i, msg := range original {
-		isFinalUser := i == len(original)-1 && msg.Role == "user"
-		if len(msg.Images) == 0 && !isFinalUser {
-			continue
-		}
-		live = append(live, replayableLiveMessage(msg))
-	}
-	return live
-}
-
-func replayableLiveMessage(live Message) Message {
-	const replayContentRunes = 2000
-	runes := []rune(live.Content)
-	if len(runes) <= replayContentRunes {
-		return live
-	}
-	head := replayContentRunes * 3 / 4
-	tail := replayContentRunes - head
-	live.Content = string(runes[:head]) +
-		"\n... [live message text truncated; full text is preserved in the compacted checkpoint] ...\n" +
-		string(runes[len(runes)-tail:])
-	return live
-}
-
-func liveUserPlaceholderIndex(msgs []Message, live Message, finalUser bool) int {
-	if live.Role != "user" {
-		return -1
-	}
-	if finalUser {
-		for i := len(msgs) - 1; i >= 0; i-- {
-			if msgs[i].Role == "user" {
-				if msgs[i].Content == live.Content || strings.HasPrefix(msgs[i].Content, live.Content) {
-					return i
-				}
-				return -1
-			}
-		}
-		return -1
-	}
-	filenames := imageFilenames(live.Images)
-	if len(filenames) == 0 {
-		return -1
-	}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "user" &&
-			(msgs[i].Content == live.Content || strings.HasPrefix(msgs[i].Content, live.Content)) &&
-			containsAllFilenames(msgs[i].Content, filenames) {
-			return i
-		}
-	}
-	return -1
-}
-
-func imageFilenames(images []MessageImage) []string {
-	out := make([]string, 0, len(images))
-	for _, img := range images {
-		if img.Filename != "" {
-			out = append(out, img.Filename)
-		}
-	}
-	return out
-}
-
-func containsAllFilenames(content string, filenames []string) bool {
-	for _, filename := range filenames {
-		if !strings.Contains(content, filename) {
-			return false
-		}
-	}
-	return true
-}
-
-func exactIndex(msgs []Message, target Message) int {
-	for i := range msgs {
-		if msgs[i].Role == target.Role &&
-			msgs[i].Content == target.Content &&
-			msgs[i].ReasoningContent == target.ReasoningContent &&
-			msgs[i].ToolCallID == target.ToolCallID &&
-			fmt.Sprint(msgs[i].ToolCalls) == fmt.Sprint(target.ToolCalls) &&
-			imagesEqual(msgs[i].Images, target.Images) {
-			return i
-		}
-	}
-	return -1
-}
-
-func imagesEqual(a, b []MessageImage) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].AttachmentID != b[i].AttachmentID ||
-			a[i].Filename != b[i].Filename ||
-			a[i].MIMEType != b[i].MIMEType ||
-			!bytes.Equal(a[i].Data, b[i].Data) {
-			return false
-		}
-	}
-	return true
 }
 
 // buildSubAgentUserMessage assembles the single user message handed to a

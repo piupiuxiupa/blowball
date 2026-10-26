@@ -36,11 +36,11 @@ The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope c
 
 #### Scenario: Live overlay is part of candidate fit
 - **WHEN** a compaction candidate will later be overlaid with live inline data
-- **THEN** those overlay tokens are included in tail selection and the post-compaction budget measurement before publication
+- **THEN** tail selection materializes the same replacement/summarized-replay projection the next request will use and measures its actual tokens before publication
 
 #### Scenario: Live message matching is unambiguous
 - **WHEN** a live image message corresponds to a reconstructed placeholder
-- **THEN** matching uses its unique attachment filenames, and a final-user replay only replaces the last user slot rather than an earlier same-content message
+- **THEN** matching uses its durable source position and persisted placeholder identity, a retained occurrence is replaced in place, and a summarized occurrence never overwrites an older same-content message
 
 ### Requirement: Compaction is triggered before a request exceeds the budget
 The system SHALL begin compaction when either the existing percentage threshold or the preflight request-budget threshold is reached, and the compressible middle is non-empty. The effective trigger SHALL be the lower of the applicable safe thresholds. The system SHALL reserve space for the completion quota and the next appended message set.
@@ -73,6 +73,10 @@ The system SHALL NOT retry the unchanged oversized request through the ordinary 
 #### Scenario: Wrap-up overflow uses the same bounded recovery
 - **WHEN** the tool-disabled round-cap wrap-up request is rejected for context overflow
 - **THEN** the system attempts one forced compaction and rebuilds the wrap-up request before reporting exhaustion
+
+#### Scenario: Rebuilt wrap-up also overflows
+- **WHEN** the rebuilt wrap-up request is rejected for context overflow
+- **THEN** the diagnostic reports the latest rebuilt-request estimate together with the effective input budget
 
 ### Requirement: Request-budget outcomes are observable
 The system SHALL record or emit structured diagnostics for the selected model window, completion reservation, safety margin, estimated request size, measurement basis, compaction trigger, pre/post compaction size, and the reason for any uncompactable result. Diagnostics SHALL NOT expose full tool-result payloads or secrets.

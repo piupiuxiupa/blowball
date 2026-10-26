@@ -71,11 +71,13 @@ It never cuts an assistant tool-call message away from all of its tool results, 
 Current-turn live-only fields that persistence reconstructs as placeholders
 (notably inline images) are overlaid onto the compacted projection before the
 next model call. If their user message moved into the checkpoint, replay text is
-bounded because the checkpoint already carries the textual intent. Overlay token
-cost is reserved during candidate tail selection so the post-publication
-overlay cannot silently cross the request budget. Image-bearing messages match
-unique reconstructed filename placeholders; a final text user message only
-replaces the final user slot.
+bounded because the checkpoint already carries the textual intent. Tail
+selection materializes the same overlay the agent will send and measures that
+final projection, so retained replacements and summarized replays are neither
+double-counted nor hidden behind an additive estimate. Live messages are
+aligned to durable source positions: the retained occurrence is replaced in
+place, while a summarized occurrence is inserted without mutating an older
+same-content prompt or upload.
 
 **Alternative rejected:** retain the last five messages then truncate individual tool results in place without re-planning. A few huge results can still exceed the window, while a small conversational tail needlessly discards useful continuity.
 

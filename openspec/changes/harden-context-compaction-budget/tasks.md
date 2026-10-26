@@ -105,3 +105,9 @@
 - [x] 13.1 Include bounded live-message overlay tokens in compaction planning before a record is published.
 - [x] 13.2 Match image-bearing live messages by unique attachment placeholders and final-user position without mutating persisted replay identity.
 - [x] 13.3 Preserve the effective input budget in second-overflow uncompactable diagnostics.
+
+## 14. Exact Live Projection
+
+- [x] 14.1 Measure each candidate with the same live replacement/summarized-replay overlay the agent will send.
+- [x] 14.2 Align live messages by durable source position so repeated prompts or uploads cannot replace an older message.
+- [x] 14.3 Report the rebuilt wrap-up estimate when the second provider overflow occurs.

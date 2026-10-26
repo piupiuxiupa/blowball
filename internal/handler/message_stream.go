@@ -1409,10 +1409,7 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 	if env, ok := agent.RequestEnvelopeFromContext(ctx); ok {
 		requestOverhead = agent.EstimateRenderedRequest(env.System, nil, env.Tools).Tokens
 	}
-	additionalInputTokens := 0
-	if live := agent.LiveMessagesFromContext(ctx); len(live) > 0 {
-		additionalInputTokens = agent.EstimateRenderedRequest("", live, nil).Tokens
-	}
+	liveMessages := agent.LiveMessagesFromContext(ctx)
 
 	// ③ Compact the middle into a checkpoint.
 	rec, ok := h.compSvc.Compact(ctx, service.CompactionInput{
@@ -1427,7 +1424,7 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 		InputBudget:           inputBudget,
 		TriggerTokensMeasured: measured,
 		RequestOverheadTokens: requestOverhead,
-		AdditionalInputTokens: additionalInputTokens,
+		LiveMessages:          liveMessages,
 	})
 	if !ok {
 		return nil

@@ -207,10 +207,12 @@ type CompactionInput struct {
 	// RequestOverheadTokens is fixed prompt/tool/protocol overhead not present
 	// in AgentMsgs. Zero falls back to the rendered-message estimate alone.
 	RequestOverheadTokens int
-	// AdditionalInputTokens accounts for live current-turn messages that are
-	// overlaid after persistence reconstruction. Candidate validation includes
-	// them before any record becomes authoritative.
-	AdditionalInputTokens int
+	// LiveMessages are the current-turn messages whose live-only fields
+	// (notably inline images) persistence reconstructs as placeholders. Every
+	// candidate is materialized with the same overlay before it is measured, so
+	// replacement and summarized-replay costs match the final request rather
+	// than being estimated as an additive surcharge.
+	LiveMessages []agent.Message
 }
 
 // Compact runs one compaction attempt: it selects the compressible range
@@ -342,7 +344,8 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		content += "\n\n## Tool Activity\n" + activity
 	}
 	projected := buildCompactedProjection(anchor, in.AgentMsgs, tailStart, content, retained)
-	postTokens := in.RequestOverheadTokens + in.AdditionalInputTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
+	projected = agent.ApplyLiveOverlay(in.AgentMsgs, projected, in.LiveMessages)
+	postTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
 	if in.InputBudget > 0 && postTokens > in.InputBudget {
 		log.Warn("compaction summary exceeded its reserved candidate budget",
 			zap.Int("post_compaction_tokens", postTokens),
@@ -962,7 +965,8 @@ func chooseTailForReservedBudget(in CompactionInput, anchor agent.Message, scope
 			content += "\n\n## Tool Activity\n" + activity
 		}
 		projected := buildCompactedProjection(anchor, in.AgentMsgs, start, content, retained)
-		cost := in.RequestOverheadTokens + in.AdditionalInputTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
+		projected = agent.ApplyLiveOverlay(in.AgentMsgs, projected, in.LiveMessages)
+		cost := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
 		if cost <= in.InputBudget {
 			return start, true
 		}

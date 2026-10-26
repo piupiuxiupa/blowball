@@ -61,8 +61,10 @@ func RequestEnvelopeFromContext(ctx context.Context) (RequestEnvelope, bool) {
 	return env, ok
 }
 
-// WithLiveMessages carries the bounded replay projection of current-turn
-// messages whose live-only fields cannot be reconstructed from persistence.
+// WithLiveMessages carries current-turn messages whose live-only fields cannot
+// be reconstructed from persistence. The full values are retained here so the
+// compaction hook can materialize and measure the exact final overlay;
+// bounded replay applies only when a message moved into the checkpoint.
 func WithLiveMessages(ctx context.Context, live []Message) context.Context {
 	return context.WithValue(ctx, liveMessagesContextKey{}, append([]Message(nil), live...))
 }

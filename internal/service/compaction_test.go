@@ -558,22 +558,54 @@ func TestCompactionService_ReservedPlanningMakesSingleSummaryCall(t *testing.T) 
 	assert.Equal(t, 1, llm.calls, "tail planning must not call the summarizer repeatedly")
 }
 
-func TestCompactionService_AdditionalLiveTokensParticipateInFit(t *testing.T) {
+func TestCompactionService_LiveOverlayParticipatesInFitAsFinalProjection(t *testing.T) {
 	rows, msgs, lastRow := compactionFixture(20)
 	for i := 15; i < len(msgs); i++ {
 		msgs[i].Content = strings.Repeat("tail", 300)
 	}
+	liveText := strings.Repeat("live", 10000)
+	live := agent.Message{
+		Role:    "user",
+		Content: liveText,
+		Images: []agent.MessageImage{{
+			AttachmentID: "att-current",
+			Filename:     "current.png",
+			MIMEType:     "image/png",
+			Data:         []byte{1, 2, 3},
+		}},
+	}
+	msgs[len(msgs)-1] = agent.Message{Role: "user", Content: liveText + "\n[图片: current.png]"}
+	rows[len(rows)-1].Role = model.RoleUser
 	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "checkpoint"}}
 	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
 	in := compactionInput(rows, msgs, lastRow)
 	in.InputBudget = 12000
-	in.AdditionalInputTokens = 3000
+	in.LiveMessages = []agent.Message{live}
 	rec, ok := svc.Compact(context.Background(), in)
 	require.True(t, ok)
-	assert.GreaterOrEqual(t, rec.PostCompactionTokens, in.AdditionalInputTokens)
+
+	tailStart := len(msgs) - rec.RetainedTailMessages
+	anchor := msgs[0]
+	if rec.AnchorTruncated {
+		require.NoError(t, json.Unmarshal([]byte(rec.AnchorJSON), &anchor))
+	}
+	projection := buildCompactedProjection(anchor, msgs, tailStart, rec.Content, rec.RetainedResults)
+	projection = agent.ApplyLiveOverlay(msgs, projection, in.LiveMessages)
+	wantTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projection, nil).Tokens
+	assert.Equal(t, wantTokens, rec.PostCompactionTokens,
+		"the persisted post-compaction size must equal the final live-overlaid projection")
 	assert.LessOrEqual(t, rec.PostCompactionTokens, in.InputBudget,
 		"live overlay tokens must be reserved before the record is published")
-	assert.Greater(t, len(msgs)-rec.RetainedTailMessages, 1, "candidate should reduce the tail to accommodate live data")
+	assert.Less(t, rec.RetainedTailMessages, 5,
+		"a large live overlay must reduce the tail before the record is published")
+	found := false
+	for _, msg := range projection {
+		if len(msg.Images) > 0 && msg.Images[0].AttachmentID == "att-current" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "the measured projection must include the inline live image")
 }
 
 func TestCompactionService_AnchorIsBounded(t *testing.T) {
