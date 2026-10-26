@@ -99,3 +99,9 @@
 - [x] 12.4 Recover once from provider context overflow during the round-cap wrap-up request.
 - [x] 12.5 Avoid double-counting the system prompt in the budgeted round hook.
 - [x] 12.6 Run attachment rollback on a detached bounded context so request cancellation cannot prevent cleanup.
+
+## 13. Live Overlay Hardening
+
+- [x] 13.1 Include bounded live-message overlay tokens in compaction planning before a record is published.
+- [x] 13.2 Match image-bearing live messages by unique attachment placeholders and final-user position without mutating persisted replay identity.
+- [x] 13.3 Preserve the effective input budget in second-overflow uncompactable diagnostics.

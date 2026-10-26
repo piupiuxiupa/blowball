@@ -34,6 +34,14 @@ The estimator SHALL apply a conservative bias for JSON-dense and tool-envelope c
 - **WHEN** preflight compaction rewrites a context containing live inline message fields that persistence reconstructs only as placeholders
 - **THEN** the rewritten request retains those live fields while bounding any replayed text
 
+#### Scenario: Live overlay is part of candidate fit
+- **WHEN** a compaction candidate will later be overlaid with live inline data
+- **THEN** those overlay tokens are included in tail selection and the post-compaction budget measurement before publication
+
+#### Scenario: Live message matching is unambiguous
+- **WHEN** a live image message corresponds to a reconstructed placeholder
+- **THEN** matching uses its unique attachment filenames, and a final-user replay only replaces the last user slot rather than an earlier same-content message
+
 ### Requirement: Compaction is triggered before a request exceeds the budget
 The system SHALL begin compaction when either the existing percentage threshold or the preflight request-budget threshold is reached, and the compressible middle is non-empty. The effective trigger SHALL be the lower of the applicable safe thresholds. The system SHALL reserve space for the completion quota and the next appended message set.
 
@@ -60,7 +68,7 @@ The system SHALL NOT retry the unchanged oversized request through the ordinary 
 
 #### Scenario: Second overflow stops with a diagnostic
 - **WHEN** the rebuilt request is also rejected for context overflow
-- **THEN** the system stops bounded recovery and reports an actionable failure rather than repeatedly retrying
+- **THEN** the system stops bounded recovery and reports an actionable failure containing both the latest estimate and effective input budget
 
 #### Scenario: Wrap-up overflow uses the same bounded recovery
 - **WHEN** the tool-disabled round-cap wrap-up request is rejected for context overflow

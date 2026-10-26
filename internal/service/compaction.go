@@ -207,6 +207,10 @@ type CompactionInput struct {
 	// RequestOverheadTokens is fixed prompt/tool/protocol overhead not present
 	// in AgentMsgs. Zero falls back to the rendered-message estimate alone.
 	RequestOverheadTokens int
+	// AdditionalInputTokens accounts for live current-turn messages that are
+	// overlaid after persistence reconstruction. Candidate validation includes
+	// them before any record becomes authoritative.
+	AdditionalInputTokens int
 }
 
 // Compact runs one compaction attempt: it selects the compressible range
@@ -338,7 +342,7 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		content += "\n\n## Tool Activity\n" + activity
 	}
 	projected := buildCompactedProjection(anchor, in.AgentMsgs, tailStart, content, retained)
-	postTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
+	postTokens := in.RequestOverheadTokens + in.AdditionalInputTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
 	if in.InputBudget > 0 && postTokens > in.InputBudget {
 		log.Warn("compaction summary exceeded its reserved candidate budget",
 			zap.Int("post_compaction_tokens", postTokens),
@@ -958,7 +962,7 @@ func chooseTailForReservedBudget(in CompactionInput, anchor agent.Message, scope
 			content += "\n\n## Tool Activity\n" + activity
 		}
 		projected := buildCompactedProjection(anchor, in.AgentMsgs, start, content, retained)
-		cost := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
+		cost := in.RequestOverheadTokens + in.AdditionalInputTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
 		if cost <= in.InputBudget {
 			return start, true
 		}

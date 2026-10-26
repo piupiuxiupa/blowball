@@ -210,6 +210,7 @@ type Message struct {
 // prefix-cache rendering byte-stable across rounds.
 type MessageImage struct {
 	AttachmentID string
+	Filename     string
 	MIMEType     string
 	Data         []byte
 }

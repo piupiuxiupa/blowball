@@ -158,6 +158,40 @@ func TestConfucius_PreflightCompactionPreservesLiveCurrentMessage(t *testing.T) 
 	assert.True(t, found, "preflight compaction must retain live inline images for the current turn")
 }
 
+func TestRestoreLiveMessages_UsesUniqueAttachmentPlaceholders(t *testing.T) {
+	live := Message{
+		Role:    "user",
+		Content: "same question",
+		Images:  []MessageImage{{AttachmentID: "att-current", Filename: "current.png", MIMEType: "image/png", Data: []byte{1}}},
+	}
+	compacted := []Message{
+		{Role: "user", Content: "same question\n[图片: old.png]"},
+		{Role: "user", Content: "same question\n[图片: current.png]"},
+		{Role: "assistant", Content: "answer"},
+	}
+	got := restoreLiveMessages([]Message{live, {Role: "assistant", Content: "answer"}}, compacted)
+	require.Len(t, got, 3)
+	assert.Empty(t, got[0].Images, "the unrelated same-content message must not be overwritten")
+	require.Len(t, got[1].Images, 1)
+	assert.Equal(t, "att-current", got[1].Images[0].AttachmentID)
+}
+
+func TestRestoreLiveMessages_UnknownAttachmentDoesNotOverwriteSameContent(t *testing.T) {
+	live := Message{
+		Role:    "user",
+		Content: "same question",
+		Images:  []MessageImage{{AttachmentID: "att-new", Filename: "new.png", MIMEType: "image/png", Data: []byte{1}}},
+	}
+	compacted := []Message{
+		{Role: "user", Content: "same question\n[图片: old.png]"},
+		{Role: "assistant", Content: "answer"},
+	}
+	got := restoreLiveMessages([]Message{live, {Role: "assistant", Content: "next"}}, compacted)
+	require.Len(t, got, 3)
+	assert.Empty(t, got[0].Images)
+	require.Len(t, got[2].Images, 1, "an unmatched live identity must be inserted, not mapped to a different message")
+}
+
 func TestConfucius_UndecompactableFirstRequestRejectedBeforeModelCall(t *testing.T) {
 	client := newFake()
 	c := newTestConfucius(t, client, nil)

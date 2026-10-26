@@ -212,12 +212,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 					if i == 0 {
 						reason = "turn_start_preflight"
 					}
-					hookCtx := WithForcedCompactionEstimate(
+					hookCtx := WithLiveMessages(WithForcedCompactionEstimate(
 						WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON),
 						reason,
 						next.Tokens,
 						requestBudget.InputTokens,
-					)
+					), collectLiveMessages(round))
 					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 						round = restoreLiveMessages(round, recovered)
 						i-- // compaction is not a model round
@@ -276,12 +276,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 					if i == 0 {
 						reason = "turn_start_overflow"
 					}
-					hookCtx := WithForcedCompactionEstimate(
+					hookCtx := WithLiveMessages(WithForcedCompactionEstimate(
 						WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON),
 						reason,
 						c.lastRequestEstimate.Tokens,
 						requestBudget.InputTokens,
-					)
+					), collectLiveMessages(round))
 					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 						round = restoreLiveMessages(round, recovered)
 						i-- // recovery is not a model round
@@ -292,7 +292,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
 				return finalContent, total, buildBreakdown(byAgent, tmeta), &UncompactableContextError{
 					EstimatedTokens: c.lastRequestEstimate.Tokens,
-					InputBudget:     0,
+					InputBudget:     requestBudget.InputTokens,
 					Reason:          "provider context overflow after forced recovery",
 				}
 			}
@@ -370,7 +370,8 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				c.lastRequestEstimate = est
 			}
 			if c.budgetedRoundHook != nil {
-				if replaced := c.budgetedRoundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON); replaced != nil {
+				hookCtx := WithLiveMessages(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), collectLiveMessages(round))
+				if replaced := c.budgetedRoundHook(hookCtx, resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON); replaced != nil {
 					round = restoreLiveMessages(round, replaced)
 					// The preflight hook already compacted this round; do not
 					// invoke the legacy pressure hook again for the same
@@ -387,7 +388,8 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				// starting point for diagnostics.
 				lastUsage = resp.Usage
 			}
-			if replaced := c.roundHook(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), lastUsage); replaced != nil {
+			hookCtx := WithLiveMessages(WithRequestEnvelope(ctx, c.cfg.SystemPrompt, c.toolsJSON), collectLiveMessages(round))
+			if replaced := c.roundHook(hookCtx, lastUsage); replaced != nil {
 				round = restoreLiveMessages(round, replaced)
 			}
 		}
@@ -419,12 +421,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			if next.Tokens > requestBudget.InputTokens {
 				if c.roundHook != nil && !c.preflightCompactionUsed {
 					c.preflightCompactionUsed = true
-					hookCtx := WithForcedCompactionEstimate(
+					hookCtx := WithLiveMessages(WithForcedCompactionEstimate(
 						WithRequestEnvelope(ctx, c.cfg.SystemPrompt, nil),
 						"wrap_up_request_budget",
 						next.Tokens,
 						requestBudget.InputTokens,
-					)
+					), collectLiveMessages(round))
 					if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 						round = restoreLiveMessages(round, recovered)
 						wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
@@ -453,12 +455,12 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			if overflowEstimate < c.lastRequestEstimate.Tokens {
 				overflowEstimate = c.lastRequestEstimate.Tokens
 			}
-			hookCtx := WithForcedCompactionEstimate(
+			hookCtx := WithLiveMessages(WithForcedCompactionEstimate(
 				WithRequestEnvelope(ctx, c.cfg.SystemPrompt, nil),
 				"wrap_up_overflow",
 				overflowEstimate,
 				requestBudget.InputTokens,
-			)
+			), collectLiveMessages(round))
 			if recovered := c.roundHook(hookCtx, Usage{}); recovered != nil {
 				round = restoreLiveMessages(round, recovered)
 				wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
@@ -785,7 +787,7 @@ func restoreLiveMessages(original, compacted []Message) []Message {
 		if exactIndex(out, live) >= 0 {
 			continue
 		}
-		if replacement := liveUserPlaceholderIndex(out, live); replacement >= 0 {
+		if replacement := liveUserPlaceholderIndex(out, live, isFinalUser); replacement >= 0 {
 			out[replacement] = live
 			continue
 		}
@@ -803,6 +805,18 @@ func restoreLiveMessages(original, compacted []Message) []Message {
 	return out
 }
 
+func collectLiveMessages(original []Message) []Message {
+	live := make([]Message, 0)
+	for i, msg := range original {
+		isFinalUser := i == len(original)-1 && msg.Role == "user"
+		if len(msg.Images) == 0 && !isFinalUser {
+			continue
+		}
+		live = append(live, replayableLiveMessage(msg))
+	}
+	return live
+}
+
 func replayableLiveMessage(live Message) Message {
 	const replayContentRunes = 2000
 	runes := []rune(live.Content)
@@ -817,17 +831,52 @@ func replayableLiveMessage(live Message) Message {
 	return live
 }
 
-func liveUserPlaceholderIndex(msgs []Message, live Message) int {
+func liveUserPlaceholderIndex(msgs []Message, live Message, finalUser bool) int {
 	if live.Role != "user" {
+		return -1
+	}
+	if finalUser {
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "user" {
+				if msgs[i].Content == live.Content || strings.HasPrefix(msgs[i].Content, live.Content) {
+					return i
+				}
+				return -1
+			}
+		}
+		return -1
+	}
+	filenames := imageFilenames(live.Images)
+	if len(filenames) == 0 {
 		return -1
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role == "user" &&
-			(msgs[i].Content == live.Content || strings.HasPrefix(msgs[i].Content, live.Content)) {
+			(msgs[i].Content == live.Content || strings.HasPrefix(msgs[i].Content, live.Content)) &&
+			containsAllFilenames(msgs[i].Content, filenames) {
 			return i
 		}
 	}
 	return -1
+}
+
+func imageFilenames(images []MessageImage) []string {
+	out := make([]string, 0, len(images))
+	for _, img := range images {
+		if img.Filename != "" {
+			out = append(out, img.Filename)
+		}
+	}
+	return out
+}
+
+func containsAllFilenames(content string, filenames []string) bool {
+	for _, filename := range filenames {
+		if !strings.Contains(content, filename) {
+			return false
+		}
+	}
+	return true
 }
 
 func exactIndex(msgs []Message, target Message) int {
@@ -850,6 +899,7 @@ func imagesEqual(a, b []MessageImage) bool {
 	}
 	for i := range a {
 		if a[i].AttachmentID != b[i].AttachmentID ||
+			a[i].Filename != b[i].Filename ||
 			a[i].MIMEType != b[i].MIMEType ||
 			!bytes.Equal(a[i].Data, b[i].Data) {
 			return false

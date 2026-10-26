@@ -558,6 +558,24 @@ func TestCompactionService_ReservedPlanningMakesSingleSummaryCall(t *testing.T) 
 	assert.Equal(t, 1, llm.calls, "tail planning must not call the summarizer repeatedly")
 }
 
+func TestCompactionService_AdditionalLiveTokensParticipateInFit(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(20)
+	for i := 15; i < len(msgs); i++ {
+		msgs[i].Content = strings.Repeat("tail", 300)
+	}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "checkpoint"}}
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 12000
+	in.AdditionalInputTokens = 3000
+	rec, ok := svc.Compact(context.Background(), in)
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, rec.PostCompactionTokens, in.AdditionalInputTokens)
+	assert.LessOrEqual(t, rec.PostCompactionTokens, in.InputBudget,
+		"live overlay tokens must be reserved before the record is published")
+	assert.Greater(t, len(msgs)-rec.RetainedTailMessages, 1, "candidate should reduce the tail to accommodate live data")
+}
+
 func TestCompactionService_AnchorIsBounded(t *testing.T) {
 	anchor := agent.Message{
 		Role:             "assistant",

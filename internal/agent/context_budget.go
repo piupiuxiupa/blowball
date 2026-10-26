@@ -11,6 +11,7 @@ import (
 
 type requestEnvelopeContextKey struct{}
 type forcedCompactionContextKey struct{}
+type liveMessagesContextKey struct{}
 
 // ForcedCompaction carries an explicit force signal to compaction hooks.
 // Provider usage is not used as a control signal: gateways may legitimately
@@ -58,6 +59,20 @@ func RequestEnvelopeFromContext(ctx context.Context) (RequestEnvelope, bool) {
 	}
 	env, ok := ctx.Value(requestEnvelopeContextKey{}).(RequestEnvelope)
 	return env, ok
+}
+
+// WithLiveMessages carries the bounded replay projection of current-turn
+// messages whose live-only fields cannot be reconstructed from persistence.
+func WithLiveMessages(ctx context.Context, live []Message) context.Context {
+	return context.WithValue(ctx, liveMessagesContextKey{}, append([]Message(nil), live...))
+}
+
+func LiveMessagesFromContext(ctx context.Context) []Message {
+	if ctx == nil {
+		return nil
+	}
+	live, _ := ctx.Value(liveMessagesContextKey{}).([]Message)
+	return append([]Message(nil), live...)
 }
 
 const (

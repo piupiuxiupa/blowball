@@ -230,6 +230,8 @@ func TestConfucius_ContextOverflowForcesOneCompaction(t *testing.T) {
 		{content: "recovered", finishReason: "stop", usage: Usage{PromptTokens: 20, CompletionTokens: 2}},
 	}}
 	c := newTestConfucius(t, client, nil)
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
 	calls := 0
 	c.SetRoundHook(func(context.Context, Usage) []Message {
 		calls++
@@ -248,6 +250,8 @@ func TestConfucius_SecondContextOverflowStopsBoundedRecovery(t *testing.T) {
 		{err: ErrContextOverflow},
 	}}
 	c := newTestConfucius(t, client, nil)
+	c.turn.MaxContextTokens = 8000
+	c.turn.MaxCompletionTokens = 100
 	calls := 0
 	c.SetRoundHook(func(context.Context, Usage) []Message {
 		calls++
@@ -257,6 +261,7 @@ func TestConfucius_SecondContextOverflowStopsBoundedRecovery(t *testing.T) {
 	require.Error(t, err)
 	var uncompactable *UncompactableContextError
 	assert.ErrorAs(t, err, &uncompactable)
+	assert.Equal(t, 8000-100-contextSafetyMarginTokens, uncompactable.InputBudget)
 	assert.Equal(t, 1, calls, "recovery may compact at most once")
 	assert.Equal(t, 2, client.requestCount(), "the unchanged request may not be retried again")
 }
