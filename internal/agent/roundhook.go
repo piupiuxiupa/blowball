@@ -26,6 +26,19 @@ import "context"
 //     loop calls it after EVERY dispatched tool round.
 type RoundHook func(ctx context.Context, lastUsage Usage) []Message
 
+// BudgetedRoundHook is the expanded seam used when request budgeting is
+// enabled. It receives the projected next-request estimate, the system prompt,
+// tools, and the full current conversation, so a hook can trigger before an
+// over-budget request is sent. Returning nil leaves the conversation unchanged.
+type BudgetedRoundHook func(ctx context.Context, lastUsage Usage, estimate ContextRequestEstimate, system string, messages []Message, tools []byte) []Message
+
+// RoundRequestEstimator projects the NEXT request size after the hook has
+// observed newly appended messages. The optional variant lets a hook use the
+// provider-observed usage when available, while still adding the messages that
+// were appended after that response. Returning a non-positive Tokens disables
+// the projection.
+type RoundRequestEstimator func(ctx context.Context, lastUsage Usage, appended []Message) ContextRequestEstimate
+
 // RoundHookSetter is the optional capability an agent exposes when its Run
 // supports a between-rounds hook. Only Confucius implements it (sub-agents
 // never see the parent conversation, so mid-turn pressure lives in the
@@ -34,4 +47,16 @@ type RoundHook func(ctx context.Context, lastUsage Usage) []Message
 // leaks across turns.
 type RoundHookSetter interface {
 	SetRoundHook(hook RoundHook)
+}
+
+// RoundRequestEstimatorSetter is the optional capability that lets the
+// orchestrator install the next-request estimation seam.
+type RoundRequestEstimatorSetter interface {
+	SetRoundRequestEstimator(fn RoundRequestEstimator)
+}
+
+// BudgetedRoundHookSetter is the optional capability for hooks that need the
+// complete rendered request as well as provider usage.
+type BudgetedRoundHookSetter interface {
+	SetBudgetedRoundHook(hook BudgetedRoundHook)
 }

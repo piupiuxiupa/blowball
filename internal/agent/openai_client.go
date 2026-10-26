@@ -142,6 +142,44 @@ func logLLMResponse(ctx context.Context, resp LLMResponse) {
 // retry.go) treats it as retryable with zero retry-logic changes.
 var ErrStreamIdleTimeout = errors.New("openai client: stream idle timeout")
 
+// ErrContextOverflow marks a provider rejection caused by the request input
+// exceeding the model's context window. It is intentionally distinct from a
+// generic 400: only recognized overflow signals are eligible for forced
+// compaction recovery, and the unchanged request must never be retried by the
+// transient retry loop.
+var ErrContextOverflow = errors.New("openai client: context overflow")
+
+// contextOverflowSignals are conservative provider-specific substrings. Keep
+// this list narrow: a malformed-request 400 must remain a semantic failure.
+var contextOverflowSignals = []string{
+	"input tokens exceed the model context limit",
+	"input token count exceeds the model context limit",
+	"exceeds the model's maximum context length",
+	"exceeds the maximum context length",
+	"context_length_exceeded",
+	"maximum context length",
+	"context window exceeds limit",
+	"input is too long for the model",
+	"prompt is too long",
+	"token limit exceeded",
+}
+
+// classifyOpenAIError returns a typed context-overflow error when the provider
+// response clearly reports an oversized input. The original error remains
+// wrapped so callers retain the full provider message and status for logs.
+func classifyOpenAIError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sig := range contextOverflowSignals {
+		if strings.Contains(msg, sig) {
+			return fmt.Errorf("%w: %v", ErrContextOverflow, err)
+		}
+	}
+	return err
+}
+
 // OpenAIClient is the production LLMClient backed by openai-go v3. It is the
 // only file in this package that imports openai-go, so swapping SDKs (or
 // pointing at a non-OpenAI compatible endpoint) only touches this file.
@@ -461,7 +499,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 			return resp, idleErr
 		}
 		captureError(err)
-		return resp, fmt.Errorf("openai client: stream: %w", err)
+		return resp, classifyOpenAIError(fmt.Errorf("openai client: stream: %w", err))
 	}
 
 	resp.FinishReason = finish

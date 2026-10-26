@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -52,6 +53,12 @@ type TurnHooks struct {
 	// Round is the between-rounds mid-turn compaction hook (agent.RoundHook),
 	// installed on the freshly-built Confucius for this turn.
 	Round agent.RoundHook
+	// Estimate projects the next LLM request size (context-request-budgeting).
+	// Nil keeps the legacy round-hook-only behavior.
+	Estimate agent.RoundRequestEstimator
+	// BudgetedRound is the expanded preflight hook: it receives the rendered
+	// request estimate and may compact before an over-budget request is sent.
+	BudgetedRound agent.BudgetedRoundHook
 	// Tap is served by the adapter's event-collection goroutine so Round can
 	// take complete, synchronized snapshots of the collected event stream —
 	// the source the mid-turn flush persists.
@@ -155,6 +162,17 @@ func (t *TurnEventTap) requests() chan chan []stream.StreamEvent {
 // writes canned events instead of driving the real agent loop.
 type innerRunner interface {
 	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, override agent.ModelOverride) error
+}
+
+// budgetedInnerRunner is the optional extension used when a turn installs the
+// request estimator. Keeping it separate from innerRunner preserves every
+// existing test double and pre-budgeting caller.
+type budgetedInnerRunner interface {
+	HandleWithBudget(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, override agent.ModelOverride) error
+}
+
+type budgetedHookRunner interface {
+	HandleWithSeams(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, budgetedHook agent.BudgetedRoundHook, override agent.ModelOverride) error
 }
 
 type orchestratorAdapter struct {
@@ -270,7 +288,18 @@ func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsD
 		}
 	}()
 
-	err := a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, override)
+	var err error
+	if hooks.Estimate != nil {
+		if budgeted, ok := a.inner.(budgetedHookRunner); ok && hooks.BudgetedRound != nil {
+			err = budgeted.HandleWithSeams(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, hooks.Estimate, hooks.BudgetedRound, override)
+		} else if budgeted, ok := a.inner.(budgetedInnerRunner); ok {
+			err = budgeted.HandleWithBudget(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, hooks.Estimate, override)
+		} else {
+			err = fmt.Errorf("handler: orchestrator does not support request budgeting")
+		}
+	} else {
+		err = a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, override)
+	}
 	innerHub.Close()
 	res := <-eventsCh
 	return res.events, res.usage, err

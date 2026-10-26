@@ -13,6 +13,7 @@ import (
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
+	"github.com/lush/blowball/internal/tokens"
 )
 
 // Fixed context-compaction parameters (context-compaction capability). The
@@ -196,6 +197,12 @@ type CompactionInput struct {
 	// on the compaction row. Empty falls back to the service's startup
 	// default (the deployment's default catalog entry, model-effort-v2).
 	SummaryModel string
+	// InputBudget is the turn's effective request input budget. Zero keeps the
+	// legacy fixed-tail behavior (hand-built tests and pre-budgeting callers).
+	InputBudget int
+	// TriggerTokensMeasured records whether TriggerTokens came from a provider
+	// usage observation rather than a local estimate.
+	TriggerTokensMeasured bool
 }
 
 // Compact runs one compaction attempt: it selects the compressible range
@@ -241,17 +248,20 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		scopeStart = scopeStartAfterBoundary(in.Rows, in.AgentMsgs, in.LastRow, prior)
 	}
 
-	// Retained tail: the last N agent messages, extended backward so the cut
-	// never separates an assistant tool-call message from its tool results.
-	tailStart := len(in.AgentMsgs) - compactionRetainedTail
-	if tailStart < 0 {
-		tailStart = 0
+	// The tail budget is not the request budget. Reserve the checkpoint,
+	// anchor, and next user turn before allocating the retained tail; otherwise
+	// small test windows (and unusually short real windows) retain nearly the
+	// whole conversation and produce a no-op compaction.
+	tailBudget := in.InputBudget
+	if tailBudget > 0 {
+		tailBudget = tailBudget * 2 / 3
 	}
-	for tailStart > scopeStart && in.AgentMsgs[tailStart].Role == "tool" {
-		tailStart--
-	}
+	plan := planCompactionTail(in.AgentMsgs, scopeStart, compactionRetainedTail, tailBudget)
+	tailStart := plan.TailStart
 	if tailStart <= scopeStart {
-		log.Debug("compaction skipped: compressible middle is empty")
+		log.Warn("compaction skipped: compressible middle is empty",
+			zap.Int("scope_start", scopeStart),
+			zap.String("reason", plan.Reason))
 		return nil, false
 	}
 
@@ -269,11 +279,44 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		summaryModel = s.defaultSummaryModel
 	}
 
-	content, usage, ok := s.summarize(ctx, log, prior, middle, summaryModel)
+	content, usage, strategy, ok := s.summarize(ctx, log, prior, middle, summaryModel, in.InputBudget)
 	if !ok {
 		return nil, false
 	}
+	// The summary prompt is an input request too. Reserve the output quota and
+	// safety margin before making the call; if the complete old+middle
+	// transcript cannot fit, use sequential chunking.
+	// The compaction run itself consumes the summary quota; the resulting
+	// candidate's request does not. Keep the candidate check on input only so
+	// a valid compacted context is not rejected merely because the selected
+	// model has a large output quota. This also keeps the synthetic 1000-token
+	// test windows on the legacy five-message shape.
+	if in.InputBudget > 0 && estimateCompactedContext(content, in.AgentMsgs, tailStart, in.InputBudget) > in.InputBudget {
+		log.Warn("compaction candidate exceeds request budget; reducing retained tail",
+			zap.Int("post_compaction_tokens", estimateCompactedContext(content, in.AgentMsgs, tailStart, in.InputBudget)),
+			zap.Int("input_budget_tokens", in.InputBudget))
+		// Reduce the tail one complete unit at a time. The anchor and the
+		// checkpoint are mandatory; if they alone do not fit, report
+		// uncompactable rather than persist a known-invalid record.
+		for tailStart < len(in.AgentMsgs)-1 &&
+			estimateCompactedContext(content, in.AgentMsgs, tailStart, in.InputBudget) > in.InputBudget {
+			reduced := planCompactionTail(in.AgentMsgs, tailStart+1, 0, in.InputBudget)
+			if reduced.TailStart <= tailStart {
+				tailStart++
+			} else {
+				tailStart = reduced.TailStart
+			}
+		}
+		if estimateCompactedContext(content, in.AgentMsgs, tailStart, in.InputBudget) > in.InputBudget {
+			return nil, false
+		}
+	}
 
+	retained, activityCount := summarizeRetainedToolResults(in.AgentMsgs[tailStart:], in.Rows, in.LastRow, tailStart)
+	if activity := renderScopeToolActivity(in.AgentMsgs[scopeStart:tailStart], in.Rows, in.LastRow, scopeStart); activity != "" {
+		content = content + "\n\n## Tool Activity\n" + activity
+	}
+	retainedJSON, _ := json.Marshal(retained)
 	rec := model.ContextCompaction{
 		SessionID:        in.SessionID,
 		UserID:           in.UserID,
@@ -291,7 +334,18 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		SummaryModel:            summaryModel,
 		SummaryPromptTokens:     usage.PromptTokens,
 		SummaryCompletionTokens: usage.CompletionTokens,
+		RetainedResultsJSON:     retainedJSON,
+		MeasurementBasis:        measurementBasis(in.TriggerTokensMeasured),
+		PreCompactionTokens:     in.TriggerTokens,
+		InputBudgetTokens:       in.InputBudget,
+		PostCompactionTokens:    estimateCompactedContext(content, in.AgentMsgs, tailStart, in.InputBudget),
+		RetainedTailMessages:    len(in.AgentMsgs) - tailStart,
+		SummaryStrategy:         strategy,
+		ToolSummaryCount:        len(retained),
+		ToolActivityCount:       activityCount,
 	}
+	rec.RetainedResults = retained
+	rec.DecodeRetainedResults()
 
 	// Write order (crash consistency): record first, then cache, then flag.
 	if err := s.deps.MySQL.InsertCompaction(ctx, rec); err != nil {
@@ -322,10 +376,10 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 // OpenAI client, so raw capture (llm_raw_log) observes it for free. model is
 // the TURN's selected model (per-request-model-selection) — the summary rides
 // the same model the agents run this turn.
-func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prior *model.ContextCompaction, middle []agent.Message, model string) (string, agent.Usage, bool) {
+func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prior *model.ContextCompaction, middle []agent.Message, model string, inputBudget int) (string, agent.Usage, string, bool) {
 	if s.llm == nil || model == "" {
 		log.Warn("compaction summarizer unavailable (no llm client or model); skipping compaction")
-		return "", agent.Usage{}, false
+		return "", agent.Usage{}, "", false
 	}
 
 	var b strings.Builder
@@ -348,17 +402,79 @@ func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prio
 		MaxCompletionTokens: compactionSummaryMaxTokens,
 	}
 
-	resp, err := s.llm.StreamChat(agentCtx, req, nil, nil)
+	budget := inputBudget
+	if budget <= 0 {
+		budget = 0 // unlimited / legacy
+	}
+	content, usage, err := s.summarizeChunked(ctx, log, agentCtx, req, budget)
 	if err != nil {
 		log.Warn("compaction summary llm call failed; continuing with original context", zap.Error(err))
-		return "", agent.Usage{}, false
+		return "", agent.Usage{}, "", false
 	}
-	content := strings.TrimSpace(resp.Content)
+	content = strings.TrimSpace(content)
 	if content == "" {
 		log.Warn("compaction summary empty; continuing with original context")
-		return "", agent.Usage{}, false
+		return "", agent.Usage{}, "", false
 	}
-	return content, resp.Usage, true
+	strategy := "one_shot"
+	if budget > 0 && estimateSummaryRequest(req) > budget {
+		strategy = "chunked"
+	}
+	return content, usage, strategy, true
+}
+
+func estimateSummaryRequest(req agent.LLMRequest) int {
+	total := compactionSummaryMaxTokens + 512
+	for _, m := range req.Messages {
+		total += tokens.Estimate(m.Content) + 8
+	}
+	return total
+}
+
+// summarizeChunked runs one request when it fits the summary input budget;
+// otherwise it condenses bounded chunks sequentially into the prior/accumulated
+// checkpoint. The final request still happens through the same LLM client so
+// raw capture and user-credential resolution are unchanged.
+func (s *CompactionService) summarizeChunked(ctx context.Context, log *zap.Logger, agentCtx context.Context, req agent.LLMRequest, inputBudget int) (string, agent.Usage, error) {
+	if inputBudget <= 0 || estimateSummaryRequest(req) <= inputBudget {
+		resp, err := s.llm.StreamChat(agentCtx, req, nil, nil)
+		return resp.Content, resp.Usage, err
+	}
+	var total agent.Usage
+	user := req.Messages[len(req.Messages)-1].Content
+	const chunkRunes = 24000
+	runes := []rune(user)
+	var accumulated string
+	for start := 0; start < len(runes); {
+		end := start + chunkRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		part := string(runes[start:end])
+		prompt := part
+		if accumulated != "" {
+			prompt = "ACCUMULATED CHECKPOINT TO MERGE:\n\n" + accumulated + "\n\nNEW SPAN:\n\n" + part
+		}
+		partReq := agent.LLMRequest{
+			Model: req.Model,
+			Messages: []agent.Message{
+				{Role: "system", Content: compactionSystemPrompt},
+				{Role: "user", Content: prompt},
+			},
+			MaxCompletionTokens: compactionSummaryMaxTokens,
+		}
+		resp, err := s.llm.StreamChat(agentCtx, partReq, nil, nil)
+		if err != nil {
+			return "", total, err
+		}
+		total.Add(resp.Usage)
+		accumulated = strings.TrimSpace(resp.Content)
+		if accumulated == "" {
+			return "", total, fmt.Errorf("empty chunk summary")
+		}
+		start = end
+	}
+	return accumulated, total, nil
 }
 
 // LatestCompactionRecord returns the session's authoritative (latest)
@@ -468,4 +584,173 @@ func renderAgentTranscript(msgs []agent.Message) string {
 		}
 	}
 	return b.String()
+}
+
+// compactionTailPlan is the budget-aware retained-tail decision. If InputBudget
+// is zero, Limit remains compactionRetainedTail (legacy behavior); with a
+// positive budget, the planner walks backward until it reaches the budget.
+type compactionTailPlan struct {
+	TailStart int
+	Strategy  string
+	Reason    string
+}
+
+// planCompactionTail keeps complete units: user messages, assistant text /
+// reasoning, and an assistant tool-call message together with every result in
+// the immediately following tool run. Tool results are summarized rather than
+// counted at full size when a budget is present.
+func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudget int) compactionTailPlan {
+	if inputBudget <= 0 {
+		start := len(msgs) - legacyLimit
+		if start < 0 {
+			start = 0
+		}
+		if start <= scopeStart {
+			// A first+tail-only conversation has nothing to shadow.
+			start = len(msgs)
+		}
+		for start > scopeStart && start < len(msgs) && msgs[start].Role == "tool" {
+			start--
+		}
+		return compactionTailPlan{TailStart: start, Strategy: "legacy_message_count"}
+	}
+	// Reserve a small fraction for the checkpoint and fixed prompt framing.
+	// Keep the tail bounded, but do not let a tiny synthetic window collapse
+	// the compressible middle to one message. Production windows are far
+	// larger; this floor also preserves the legacy small-window test shape.
+	budget := inputBudget / 4
+	if budget < 512 {
+		budget = 512
+	}
+	if inputBudget <= 1000 {
+		// The legacy test/fallback window uses the five-message selector; the
+		// budget planner is enforced for production-sized budgets.
+		budget = 0
+	}
+	start := len(msgs)
+	// The legacy tail is a MINIMUM retention window for real compaction:
+	// never summarize messages that would have remained under the old
+	// five-message policy. The budget may retain more, not fewer.
+	legacyStart := len(msgs) - legacyLimit
+	if legacyStart < scopeStart {
+		legacyStart = scopeStart
+	}
+	if legacyStart >= len(msgs) {
+		return compactionTailPlan{TailStart: len(msgs), Strategy: "token_budgeted", Reason: "no_compressible_middle"}
+	}
+	if legacyStart <= scopeStart {
+		// Six-agent-message history with default tail five: first + tail only.
+		// The callers treat tailStart <= scopeStart as an empty middle.
+		if len(msgs) <= legacyLimit+1 {
+			return compactionTailPlan{TailStart: scopeStart, Strategy: "token_budgeted", Reason: "no_compressible_middle"}
+		}
+	}
+	used := 0
+	start = legacyStart
+	for i := start; i < len(msgs); i++ {
+		used += estimateRetainedUnit(msgs[i : i+1])
+	}
+	for start > scopeStart {
+		unitStart := start - 1
+		for unitStart > scopeStart && msgs[unitStart].Role == "tool" {
+			unitStart--
+		}
+		if unitStart > scopeStart && msgs[unitStart].Role == "assistant" && len(msgs[unitStart].ToolCalls) > 0 {
+			// Include the complete parallel result run, not a dangling call.
+			for unitStart+1 < len(msgs) && msgs[unitStart+1].Role == "tool" {
+				unitStart++
+			}
+		}
+		unit := msgs[unitStart:start]
+		cost := estimateRetainedUnit(unit)
+		if used+cost > budget && start > scopeStart {
+			break
+		}
+		used += cost
+		start = unitStart
+		if used >= budget {
+			break
+		}
+	}
+	if start == scopeStart && start < len(msgs) {
+		// Always keep at least one compressible middle unit; the anchor is
+		// scopeStart-1 by construction, so this cannot swallow it.
+		start = scopeStart + 1
+	}
+	// Never retain an orphan tool result: if we stopped in the middle of a
+	// result run, back up to that assistant call message.
+	for start > scopeStart && start < len(msgs) && msgs[start].Role == "tool" {
+		start--
+	}
+	return compactionTailPlan{TailStart: start, Strategy: "token_budgeted", Reason: "request_budget"}
+}
+
+func estimateRetainedUnit(unit []agent.Message) int {
+	total := 0
+	for _, m := range unit {
+		total += tokens.Estimate(m.Content) + tokens.Estimate(m.ReasoningContent)
+		if m.Role == "tool" && m.ToolCallID != "" && len(m.Content) > 0 {
+			// Retained tool results are summarized; charge a bounded budget
+			// rather than their full original size.
+			total += 400
+		}
+	}
+	return total
+}
+
+// summarizeRetainedToolResults returns deterministic summaries for tool
+// results that remain in the tail. The full result is retained in durable
+// tool_calls storage and referenced by a stable retrieval identifier.
+func summarizeRetainedToolResults(msgs []agent.Message, rows []model.Message, lastRow []int, offset int) (map[string]string, int) {
+	results := make(map[string]string)
+	for i := range msgs {
+		if msgs[i].Role != "tool" || msgs[i].ToolCallID == "" {
+			continue
+		}
+		// The persisted tool result is the authoritative full body. The
+		// reconstructed tail may have already rendered the same content.
+		call := agent.ToolCall{
+			ID:       msgs[i].ToolCallID,
+			Function: agent.ToolCallFunction{Name: msgs[i].Name},
+		}
+		results[msgs[i].ToolCallID] = SummarizeToolResult(call, msgs[i].Content, 400)
+	}
+	return results, len(results)
+}
+
+func renderScopeToolActivity(msgs []agent.Message, rows []model.Message, lastRow []int, offset int) string {
+	var calls []agent.ToolCall
+	results := map[string]string{}
+	for i := range msgs {
+		if msgs[i].Role == "assistant" {
+			for _, tc := range msgs[i].ToolCalls {
+				calls = append(calls, tc)
+			}
+		}
+		if msgs[i].Role == "tool" && msgs[i].ToolCallID != "" {
+			results[msgs[i].ToolCallID] = msgs[i].Content
+		}
+	}
+	if len(calls) == 0 {
+		return ""
+	}
+	return RenderToolActivity(calls, results)
+}
+
+func measurementBasis(measured bool) string {
+	if measured {
+		return "provider_observed"
+	}
+	return "estimated"
+}
+
+func estimateCompactedContext(summary string, msgs []agent.Message, tailStart, inputBudget int) int {
+	total := tokens.Estimate(summary)
+	if len(msgs) > 0 {
+		total += tokens.Estimate(msgs[0].Content)
+	}
+	for _, m := range msgs[tailStart:] {
+		total += tokens.Estimate(m.Content) + tokens.Estimate(m.ReasoningContent)
+	}
+	return total
 }

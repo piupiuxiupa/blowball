@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Context-compaction trigger kinds (context_compactions.trigger_kind).
 const (
@@ -37,5 +40,34 @@ type ContextCompaction struct {
 	SummaryModel            string    `db:"summary_model"              json:"summary_model"`
 	SummaryPromptTokens     int       `db:"summary_prompt_tokens"      json:"summary_prompt_tokens"`
 	SummaryCompletionTokens int       `db:"summary_completion_tokens"  json:"summary_completion_tokens"`
-	CreateTime              time.Time `db:"create_time"                json:"create_time"`
+	// RetainedResults holds deterministic tool-result summaries for the
+	// retained tail, keyed by tool_call_id. It is JSON because call ids are
+	// provider-generated strings and the tail can contain parallel calls.
+	RetainedResultsJSON  []byte            `db:"retained_results_json" json:"-"`
+	RetainedResults      map[string]string `db:"-" json:"retained_results,omitempty"`
+	MeasurementBasis     string            `db:"measurement_basis" json:"measurement_basis,omitempty"`
+	PreCompactionTokens  int               `db:"pre_compaction_tokens" json:"pre_compaction_tokens,omitempty"`
+	InputBudgetTokens    int               `db:"input_budget_tokens" json:"input_budget_tokens,omitempty"`
+	PostCompactionTokens int               `db:"post_compaction_tokens" json:"post_compaction_tokens,omitempty"`
+	RetainedTailMessages int               `db:"retained_tail_messages" json:"retained_tail_messages,omitempty"`
+	SummaryStrategy      string            `db:"summary_strategy" json:"summary_strategy,omitempty"`
+	ToolSummaryCount     int               `db:"tool_summary_count" json:"tool_summary_count,omitempty"`
+	ToolActivityCount    int               `db:"tool_activity_count" json:"tool_activity_count,omitempty"`
+	CreateTime           time.Time         `db:"create_time"                json:"create_time"`
+}
+
+// DecodeRetainedResults hydrates RetainedResults from its on-disk JSON column.
+// A nil/empty or malformed value degrades to nil so legacy records remain
+// readable and callers can fall back to raw reconstructed tail messages.
+func (c *ContextCompaction) DecodeRetainedResults() {
+	if c == nil || len(c.RetainedResultsJSON) == 0 {
+		c.RetainedResults = nil
+		return
+	}
+	var out map[string]string
+	if err := json.Unmarshal(c.RetainedResultsJSON, &out); err != nil {
+		c.RetainedResults = nil
+		return
+	}
+	c.RetainedResults = out
 }

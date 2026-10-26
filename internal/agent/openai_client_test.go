@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/lush/blowball/internal/stream"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/stretchr/testify/assert"
@@ -167,6 +169,96 @@ func mustJSON(v any) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+func TestClassifyOpenAIError_contextOverflow(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{
+			name: "gateway input tokens exceed model context",
+			msg:  `400 Bad Request: {"error":{"message":"input tokens exceed the model context limit"}}`,
+			want: true,
+		},
+		{
+			name: "openai context length code",
+			msg:  `Error code: 400 - {"error":{"code":"context_length_exceeded","message":"Please reduce the length of the messages."}}`,
+			want: true,
+		},
+		{
+			name: "malformed request is semantic",
+			msg:  `400 Bad Request: {"error":{"message":"unknown parameter"}}`,
+			want: false,
+		},
+		{
+			name: "rate limit is not overflow",
+			msg:  `429 Too Many Requests`,
+			want: false,
+		},
+		{
+			name: "server error is not overflow",
+			msg:  `503 Service Unavailable`,
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyOpenAIError(errors.New(tc.msg))
+			assert.Equal(t, tc.want, errors.Is(err, ErrContextOverflow))
+			if !tc.want {
+				assert.Contains(t, err.Error(), tc.msg)
+			} else {
+				assert.Contains(t, err.Error(), tc.msg)
+			}
+		})
+	}
+}
+
+func TestIsTransientError_contextOverflowIsNotRetried(t *testing.T) {
+	err := classifyOpenAIError(errors.New("input tokens exceed the model context limit"))
+	require.ErrorIs(t, err, ErrContextOverflow)
+	assert.False(t, isTransientError(err), "context overflow must enter forced compaction, not transient retry")
+}
+
+func TestConfucius_ContextOverflowForcesOneCompaction(t *testing.T) {
+	ctx := context.Background()
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+	client := &fakeLLMClient{responses: []fakeResponse{
+		{err: ErrContextOverflow},
+		{content: "recovered", finishReason: "stop", usage: Usage{PromptTokens: 20, CompletionTokens: 2}},
+	}}
+	c := newTestConfucius(t, client, nil)
+	calls := 0
+	c.SetRoundHook(func(context.Context, Usage) []Message {
+		calls++
+		return []Message{{Role: "user", Content: "compacted"}}
+	})
+	content, _, _, err := c.Run(ctx, []Message{{Role: "user", Content: "hi"}}, hub)
+	require.NoError(t, err)
+	assert.Equal(t, "recovered", content)
+	assert.Equal(t, 1, calls, "forced compaction must run exactly once")
+}
+
+func TestConfucius_SecondContextOverflowStopsBoundedRecovery(t *testing.T) {
+	hub := stream.NewHub(stream.DefaultHubBufferSize)
+	client := &fakeLLMClient{responses: []fakeResponse{
+		{err: ErrContextOverflow},
+		{err: ErrContextOverflow},
+	}}
+	c := newTestConfucius(t, client, nil)
+	calls := 0
+	c.SetRoundHook(func(context.Context, Usage) []Message {
+		calls++
+		return []Message{{Role: "user", Content: "compacted"}}
+	})
+	_, _, _, err := c.Run(context.Background(), []Message{{Role: "user", Content: "hi"}}, hub)
+	require.Error(t, err)
+	var uncompactable *UncompactableContextError
+	assert.ErrorAs(t, err, &uncompactable)
+	assert.Equal(t, 1, calls, "recovery may compact at most once")
+	assert.Equal(t, 2, client.requestCount(), "the unchanged request may not be retried again")
 }
 
 // sseDone is the minimal terminal SSE payload every request-branch test below

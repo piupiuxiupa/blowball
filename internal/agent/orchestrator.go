@@ -442,6 +442,48 @@ type Orchestrator struct {
 	workspaceRootForUser WorkspaceRootForUser
 }
 
+// HandleWithBudget installs the optional per-turn request estimator alongside
+// the round hook. The original Handle entry point remains for callers that do
+// not need budgeting (including tests and pre-compaction paths).
+func (o *Orchestrator) HandleWithBudget(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, override ModelOverride) error {
+	return o.handleWithSeams(ctx, workspaceRoot, skillsDir, userID, messages, hub, roundHook, estimator, nil, override)
+}
+
+// HandleWithSeams installs both the next-request estimator and the expanded
+// budgeted hook, preserving Handle's original signature for unaffected callers.
+func (o *Orchestrator) HandleWithSeams(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, budgetedHook BudgetedRoundHook, override ModelOverride) error {
+	return o.handleWithSeams(ctx, workspaceRoot, skillsDir, userID, messages, hub, roundHook, estimator, budgetedHook, override)
+}
+
+func (o *Orchestrator) handleWithSeams(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, budgetedHook BudgetedRoundHook, override ModelOverride) error {
+	ctx = skill.WithUserID(ctx, userID)
+	confucius, closer, err := o.factory.Build(ctx, workspaceRoot, skillsDir, userID, override)
+	if err != nil {
+		return fmt.Errorf("orchestrator: build agents: %w", err)
+	}
+	if closer != nil {
+		defer closer()
+	}
+	if roundHook != nil {
+		if hs, ok := confucius.(RoundHookSetter); ok {
+			hs.SetRoundHook(roundHook)
+		}
+	}
+	if es, ok := confucius.(RoundRequestEstimatorSetter); ok {
+		es.SetRoundRequestEstimator(estimator)
+	}
+	if hs, ok := confucius.(BudgetedRoundHookSetter); ok {
+		hs.SetBudgetedRoundHook(budgetedHook)
+	}
+	content, usage, breakdown, err := confucius.Run(ctx, messages, hub)
+	if err != nil {
+		emitDone(hub, ctx, doneUsage{confucius: usage, breakdown: breakdown, content: content, err: err})
+		return fmt.Errorf("orchestrator: confucius run: %w", err)
+	}
+	emitDone(hub, ctx, doneUsage{confucius: usage, breakdown: breakdown, content: content})
+	return nil
+}
+
 // NewOrchestrator constructs the production Orchestrator. workspaceRootForUser
 // is an optional convenience closure that maps a user ID to its workspace root
 // path; it is stored on the returned Orchestrator so handlers can call

@@ -48,6 +48,11 @@ func isTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Context overflow is repaired by compaction, never by re-sending the
+	// byte-identical oversized request.
+	if errors.Is(err, ErrContextOverflow) {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
 	for _, sig := range transientErrorSignals {
 		if strings.Contains(msg, sig) {

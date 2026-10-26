@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,12 +45,25 @@ type Confucius struct {
 	// mid-turn trigger). Nil on leaf-agent-free runs unless the orchestrator
 	// installed one right after the factory built this agent; see roundhook.go.
 	roundHook RoundHook
+	// requestEstimator is the per-turn budget seam. It is intentionally
+	// separate from roundHook so a forced compaction hook can be installed on
+	// the same agent without changing the hook's signature.
+	requestEstimator     RoundRequestEstimator
+	lastRequestEstimate  ContextRequestEstimate
+	overflowRecoveryUsed bool
+	budgetedRoundHook    BudgetedRoundHook
 }
 
 // SetRoundHook implements RoundHookSetter. The orchestrator calls it on the
 // freshly-built per-request Confucius so the hook (and everything it captures)
 // never outlives the turn.
 func (c *Confucius) SetRoundHook(hook RoundHook) { c.roundHook = hook }
+
+// SetRoundRequestEstimator implements RoundRequestEstimatorSetter.
+func (c *Confucius) SetRoundRequestEstimator(fn RoundRequestEstimator) { c.requestEstimator = fn }
+
+// SetBudgetedRoundHook implements BudgetedRoundHookSetter.
+func (c *Confucius) SetBudgetedRoundHook(hook BudgetedRoundHook) { c.budgetedRoundHook = hook }
 
 // NewConfucius builds the root agent. coordinator constructs one isolated
 // generic child per spawn. The tools[] JSON is rendered once at construction
@@ -154,6 +168,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	c.coordinator.meta = tmeta
 	c.plan = &planLedger{}
 	c.hitCapThisRun = false
+	c.overflowRecoveryUsed = false
 	var capped bool // set when the loop exits by hitting the round cap (not via a natural break)
 
 	for i := 0; i < c.maxRounds; i++ {
@@ -178,6 +193,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		// (across ALL attempts of the round — the continuation stream is
 		// seamless, so the fallback accumulates too).
 		var assistantText string
+		boundary := len(round)
 		result, err := runLLMRound(ctx, c.client, hub, c.Name(), req, &round, c.turn.LengthContinue, c.cfg.Retry,
 			func(r []Message) []Message { return withSystem(c.cfg.SystemPrompt, r) },
 			// Dispatch of the parseable tool_calls of an intermediate length
@@ -204,6 +220,22 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return finalContent, total, buildBreakdown(byAgent, tmeta), ctxErr
+			}
+			if errors.Is(err, ErrContextOverflow) && c.roundHook != nil {
+				if !c.overflowRecoveryUsed {
+					c.overflowRecoveryUsed = true
+					if recovered := c.roundHook(ctx, Usage{}); recovered != nil {
+						round = recovered
+						continue
+					}
+				}
+				hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), "context remains uncompactable after forced recovery", "uncompactable_context"))
+				hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
+				return finalContent, total, buildBreakdown(byAgent, tmeta), &UncompactableContextError{
+					EstimatedTokens: c.lastRequestEstimate.Tokens,
+					InputBudget:     0,
+					Reason:          "provider context overflow after forced recovery",
+				}
 			}
 			hub.SendCtx(ctx, stream.AgentErrorEvent(c.Name(), err.Error(), "llm_error"))
 			hub.SendCtx(ctx, stream.AgentEndEvent(c.Name()))
@@ -270,8 +302,33 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		// (first message + framed summary + retained tail); nil keeps the
 		// conversation unchanged. The hook is silent on the SSE stream by
 		// contract and never aborts the loop.
-		if c.roundHook != nil {
-			if replaced := c.roundHook(ctx, resp.Usage); replaced != nil {
+		roundCompacted := false
+		if c.requestEstimator != nil {
+			// The estimator includes tool results appended after the measured
+			// round. A request that no longer fits gets one forced compaction
+			// attempt through the same hook before the next StreamChat.
+			if est := c.requestEstimator(ctx, resp.Usage, round[boundary:]); est.Tokens > 0 {
+				c.lastRequestEstimate = est
+			}
+			if c.budgetedRoundHook != nil {
+				if replaced := c.budgetedRoundHook(ctx, resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON); replaced != nil {
+					round = replaced
+					// The preflight hook already compacted this round; do not
+					// invoke the legacy pressure hook again for the same
+					// snapshot.
+					roundCompacted = true
+				}
+			}
+		}
+		if c.roundHook != nil && !roundCompacted {
+			lastUsage := resp.Usage
+			if c.lastRequestEstimate.MeasuredUsage {
+				// The hook's provider-usage branch is intentionally bypassed by
+				// the estimator-aware handler; this value remains the measured
+				// starting point for diagnostics.
+				lastUsage = resp.Usage
+			}
+			if replaced := c.roundHook(ctx, lastUsage); replaced != nil {
 				round = replaced
 			}
 		}
@@ -326,6 +383,11 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			return finalContent, total, buildBreakdown(byAgent, tmeta), fmt.Errorf("confucius: round cap exhausted: wrap-up round produced no content")
 		}
 	}
+
+	// Note: forced recovery is intentionally one-shot per turn. The loop's
+	// context-overflow branch rewrites round via the same compacting hook and
+	// continues; a second overflow reaches the ordinary error branch above and
+	// terminates the turn.
 
 	if !hub.SendCtx(ctx, stream.AgentEndEvent(c.Name())) {
 		return finalContent, total, buildBreakdown(byAgent, tmeta), ctx.Err()

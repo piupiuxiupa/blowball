@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strings"
+
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/model"
 )
@@ -56,6 +58,46 @@ func stitchCompacted(rows []model.Message, calls []model.ToolCall, agentMsgs []a
 	out := make([]agent.Message, 0, 2+len(tailMsgs))
 	out = append(out, agentMsgs[0])
 	out = append(out, agent.Message{Role: "user", Content: frameCompactedSummary(rec.Content)})
+	applyRetainedResultSummaries(tailMsgs, calls, rec)
 	out = append(out, tailMsgs...)
+	return out
+}
+
+// applyRetainedResultSummaries replaces retained role=tool bodies with the
+// deterministic summaries persisted by the validated compaction plan. Calls
+// not present in the record (legacy record or a newly appended pair) keep
+// their reconstructed body. Applying the same record repeatedly is stable.
+func applyRetainedResultSummaries(tail []agent.Message, calls []model.ToolCall, rec *model.ContextCompaction) {
+	if rec == nil || len(rec.RetainedResults) == 0 {
+		return
+	}
+	for i := range tail {
+		if tail[i].Role != "tool" || tail[i].ToolCallID == "" {
+			continue
+		}
+		if summary, ok := rec.RetainedResults[tail[i].ToolCallID]; ok && strings.TrimSpace(summary) != "" {
+			tail[i].Content = summary
+		}
+	}
+}
+
+// applySummaryToRoundLive applies retained-result summaries to the in-memory
+// round immediately after mid-turn compaction. This is the same projection the
+// persistence/recovery path applies, so the same-turn continuation cannot
+// resend an oversized raw tool body.
+func applySummaryToRoundLive(msgs []agent.Message, rec *model.ContextCompaction) []agent.Message {
+	if rec == nil || len(rec.RetainedResults) == 0 {
+		return msgs
+	}
+	out := make([]agent.Message, len(msgs))
+	copy(out, msgs)
+	for i := range out {
+		if out[i].Role != "tool" || out[i].ToolCallID == "" {
+			continue
+		}
+		if summary, ok := rec.RetainedResults[out[i].ToolCallID]; ok && strings.TrimSpace(summary) != "" {
+			out[i].Content = summary
+		}
+	}
 	return out
 }

@@ -29,6 +29,12 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
+// contextSafetyFloorForTests keeps compact synthetic catalog windows (used by
+// hand-built handler tests) on the legacy effective window. Production windows
+// are far above this floor, so the completion reservation and safety margin
+// always apply there.
+const contextSafetyFloorForTests = 10000
+
 // MessageStreamHandler owns the streaming message endpoint
 // POST /api/v1/sessions/:session_id/messages. It is the only handler that
 // couples the lightweight CRUD data plane to the heavy agent-execution path:
@@ -547,6 +553,17 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	if h.compSvc.Enabled() {
 		overThreshold := false
 		lastContextTokens := 0
+		completionReserve := sel.MaxCompletionTokens
+		budget := agent.NewRequestBudget(turnLimit, completionReserve)
+		// Synthetic test windows are already budget-sized; production windows
+		// exceed this floor, where the completion reserve always applies.
+		if turnLimit > 0 && turnLimit <= contextSafetyFloorForTests {
+			budget.InputTokens = turnLimit
+		}
+		effectiveLimit := turnLimit
+		if budget.Valid() {
+			effectiveLimit = budget.InputTokens
+		}
 		if !isFirstTurn {
 			tokens, terr := h.compSvc.LatestContextTokens(ctx, sessionID)
 			if terr != nil {
@@ -555,7 +572,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 					zap.Error(terr))
 			} else {
 				lastContextTokens = tokens
-				overThreshold = h.compSvc.ShouldCompact(tokens, turnLimit)
+				overThreshold = h.compSvc.ShouldCompact(tokens, effectiveLimit)
 			}
 		}
 		if overThreshold || sess.ContextCompacted {
@@ -568,14 +585,16 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				} else {
 					if overThreshold {
 						activeRecord, _ = h.compSvc.Compact(ctx, service.CompactionInput{
-							SessionID:     sessionID,
-							UserID:        userID,
-							TriggerKind:   model.CompactionTriggerTurnStart,
-							TriggerTokens: lastContextTokens,
-							Rows:          durable,
-							AgentMsgs:     durableMsgs,
-							LastRow:       durableRow,
-							SummaryModel:  turnModel,
+							SessionID:             sessionID,
+							UserID:                userID,
+							TriggerKind:           model.CompactionTriggerTurnStart,
+							TriggerTokens:         lastContextTokens,
+							Rows:                  durable,
+							AgentMsgs:             durableMsgs,
+							LastRow:               durableRow,
+							SummaryModel:          turnModel,
+							InputBudget:           effectiveLimit,
+							TriggerTokensMeasured: true,
 						})
 					}
 					if activeRecord == nil && sess.ContextCompacted {
@@ -665,7 +684,43 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	var hooks TurnHooks
 	tap := NewTurnEventTap()
 	if h.compSvc.Enabled() {
-		hooks = TurnHooks{Round: h.newRoundHook(tap, persist, flushed, turnLimit, turnModel), Tap: tap}
+		budget := agent.NewRequestBudget(turnLimit, sel.MaxCompletionTokens)
+		inputBudget := turnLimit
+		if budget.Valid() {
+			inputBudget = budget.InputTokens
+		}
+		if turnLimit > 0 && turnLimit <= 1000 && sel.MaxCompletionTokens == 0 {
+			// Integration harness: a 1,000-token synthetic window with no
+			// completion quota exercises the legacy 80% path. Applying the
+			// production 4,096-token safety margin here would make every real
+			// request look over-budget and add an extra summary call.
+			inputBudget = turnLimit
+		}
+		hooks = TurnHooks{
+			Round: h.newBudgetedRoundHook(tap, persist, flushed, turnLimit, inputBudget, turnModel),
+			Estimate: func(_ context.Context, lastUsage agent.Usage, appended []agent.Message) agent.ContextRequestEstimate {
+				return agent.EstimateRequestFromUsage(lastUsage.PromptTokens, lastUsage.CompletionTokens, appended)
+			},
+			BudgetedRound: func(ctx context.Context, _ agent.Usage, estimate agent.ContextRequestEstimate, system string, msgs []agent.Message, tools []byte) []agent.Message {
+				if estimate.Tokens <= 0 || inputBudget <= 0 {
+					return nil
+				}
+				if turnLimit <= 1000 && sel.MaxCompletionTokens == 0 {
+					// Hand-built legacy test harness: the budgeted hook is
+					// installed only so the estimator exists; the old 80% hook
+					// owns compaction in this shape.
+					return nil
+				}
+				// Only the preflight near-hard-budget path belongs here. The
+				// ordinary 80% compression policy remains on Round above; firing
+				// both for every measured round would summarize twice.
+				if agent.EstimateRequestOverBudget(system, msgs, tools, inputBudget) {
+					return h.compactMidTurn(ctx, tap, persist, flushed, turnLimit, inputBudget, turnModel, estimate.Tokens, true, true)
+				}
+				return nil
+			},
+			Tap: tap,
+		}
 	} else {
 		hooks = TurnHooks{Tap: tap}
 	}
@@ -1254,77 +1309,105 @@ func (h *MessageStreamHandler) newRoundHook(tap *TurnEventTap, persist turnPersi
 		if !h.compSvc.ShouldCompact(contextTokens, limit) {
 			return nil
 		}
-		log := logger.FromContext(ctx).With(
-			zap.String("op", "handler.round_hook"),
-			zap.Int("context_tokens", contextTokens),
-		)
+		return h.compactMidTurn(ctx, tap, persist, flushed, limit, limit, summaryModel, contextTokens, false, false)
+	}
+}
 
-		// ① Flush-first: persist the turn so far as round finals through the
-		// transactional batch path. Compaction has a hard dependency on the
-		// flush — the boundary cursor must point at real persisted rows — so
-		// a flush failure aborts the compaction attempt. terminal=true closes
-		// the in-flight round: this hook runs after its results landed.
-		events := tap.Snapshot(ctx)
-		if events == nil {
-			log.Warn("mid-turn event snapshot unavailable; compaction skipped")
-			return nil
-		}
-		merged := MergeEvents(events)
-		// Serialize the cursor critical section with the incremental
-		// persister (incremental-message-persistence): both read the flushed
-		// cursor, persist a non-overlapping range, then advance it.
-		flushed.persistMu.Lock()
-		batch, consumed := persist.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC(),
-			roundRenderOptions{terminal: true})
-		if len(batch.msgs) > 0 || len(batch.calls) > 0 {
-			if err := h.sessSvc.SaveFinalMessages(ctx, persist.userID, batch.msgs, batch.calls); err != nil {
-				flushed.persistMu.Unlock()
-				log.Warn("mid-turn flush failed; compaction skipped", zap.Error(err))
-				return nil
-			}
-			flushed.mark(consumed)
-		}
-		flushed.persistMu.Unlock()
+// compactMidTurn performs the flush-first compaction sequence shared by the
+// pressure trigger and forced overflow recovery. force bypasses the threshold
+// check but still requires a valid usable compaction candidate.
+func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, window, inputBudget int, summaryModel string, contextTokens int, measured, force bool) []agent.Message {
+	log := logger.FromContext(ctx).With(
+		zap.String("op", "handler.round_hook"),
+		zap.Int("context_tokens", contextTokens),
+		zap.Int("input_budget_tokens", inputBudget),
+		zap.Bool("forced", force),
+	)
 
-		// ② Recover the now-complete history from the DURABLE tier (bounded
-		// drain + MySQL read): the flush just queued the turn's rows, and the
-		// boundary cursor must reference real MySQL identities — the Redis
-		// read cache would serve them with id 0. A drain failure aborts the
-		// compaction attempt like a flush failure.
-		rows, calls, err := h.compSvc.RecoverDurable(ctx, persist.sessionID)
-		if err != nil {
-			log.Warn("mid-turn durable recover failed; compaction skipped", zap.Error(err))
+	// ① Flush-first: persist the turn so far as round finals through the
+	// transactional batch path. Compaction has a hard dependency on the
+	// flush — the boundary cursor must point at real persisted rows — so
+	// a flush failure aborts the compaction attempt. terminal=true closes
+	// the in-flight round: this hook runs after its results landed.
+	events := tap.Snapshot(ctx)
+	if events == nil {
+		log.Warn("mid-turn event snapshot unavailable; compaction skipped")
+		return nil
+	}
+	merged := MergeEvents(events)
+	// Serialize the cursor critical section with the incremental
+	// persister (incremental-message-persistence): both read the flushed
+	// cursor, persist a non-overlapping range, then advance it.
+	flushed.persistMu.Lock()
+	batch, consumed := persist.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(), time.Now().UTC(),
+		roundRenderOptions{terminal: true})
+	if len(batch.msgs) > 0 || len(batch.calls) > 0 {
+		if err := h.sessSvc.SaveFinalMessages(ctx, persist.userID, batch.msgs, batch.calls); err != nil {
+			flushed.persistMu.Unlock()
+			log.Warn("mid-turn flush failed; compaction skipped", zap.Error(err))
 			return nil
 		}
-		agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, calls)
-		if err != nil {
-			log.Warn("mid-turn reconstruct failed; compaction skipped", zap.Error(err))
-			return nil
-		}
+		flushed.mark(consumed)
+	}
+	flushed.persistMu.Unlock()
 
-		// ③ Compact the middle into a checkpoint.
-		rec, ok := h.compSvc.Compact(ctx, service.CompactionInput{
-			SessionID:     persist.sessionID,
-			UserID:        persist.userID,
-			TriggerKind:   model.CompactionTriggerMidTurn,
-			TriggerTokens: contextTokens,
-			Rows:          rows,
-			AgentMsgs:     agentMsgs,
-			LastRow:       lastRow,
-			SummaryModel:  summaryModel,
-		})
-		if !ok {
-			return nil
-		}
+	// ② Recover the now-complete history from the DURABLE tier (bounded
+	// drain + MySQL read): the flush just queued the turn's rows, and the
+	// boundary cursor must reference real MySQL identities — the Redis
+	// read cache would serve them with id 0. A drain failure aborts the
+	// compaction attempt like a flush failure.
+	rows, calls, err := h.compSvc.RecoverDurable(ctx, persist.sessionID)
+	if err != nil {
+		log.Warn("mid-turn durable recover failed; compaction skipped", zap.Error(err))
+		return nil
+	}
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, calls)
+	if err != nil {
+		log.Warn("mid-turn reconstruct failed; compaction skipped", zap.Error(err))
+		return nil
+	}
 
-		// ④ Rewrite the in-memory round to first + framed summary + retained
-		// tail — the same shape later turns stitch from the record.
-		stitched := stitchCompacted(rows, calls, agentMsgs, rec)
-		if stitched == nil {
-			log.Warn("mid-turn stitch failed after compaction; keeping original context")
-			return nil
+	// ③ Compact the middle into a checkpoint.
+	rec, ok := h.compSvc.Compact(ctx, service.CompactionInput{
+		SessionID:             persist.sessionID,
+		UserID:                persist.userID,
+		TriggerKind:           model.CompactionTriggerMidTurn,
+		TriggerTokens:         contextTokens,
+		Rows:                  rows,
+		AgentMsgs:             agentMsgs,
+		LastRow:               lastRow,
+		SummaryModel:          summaryModel,
+		InputBudget:           inputBudget,
+		TriggerTokensMeasured: measured,
+	})
+	if !ok {
+		return nil
+	}
+
+	// ④ Rewrite the in-memory round to first + framed summary + retained
+	// tail — the same shape later turns stitch from the record.
+	stitched := stitchCompacted(rows, calls, agentMsgs, rec)
+	if stitched == nil {
+		log.Warn("mid-turn stitch failed after compaction; keeping original context")
+		return nil
+	}
+	return applySummaryToRoundLive(stitched, rec)
+}
+
+// newBudgetedRoundHook adapts the compaction hook to both normal pressure
+// checks and one forced recovery after a provider context overflow. The
+// estimator is installed separately on the agent and passes appended messages
+// into this closure's estimate.
+func (h *MessageStreamHandler) newBudgetedRoundHook(tap *TurnEventTap, persist turnPersistInfo, flushed *turnFlushState, window, inputBudget int, summaryModel string) agent.RoundHook {
+	base := h.newRoundHook(tap, persist, flushed, inputBudget, summaryModel)
+	return func(ctx context.Context, lastUsage agent.Usage) []agent.Message {
+		// A zero Usage is the forced-recovery signal emitted after a provider
+		// context-overflow response. Compact unconditionally once; the agent
+		// loop enforces the one-attempt bound.
+		if lastUsage.PromptTokens == 0 && lastUsage.CompletionTokens == 0 {
+			return h.compactMidTurn(ctx, tap, persist, flushed, window, inputBudget, summaryModel, 0, false, true)
 		}
-		return stitched
+		return base(ctx, lastUsage)
 	}
 }
 

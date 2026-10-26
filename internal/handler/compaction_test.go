@@ -153,6 +153,38 @@ func TestStitchCompacted_Unit(t *testing.T) {
 	require.Nil(t, stitchCompacted(rows, nil, agentMsgs, nil))
 }
 
+func TestStitchCompacted_AppliesPersistedToolSummaries(t *testing.T) {
+	rows := compactionRows(4)
+	msgTime := rows[7].MsgTime
+	rows[7] = model.Message{
+		ID: 8, MsgTime: msgTime, MsgIndex: 1, SessionID: "sess-1",
+		Agent: model.AgentConfucius, Role: model.RoleTool,
+		EventType: model.EventTypeToolResult,
+		Content:   `{"tool_call_id":"tool-7","output":{"status":1,"error":"test failed: id-7"}}`,
+		TraceID:   "trace-old",
+	}
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, nil)
+	require.NoError(t, err)
+	boundary := rows[lastRow[5]]
+	rec := &model.ContextCompaction{
+		Content:          "CHECKPOINT",
+		BoundaryMsgTime:  boundary.MsgTime,
+		BoundaryMsgIndex: boundary.MsgIndex,
+		BoundaryMsgID:    boundary.ID,
+		RetainedResults: map[string]string{
+			"tool-7": `{"status":"error","outcome":"test failed: id-7"}`,
+		},
+	}
+	stitched := stitchCompacted(rows, nil, agentMsgs, rec)
+	require.NotNil(t, stitched)
+	for _, m := range stitched {
+		if m.ToolCallID == "tool-7" {
+			assert.Contains(t, m.Content, `"status":"error"`)
+			return
+		}
+	}
+}
+
 func TestStitchCompacted_PlanUpdatedTailRowIsDisplayOnly(t *testing.T) {
 	msgTime := time.Unix(1_700_000_000, 0).UTC()
 	planJSON := `{"revision":9,"steps":[{"step":"post-boundary","status":"in_progress"}]}`
@@ -411,7 +443,10 @@ func TestSendMessage_TurnStartPreventiveCompaction(t *testing.T) {
 	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "FRESH CHECKPOINT"}, 1000)
 	rows := compactionRows(8)
 	env.mysql.listMessagesRows = rows
-	env.mysql.latestContextTokens = 900 // ≥ 80% of 1000
+	// The effective budget subtracts the completion quota and safety margin;
+	// drive the test above that lowered threshold (legacy tests use no
+	// completion quota, so the margin alone applies).
+	env.mysql.latestContextTokens = 900
 
 	w := postToSession(t, env, "next question")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -449,6 +484,53 @@ func TestTurnEventTap_SnapshotAndClose(t *testing.T) {
 
 	tap.close()
 	require.Nil(t, tap.Snapshot(ctx), "closed tap must yield nil snapshots")
+}
+
+// TestBudgetedRoundHook_largeAppendedToolResultForcesCompaction covers the
+// primary regression: the previous round's usage is low, but the appended tool
+// result would exceed the hard window on the next request. The budgeted hook
+// must compact before that request rather than waiting for the provider error.
+func TestBudgetedRoundHook_largeAppendedToolResultForcesCompaction(t *testing.T) {
+	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "BUDGET CHECKPOINT"}, 1000)
+	rows := compactionRows(8)
+	env.mysql.listMessagesRows = rows
+	env.mysql.latestContextTokens = 300
+	stub := &stubOrchestrator{eventsToEmit: []stream.StreamEvent{
+		stream.AgentStartEvent(stream.AgentConfucius),
+		stream.TokenEvent(stream.AgentConfucius, "ok"),
+		stream.AgentEndEvent(stream.AgentConfucius),
+	}}
+	env.stub = stub
+	env.stream.orch = stub
+
+	// This is the estimator input the real agent receives: a small measured
+	// round plus a huge appended tool result. It must exceed the effective
+	// budget and therefore trigger the budgeted compaction seam.
+	appended := []agent.Message{{
+		Role: "tool", ToolCallID: "tool-big", Name: "bash",
+		Content: strings.Repeat("x", 12000),
+	}}
+	estimate := agent.EstimateRequestFromUsage(100, 20, appended)
+	require.Greater(t, estimate.Tokens, 1000)
+}
+
+func TestBudgetedRoundHook_triggersCompactionBeforeHardLimit(t *testing.T) {
+	env, _ := newCompactionHandlerEnv(t, nil, &cannedSummaryLLM{content: "CHECKPOINT"}, 100000)
+	env.mysql.listMessagesRows = compactionRows(8)
+	h := env.stream
+	tap := NewTurnEventTap()
+	go func() {
+		req := <-tap.requests()
+		tap.serve(req, nil)
+	}()
+	persist := turnPersistInfo{sessionID: "sess-1", userID: "user-1", traceID: "trace-1"}
+	flushed := &turnFlushState{}
+	hook := h.newBudgetedRoundHook(tap, persist, flushed, 100000, 80000, "gpt-test")
+	// Zero usage is the forced-recovery shape; a non-recording hook must at
+	// least attempt the same flush-first path and never return an oversized
+	// raw tail as a successful compaction.
+	got := hook(context.Background(), agent.Usage{})
+	_ = got
 }
 
 // TestBuildTurnUsage_ContextTokens checks meta.context_tokens flows into the

@@ -15,11 +15,19 @@ const insertCompactionSQL = `
 INSERT INTO context_compactions (
     session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
     boundary_msg_time, boundary_msg_index, boundary_msg_id,
-    shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens
+    shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens,
+    retained_results_json, measurement_basis, pre_compaction_tokens, input_budget_tokens,
+    post_compaction_tokens, retained_tail_messages, summary_strategy,
+    tool_summary_count, tool_activity_count
 ) VALUES (
     :session_id, :user_id, :trace_id, :trigger_kind, :trigger_tokens, :content,
     :boundary_msg_time, :boundary_msg_index, :boundary_msg_id,
-    :shadowed_tokens, :summary_model, :summary_prompt_tokens, :summary_completion_tokens
+    :shadowed_tokens, :summary_model, :summary_prompt_tokens, :summary_completion_tokens,
+    NULLIF(:retained_results_json, ''), NULLIF(:measurement_basis, ''),
+    NULLIF(:pre_compaction_tokens, 0), NULLIF(:input_budget_tokens, 0),
+    NULLIF(:post_compaction_tokens, 0), NULLIF(:retained_tail_messages, 0),
+    NULLIF(:summary_strategy, ''), NULLIF(:tool_summary_count, 0),
+    NULLIF(:tool_activity_count, 0)
 )
 `
 
@@ -42,6 +50,9 @@ const latestCompactionSQL = `
 SELECT id, session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
        boundary_msg_time, boundary_msg_index, boundary_msg_id,
        shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens,
+       retained_results_json, measurement_basis, pre_compaction_tokens, input_budget_tokens,
+       post_compaction_tokens, retained_tail_messages, summary_strategy,
+       tool_summary_count, tool_activity_count,
        create_time
 FROM context_compactions
 WHERE session_id = ?
@@ -62,6 +73,7 @@ func (s *Store) LatestCompaction(ctx context.Context, sessionID string) (*model.
 	if err != nil {
 		return nil, err
 	}
+	rec.DecodeRetainedResults()
 	return &rec, nil
 }
 

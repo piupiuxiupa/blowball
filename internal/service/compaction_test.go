@@ -10,6 +10,7 @@ import (
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/model"
+	"github.com/stretchr/testify/assert"
 )
 
 // compactionFixture builds a synthetic persisted conversation of n agent
@@ -217,7 +218,10 @@ func TestCompactionService_Compact_EmptyMiddleSkips(t *testing.T) {
 
 	// Exactly first + 5 tail messages: nothing compressible.
 	rows, msgs, lastRow := compactionFixture(6)
-	if _, ok := svc.Compact(context.Background(), compactionInput(rows, msgs, lastRow)); ok {
+	// First + five tail on a production-sized request budget.
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 100000
+	if _, ok := svc.Compact(context.Background(), in); ok {
 		t.Fatal("Compact compacted a first+tail-only conversation")
 	}
 	if len(m.compactions) != 0 || llm.gotCall {
@@ -416,4 +420,58 @@ func TestCompactionService_RenderAgentTranscript(t *testing.T) {
 			t.Errorf("transcript missing %q:\n%s", want, got)
 		}
 	}
+}
+
+func TestPlanCompactionTail_budgetKeepsWholeToolUnit(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "user", Content: "old question"},
+		{Role: "assistant", Content: "old answer"},
+		{Role: "assistant", Content: "running", ToolCalls: []agent.ToolCall{{ID: "c1", Function: agent.ToolCallFunction{Name: "bash"}}}},
+		{Role: "tool", ToolCallID: "c1", Name: "bash", Content: strings.Repeat("x", 10000)},
+		{Role: "assistant", Content: "recent prose", ReasoningContent: "recent reasoning"},
+	}
+	plan := planCompactionTail(msgs, 1, 2, 400)
+	assert.Greater(t, plan.TailStart, 1)
+	assert.NotEqual(t, "tool", msgs[plan.TailStart].Role, "planner must never leave an orphan tool result")
+	assert.Equal(t, "token_budgeted", plan.Strategy)
+}
+
+func TestCompactRecordsBudgetObservations(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(16)
+	m := &fakeMySQLStore{}
+	svc := newCompactionTestService(m, &fakeRedisStore{}, &fakeLLMClient{resp: agent.LLMResponse{Content: "summary", Usage: agent.Usage{PromptTokens: 80, CompletionTokens: 20}}}, 100000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 32000
+	in.TriggerTokens = 28000
+	in.TriggerTokensMeasured = true
+	rec, ok := svc.Compact(context.Background(), in)
+	if !ok {
+		t.Fatal("expected successful compaction")
+	}
+	assert.Equal(t, "provider_observed", rec.MeasurementBasis)
+	assert.Equal(t, 28000, rec.PreCompactionTokens)
+	assert.Equal(t, 32000, rec.InputBudgetTokens)
+	assert.Greater(t, rec.PostCompactionTokens, 0)
+	assert.Greater(t, rec.RetainedTailMessages, 0)
+}
+
+func TestCompactionService_ChunkedSummaryWhenInputWouldOverflow(t *testing.T) {
+	rows, msgs, lastRow := compactionFixture(30)
+	// Make the shadowed span large enough that a one-shot summary request
+	// would cross a small production-shaped input budget.
+	for i := range msgs {
+		msgs[i].Content = strings.Repeat("x", 3000)
+	}
+	m := &fakeMySQLStore{}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "chunk summary", Usage: agent.Usage{PromptTokens: 100, CompletionTokens: 20}}}
+	svc := newCompactionTestService(m, &fakeRedisStore{}, llm, 100000)
+	in := compactionInput(rows, msgs, lastRow)
+	in.InputBudget = 8000
+	rec, ok := svc.Compact(context.Background(), in)
+	if !ok {
+		t.Fatal("chunked summary should complete")
+	}
+	assert.Equal(t, "chunked", rec.SummaryStrategy)
+	assert.Greater(t, rec.SummaryPromptTokens, 0)
 }
