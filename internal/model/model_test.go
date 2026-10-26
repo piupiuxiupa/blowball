@@ -42,7 +42,8 @@ var expectedDBTags = map[string][]string{
 		"retained_results_json", "-",
 		"measurement_basis", "pre_compaction_tokens", "input_budget_tokens",
 		"post_compaction_tokens", "retained_tail_messages", "summary_strategy",
-		"tool_summary_count", "tool_activity_count", "create_time",
+		"tool_summary_count", "tool_activity_count", "tool_activity_json",
+		"create_time",
 	},
 }
 

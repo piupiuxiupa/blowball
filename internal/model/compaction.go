@@ -60,6 +60,7 @@ type ContextCompaction struct {
 	SummaryStrategy      string            `db:"summary_strategy" json:"summary_strategy,omitempty"`
 	ToolSummaryCount     int               `db:"tool_summary_count" json:"tool_summary_count,omitempty"`
 	ToolActivityCount    int               `db:"tool_activity_count" json:"tool_activity_count,omitempty"`
+	ToolActivityJSON     []byte            `db:"tool_activity_json" json:"tool_activity_json,omitempty"`
 	CreateTime           time.Time         `db:"create_time"                json:"create_time"`
 }
 

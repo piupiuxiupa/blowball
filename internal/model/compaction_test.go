@@ -1,10 +1,28 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestContextCompaction_ToolActivityJSONSurvivesCacheRoundTrip(t *testing.T) {
+	want := []byte(`[{"tool_name":"grep","calls":2,"success":2,"errors":0}]`)
+	rec := ContextCompaction{ToolActivityJSON: want}
+
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ContextCompaction
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got.ToolActivityJSON) != string(want) {
+		t.Fatalf("ToolActivityJSON = %q, want %q", got.ToolActivityJSON, want)
+	}
+}
 
 func TestContextCompactionDecodeRetainedResults(t *testing.T) {
 	rec := ContextCompaction{

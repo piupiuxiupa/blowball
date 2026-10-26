@@ -20,7 +20,7 @@ INSERT INTO context_compactions (
     shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens,
     retained_results_json, measurement_basis, pre_compaction_tokens, input_budget_tokens,
     post_compaction_tokens, retained_tail_messages, summary_strategy,
-    tool_summary_count, tool_activity_count
+    tool_summary_count, tool_activity_count, tool_activity_json
 ) VALUES (
     :session_id, :user_id, :trace_id, :trigger_kind, :trigger_tokens, :content,
     :boundary_msg_time, :boundary_msg_index, :boundary_msg_id,
@@ -30,7 +30,7 @@ INSERT INTO context_compactions (
     NULLIF(:pre_compaction_tokens, 0), NULLIF(:input_budget_tokens, 0),
     NULLIF(:post_compaction_tokens, 0), NULLIF(:retained_tail_messages, 0),
     NULLIF(:summary_strategy, ''), NULLIF(:tool_summary_count, 0),
-    NULLIF(:tool_activity_count, 0)
+    NULLIF(:tool_activity_count, 0), NULLIF(:tool_activity_json, '')
 )
 `
 
@@ -56,7 +56,7 @@ SELECT id, session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
        shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens,
        retained_results_json, measurement_basis, pre_compaction_tokens, input_budget_tokens,
        post_compaction_tokens, retained_tail_messages, summary_strategy,
-       tool_summary_count, tool_activity_count,
+       tool_summary_count, tool_activity_count, tool_activity_json,
        create_time
 FROM context_compactions
 WHERE session_id = ?
@@ -94,6 +94,7 @@ type compactionRecordRow struct {
 	SummaryStrategy         sql.NullString `db:"summary_strategy"`
 	ToolSummaryCount        sql.NullInt64  `db:"tool_summary_count"`
 	ToolActivityCount       sql.NullInt64  `db:"tool_activity_count"`
+	ToolActivityJSON        []byte         `db:"tool_activity_json"`
 	CreateTime              time.Time      `db:"create_time"`
 }
 
@@ -124,6 +125,7 @@ func (r compactionRecordRow) model() model.ContextCompaction {
 		SummaryStrategy:         r.SummaryStrategy.String,
 		ToolSummaryCount:        int(r.ToolSummaryCount.Int64),
 		ToolActivityCount:       int(r.ToolActivityCount.Int64),
+		ToolActivityJSON:        r.ToolActivityJSON,
 		CreateTime:              r.CreateTime,
 	}
 }

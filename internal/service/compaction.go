@@ -52,6 +52,7 @@ Rules:
 - Preserve exact file paths, commands, URLs, error strings, identifiers, function signatures, and numeric values VERBATIM; never paraphrase or truncate them.
 - Keep concrete code snippets and file references that will be needed again; drop finished exploratory detours and small talk.
 - When a PRIOR CHECKPOINT is supplied, MERGE it with the new span into one consolidated checkpoint. Do not stack, do not append section duplicates, and do not drop still-relevant prior facts.
+- Do NOT emit a Tool Activity section; that ledger is merged deterministically outside your response.
 - Output only the checkpoint body, no preamble and no closing remarks.`
 
 // CompactionService owns the context-compaction lifecycle (context-compaction
@@ -262,6 +263,7 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	// failure degrades to "no prior" (the summary then re-covers the whole
 	// middle — a safe superset, never a broken state).
 	prior := s.LatestCompactionRecord(ctx, in.SessionID)
+	priorActivity, summaryPrior := priorToolActivity(prior)
 
 	scopeStart := 1
 	if prior != nil {
@@ -335,17 +337,20 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	middle := agent.StripImages(in.AgentMsgs[scopeStart:tailStart])
 	shadowedCount := len(middle)
 	boundaryRow := in.Rows[in.LastRow[tailStart-1]]
-	content, usage, strategy, ok := s.summarize(ctx, log, prior, middle, summaryModel, in.InputBudget)
+	newActivity := buildScopeToolActivity(middle)
+	content, usage, strategy, ok := s.summarize(ctx, log, summaryPrior, middle, summaryModel, in.InputBudget)
 	if !ok {
 		return nil, false
 	}
-	retained, activityCount := summarizeRetainedToolResults(in.AgentMsgs, tailStart,
+	content, _ = ExtractToolActivity(content)
+	activity := MergeToolActivity(priorActivity, newActivity)
+	if renderedActivity := RenderToolActivityLedger(activity); renderedActivity != "" {
+		content += "\n\n## Tool Activity\n" + renderedActivity
+	}
+	retained, toolSummaryCount := summarizeRetainedToolResults(in.AgentMsgs, tailStart,
 		func(call agent.ToolCall, full string) (string, string) {
 			return s.spillRetainedToolResult(ctx, in.UserID, in.SessionID, call, full)
 		})
-	if activity := renderScopeToolActivity(middle); activity != "" {
-		content += "\n\n## Tool Activity\n" + activity
-	}
 	projected := buildCompactedProjection(anchor, in.AgentMsgs, tailStart, content, retained)
 	projected = agent.ApplyLiveOverlay(in.AgentMsgs, projected, in.LiveMessages)
 	postTokens := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", projected, nil).Tokens
@@ -357,6 +362,7 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 	}
 
 	retainedJSON, _ := json.Marshal(retained)
+	activityJSON := MarshalToolActivity(activity)
 	rec := model.ContextCompaction{
 		SessionID:        in.SessionID,
 		UserID:           in.UserID,
@@ -383,8 +389,9 @@ func (s *CompactionService) Compact(ctx context.Context, in CompactionInput) (*m
 		PostCompactionTokens:    postTokens,
 		RetainedTailMessages:    len(in.AgentMsgs) - tailStart,
 		SummaryStrategy:         strategy,
-		ToolSummaryCount:        len(retained),
-		ToolActivityCount:       activityCount,
+		ToolSummaryCount:        toolSummaryCount,
+		ToolActivityCount:       TotalToolActivityCalls(activity),
+		ToolActivityJSON:        activityJSON,
 	}
 	rec.RetainedResults = retained
 	rec.DecodeRetainedResults()
@@ -806,7 +813,7 @@ func summarizeRetainedToolResults(
 	return results, len(results)
 }
 
-func renderScopeToolActivity(msgs []agent.Message) string {
+func buildScopeToolActivity(msgs []agent.Message) []ToolActivity {
 	var calls []agent.ToolCall
 	results := map[string]string{}
 	for i := range msgs {
@@ -820,9 +827,9 @@ func renderScopeToolActivity(msgs []agent.Message) string {
 		}
 	}
 	if len(calls) == 0 {
-		return ""
+		return nil
 	}
-	return RenderToolActivity(calls, results)
+	return BuildToolActivity(calls, results)
 }
 
 func indexToolCalls(msgs []agent.Message) map[string]agent.ToolCall {
@@ -981,7 +988,7 @@ func chooseTailForReservedBudget(in CompactionInput, anchor agent.Message, scope
 				return toolResultSpillRelPath(in.SessionID, call), ""
 			})
 		content := reservedSummary
-		if activity := renderScopeToolActivity(in.AgentMsgs[scopeStart:start]); activity != "" {
+		if activity := RenderToolActivityLedger(buildScopeToolActivity(in.AgentMsgs[scopeStart:start])); activity != "" {
 			content += "\n\n## Tool Activity\n" + activity
 		}
 		projected := buildCompactedProjection(anchor, in.AgentMsgs, start, content, retained)
@@ -1003,4 +1010,21 @@ func measurementBasis(measured bool) string {
 		return "provider_observed"
 	}
 	return "estimated"
+}
+
+// priorToolActivity returns the structured ledger when available and strips
+// legacy text activity sections from the checkpoint body. Legacy records
+// without structured JSON recover their ledger from the deterministic section.
+func priorToolActivity(prior *model.ContextCompaction) ([]ToolActivity, *model.ContextCompaction) {
+	if prior == nil {
+		return nil, nil
+	}
+	cleanContent, legacyActivity := ExtractToolActivity(prior.Content)
+	activity := DecodeToolActivity(prior.ToolActivityJSON)
+	if len(activity) == 0 {
+		activity = legacyActivity
+	}
+	clone := *prior
+	clone.Content = cleanContent
+	return activity, &clone
 }

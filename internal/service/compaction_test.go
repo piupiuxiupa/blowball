@@ -275,6 +275,60 @@ func TestCompactionService_Compact_RecompactionMergesPrior(t *testing.T) {
 	}
 }
 
+func TestCompactionService_RecompactionMergesStructuredToolActivity(t *testing.T) {
+	m := &fakeMySQLStore{}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "merged checkpoint"}}
+	svc := newCompactionTestService(m, &fakeRedisStore{}, llm, 1000)
+
+	rows, msgs, lastRow := compactionFixture(20)
+	msgs[8] = agent.Message{
+		Role: "assistant",
+		ToolCalls: []agent.ToolCall{{
+			ID:       "call-new",
+			Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"true"}`},
+		}},
+	}
+	msgs[9] = agent.Message{
+		Role:       "tool",
+		ToolCallID: "call-new",
+		Name:       "bash",
+		Content:    `{"status":0,"result":{"exit_code":0}}`,
+	}
+	priorActivity, err := json.Marshal([]ToolActivity{{
+		ToolName: "grep",
+		Calls:    2,
+		Success:  1,
+		Errors:   1,
+		Examples: []string{"old"},
+	}})
+	require.NoError(t, err)
+	m.compactions = append(m.compactions, model.ContextCompaction{
+		ID:               1,
+		SessionID:        "sess-comp",
+		Content:          "PRIOR SUMMARY\n\n## Tool Activity\n- stale: 1 calls, 1 succeeded, 0 failed",
+		BoundaryMsgTime:  rows[7].MsgTime,
+		BoundaryMsgIndex: rows[7].MsgIndex,
+		BoundaryMsgID:    rows[7].ID,
+		ToolActivityJSON: priorActivity,
+	})
+
+	rec, ok := svc.Compact(context.Background(), compactionInput(rows, msgs, lastRow))
+	require.True(t, ok)
+
+	assert.Equal(t, 3, rec.ToolActivityCount, "counts include prior and newly shadowed calls")
+	assert.Equal(t, 0, rec.ToolSummaryCount, "retained-tail summaries are counted separately")
+	activity := DecodeToolActivity(rec.ToolActivityJSON)
+	require.Len(t, activity, 2)
+	assert.Equal(t, "grep", activity[0].ToolName)
+	assert.Equal(t, 2, activity[0].Calls)
+	assert.Equal(t, "bash", activity[1].ToolName)
+	assert.Equal(t, 1, activity[1].Calls)
+	assert.Equal(t, 1, strings.Count(rec.Content, "## Tool Activity"),
+		"re-compaction must keep exactly one merged activity section")
+	assert.NotContains(t, llm.lastReq.Messages[1].Content, "## Tool Activity",
+		"the model receives the cleaned prior body, not a duplicate legacy ledger")
+}
+
 func TestCompactionService_Compact_SummaryFailureDegrades(t *testing.T) {
 	for name, llm := range map[string]*fakeLLMClient{
 		"llm error":  {err: errors.New("gateway 500")},
