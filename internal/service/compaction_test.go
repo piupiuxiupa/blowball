@@ -453,6 +453,62 @@ func TestPlanCompactionTail_budgetKeepsWholeToolUnit(t *testing.T) {
 	assert.Equal(t, "token_budgeted", plan.Strategy)
 }
 
+func TestPlanCompactionTail_boundaryInsideParallelToolResults(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "user", Content: "old question"},
+		{Role: "assistant", Content: "old answer"},
+		{Role: "assistant", Content: "running", ToolCalls: []agent.ToolCall{
+			{ID: "c1", Function: agent.ToolCallFunction{Name: "bash"}},
+			{ID: "c2", Function: agent.ToolCallFunction{Name: "bash"}},
+			{ID: "c3", Function: agent.ToolCallFunction{Name: "bash"}},
+		}},
+		{Role: "tool", ToolCallID: "c1", Name: "bash", Content: "first"},
+		{Role: "tool", ToolCallID: "c2", Name: "bash", Content: "second"},
+		{Role: "tool", ToolCallID: "c3", Name: "bash", Content: "third"},
+		{Role: "assistant", Content: "recent prose"},
+	}
+
+	// With three retained messages, the initial boundary is index 5 — the
+	// middle of the c1/c2/c3 result run rather than a valid tool-unit edge.
+	for _, inputBudget := range []int{0, 4000} {
+		plan := planCompactionTail(msgs, 1, 3, inputBudget)
+		assert.LessOrEqual(t, plan.TailStart, 3,
+			"the tail must start at or before the assistant tool-call unit")
+		assert.NotEqual(t, "tool", msgs[plan.TailStart].Role,
+			"the planner must never retain a partial parallel result run")
+	}
+}
+
+func TestPlanCompactionTail_firstPostBoundaryToolUnitMovesIntoMiddle(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "anchor"},
+		{Role: "user", Content: "old question"},
+		{Role: "assistant", Content: "old answer"},
+		{Role: "assistant", Content: "running", ToolCalls: []agent.ToolCall{
+			{ID: "c1", Function: agent.ToolCallFunction{Name: "bash"}},
+			{ID: "c2", Function: agent.ToolCallFunction{Name: "bash"}},
+			{ID: "c3", Function: agent.ToolCallFunction{Name: "bash"}},
+		}},
+		{Role: "tool", ToolCallID: "c1", Name: "bash", Content: "first"},
+		{Role: "tool", ToolCallID: "c2", Name: "bash", Content: "second"},
+		{Role: "tool", ToolCallID: "c3", Name: "bash", Content: "third"},
+		{Role: "assistant", Content: "recent prose"},
+	}
+	const scopeStart = 3
+
+	for _, inputBudget := range []int{0, 4000} {
+		plan := planCompactionTail(msgs, scopeStart, 5, inputBudget)
+		assert.Greater(t, plan.TailStart, scopeStart,
+			"the planner must move the complete first post-boundary unit into the middle")
+		assert.GreaterOrEqual(t, plan.TailStart, 7,
+			"all three parallel tool results must precede the new tail")
+		if plan.TailStart < len(msgs) {
+			assert.NotEqual(t, "tool", msgs[plan.TailStart].Role)
+		}
+	}
+}
+
 func TestCompactRecordsBudgetObservations(t *testing.T) {
 	rows, msgs, lastRow := compactionFixture(16)
 	m := &fakeMySQLStore{}

@@ -676,9 +676,7 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 			// A first+tail-only conversation has nothing to shadow.
 			start = len(msgs)
 		}
-		for start > scopeStart && start < len(msgs) && msgs[start].Role == "tool" {
-			start--
-		}
+		start = alignTailToUnitStart(msgs, scopeStart, start)
 		return compactionTailPlan{TailStart: start, Strategy: "legacy_message_count"}
 	}
 	// Reserve a small fraction for the checkpoint and fixed prompt framing.
@@ -694,7 +692,6 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 		// budget planner is enforced for production-sized budgets.
 		budget = 0
 	}
-	start := len(msgs)
 	// The legacy tail is a MINIMUM retention window for real compaction:
 	// never summarize messages that would have remained under the old
 	// five-message policy. The budget may retain more, not fewer.
@@ -712,8 +709,8 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 			return compactionTailPlan{TailStart: scopeStart, Strategy: "token_budgeted", Reason: "no_compressible_middle"}
 		}
 	}
+	start := alignTailToUnitStart(msgs, scopeStart, legacyStart)
 	used := 0
-	start = legacyStart
 	for i := start; i < len(msgs); i++ {
 		used += estimateRetainedUnit(msgs[i : i+1])
 	}
@@ -741,15 +738,25 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 	}
 	if start == scopeStart && start < len(msgs) {
 		// Always keep at least one compressible middle unit; the anchor is
-		// scopeStart-1 by construction, so this cannot swallow it.
-		start = scopeStart + 1
+		// scopeStart-1 by construction, so this cannot swallow it. Move
+		// forward over the complete first unit rather than selecting
+		// scopeStart+1 and then backing up into scopeStart when that message
+		// belongs to a parallel tool-result run.
+		start = advanceTailStart(msgs, scopeStart)
 	}
-	// Never retain an orphan tool result: if we stopped in the middle of a
-	// result run, back up to that assistant call message.
+	start = alignTailToUnitStart(msgs, scopeStart, start)
+	return compactionTailPlan{TailStart: start, Strategy: "token_budgeted", Reason: "request_budget"}
+}
+
+// alignTailToUnitStart moves a boundary inside a tool-result run back to the
+// assistant tool-call message that owns the complete run. The retained tail
+// may then be larger than the nominal count/budget, which is preferable to
+// splitting a tool unit or allowing unit traversal to cross the boundary.
+func alignTailToUnitStart(msgs []agent.Message, scopeStart, start int) int {
 	for start > scopeStart && start < len(msgs) && msgs[start].Role == "tool" {
 		start--
 	}
-	return compactionTailPlan{TailStart: start, Strategy: "token_budgeted", Reason: "request_budget"}
+	return start
 }
 
 func estimateRetainedUnit(unit []agent.Message) int {
