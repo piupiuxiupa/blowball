@@ -11,6 +11,7 @@ import (
 
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/tool/xizhi"
 	"go.uber.org/zap"
 )
 
@@ -47,19 +48,51 @@ func (s *CompactionService) spillRetainedToolResult(
 		return "", "full result remains in persisted tool_calls; workspace path unavailable"
 	}
 	relPath := toolResultSpillRelPath(sessionID, call)
-	absPath := filepath.Join(workspace, filepath.FromSlash(relPath))
-	relCheck, err := filepath.Rel(workspace, absPath)
-	if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(os.PathSeparator)) {
-		return "", "full result remains in persisted tool_calls; spill path escaped workspace"
+	if _, err := xizhi.ValidatePath(workspace, relPath); err != nil {
+		logger.FromContext(ctx).Warn("tool result spill path rejected",
+			zap.String("session_id", sessionID),
+			zap.String("path", relPath),
+			zap.Error(err))
+		return "", "full result remains in persisted tool_calls; workspace spill path rejected"
 	}
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		logger.FromContext(ctx).Warn("tool result spill root open failed",
+			zap.String("session_id", sessionID),
+			zap.Error(err))
+		return "", "full result remains in persisted tool_calls; workspace spill unavailable"
+	}
+	defer root.Close()
+	rootRelPath := filepath.FromSlash(relPath)
+	if err := root.MkdirAll(filepath.Dir(rootRelPath), 0o755); err != nil {
 		logger.FromContext(ctx).Warn("tool result spill mkdir failed",
 			zap.String("session_id", sessionID),
 			zap.String("path", relPath),
 			zap.Error(err))
 		return "", "full result remains in persisted tool_calls; workspace spill failed"
 	}
-	if err := os.WriteFile(absPath, []byte(full), 0o644); err != nil {
+	// Revalidate after directory creation to close the validation-to-create
+	// window. OpenRoot then confines every remaining lookup to this workspace
+	// even if a symlink is swapped concurrently.
+	if _, err := xizhi.ValidatePath(workspace, relPath); err != nil {
+		logger.FromContext(ctx).Warn("tool result spill path rejected after mkdir",
+			zap.String("session_id", sessionID),
+			zap.String("path", relPath),
+			zap.Error(err))
+		return "", "full result remains in persisted tool_calls; workspace spill path rejected"
+	}
+	if info, err := root.Lstat(rootRelPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", "full result remains in persisted tool_calls; workspace spill path is a symlink"
+		}
+	} else if !os.IsNotExist(err) {
+		logger.FromContext(ctx).Warn("tool result spill stat failed",
+			zap.String("session_id", sessionID),
+			zap.String("path", relPath),
+			zap.Error(err))
+		return "", "full result remains in persisted tool_calls; workspace spill failed"
+	}
+	if err := root.WriteFile(rootRelPath, []byte(full), 0o644); err != nil {
 		logger.FromContext(ctx).Warn("tool result spill write failed",
 			zap.String("session_id", sessionID),
 			zap.String("path", relPath),
