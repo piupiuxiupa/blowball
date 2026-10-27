@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -234,6 +233,42 @@ func TestInsertStagedAttachment_ConcurrentQuota(t *testing.T) {
 	assert.Equal(t, 20, staged)
 }
 
+func TestRestoreStagedAttachment_RecoveryIsNeverQuotaRejected(t *testing.T) {
+	store, cleanup := setupAttachmentStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	const userID = "u-restore-full"
+
+	for i := 0; i < model.MaxStagedAttachmentsPerUser; i++ {
+		require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
+			ID: fmt.Sprintf("restore-full-%02d", i), UserID: userID,
+			Filename: "staged.png", MIME: "image/png", Size: 1,
+		}))
+	}
+	recovery := model.Attachment{
+		ID: "restore-full-retry", UserID: userID, Filename: "retry.png", MIME: "image/png",
+		Size: 1, CreateTime: time.Now().Add(-48 * time.Hour),
+	}
+
+	require.NoError(t, store.RestoreStagedAttachment(ctx, recovery),
+		"the file has already consumed disk and must retain a retryable registry row")
+
+	restored, err := store.GetAttachmentByUser(ctx, recovery.ID, userID)
+	require.NoError(t, err)
+	require.NotNil(t, restored)
+	assert.Nil(t, restored.SessionID)
+
+	staged, err := store.CountStagedAttachments(ctx, userID)
+	require.NoError(t, err)
+	assert.Equal(t, model.MaxStagedAttachmentsPerUser+1, staged)
+
+	reserved, err := store.InsertStagedAttachment(ctx, model.Attachment{
+		ID: "restore-full-new", UserID: userID, Filename: "new.png", MIME: "image/png", Size: 1,
+	}, model.MaxStagedAttachmentsPerUser)
+	require.NoError(t, err)
+	assert.False(t, reserved, "new uploads must stay blocked while recovery is above quota")
+}
+
 func TestStagedQuotaLock_CoversUnclaimAndRestore(t *testing.T) {
 	store, cleanup := setupAttachmentStore(t)
 	defer cleanup()
@@ -320,14 +355,26 @@ func TestStagedQuotaLock_CoversUnclaimAndRestore(t *testing.T) {
 		wg.Wait()
 
 		require.NoError(t, insertErr)
-		if inserted {
-			assert.True(t, errors.Is(restoreErr, ErrStagedAttachmentQuotaExceeded),
-				"restore error = %v, want quota exceeded", restoreErr)
-		} else {
-			require.NoError(t, restoreErr)
-		}
+		require.NoError(t, restoreErr,
+			"a sweeper recovery must never be rejected after its row was deleted")
 		staged, err := store.CountStagedAttachments(ctx, userID)
 		require.NoError(t, err)
-		assert.Equal(t, 20, staged)
+		if inserted {
+			assert.Equal(t, 21, staged,
+				"a concurrent upload may reserve the final slot before the recovery lands")
+		} else {
+			assert.Equal(t, 20, staged,
+				"once the recovery lands first, the concurrent upload must be rejected")
+		}
+		restored, err := store.GetAttachmentByUser(ctx, restoreRow.ID, userID)
+		require.NoError(t, err)
+		require.NotNil(t, restored)
+		assert.Nil(t, restored.SessionID)
+
+		reserved, err := store.InsertStagedAttachment(ctx, model.Attachment{
+			ID: "restore-blocked", UserID: userID, Filename: "blocked.png", MIME: "image/png", Size: 1,
+		}, 20)
+		require.NoError(t, err)
+		assert.False(t, reserved, "recovery may exceed the quota but must block new uploads")
 	})
 }

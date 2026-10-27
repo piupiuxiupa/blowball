@@ -26,7 +26,7 @@
 - **THEN** 系统返回 HTTP 404，不落盘、不写表
 
 ### Requirement: 会话无关的暂存图片上传
-系统 SHALL 提供已鉴权的上传端点 `POST /api/v1/attachments`（multipart，`file` 字段），不要求会话存在。MIME 魔数嗅探、格式白名单（`image/png`、`image/jpeg`、`image/webp`、`image/gif`）与 8 MiB 单文件上限 MUST 与会话作用域端点一致。上传成功 SHALL 返回 `{attachment_id, filename, mime, size}`，文件落盘 `data/{userID}/attachments/_staging/{attachment_id}.{ext}`，`attachments` 表新增行且 `session_id` 为 NULL（未绑定暂存态）。系统 SHALL 限制每用户暂存态附件数量（默认 20 个），超限时拒绝上传并返回 HTTP 429。
+系统 SHALL 提供已鉴权的上传端点 `POST /api/v1/attachments`（multipart，`file` 字段），不要求会话存在。MIME 魔数嗅探、格式白名单（`image/png`、`image/jpeg`、`image/webp`、`image/gif`）与 8 MiB 单文件上限 MUST 与会话作用域端点一致。上传成功 SHALL 返回 `{attachment_id, filename, mime, size}`，文件落盘 `data/{userID}/attachments/_staging/{attachment_id}.{ext}`，`attachments` 表新增行且 `session_id` 为 NULL（未绑定暂存态）。系统 SHALL 限制每用户暂存态附件数量（默认 20 个），超限时拒绝上传并返回 HTTP 429。清理失败后的恢复写回 MUST NOT 因配额拒绝：它只重新登记已经存在的文件，同时超限计数 SHALL 阻止后续新上传。
 
 #### Scenario: 无会话成功上传
 - **WHEN** 已鉴权用户在不提供任何 `session_id` 的情况下上传一张 1MB 的 PNG
@@ -39,6 +39,10 @@
 #### Scenario: 暂存配额超限
 - **WHEN** 用户已存在 20 个 `session_id` 为 NULL 的暂存附件，再次调用暂存上传
 - **THEN** 系统返回 HTTP 429，不落盘、不写表
+
+#### Scenario: 文件删除失败后的恢复不被配额拒绝
+- **WHEN** 清扫器已删除过期暂存行但文件删除失败，且并发的暂存上传刚好占满配额
+- **THEN** 清扫器仍恢复该暂存行以保留重试入口，随后新的暂存上传返回 HTTP 429
 
 #### Scenario: 暂存附件不提供后端读取
 - **WHEN** 以暂存态 `attachment_id` 调用附件内容端点（无论携带哪个会话的 `session_id`）

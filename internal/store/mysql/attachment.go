@@ -336,50 +336,25 @@ func (s *Store) DeleteStagedAttachment(ctx context.Context, id string) (bool, er
 }
 
 // RestoreStagedAttachment re-registers an expired staged row after the sweeper
-// won the delete race but could not remove the file. The duplicate-key branch
-// is a no-op so a concurrently recreated/claimed row is never clobbered.
+// won the delete race but could not remove the file. This is a recovery write,
+// not a new quota reservation: the file already exists and was counted before
+// its row was deleted. It must therefore never be rejected by the quota, which
+// could otherwise leave an untracked file forever. New uploads still take the
+// quota lock and are rejected while the staged count is at or above the limit.
+// The duplicate-key branch is a no-op so a concurrently recreated/claimed row
+// is never clobbered.
 func (s *Store) RestoreStagedAttachment(ctx context.Context, a model.Attachment) error {
-	err := s.withStagedAttachmentQuotaLock(ctx, a.UserID, func(conn *sqlx.Conn) error {
-		tx, err := conn.BeginTxx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin: %w", err)
-		}
-		defer tx.Rollback()
-
-		var exists int
-		if err := tx.GetContext(ctx, &exists,
-			"SELECT COUNT(*) FROM attachments WHERE id = ?", a.ID); err != nil {
-			return fmt.Errorf("check existing: %w", err)
-		}
-		if exists > 0 {
-			return nil
-		}
-		var staged int
-		if err := tx.GetContext(ctx, &staged, countStagedAttachmentsSQL, a.UserID); err != nil {
-			return fmt.Errorf("count staged: %w", err)
-		}
-		if staged >= model.MaxStagedAttachmentsPerUser {
-			return ErrStagedAttachmentQuotaExceeded
-		}
-		logQuery(ctx, "attachment.restore_staged", restoreStagedAttachmentSQL, a.ID)
-		params := map[string]any{
-			"id":          a.ID,
-			"user_id":     a.UserID,
-			"filename":    a.Filename,
-			"mime":        a.MIME,
-			"size":        a.Size,
-			"message_id":  a.MessageID,
-			"create_time": a.CreateTime,
-		}
-		if _, err := tx.NamedExecContext(ctx, restoreStagedAttachmentSQL, params); err != nil {
-			return fmt.Errorf("insert: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
+	logQuery(ctx, "attachment.restore_staged", restoreStagedAttachmentSQL, a.ID)
+	params := map[string]any{
+		"id":          a.ID,
+		"user_id":     a.UserID,
+		"filename":    a.Filename,
+		"mime":        a.MIME,
+		"size":        a.Size,
+		"message_id":  a.MessageID,
+		"create_time": a.CreateTime,
+	}
+	if _, err := s.db.NamedExecContext(ctx, restoreStagedAttachmentSQL, params); err != nil {
 		return fmt.Errorf("mysql.RestoreStagedAttachment: %w", err)
 	}
 	return nil
