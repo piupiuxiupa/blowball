@@ -42,6 +42,14 @@ func TestEstimateJSONContent_isConservativeForDenseJSON(t *testing.T) {
 	got := estimateJSONContent(payload)
 	generic := (len([]rune(payload)) + 3) / 4
 	assert.Greater(t, got, generic)
+	assert.Equal(t, got, EstimateToolContentTokens(payload))
+}
+
+func TestEstimateDenseTextTokens_conservativeForMixedTranscript(t *testing.T) {
+	const payload = `TOOL RESULT bash: {"status":0,"result":{"id":"0123456789abcdef"}}`
+	dense := EstimateDenseTextTokens(payload)
+	generic := (len([]rune(payload)) + 3) / 4
+	assert.Greater(t, dense, generic)
 }
 
 func TestEstimateRenderedRequest_countsToolsAndImages(t *testing.T) {

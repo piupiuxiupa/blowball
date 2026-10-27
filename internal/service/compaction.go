@@ -475,7 +475,7 @@ func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prio
 func estimateSummaryRequest(req agent.LLMRequest) int {
 	total := compactionSummaryMaxTokens + 512
 	for _, m := range req.Messages {
-		total += tokens.Estimate(m.Content) + 8
+		total += agent.EstimateDenseTextTokens(m.Content) + 8
 	}
 	return total
 }
@@ -545,7 +545,7 @@ func summaryChunkRunes(inputBudget int, accumulated string) int {
 	})
 	available := inputBudget - base
 	if accumulated != "" {
-		available -= tokens.Estimate("ACCUMULATED CHECKPOINT TO MERGE:\n\n" + accumulated + "\n\nNEW SPAN:\n\n")
+		available -= agent.EstimateDenseTextTokens("ACCUMULATED CHECKPOINT TO MERGE:\n\n" + accumulated + "\n\nNEW SPAN:\n\n")
 	}
 	if available <= 0 {
 		return 0
@@ -805,7 +805,7 @@ func summarizeRetainedToolResults(
 			}
 		}
 		ref, failNote := "", ""
-		if retrieval != nil && tokens.Estimate(msgs[i].Content) > 400 {
+		if retrieval != nil && agent.EstimateToolContentTokens(msgs[i].Content) > 400 {
 			ref, failNote = retrieval(call, msgs[i].Content)
 		}
 		results[msgs[i].ToolCallID] = summarizeToolResult(call, msgs[i].Content, 400, ref, failNote)

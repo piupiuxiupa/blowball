@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/lush/blowball/internal/tokens"
 )
@@ -239,6 +240,20 @@ func estimateContent(s string) int {
 	return tokens.Estimate(s)
 }
 
+// EstimateToolContentTokens returns the conservative estimate for a tool
+// result body. Valid JSON uses the dense-envelope rate; other text falls back
+// to the shared CJK-aware heuristic.
+func EstimateToolContentTokens(s string) int {
+	return estimateJSONContent(s)
+}
+
+// EstimateDenseTextTokens charges every non-CJK rune at the dense-envelope
+// rate. It is for mixed prose/JSON transcripts that cannot be validated as a
+// single JSON value but must still be budgeted conservatively.
+func EstimateDenseTextTokens(s string) int {
+	return estimateDenseContent(s)
+}
+
 // estimateJSONContent accounts for request/tool payloads whose punctuation and
 // escaped characters tokenize denser than ordinary prose.
 func estimateJSONContent(s string) int {
@@ -248,10 +263,20 @@ func estimateJSONContent(s string) int {
 	if !json.Valid([]byte(s)) {
 		return tokens.Estimate(s)
 	}
+	return estimateDenseContent(s)
+}
+
+func estimateDenseContent(s string) int {
+	if s == "" {
+		return 0
+	}
 	runes := []rune(s)
 	cjk := 0
 	for _, r := range runes {
-		if (r >= 0x4E00 && r <= 0x9FFF) || (r >= 0x3040 && r <= 0x30FF) || (r >= 0xAC00 && r <= 0xD7AF) {
+		if unicode.Is(unicode.Han, r) ||
+			unicode.Is(unicode.Hiragana, r) ||
+			unicode.Is(unicode.Katakana, r) ||
+			unicode.Is(unicode.Hangul, r) {
 			cjk++
 		}
 	}

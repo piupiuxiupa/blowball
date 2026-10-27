@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/tokens"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,6 +89,37 @@ func TestIndexedToolArgumentsReachSummaries(t *testing.T) {
 	}
 	summaries, _ := summarizeRetainedToolResults(msgs, 1, nil)
 	assert.Contains(t, summaries["call-args"], "go test ./internal/service")
+}
+
+func TestSummarizeRetainedToolResults_spillsDenseJSONByConservativeEstimate(t *testing.T) {
+	payload := `{"status":0,"result":{"ids":[` +
+		strings.Repeat(`"0123456789abcdef",`, 75) + `"final"]}}`
+	require.True(t, json.Valid([]byte(payload)))
+	require.LessOrEqual(t, tokens.Estimate(payload), 400,
+		"the generic estimator must reproduce the missed threshold")
+	require.Greater(t, agent.EstimateToolContentTokens(payload), 400,
+		"the conservative tool estimator must cross the spill threshold")
+
+	call := agent.ToolCall{ID: "call-dense", Function: agent.ToolCallFunction{Name: "custom_tool"}}
+	msgs := []agent.Message{
+		{Role: "assistant", ToolCalls: []agent.ToolCall{call}},
+		{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name, Content: payload},
+	}
+	retrieved := false
+	summaries, _ := summarizeRetainedToolResults(msgs, 1,
+		func(got agent.ToolCall, full string) (string, string) {
+			retrieved = true
+			assert.Equal(t, call.ID, got.ID)
+			assert.Equal(t, payload, full)
+			return "tmp/compaction-outputs/session/dense.txt", ""
+		})
+
+	require.True(t, retrieved, "dense JSON above the token threshold must be spilled")
+	var summary ToolResultSummary
+	require.NoError(t, json.Unmarshal([]byte(summaries[call.ID]), &summary))
+	assert.Equal(t, "tmp/compaction-outputs/session/dense.txt", summary.RetrievalRef)
+	assert.Equal(t, agent.EstimateToolContentTokens(payload), summary.OriginalTokens)
+	assert.True(t, summary.Truncated)
 }
 
 func TestRenderToolActivity_recompactionMergedLedgerIsBounded(t *testing.T) {

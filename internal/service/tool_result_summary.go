@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/tokens"
 )
 
 const (
@@ -52,7 +51,7 @@ func summarizeToolResult(
 		ToolCallID:     call.ID,
 		Status:         "success",
 		OriginalBytes:  len([]byte(full)),
-		OriginalTokens: tokens.Estimate(full),
+		OriginalTokens: agent.EstimateToolContentTokens(full),
 	}
 	if maxTokens <= 0 {
 		maxTokens = 400

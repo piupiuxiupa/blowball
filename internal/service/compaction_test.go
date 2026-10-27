@@ -884,3 +884,36 @@ func TestSummaryChunksRespectActualInputBudget(t *testing.T) {
 		assert.LessOrEqual(t, estimateSummaryRequest(call), 9000, "every chunk request must fit the actual summary budget")
 	}
 }
+
+func TestSummaryChunkingUsesDenseTranscriptEstimate(t *testing.T) {
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "chunk"}}
+	svc := newCompactionTestService(&fakeMySQLStore{}, &fakeRedisStore{}, llm, 100000)
+	denseToolResult := `{"status":0,"result":{"ids":[` +
+		strings.Repeat(`"0123456789abcdef",`, 600) + `"final"]}}`
+	require.True(t, json.Valid([]byte(denseToolResult)))
+	req := agent.LLMRequest{
+		Model: "gpt-test",
+		Messages: []agent.Message{
+			{Role: "system", Content: compactionSystemPrompt},
+			{Role: "user", Content: "TOOL RESULT custom_tool:\n" + denseToolResult + "\n\n"},
+		},
+		MaxCompletionTokens: compactionSummaryMaxTokens,
+	}
+
+	legacyEstimate := compactionSummaryMaxTokens + 512
+	for _, m := range req.Messages {
+		legacyEstimate += tokens.Estimate(m.Content) + 8
+	}
+	const budget = 8000
+	require.LessOrEqual(t, legacyEstimate, budget,
+		"the old generic estimate must incorrectly fit the one-shot request")
+	require.Greater(t, estimateSummaryRequest(req), budget,
+		"the dense transcript estimate must force chunking")
+
+	_, _, err := svc.summarizeChunked(context.Background(), nil, context.Background(), req, budget)
+	require.NoError(t, err)
+	require.Greater(t, len(llm.requests), 1)
+	for _, call := range llm.requests {
+		assert.LessOrEqual(t, estimateSummaryRequest(call), budget)
+	}
+}

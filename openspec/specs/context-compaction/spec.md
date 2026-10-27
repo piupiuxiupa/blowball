@@ -87,7 +87,7 @@ Every retained assistant message containing `tool_calls` SHALL be accompanied by
 ### Requirement: Summary generation uses the current agent model with a structured checkpoint template
 The system SHALL generate the summary using the turn's request-selected model (the same model the three agents run for that turn) via the existing LLM client. The summarization instruction SHALL require a structured checkpoint (sections for primary intent, technical concepts, files and code, errors and fixes, pending jobs, current work, next step, critical context) preserving exact paths, commands, error strings, identifiers, and numeric values. Only returned text SHALL be retained; reasoning content and tool calls SHALL be discarded.
 
-The system SHALL use sequential chunked consolidation when the complete shadowed transcript plus prior checkpoint does not fit the summary input budget. Each chunk SHALL reserve room for the fixed system prompt, prior or accumulated summary, and completion quota. A single summary call SHALL remain permissible when the complete input fits.
+The system SHALL use sequential chunked consolidation when the complete shadowed transcript plus prior checkpoint does not fit the summary input budget. The fit decision SHALL use a conservative estimator that accounts for JSON-dense tool arguments and results in the mixed transcript. Each chunk SHALL reserve room for the fixed system prompt, prior or accumulated summary, and completion quota. A single summary call SHALL remain permissible when the complete input fits.
 
 #### Scenario: Structured summary replaces the middle
 - **WHEN** compaction completes
@@ -228,7 +228,7 @@ For a compacted session, the system SHALL reconstruct the model context from the
 - **THEN** reconstruction uses the newest authoritative boundary and summary rather than an earlier superseded checkpoint
 
 ### Requirement: Retained tool results use deterministic summaries with stable identity
-For each paired tool result retained in the model context, the system SHALL produce a bounded deterministic summary that includes the tool name, original tool call identity, success or error status, truncation state, a concise outcome, original approximate size, and a retrieval reference when full output is available. Error strings, exit codes, paths, commands, and identifiers that remain in the summary SHALL be preserved verbatim.
+For each paired tool result retained in the model context, the system SHALL produce a bounded deterministic summary that includes the tool name, original tool call identity, success or error status, truncation state, a concise outcome, original approximate size, and a retrieval reference when full output is available. Dense JSON tool results SHALL use the conservative tool-content token estimate for the spill and truncation decisions. Error strings, exit codes, paths, commands, and identifiers that remain in the summary SHALL be preserved verbatim.
 
 Known tool families SHALL use bounded, type-aware summaries. Unknown tools SHALL use a bounded head/tail excerpt plus status, size, and retrieval metadata. The system SHALL NOT fabricate details absent from the original result.
 
