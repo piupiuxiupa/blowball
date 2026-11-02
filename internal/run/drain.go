@@ -15,8 +15,10 @@ import (
 // from a run event log. The drainer stamps it before appending so SSE
 // subscribers (originating connection and resume endpoint alike) can attribute
 // every event — including sub-agent events, which additionally carry
-// parent_tool_call_id — to the run.
-const MetaRunID = "run_id"
+// parent_tool_call_id — to the run. Aliases the stream package constant so
+// the direct-append paths (the queued event) and the drainer share one
+// literal.
+const MetaRunID = stream.MetaRunID
 
 // StartDrainer pumps the turn hub into the run store: it is the hub's single
 // consumer, appending every event (done included) to run:{rid}:events,

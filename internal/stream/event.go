@@ -28,6 +28,13 @@ const (
 	// EventMessage is a sentinel used for user message rows persisted to the
 	// messages table; it is never emitted as an SSE event.
 	EventMessage = "message"
+	// EventQueued announces that a message was admitted into the session's
+	// message queue and is waiting for the running turn to finish
+	// (session-message-queue). It is the FIRST event on a queued run's log —
+	// written at enqueue time, before the pump starts the turn — so replay
+	// and Last-Event-ID resume see the wait as part of the run. Like done it
+	// never passes through a hub and is never persisted as a message row.
+	EventQueued = "queued"
 )
 
 // Agent names. These mirror model.AgentConfucius/AgentChongzhi/AgentLiang but are
@@ -52,6 +59,13 @@ const (
 	// turn's artifact events. done is not persisted; the artifact events are
 	// the durable record.
 	MetaArtifacts = "artifacts"
+	// MetaRunID is the Meta key carrying the owning run's id. The drainer
+	// stamps it on every hub event; the queued event is appended directly by
+	// the enqueue path and stamps it itself.
+	MetaRunID = "run_id"
+	// MetaQueuePosition carries a queued event's 1-based queue depth at
+	// admission time (informational for frontends).
+	MetaQueuePosition = "queue_position"
 )
 
 // StreamEvent is the unit of data exchanged between agents and the SSE consumer.
@@ -62,6 +76,18 @@ type StreamEvent struct {
 	Agent   string         `json:"agent"`
 	Content string         `json:"content"`
 	Meta    map[string]any `json:"meta,omitempty"`
+}
+
+// QueuedEvent builds the queue-admission announcement (the first event on a
+// queued run's log). runID is stamped into Meta here because the event is
+// appended to the run log directly by the enqueue path, not through the
+// drainer; position is the entry's 1-based queue depth at admission.
+func QueuedEvent(runID string, position int) StreamEvent {
+	e := StreamEvent{Type: EventQueued, Meta: map[string]any{MetaRunID: runID}}
+	if position > 0 {
+		e.Meta[MetaQueuePosition] = position
+	}
+	return e
 }
 
 // TokenEvent builds a token streaming event for a single content chunk.

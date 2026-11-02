@@ -25,12 +25,24 @@ import (
 // touch the agent layer directly.
 type TurnRunHandler struct {
 	runs *run.Manager
+	// queueRollback restores a queued entry's staged-attachment claims when
+	// it is cancelled before starting (session-message-queue). Wired from the
+	// streaming handler at construction time; nil (tests, unwired deployments)
+	// skips the rollback — a bound-but-unreferenced row then simply follows
+	// the session lifecycle.
+	queueRollback func(ctx context.Context, entry run.QueueEntry)
 }
 
 // NewTurnRunHandler wires the turn-lifecycle endpoints. A nil Manager is a
 // programming error (only the agent/all roles register these routes).
 func NewTurnRunHandler(runs *run.Manager) *TurnRunHandler {
 	return &TurnRunHandler{runs: runs}
+}
+
+// SetQueueCancelRollback installs the staged-attachment rollback hook used by
+// the queued-run cancel branch (session-message-queue).
+func (h *TurnRunHandler) SetQueueCancelRollback(fn func(ctx context.Context, entry run.QueueEntry)) {
+	h.queueRollback = fn
 }
 
 // runStreamBlock is the XREAD BLOCK window of the SSE subscriber loop: it
@@ -85,6 +97,55 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 	}
 	if run.Terminal(meta.Status) {
 		c.JSON(http.StatusOK, turnStatusBody(runID, meta.Status))
+		return
+	}
+
+	// Queued run (session-message-queue): the message waits in the session's
+	// queue and has no heartbeat BY DESIGN, so it must be answered here —
+	// falling through to the registry / alive / dead-run ladder below would
+	// misclassify it as a crashed run and mark it interrupted.
+	if meta.Status == run.StatusQueued {
+		entry, dequeued, err := h.runs.Store.DequeueMessage(ctx, sessionID, runID)
+		if err != nil {
+			logger.FromContext(ctx).Error("cancel: dequeue queued message failed",
+				zap.String("op", "handler.cancel_turn"),
+				zap.String("run_id", runID), zap.Error(err))
+			c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "cancel failed"))
+			return
+		}
+		if dequeued {
+			// Terminal bookkeeping for a cancelled-before-start run: status
+			// first (unblocks waiting SSE readers via the terminal-status
+			// close path), no claim to release (a queued run never held one),
+			// then the retain window. The staged-attachment rollback is
+			// best-effort — a bound row that survives it follows the session
+			// lifecycle.
+			if err := h.runs.Store.SetStatus(ctx, runID, run.StatusCancelled); err != nil {
+				logger.FromContext(ctx).Warn("cancel: set queued-run status failed",
+					zap.String("op", "handler.cancel_turn"),
+					zap.String("run_id", runID), zap.Error(err))
+			}
+			if err := h.runs.Store.Retire(ctx, runID, run.RetainAfterTerminal); err != nil {
+				logger.FromContext(ctx).Warn("cancel: retire queued run failed",
+					zap.String("op", "handler.cancel_turn"),
+					zap.String("run_id", runID), zap.Error(err))
+			}
+			if h.queueRollback != nil && len(entry.NewlyClaimed) > 0 {
+				h.queueRollback(ctx, entry)
+			}
+			c.JSON(http.StatusOK, turnStatusBody(runID, run.StatusCancelled))
+			return
+		}
+		// The dequeue lost its race: a concurrent cancel already removed it
+		// (status flips to terminal) or a pump is starting it (status flips
+		// to running). Answer from the CURRENT state instead of the stale
+		// queued one; a running answer tells the client to retry the cancel,
+		// which then takes the ordinary registry path.
+		if meta, ok, err := h.runs.Store.GetMeta(ctx, runID); err == nil && ok {
+			c.JSON(http.StatusOK, turnStatusBody(runID, meta.Status))
+			return
+		}
+		c.JSON(http.StatusOK, turnStatusBody(runID, run.StatusCancelled))
 		return
 	}
 
@@ -275,6 +336,11 @@ func writeRunEventStream(ctx context.Context, w http.ResponseWriter, runs *run.M
 			return nil
 		}
 		if meta.Status == run.StatusRunning {
+			// Dead-run detection is intentionally gated on RUNNING: a QUEUED
+			// run has no heartbeat key by design (its turn has not started),
+			// so the alive probe below must never see one (session-message-
+			// queue). The loop simply keeps tailing until the pump starts the
+			// turn or a cancel flips the status terminal.
 			alive, err := runs.Store.Alive(ctx, runID)
 			if err == nil && !alive {
 				// Dead run: the owning process died mid-turn. Synthesize the

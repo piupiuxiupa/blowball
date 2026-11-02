@@ -130,8 +130,13 @@ type QueueEntry struct {
 	Model       string                       `json:"model"`
 	Selection   QueueSelection               `json:"selection"`
 	Attachments []model.MessageAttachmentRef `json:"attachments,omitempty"`
-	RawToken    string                       `json:"raw_token,omitempty"`
-	EnqueuedAt  time.Time                    `json:"enqueued_at"`
+	// NewlyClaimed lists the attachment ids the enqueueing request claimed
+	// from staging into the session (the subset eligible for rollback when
+	// the entry is cancelled before its turn starts). Rows bound by earlier
+	// messages were never newly claimed and must keep their binding.
+	NewlyClaimed []string  `json:"newly_claimed,omitempty"`
+	RawToken     string    `json:"raw_token,omitempty"`
+	EnqueuedAt   time.Time `json:"enqueued_at"`
 }
 
 // QueueSelection is the queue-entry form of a turn's resolved model selection

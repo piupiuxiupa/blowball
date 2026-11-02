@@ -26,6 +26,7 @@ type turnRunTestEnv struct {
 	store  *run.MemStore
 	reg    *run.Registry
 	stub   *blockingStubOrchestrator
+	turnH  *TurnRunHandler
 }
 
 // blockingStubOrchestrator is a stub whose Handle blocks until released (or
@@ -82,7 +83,7 @@ func newTurnRunEnv(t *testing.T, stub *blockingStubOrchestrator) *turnRunTestEnv
 	r.POST("/api/v1/sessions/:session_id/messages", streamH.SendMessage)
 	r.POST("/api/v1/sessions/:session_id/turns/:run_id/cancel", turnH.CancelTurn)
 	r.GET("/api/v1/sessions/:session_id/turns/:run_id/events", turnH.TurnEvents)
-	return &turnRunTestEnv{engine: r, store: store, reg: reg, stub: stub}
+	return &turnRunTestEnv{engine: r, store: store, reg: reg, stub: stub, turnH: turnH}
 }
 
 func (e *turnRunTestEnv) postMessage(sessionID string) *httptest.ResponseRecorder {

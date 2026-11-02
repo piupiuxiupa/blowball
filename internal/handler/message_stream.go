@@ -83,6 +83,18 @@ type MessageStreamHandler struct {
 	writeRunEvents func(ctx context.Context, w http.ResponseWriter, runs *run.Manager, runID, after string, headers map[string]string, turnDone <-chan struct{}) error
 }
 
+// RollbackQueuedAttachments restores the staged-attachment claims a queued
+// entry made at enqueue time, when the entry is cancelled before its turn
+// starts (the queue-cancel path in TurnRunHandler). Only the newly-claimed
+// subset is restored — rows bound by earlier messages were never newly
+// claimed and must keep their session binding.
+func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, entry run.QueueEntry) {
+	if len(entry.NewlyClaimed) == 0 {
+		return
+	}
+	h.rollbackNewAttachmentClaims(ctx, entry.UserID, entry.SessionID, entry.NewlyClaimed)
+}
+
 // NewMessageStreamHandler wires the streaming handler with its services, the
 // orchestrator adapter, the run-lifecycle manager, and the dataDir used to
 // resolve per-user workspace and skills roots. compSvc is the
