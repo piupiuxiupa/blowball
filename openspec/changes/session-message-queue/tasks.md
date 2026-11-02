@@ -55,12 +55,12 @@
 
 ## 9. 契约与文档同步
 
-- [ ] 9.1 `api/openapi.yaml`：`queued` 事件类型、`GET /sessions/{id}/queue`、409 `QUEUE_FULL`、`queued_count` 字段、cancel 对 queued run 的语义、队列启用时 busy 场景改写入队
-- [ ] 9.2 `CLAUDE.md` / `AGENTS.md` 同步：路由表（queue 端点）、发送流程段落（admit/pump/持久化时机/停机/reconciler）、`messages.queue` 配置约定；`openspec` 归档前 delta 与主 specs 同步规则照旧
-- [ ] 9.3 提醒项（非本 repo 任务）：`blowball-frontend` 同步 openapi 并 `npm run generate-api`，实现 pending 气泡与发送解禁——记录到变更说明，不在本仓库验收
+- [x] 9.1 `api/openapi.yaml`：`queued` 事件类型、`GET /sessions/{id}/queue`、409 `QUEUE_FULL`、`queued_count` 字段、cancel 对 queued run 的语义、队列启用时 busy 场景改写入队
+- [x] 9.2 `CLAUDE.md` / `AGENTS.md` 同步：路由表（queue 端点）、发送流程段落（admit/pump/持久化时机/停机/reconciler）、`messages.queue` 配置约定；`openspec` 归档前 delta 与主 specs 同步规则照旧
+- [x] 9.3 提醒项（非本 repo 任务）：`blowball-frontend` 同步 openapi 并 `npm run generate-api`，实现 pending 气泡与发送解禁——记录到变更说明，不在本仓库验收
 
 ## 10. 集成与回归
 
-- [ ] 10.1 `test/integration/`：全链路排队场景——运行中连续发 B/C、按序接续、每条独立 model/effort、取消排队消息、取消当前轮后队列继续、深度上限、停机跳过接续、崩溃残留 reconciler 接续
-- [ ] 10.2 队列禁用回归：现有集成测试全量通过（byte-for-byte 行为保持的最终验收）
-- [ ] 10.3 `make lint && make test` 全绿；按组提交 Conventional Commits（feat(queue): …）
+- [x] 10.1 `test/integration/`：全链路排队场景——运行中连续发 B/C、按序接续、每条独立 model/effort、取消排队消息、取消当前轮后队列继续、深度上限、停机跳过接续、崩溃残留 reconciler 接续
+- [x] 10.2 队列禁用回归：现有集成测试全量通过（byte-for-byte 行为保持的最终验收）
+- [x] 10.3 `make lint && make test` 全绿；按组提交 Conventional Commits（feat(queue): …）
