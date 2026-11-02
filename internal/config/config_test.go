@@ -2008,6 +2008,129 @@ messages:
 	}
 }
 
+// TestLoad_MessagesQueue covers the `messages.queue` sub-block
+// (session-message-queue): omitted → disabled with the default depth cap
+// (byte-for-zero behavior), explicit values win, and any explicit
+// non-positive max_depth is rejected at load (unlike max_input_tokens there is
+// no "0 = disable" — enabled is the switch).
+func TestLoad_MessagesQueue(t *testing.T) {
+	cases := []struct {
+		name      string
+		yaml      string
+		wantOn    bool
+		wantDepth int
+		wantSet   bool
+	}{
+		{
+			name: "omitted block stays disabled",
+			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  flush_interval: 1s
+`,
+			wantOn:    false,
+			wantDepth: 8,
+			wantSet:   false,
+		},
+		{
+			name: "enabled with explicit depth",
+			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  queue:
+    enabled: true
+    max_depth: 3
+`,
+			wantOn:    true,
+			wantDepth: 3,
+			wantSet:   true,
+		},
+		{
+			name: "enabled with default depth",
+			yaml: `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  queue:
+    enabled: true
+`,
+			wantOn:    true,
+			wantDepth: 8,
+			wantSet:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempYAML(t, tc.yaml)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.Messages.Queue.Enabled != tc.wantOn {
+				t.Errorf("Messages.Queue.Enabled = %v, want %v", cfg.Messages.Queue.Enabled, tc.wantOn)
+			}
+			if got := cfg.Messages.QueueMaxDepthLimit(); got != tc.wantDepth {
+				t.Errorf("QueueMaxDepthLimit() = %d, want %d", got, tc.wantDepth)
+			}
+			if (cfg.Messages.Queue.MaxDepth != nil) != tc.wantSet {
+				t.Errorf("Queue.MaxDepth set = %v, want %v", cfg.Messages.Queue.MaxDepth != nil, tc.wantSet)
+			}
+		})
+	}
+}
+
+func TestLoad_MessagesQueueInvalidDepth(t *testing.T) {
+	for _, depth := range []string{"0", "-1"} {
+		t.Run("max_depth "+depth, func(t *testing.T) {
+			path := writeTempYAML(t, `
+openai:
+  api_key: sk-test
+  models:
+    - name: gpt-4o-mini
+      max_context_tokens: 128000
+      max_completion_tokens: 8192
+mysql:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
+jwt:
+  secret: "ok"
+messages:
+  queue:
+    enabled: true
+    max_depth: `+depth+`
+`)
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load accepted a non-positive messages.queue.max_depth, want load-time rejection")
+			}
+		})
+	}
+}
+
 // TestLoad_MemoryDisabledByDefault verifies the omitted `memory:` block is a
 // no-op: disabled with zero behavior change (cross-session-memory capability).
 func TestLoad_MemoryDisabledByDefault(t *testing.T) {

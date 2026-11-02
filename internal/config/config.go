@@ -107,6 +107,10 @@ const (
 	// streaming message endpoint when messages.max_input_tokens is unset
 	// (add-input-token-limit): detection is on by default.
 	defaultMaxInputTokens = 5000
+	// defaultQueueMaxDepth is the per-session queued-message cap when
+	// messages.queue is enabled without an explicit max_depth
+	// (session-message-queue).
+	defaultQueueMaxDepth = 8
 )
 
 // MessagesConfig holds the Redis-first write-behind message persistence knobs
@@ -126,6 +130,33 @@ type MessagesConfig struct {
 	FlushInterval  time.Duration `yaml:"flush_interval"`
 	FlushBatchSize int           `yaml:"flush_batch_size"`
 	MaxInputTokens *int          `yaml:"max_input_tokens"`
+	Queue          QueueConfig   `yaml:"queue"`
+}
+
+// QueueConfig configures the in-session message queue (session-message-queue
+// capability, the `messages.queue` sub-block). When Enabled, a POST to a
+// session with a running turn is admitted into the per-session FIFO queue
+// (Redis `queue:{sid}`) instead of being rejected with 409 SESSION_BUSY, and
+// the queue head is started as the next turn once the running one finalizes.
+// Default OFF — an omitted block or `enabled: false` is byte-for-byte
+// pre-capability behavior (rollback = flip the switch). MaxDepth caps the
+// queue length; admission beyond it returns 409 QUEUE_FULL. It is a pointer so
+// "unset → default 8" and an explicit value are distinguishable; unlike
+// max_input_tokens there is no "0 = disable" semantics — the Enabled flag is
+// the switch, so any explicit non-positive value is rejected at load.
+type QueueConfig struct {
+	Enabled  bool `yaml:"enabled"`
+	MaxDepth *int `yaml:"max_depth"`
+}
+
+// QueueMaxDepthLimit resolves the effective queue depth cap: an explicit value
+// wins, unset falls back to the default 8. Validation guarantees any explicit
+// value is positive, so callers can use the result directly.
+func (m MessagesConfig) QueueMaxDepthLimit() int {
+	if m.Queue.MaxDepth != nil {
+		return *m.Queue.MaxDepth
+	}
+	return defaultQueueMaxDepth
 }
 
 // applyDefaults fills zero-valued fields with the documented defaults. It is
@@ -164,6 +195,9 @@ func (m MessagesConfig) validate() error {
 	}
 	if m.MaxInputTokens != nil && *m.MaxInputTokens < 0 {
 		return fmt.Errorf("messages.max_input_tokens: must be zero (disable) or positive (got %d)", *m.MaxInputTokens)
+	}
+	if m.Queue.MaxDepth != nil && *m.Queue.MaxDepth <= 0 {
+		return fmt.Errorf("messages.queue.max_depth: must be positive (got %d)", *m.Queue.MaxDepth)
 	}
 	return nil
 }

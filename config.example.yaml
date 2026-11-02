@@ -184,6 +184,15 @@ messages:
   flush_interval: 1s
   flush_batch_size: 100
   # max_input_tokens: 5000
+  # In-session message queue (session-message-queue): while a turn is running,
+  # new messages are admitted into the session's FIFO queue and auto-continued
+  # as the next turn instead of being rejected with 409 SESSION_BUSY. Default
+  # OFF — an omitted block is byte-for-byte pre-capability behavior; rollback =
+  # stop agent processes, let the queue drain, then flip enabled back to false
+  # (orphaned entries become inert and can be cleared with DEL queue:{sid}).
+  # queue:
+  #   enabled: true
+  #   max_depth: 8   # 409 QUEUE_FULL beyond this; positive, no "0 = disable"
 
 # Cross-session long-term memory backed by an external OpenViking server
 # (cross-session-memory capability; auto-only v1: recall at turn start,
