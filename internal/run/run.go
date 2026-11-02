@@ -23,6 +23,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -42,6 +43,11 @@ const (
 	// StatusInterrupted marks a run whose process died mid-turn; assigned by
 	// whichever observer first detects the expired heartbeat.
 	StatusInterrupted = "interrupted"
+	// StatusQueued marks a run whose message sits in the session's queue
+	// awaiting its turn (session-message-queue). It is neither running (no
+	// heartbeat exists by design, so dead-run detection must ignore it) nor
+	// terminal; the pump flips it to running when it starts the turn.
+	StatusQueued = "queued"
 )
 
 // Shared lifecycle timings. The heartbeat TTL is 3× the beat interval so a
@@ -101,6 +107,71 @@ type RunMeta struct {
 	CreatedAt string
 }
 
+// QueueEntry is one queued message snapshot (session-message-queue): the
+// resolved-request equivalent stored in the Redis LIST `queue:{sid}` until a
+// pump starts it as the next turn. The snapshot (not the raw request
+// parameters) is what travels, so the pumping process — which may be a
+// different replica — never re-resolves the request against its own config
+// reading order. RunID is the enqueueing request's trace_id, so the SSE
+// response of the queued POST and any later resume attach to the same run.
+//
+// RawToken carries the enqueueing request's login JWT so the pumped turn can
+// keep the skill-market allowlist fetch (and every other token-gated tool
+// execution) working with no HTTP request in hand. It rests in Redis within
+// the same trust boundary as the user's message content itself, it is
+// TTL-bound by the JWT's own expiry, and a turn outliving it degrades through
+// the standing fail-closed path — identical to a long turn whose request token
+// expired mid-flight.
+type QueueEntry struct {
+	RunID       string                       `json:"run_id"`
+	SessionID   string                       `json:"session_id"`
+	UserID      string                       `json:"user_id"`
+	Content     string                       `json:"content"`
+	Model       string                       `json:"model"`
+	Selection   QueueSelection               `json:"selection"`
+	Attachments []model.MessageAttachmentRef `json:"attachments,omitempty"`
+	RawToken    string                       `json:"raw_token,omitempty"`
+	EnqueuedAt  time.Time                    `json:"enqueued_at"`
+}
+
+// QueueSelection is the queue-entry form of a turn's resolved model selection
+// (the handler's modelSelection): model/effort axes, wire-family and vision
+// markers, and the per-entry context/output budgets including the
+// finish_reason=length continuation policy. Field names are chosen (not the
+// config struct's) so the JSON stays a stable wire shape.
+type QueueSelection struct {
+	Model               string `json:"model"`
+	Thinking            bool   `json:"thinking"`
+	Vision              bool   `json:"vision"`
+	Effort              string `json:"effort"`
+	MaxContextTokens    int    `json:"max_context_tokens"`
+	MaxCompletionTokens int    `json:"max_completion_tokens"`
+	LengthExpandStep    int    `json:"length_expand_step,omitempty"`
+	LengthMaxRetries    int    `json:"length_max_retries,omitempty"`
+}
+
+// AdmitOutcome enumerates AdmitMessage's results.
+type AdmitOutcome int
+
+const (
+	// AdmitClaimed: the claim was free and the queue empty, so the caller's
+	// run now holds the session claim and must start its turn immediately
+	// (the fast path — byte-identical to a successful ClaimSession).
+	AdmitClaimed AdmitOutcome = iota
+	// AdmitQueued: a turn is running or the queue is non-empty, so the entry
+	// was appended at the queue tail.
+	AdmitQueued
+	// AdmitFull: the queue already holds maxDepth entries.
+	AdmitFull
+)
+
+// AdmitResult reports AdmitMessage's outcome. Position is the 1-based queue
+// position of the newly enqueued entry (0 otherwise).
+type AdmitResult struct {
+	Outcome  AdmitOutcome
+	Position int
+}
+
 // Store is the Redis-backed run state surface. Implementations must be safe
 // for concurrent use. Every method is best-effort state management: failures
 // are surfaced as errors for the caller to WARN — they never block a turn.
@@ -132,6 +203,50 @@ type Store interface {
 	// ActiveRuns maps each sessionID to its current active run id ("" when
 	// none). Used by the session list generating flag.
 	ActiveRuns(ctx context.Context, sessionIDs []string) (map[string]string, error)
+
+	// ── session message queue (session-message-queue) ──────────────────────
+	//
+	// Queue admission/continuation primitives. The FIFO invariant — "queue
+	// non-empty ⇒ a new message may only RPUSH; claim free AND queue empty ⇒
+	// a message may claim directly" — is sealed atomically inside each
+	// implementation (Redis: one Lua script per operation; MemStore: one lock
+	// critical section). Failures are surfaced as errors for the caller to
+	// WARN — like the rest of the Store they never block a message.
+
+	// AdmitMessage atomically admits one queued-message candidate to a
+	// session: claims the session run slot when it is free AND the queue is
+	// empty (the caller must then start its turn immediately, exactly like a
+	// successful ClaimSession), otherwise appends the entry at the queue tail
+	// (AdmitQueued, Position = its 1-based depth), or reports AdmitFull when
+	// the queue already holds maxDepth entries.
+	AdmitMessage(ctx context.Context, sessionID string, entry QueueEntry, maxDepth int) (AdmitResult, error)
+
+	// PumpHead atomically pops the queue head and transfers the session claim
+	// to it when the claim is free. ok=false means nothing was pumped: empty
+	// queue, or the claim is held (a racing admission won it first — the head
+	// stays enqueued). Called after a turn's terminal bookkeeping released its
+	// claim, and by the reconciler for crash residue.
+	PumpHead(ctx context.Context, sessionID string) (entry QueueEntry, ok bool, err error)
+
+	// DequeueMessage removes the queued entry identified by runID (cancel of a
+	// queued run). ok=false when no such entry exists. The claim is untouched
+	// (a queued run never held it).
+	DequeueMessage(ctx context.Context, sessionID, runID string) (entry QueueEntry, ok bool, err error)
+
+	// QueueLen reports the session's queue depth (0 when no key exists).
+	QueueLen(ctx context.Context, sessionID string) (int, error)
+	// QueueEntries returns the session's queued entries in enqueue order.
+	QueueEntries(ctx context.Context, sessionID string) ([]QueueEntry, error)
+
+	// TouchQueued re-arms the run-key family TTL (events/meta) for a queued
+	// run without touching the heartbeat or the claim — the queue's wait can
+	// outlast RunKeyTTL, and the reconciler keeps the replay surface alive.
+	TouchQueued(ctx context.Context, runID string) error
+
+	// ClearQueue drops every queued entry of the session (session deletion;
+	// entries are not message rows and are never archived).
+	ClearQueue(ctx context.Context, sessionID string) error
+
 
 	// Heartbeat refreshes run:{rid}:alive (HeartbeatTTL), re-arms the
 	// event/meta TTLs (RunKeyTTLWithJitter in Redis), and compare-and-rearms

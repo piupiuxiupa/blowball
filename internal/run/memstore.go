@@ -30,6 +30,7 @@ type MemStore struct {
 	cancels  map[string]bool
 	claims   map[string]string // sessionID -> runID
 	claimExp map[string]time.Time
+	queues   map[string][]QueueEntry // sessionID -> queued entries (FIFO)
 }
 
 type memEntry struct {
@@ -43,6 +44,7 @@ func NewMemStore() *MemStore {
 		Now:      time.Now,
 		streams:  make(map[string][]memEntry),
 		meta:     make(map[string]RunMeta),
+		queues:   make(map[string][]QueueEntry),
 		expire:   make(map[string]time.Time),
 		alive:    make(map[string]time.Time),
 		cancels:  make(map[string]bool),
@@ -206,6 +208,108 @@ func (m *MemStore) Heartbeat(_ context.Context, runID, sessionID string) error {
 	if m.claims[sessionID] == runID && m.now().Before(m.claimExp[sessionID]) {
 		m.claimExp[sessionID] = m.now().Add(SessionClaimTTL)
 	}
+	return nil
+}
+
+// claimHeldLocked reports whether the session claim currently excludes
+// admission (present and unexpired).
+func (m *MemStore) claimHeldLocked(sessionID string) bool {
+	_, ok := m.claims[sessionID]
+	return ok && m.now().Before(m.claimExp[sessionID])
+}
+
+// AdmitMessage implements Store (one lock critical section = the atomic
+// claim-or-enqueue admission).
+func (m *MemStore) AdmitMessage(_ context.Context, sessionID string, entry QueueEntry, maxDepth int) (AdmitResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.claimHeldLocked(sessionID) && len(m.queues[sessionID]) == 0 {
+		m.claims[sessionID] = entry.RunID
+		m.claimExp[sessionID] = m.now().Add(SessionClaimTTL)
+		return AdmitResult{Outcome: AdmitClaimed}, nil
+	}
+	if len(m.queues[sessionID]) >= maxDepth {
+		return AdmitResult{Outcome: AdmitFull}, nil
+	}
+	m.queues[sessionID] = append(m.queues[sessionID], entry)
+	return AdmitResult{Outcome: AdmitQueued, Position: len(m.queues[sessionID])}, nil
+}
+
+// PumpHead implements Store: pop head + claim transfer in one critical
+// section; a held claim (a racing admission won it) leaves the head enqueued.
+func (m *MemStore) PumpHead(_ context.Context, sessionID string) (QueueEntry, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q := m.queues[sessionID]
+	if len(q) == 0 {
+		return QueueEntry{}, false, nil
+	}
+	if m.claimHeldLocked(sessionID) {
+		return QueueEntry{}, false, nil
+	}
+	head := q[0]
+	m.queues[sessionID] = q[1:]
+	if len(m.queues[sessionID]) == 0 {
+		delete(m.queues, sessionID) // mirror Redis's auto-delete of empty lists
+	}
+	m.claims[sessionID] = head.RunID
+	m.claimExp[sessionID] = m.now().Add(SessionClaimTTL)
+	return head, true, nil
+}
+
+// DequeueMessage implements Store (remove by run id; claim untouched).
+func (m *MemStore) DequeueMessage(_ context.Context, sessionID, runID string) (QueueEntry, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q := m.queues[sessionID]
+	for i, e := range q {
+		if e.RunID == runID {
+			m.queues[sessionID] = append(q[:i:i], q[i+1:]...)
+			if len(m.queues[sessionID]) == 0 {
+				delete(m.queues, sessionID)
+			}
+			return e, true, nil
+		}
+	}
+	return QueueEntry{}, false, nil
+}
+
+// QueueLen implements Store.
+func (m *MemStore) QueueLen(_ context.Context, sessionID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.queues[sessionID]), nil
+}
+
+// QueueEntries implements Store (enqueue order).
+func (m *MemStore) QueueEntries(_ context.Context, sessionID string) ([]QueueEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q := m.queues[sessionID]
+	if len(q) == 0 {
+		return nil, nil
+	}
+	out := make([]QueueEntry, len(q))
+	copy(out, q)
+	return out, nil
+}
+
+// TouchQueued implements Store: re-arm the run-key family TTL only (no
+// heartbeat, no claim), mirroring the Redis EXPIRE pair.
+func (m *MemStore) TouchQueued(_ context.Context, runID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.expire[runID]; ok && !m.expiredLocked(runID) {
+		m.expire[runID] = m.now().Add(RunKeyTTL)
+	}
+	return nil
+}
+
+// ClearQueue implements Store.
+func (m *MemStore) ClearQueue(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.queues, sessionID)
 	return nil
 }
 

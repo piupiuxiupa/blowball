@@ -1,0 +1,209 @@
+package redis
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/lush/blowball/internal/run"
+	"github.com/lush/blowball/internal/stream"
+)
+
+// redisQueueEntry builds a full entry so the JSON round-trip through the
+// LIST is exercised (selection, attachments, token, timestamps).
+func redisQueueEntry(runID string) run.QueueEntry {
+	return run.QueueEntry{
+		RunID:     runID,
+		SessionID: "sess-1",
+		UserID:    "u1",
+		Content:   "msg " + runID,
+		Model:     "gpt-test",
+		Selection: run.QueueSelection{
+			Model: "gpt-test", Thinking: true, Vision: true, Effort: "low",
+			MaxContextTokens: 128000, MaxCompletionTokens: 8192,
+			LengthExpandStep: 8192, LengthMaxRetries: 3,
+		},
+		EnqueuedAt: time.Unix(1700000000, 0).UTC(),
+	}
+}
+
+func TestRunStore_AdmitMessageFIFOSealed(t *testing.T) {
+	rs, mr := testRunStore(t)
+	ctx := context.Background()
+
+	// Fast path: free claim + empty queue → claimed, claim key set with TTL.
+	res, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry("run-a"), 3)
+	if err != nil || res.Outcome != run.AdmitClaimed {
+		t.Fatalf("admit a = (%+v,%v), want AdmitClaimed", res, err)
+	}
+	if ttl := mr.TTL("session:sess-1:run"); ttl != run.SessionClaimTTL {
+		t.Fatalf("claim TTL = %s, want %s", ttl, run.SessionClaimTTL)
+	}
+	if got, _ := mr.Get("session:sess-1:run"); got != "run-a" {
+		t.Fatalf("claim holder = %q, want run-a", got)
+	}
+
+	// Held claim → queued at position 1.
+	if res, err = rs.AdmitMessage(ctx, "sess-1", redisQueueEntry("run-b"), 3); err != nil || res.Outcome != run.AdmitQueued || res.Position != 1 {
+		t.Fatalf("admit b = (%+v,%v), want AdmitQueued pos 1", res, err)
+	}
+	// A NEW message while the queue is non-empty must enqueue even if the
+	// claim is free (release run-a but keep the queue): the FIFO invariant
+	// forbids jumping the queue by claiming directly.
+	if err := rs.ReleaseSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if res, err = rs.AdmitMessage(ctx, "sess-1", redisQueueEntry("run-c"), 3); err != nil || res.Outcome != run.AdmitQueued || res.Position != 2 {
+		t.Fatalf("admit c = (%+v,%v), want AdmitQueued pos 2 (non-empty queue blocks the direct claim)", res, err)
+	}
+	if got, err := mr.Get("session:sess-1:run"); err == nil && got != "" {
+		t.Fatalf("admit c claimed the session (%q) despite a non-empty queue", got)
+	}
+
+	// Depth cap.
+	if res, err = rs.AdmitMessage(ctx, "sess-1", redisQueueEntry("run-d"), 3); err != nil || res.Outcome != run.AdmitQueued {
+		t.Fatalf("admit d = (%+v,%v), want AdmitQueued", res, err)
+	}
+	if res, err = rs.AdmitMessage(ctx, "sess-1", redisQueueEntry("run-e"), 3); err != nil || res.Outcome != run.AdmitFull {
+		t.Fatalf("admit e = (%+v,%v), want AdmitFull", res, err)
+	}
+	if n, err := rs.QueueLen(ctx, "sess-1"); err != nil || n != 3 {
+		t.Fatalf("QueueLen = (%d,%v), want 3", n, err)
+	}
+}
+
+func TestRunStore_PumpHeadClaimTransfer(t *testing.T) {
+	rs, mr := testRunStore(t)
+	ctx := context.Background()
+
+	// run-a running; b, c queued (via the queue so entries exercise the JSON
+	// round-trip).
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, id := range []string{"run-b", "run-c"} {
+		if _, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry(id), 8); err != nil {
+			t.Fatalf("admit %s: %v", id, err)
+		}
+	}
+
+	// Held claim: the pump must not pop anything.
+	if e, ok, err := rs.PumpHead(ctx, "sess-1"); err != nil || ok || e.RunID != "" {
+		t.Fatalf("pump with held claim = (%q,%v,%v), want (,false,nil)", e.RunID, ok, err)
+	}
+
+	// Release → FIFO order, each pump transferring the claim with TTL.
+	if err := rs.ReleaseSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	for _, want := range []string{"run-b", "run-c"} {
+		e, ok, err := rs.PumpHead(ctx, "sess-1")
+		if err != nil || !ok || e.RunID != want {
+			t.Fatalf("pump = (%q,%v,%v), want (%q,true)", e.RunID, ok, err, want)
+		}
+		if e.SessionID != "sess-1" || e.Content != "msg "+want || e.Model != "gpt-test" || e.Selection.MaxContextTokens != 128000 {
+			t.Fatalf("pumped entry did not round-trip: %+v", e)
+		}
+		if got, _ := mr.Get("session:sess-1:run"); got != want {
+			t.Fatalf("claim holder after pumping %s = %q, want %q", want, got, want)
+		}
+		if ttl := mr.TTL("session:sess-1:run"); ttl != run.SessionClaimTTL {
+			t.Fatalf("claim TTL after pump = %s, want %s", ttl, run.SessionClaimTTL)
+		}
+		// The pumped run owns the slot; the next pump needs its release.
+		if err := rs.ReleaseSession(ctx, "sess-1", want); err != nil {
+			t.Fatalf("release %s: %v", want, err)
+		}
+	}
+
+	// Empty queue (and the auto-deleted list key): ok=false.
+	if e, ok, err := rs.PumpHead(ctx, "sess-1"); err != nil || ok || e.RunID != "" {
+		t.Fatalf("pump on empty queue = (%q,%v,%v), want (,false,nil)", e.RunID, ok, err)
+	}
+	if mr.Exists("queue:sess-1") {
+		t.Fatal("empty queue list key still exists, want Redis auto-delete")
+	}
+}
+
+func TestRunStore_DequeueAndQueueEntries(t *testing.T) {
+	rs, _ := testRunStore(t)
+	ctx := context.Background()
+
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, id := range []string{"run-b", "run-c", "run-d"} {
+		if _, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry(id), 8); err != nil {
+			t.Fatalf("admit %s: %v", id, err)
+		}
+	}
+
+	// Dequeue the middle entry; order of the rest is preserved.
+	e, ok, err := rs.DequeueMessage(ctx, "sess-1", "run-c")
+	if err != nil || !ok || e.RunID != "run-c" {
+		t.Fatalf("dequeue c = (%q,%v,%v), want (run-c,true)", e.RunID, ok, err)
+	}
+	entries, err := rs.QueueEntries(ctx, "sess-1")
+	if err != nil || len(entries) != 2 || entries[0].RunID != "run-b" || entries[1].RunID != "run-d" {
+		t.Fatalf("queue after dequeue = (%v,%v), want [run-b run-d]", entries, err)
+	}
+	// Unknown id → ok=false; the claim is untouched either way.
+	if _, ok, _ := rs.DequeueMessage(ctx, "sess-1", "run-zzz"); ok {
+		t.Fatal("dequeue of unknown run reported ok")
+	}
+	if got := testGetClaim(rs, "sess-1"); got != "run-a" {
+		t.Fatalf("claim holder = %q, want run-a (dequeue never touches the claim)", got)
+	}
+
+	// ClearQueue drops everything; the claim survives (session deletion
+	// releases it through its own path).
+	if err := rs.ClearQueue(ctx, "sess-1"); err != nil {
+		t.Fatalf("clear queue: %v", err)
+	}
+	if n, _ := rs.QueueLen(ctx, "sess-1"); n != 0 {
+		t.Fatalf("QueueLen after clear = %d, want 0", n)
+	}
+	if got := testGetClaim(rs, "sess-1"); got != "run-a" {
+		t.Fatalf("clear queue disturbed the claim: %q", got)
+	}
+}
+
+// testGetClaim reads the raw claim value via the shared client.
+func testGetClaim(rs *RunStore, sid string) string {
+	v, err := rs.client.Get(context.Background(), sessionRunKey(sid)).Result()
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
+func TestRunStore_TouchQueuedRearmsTTL(t *testing.T) {
+	rs, mr := testRunStore(t)
+	ctx := context.Background()
+
+	// A queued run's key family (meta created at enqueue, events created by
+	// the queued event append) gets its TTL re-armed by TouchQueued.
+	if err := rs.InitMeta(ctx, "run-q", run.RunMeta{SessionID: "sess-1", Status: run.StatusQueued}); err != nil {
+		t.Fatalf("init meta: %v", err)
+	}
+	if err := rs.AppendEvent(ctx, "run-q", stream.TokenEvent("Confucius", "x")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	mr.FastForward(70 * time.Minute) // past the 54–66min jittered window
+	if mr.Exists("run:run-q:meta") {
+		t.Fatal("meta should have expired before the touch")
+	}
+	_ = rs.TouchQueued(ctx, "run-q") // no-op on missing keys — must not error
+
+	// Fresh keys ARE re-armed.
+	if err := rs.InitMeta(ctx, "run-q2", run.RunMeta{SessionID: "sess-1", Status: run.StatusQueued}); err != nil {
+		t.Fatalf("init meta q2: %v", err)
+	}
+	mr.FastForward(10 * time.Minute) // well inside the 54–66min window
+	if err := rs.TouchQueued(ctx, "run-q2"); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	if ttl := mr.TTL("run:run-q2:meta"); ttl < 40*time.Minute {
+		t.Fatalf("meta TTL after touch = %s, want re-armed toward 1h", ttl)
+	}
+}
