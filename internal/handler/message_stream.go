@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,7 +23,6 @@ import (
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
-	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/skillmarket"
@@ -81,7 +81,40 @@ type MessageStreamHandler struct {
 	// turnDone is the owning turn's completion channel (the degraded-path
 	// close signal when the store is unreachable).
 	writeRunEvents func(ctx context.Context, w http.ResponseWriter, runs *run.Manager, runID, after string, headers map[string]string, turnDone <-chan struct{}) error
+	// queueMaxDepth is the session-message-queue knob (messages.queue): 0
+	// keeps the queue disabled — busy sessions reject POSTs with 409
+	// SESSION_BUSY and no pump/reconciler runs — while a positive value
+	// enables queue admission with that depth cap. Set via
+	// EnableMessageQueue at wiring time (kept out of the constructor so the
+	// pre-queue call sites and tests stay byte-for-byte).
+	queueMaxDepth int
+	// turnsStopped is the process-level "no new turns" gate tripped by
+	// graceful shutdown (session-message-queue D5): the pump tail checks it
+	// so a shutdown-bound cancel does not start the queued head as the
+	// process is going down — entries stay enqueued for the post-restart
+	// reconciler.
+	turnsStopped atomic.Bool
 }
+
+// EnableMessageQueue turns on the in-session message queue
+// (session-message-queue, messages.queue.enabled) with the given depth cap.
+// Kept out of the constructor so pre-queue call sites and tests stay
+// unchanged: a handler that never calls this is byte-for-byte the 409
+// SESSION_BUSY behavior. Non-positive maxDepth keeps the queue off.
+func (h *MessageStreamHandler) EnableMessageQueue(maxDepth int) {
+	if maxDepth > 0 {
+		h.queueMaxDepth = maxDepth
+	}
+}
+
+// StopNewTurns trips the process-level shutdown gate: the queue pump tail
+// (and the reconciler) check it so graceful shutdown never starts a queued
+// turn while the process is going down — entries stay enqueued for the
+// post-restart reconciler.
+func (h *MessageStreamHandler) StopNewTurns() { h.turnsStopped.Store(true) }
+
+// newTurnsStopped reports whether the shutdown gate is tripped.
+func (h *MessageStreamHandler) newTurnsStopped() bool { return h.turnsStopped.Load() }
 
 // RollbackQueuedAttachments restores the staged-attachment claims a queued
 // entry made at enqueue time, when the entry is cancelled before its turn
@@ -418,33 +451,38 @@ var incrementalPersistEvery = 1 * time.Second
 //     token-limit). Pure in-memory check, before any storage I/O.
 //  3. Resolve user_id + session_id + workspace_root.
 //  4. Validate that the session exists and belongs to the caller. Missing or
-//     mismatched ownership -> 404.
-//  5. Recover prior messages to build the agent context (and count prior user
-//     rows for the title-generation cadence).
-//  6. Capture the user message timestamp; the user row itself is persisted at
-//     send time (step 8) so it is durable and visible for the whole turn,
-//     while the assistant events stay deferred to the turn end so the first
-//     token is not delayed by a storage round-trip.
-//  7. Claim the session's single active-run slot (Redis SET NX). A running
-//     turn -> 409 SESSION_BUSY carrying the active run id. Once claimed,
-//     fire-and-forget title generation when the user-message ordinal hits the
-//     cadence (n % 3 == 1) — in parallel with the turn, before it starts.
-//  8. Persist the user message row synchronously through SaveMessagesBatch
-//     (send-time-user-message-persistence): one Redis dual-write pipeline on
-//     the handler goroutine, strictly after the claim and after every history
-//     read of this turn (see the placement invariants at the write site). The
-//     turn is durable from here on; a later batch re-including the row is
-//     prevented by the turn's userPersisted flag.
-//  9. Run the orchestrator on a TURN-scoped context held by the run registry
+//     mismatched ownership -> 404. Validate + claim attachments (rollback on
+//     any rejection below, until admission succeeds).
+//  5. Admit the message to the session's run slot. Queue DISABLED
+//     (messages.queue unset): claim the single active-run slot (Redis SET NX)
+//     — a running turn -> 409 SESSION_BUSY carrying the active run id. Queue
+//     ENABLED: one atomic claim-or-enqueue step — claim free AND queue empty
+//     -> claim (fast path); otherwise append to the session queue (a
+//     transport failure degrades to unguarded execution in both modes, the
+//     standing "messages always win" convention); depth cap -> 409
+//     QUEUE_FULL. An enqueued message gets its run meta (status queued) and
+//     the `queued` event on the run log, its SSE response replays that event
+//     and tails until the pump continues the turn, and this handler returns
+//     without a turn goroutine (session-message-queue).
+//  6. For an admitted (or degraded) message, startTurn (turn_start.go) runs
+//     the shared turn pipeline: history recovery + compaction stitching +
+//     memory recall (the preamble — after the claim, so a queued message
+//     recovers history at pump time), the send-time title cadence trigger,
+//     run meta, send-time user-row persistence, the incremental persister,
+//     and the turn goroutine itself. The user row is persisted after every
+//     history read of the turn (placement invariants at the write site), so
+//     the turn is durable from that point; assistant events stay deferred to
+//     the turn end so the first token is not delayed by a storage round-trip.
+//  7. Run the orchestrator on a TURN-scoped context held by the run registry
 //     (turn-detach-resume): a client disconnect does NOT cancel the agent
 //     loop; only the cancel endpoint, an error, or process shutdown does. The
 //     runner streams events into a fresh hub whose single consumer (the
 //     drainer) appends every event to the Redis run event log.
-//  10. Concurrently, the SSE response subscribes to the run event log (the same
+//  8. Concurrently, the SSE response subscribes to the run event log (the same
 //     reader the resume endpoint uses), replaying from the beginning — so a
 //     slow start never misses events and a disconnect only drops the
 //     subscription, never the turn.
-//  11. After the orchestrator returns (whenever that is — possibly long after
+//  9. After the orchestrator returns (whenever that is — possibly long after
 //     the client disconnected), the TURN goroutine persists the assistant
 //     reply as an event-suffix batch using a detached (background-derived,
 //     trace_id-preserving) context — synchronously, with bounded retry — then
@@ -455,7 +493,9 @@ var incrementalPersistEvery = 1 * time.Second
 //     longer silently drop the batch (harden-turn-persistence). A heartbeat
 //     keeper runs during the persist/drain phase so attach cannot misclassify
 //     the still-finalizing run as dead. Title generation does NOT fire here —
-//     it already fired at send time (step 7).
+//     it already fired at send time (step 6). Queue enabled: after Finalize
+//     the goroutine pumps the queued head as the next turn
+//     (session-message-queue; skipped while shutting down).
 func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// Cap the request body BEFORE JSON parsing so an oversized payload is
 	// rejected as it arrives rather than buffered in full (same pattern as
@@ -520,7 +560,6 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 				turnModel, turnLimit, completionReserve)))
 		return
 	}
-	statusSuffix := prompt.RenderStatus()
 
 	userID := middleware.UserIDFromCtx(c)
 	sessionID := c.Param("session_id")
@@ -617,546 +656,141 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		}
 	}
 
-	prior, err := h.msgSvc.RecoverMessages(ctx, userID, sessionID)
-	if err != nil {
-		logger.FromContext(ctx).Warn("recover messages failed; proceeding",
-			zap.String("op", "handler.send_message"),
-			zap.Error(err))
-		prior = nil
-	}
-	priorCalls, cerr := h.msgSvc.ListToolCalls(ctx, sessionID)
-	if cerr != nil {
-		logger.FromContext(ctx).Warn("recover tool calls failed; proceeding without",
-			zap.String("op", "handler.send_message"),
-			zap.Error(cerr))
-		priorCalls = nil
+	// ── admission: acquire (or queue behind) the session's run slot ─────────
+	//
+	// The turn-request form below is the shared start-ready shape: the
+	// preamble (history recovery, compaction stitching, memory recall) runs
+	// INSIDE startTurn — after the claim — so a queued message recovers
+	// history at pump time (the previous turn's terminal batch is durable
+	// before the claim is free, harden-turn-persistence D2) rather than at
+	// enqueue time, and every entry path (HTTP fast path, degradation,
+	// pump) produces the identical turn.
+	//
+	// userMsgTime is minted here for the HTTP paths (request time, the
+	// pre-extraction behavior); the pump path mints its own at continuation
+	// time — see turn_start.go's turnRequestFromQueueEntry for the ordering
+	// rationale.
+	tr := &turnRequest{
+		sessionID:        sessionID,
+		userID:           userID,
+		traceID:          tid,
+		content:          req.Content,
+		attachments:      userAttachments,
+		sel:              sel,
+		rawToken:         rawToken,
+		userMsgTime:      time.Now(),
+		contextCompacted: sess.ContextCompacted,
 	}
 
-	agentMsgs, _, err := MessagesToAgentMessagesIndexed(prior, priorCalls)
-	if err != nil {
-		logger.FromContext(ctx).Warn("reconstruct messages failed; falling back to current message only",
-			zap.String("op", "handler.send_message"),
-			zap.Error(err))
-		agentMsgs = nil
-	}
-
-	// Existing compacted sessions are stitched from the DURABLE tier. The
-	// turn-start pressure check now runs inside the built agent just before its
-	// first model call, where the exact system prompt, tools, current user
-	// message, and budget are available.
-	if h.compSvc.Enabled() && sess.ContextCompacted {
-		if durable, durableCalls, derr := h.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
-			durableMsgs, _, rerr := MessagesToAgentMessagesIndexed(durable, durableCalls)
-			if rerr != nil {
-				logger.FromContext(ctx).Warn("durable reconstruct failed; using full recovered history",
-					zap.String("op", "handler.send_message"),
-					zap.Error(rerr))
-			} else if activeRecord := h.compSvc.LatestCompactionRecord(ctx, sessionID); activeRecord != nil {
-				if stitched := stitchCompacted(durable, durableCalls, durableMsgs, activeRecord); stitched != nil {
-					agentMsgs = stitched
-				}
-			}
+	var started *startedTurn
+	if h.queueMaxDepth > 0 {
+		// session-message-queue admission (design D2): one atomic
+		// claim-or-enqueue step. claim free AND queue empty → claim (the
+		// fast path, byte-identical to a successful ClaimSession); busy or
+		// queue non-empty → append at the tail; depth cap → QUEUE_FULL.
+		// The entry carries the resolved snapshot, so the pumping process
+		// never re-resolves the request (D1).
+		entry := queueEntryFromRequest(tr, newlyClaimedAttachments, time.Now())
+		res, aerr := h.runs.Store.AdmitMessage(ctx, sessionID, entry, h.queueMaxDepth)
+		if aerr != nil {
+			// Admission transport failure: the queue itself is Redis, so
+			// there is nothing to enqueue into — degrade exactly like the
+			// legacy claim failure below (WARN + unguarded execution).
+			// "messages always win" outranks the mutex.
+			logger.FromContext(ctx).Warn("queue admission failed; proceeding without mutual exclusion",
+				zap.String("op", "handler.send_message"),
+				zap.Error(aerr))
+			claimsCommitted = true
+			started = h.startTurn(ctx, tr)
 		} else {
-			logger.FromContext(ctx).Warn("durable recovery failed; using full recovered history",
-				zap.String("op", "handler.send_message"),
-				zap.Error(derr))
-		}
-	}
-
-	// Cross-session memory recall (cross-session-memory +
-	// memory-recall-cache-stable): query the user's OpenViking memory store
-	// with the new message and inject the NEW entries as a synthetic
-	// recall_memories tool pair immediately before the user message. The
-	// pair is persisted at send time (below) and replayed byte-identically
-	// by history recovery, so turn payloads are append-only and the LLM
-	// prefix cache covers prior turns; entries already injected this session
-	// (derived from the recovered transcript) are never repeated, and a turn
-	// with no new entries injects nothing at all. This runs on the request
-	// context BEFORE the send-time user-row write below, satisfying the
-	// history-read invariant documented there; any failure or timeout is a
-	// WARN + no injection — memory must never block or fail a turn. (Known
-	// cost: recall precedes the run claim, so a SESSION_BUSY-rejected
-	// request pays one wasted Find.)
-	var recall *recallInjection
-	if h.memSvc.Enabled() {
-		injected := injectedRecallKeys(agentMsgs)
-		if res, err := h.memSvc.Recall(ctx, userID, req.Content, injected); err != nil {
-			logger.FromContext(ctx).Warn("memory recall failed; continuing without memory",
-				zap.String("op", "handler.send_message"),
-				zap.String("user_id", userID),
-				zap.Error(err))
-		} else if res.Frame != "" {
-			inj := newRecallInjection(sessionID, tid, req.Content, res)
-			agentMsgs = append(agentMsgs, inj.agentMessages()...)
-			recall = &inj
-		}
-	}
-	req.Content += statusSuffix
-	// Current-turn inline images (K=1 window): the LIVE user message carries
-	// the image bytes read from disk; from the next turn on, reconstruction
-	// renders this row as text placeholders instead. A missing file degrades
-	// to the placeholder (ERROR log) — the turn must not die because a file
-	// vanished underneath the registry.
-	current := agent.Message{Role: "user", Content: req.Content}
-	if len(userAttachments) > 0 {
-		current.Images, current.Content = h.loadCurrentTurnImages(ctx, userID, sessionID, req.Content, userAttachments)
-	}
-	messages := append(agentMsgs, current)
-
-	// Capture the user message timestamp early so the persisted user row keeps
-	// the request-arrival time even though persistence is deferred until after
-	// the orchestrator succeeds.
-	userMsgTime := time.Now()
-
-	// Turn-scoped persistence bookkeeping shared by the send-time user-row
-	// write, the mid-turn flush, and the turn-end save (context-compaction +
-	// send-time-user-message-persistence): how many merged events have already
-	// been persisted determines the suffix the turn-end save pushes, and
-	// whether the user row was persisted at send time gates its inclusion in
-	// every later batch — keeping both the MySQL rows (deterministic
-	// client_msg_ids) and the Redis msgs:{sid} list free of duplicates.
-	persist := turnPersistInfo{
-		sessionID:       sessionID,
-		userID:          userID,
-		traceID:         tid,
-		userContent:     req.Content,
-		userAttachments: userAttachments,
-		userMsgTime:     userMsgTime,
-	}
-	flushed := &turnFlushState{}
-
-	// The synchronized event tap is now UNCONDITIONAL (incremental-message-
-	// persistence): the incremental persister below snapshots the collected
-	// event stream through it every second, and the mid-turn compaction hook
-	// (when compaction is configured) flushes through the same cursor state.
-	// Both are per-turn values handed to the orchestrator alongside the hub.
-	var hooks TurnHooks
-	tap := NewTurnEventTap()
-	if h.compSvc.Enabled() {
-		inputBudget := configuredInputBudget(turnLimit, sel.MaxCompletionTokens)
-		hooks = TurnHooks{
-			Round: h.newBudgetedRoundHook(tap, persist, flushed, turnLimit, inputBudget, turnModel),
-			Estimate: func(_ context.Context, lastUsage agent.Usage, appended []agent.Message) agent.ContextRequestEstimate {
-				return agent.EstimateRequestFromUsage(lastUsage.PromptTokens, lastUsage.CompletionTokens, appended)
-			},
-			BudgetedRound: func(ctx context.Context, _ agent.Usage, estimate agent.ContextRequestEstimate, _ string, msgs []agent.Message, tools []byte) []agent.Message {
-				if estimate.Tokens <= 0 || inputBudget <= 0 {
-					return nil
-				}
-				// Only the preflight near-hard-budget path belongs here. The
-				// ordinary 80% compression policy remains on Round above; firing
-				// both for every measured round would summarize twice.
-				// msgs already carries the system prompt; passing it again as a
-				// separate envelope would double-count prompt tokens.
-				if agent.EstimateRequestOverBudget("", msgs, tools, inputBudget) {
-					return h.compactMidTurn(ctx, tap, persist, flushed, turnLimit, inputBudget, turnModel, estimate.Tokens, true, model.CompactionTriggerMidTurn)
-				}
-				return nil
-			},
-			Tap: tap,
-		}
-	} else {
-		hooks = TurnHooks{Tap: tap}
-	}
-
-	// ── turn-detach-resume: session claim, run registry, event log ──────────
-	//
-	// The turn runs on its OWN context, detached from the HTTP request: a
-	// client disconnect no longer cancels generation. The run id is the
-	// request's trace_id, delivered via the X-Run-Id response header and the
-	// run_id meta stamped on every event in the log.
-
-	// Claim the session's single active-run slot (Redis SET NX). A holder
-	// means a turn is still running: reject with SESSION_BUSY and hand back
-	// the run id so the client can attach instead of waiting blindly. A claim
-	// TRANSPORT failure degrades to running unguarded (WARN) rather than
-	// rejecting the chat: a Redis outage already puts persistence on its
-	// direct-write fallback, and "messages always win" outranks the mutex —
-	// the claim is best-effort mutual exclusion, not admission control.
-	holder, claimed, err := h.runs.Store.ClaimSession(ctx, sessionID, tid)
-	if err != nil {
-		logger.FromContext(ctx).Warn("session run claim failed; proceeding without mutual exclusion",
-			zap.String("op", "handler.send_message"),
-			zap.Error(err))
-	} else if !claimed {
-		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
-			"code":    "SESSION_BUSY",
-			"message": "a turn is already running for this session",
-			"run_id":  holder,
-		}})
-		return
-	}
-	// The request now owns the session run slot; validation failures below no
-	// longer roll staged attachments back.
-	claimsCommitted = true
-
-	// Title generation cadence (title-generation-cadence): fire-and-forget at
-	// message-SEND time, in parallel with the turn. Placement — after the
-	// session-run claim succeeded (a 409 SESSION_BUSY request returned above
-	// and never reaches here; a claim transport failure degraded to unguarded
-	// execution and still triggers, matching the persistence fallback
-	// convention) and before the orchestrator starts — means the title lands
-	// within seconds and survives turn errors/cancellation (GenerateTitle
-	// derives its own detached context). Throttled by user-message ordinal:
-	// n = prior persisted user rows + 1 (this message), trigger iff n % 3 == 1
-	// — the 1st message always, then every 3rd (4th, 7th, ...). The
-	// turn-serializing claim keeps the count deterministic: prior holds
-	// exactly messages 1..n-1. Input is the session's first user message plus
-	// the triggering message (both user-side anchors; on n=1 they coincide).
-	if h.titleSvc != nil {
-		userCount, firstUserMsg := 0, ""
-		for _, m := range prior {
-			if m.Role == model.RoleUser {
-				if userCount == 0 {
-					firstUserMsg = m.Content
-				}
-				userCount++
-			}
-		}
-		if (userCount+1)%3 == 1 {
-			if firstUserMsg == "" {
-				firstUserMsg = req.Content
-			}
-			// Fire-and-forget; GenerateTitle has its own recover().
-			go h.titleSvc.GenerateTitle(ctx, sessionID, firstUserMsg, req.Content)
-		}
-	}
-
-	// Run meta (ownership + status + the turn's resolved model) in Redis.
-	// Best-effort: a failed write costs cancel/resume for this run, never the
-	// turn itself.
-	if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
-		SessionID: sessionID,
-		UserID:    userID,
-		Status:    run.StatusRunning,
-		Model:     turnModel,
-		CreatedAt: userMsgTime.Format(time.RFC3339),
-	}); err != nil {
-		logger.FromContext(ctx).Warn("run meta init failed",
-			zap.String("op", "handler.send_message"),
-			zap.String("run_id", tid),
-			zap.Error(err))
-	}
-
-	// Send-time user-row persistence (send-time-user-message-persistence):
-	// persist this turn's user message NOW — after the claim succeeded and
-	// before the turn goroutine spawns — so the row is durable and visible to
-	// history reads for the whole turn (a process crash can no longer lose it,
-	// and a mid-turn refresh sees the question alongside the agent replay).
-	// Placement invariants (design decision 1): the write MUST stay after
-	// every history read of THIS turn — RecoverMessages and the turn-start
-	// stitching/compaction block above captured `prior`/durable history before
-	// the claim, and the LLM context appends the user message explicitly
-	// (`messages`), so an earlier write would put the same message into the
-	// recovered history AND the appended context — twice. It also stays after
-	// the claim itself: 400/404/409 rejections above write nothing.
-	//
-	// The call is synchronous on the handler goroutine; the goroutine-spawn
-	// happens-before edge below hands the set flag to the round hook and the
-	// turn-end save without extra synchronization. On error the flag is NOT
-	// set and the turn-end batch includes the user row as before
-	// (at-least-once; the deterministic client_msg_id {trace_id}:0 collapses
-	// the duplicate in MySQL). A Redis-pipeline failure never surfaces here —
-	// SaveMessagesBatch degrades internally to a synchronous MySQL direct
-	// write and returns nil.
-	// The synthetic recall pair (memory-recall-cache-stable) persists FIRST,
-	// ahead of the user row, so both the Redis list order and the
-	// (msg_time, msg_index) stream order match the payload order: pair rows
-	// (msg_index -1) strictly before the user row (msg_index 0). One
-	// AppendFinalBatch transaction lands the placeholder + tool_calls row;
-	// the deterministic ids collapse any redelivery. Failure follows
-	// memory's standing best-effort contract: WARN and keep the in-memory
-	// injection (the model still sees its memories; the cost is a one-time
-	// prefix break on the next turn, never a failed chat).
-	if recall != nil {
-		placeholder, call := recall.persistRows(persist.sessionID, persist.traceID, persist.userMsgTime)
-		if err := h.sessSvc.SaveFinalMessages(ctx, userID, []model.Message{placeholder}, []model.ToolCall{call}); err != nil {
-			logger.FromContext(ctx).Warn("send-time recall pair persist failed; continuing with in-memory injection only",
-				zap.String("op", "handler.send_message"),
-				zap.String("run_id", tid),
-				zap.Error(err))
-		}
-	}
-	if err := h.sessSvc.SaveMessagesBatch(ctx, userID, []model.Message{
-		UserMessage(persist.sessionID, persist.traceID, persist.userContent, persist.userMsgTime, persist.userAttachments...),
-	}); err != nil {
-		logger.FromContext(ctx).Warn("send-time user message persist failed; deferring the user row to the turn-end batch",
-			zap.String("op", "handler.send_message"),
-			zap.String("run_id", tid),
-			zap.Error(err))
-	} else {
-		flushed.markUserPersisted()
-	}
-
-	// The turn context: detached, but carrying the same trace/session
-	// attribution (raw capture, llm_raw_log) as the request context did — and
-	// the login token, which flows from here into every tool execution ctx so
-	// luban/executor market lookups survive the HTTP request's lifetime.
-	turnCtx, turnCancel := context.WithCancel(context.Background())
-	turnCtx = skillmarket.WithToken(agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID), rawToken)
-	regRun := h.runs.Registry.Register(tid, turnCancel)
-
-	workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")
-	skillsDir := filepath.Join(h.dataDir, userID, "skills")
-
-	// Turn-artifacts capability: the turn-end finalization closure. The
-	// adapter invokes it with this turn's top-level assistant text just
-	// before the done event; linked paths are the artifact declaration.
-	if h.artifacts != nil {
-		svc := h.artifacts
-		hooks.FinalizeTurn = func(ctx context.Context, assistantText string) []stream.ArtifactInfo {
-			arts, err := svc.FinalizeTurn(ctx, userID, workspaceRoot, assistantText)
-			if err != nil {
-				logger.FromContext(ctx).Warn("artifact finalization failed; turn completes without artifact events",
-					zap.String("op", "handler.artifact_finalize"),
-					zap.String("user_id", userID),
-					zap.Error(err))
-				return nil
-			}
-			infos := make([]stream.ArtifactInfo, 0, len(arts))
-			for _, a := range arts {
-				infos = append(infos, stream.ArtifactInfo{
-					Path:      a.Path,
-					VersionID: a.VersionID,
-					Size:      a.Size,
-					Mime:      a.Mime,
-					Op:        a.Op,
-				})
-			}
-			return infos
-		}
-	}
-
-	hub := h.newHub()
-
-	// The drainer is the hub's single consumer: it appends every event to
-	// run:{rid}:events (done included), heartbeats, and polls the
-	// cross-process cancel flag. drained closes after the final drain, which
-	// orders the terminal status write strictly after the last event.
-	drainDone := run.StartDrainer(hub, h.runs.Store, h.runs.Registry, tid, sessionID, run.HeartbeatEvery)
-
-	type runResult struct {
-		events []stream.StreamEvent
-		usage  map[string]any
-		err    error
-	}
-	resultCh := make(chan runResult, 1)
-
-	// saveCtx is a detached context that survives the HTTP request so the
-	// turn-end persistence is not killed by a client disconnect. It carries
-	// the turn's session_id + trace_id so its log sites (via logger.FromContext)
-	// correlate with the turn (tool-call-log-correlation).
-	saveCtx := agent.WithSessionID(trace.WithContext(context.Background(), tid), sessionID)
-
-	// Mid-turn incremental persister (incremental-message-persistence): the
-	// closed merged-event prefix lands every second while the turn runs; the
-	// turn goroutine stops it (draining any in-flight batch) before the
-	// terminal batch computes its suffix.
-	stopIncremental := h.startIncrementalPersister(saveCtx, tap, persist, flushed)
-
-	// persistTurnEvents renders the supplied assistant event stream as the
-	// turn-end final batch (refactor-message-storage: round finals + tool
-	// calls, one transaction) and persists
-	// the turn's per-agent cost into turn_usage. It runs SYNCHRONOUSLY on the
-	// turn goroutine (harden-turn-persistence): the terminal batch must be
-	// durable before Finalize releases the session claim, so a process death
-	// can no longer silently drop it. The SaveMessagesBatch call retries
-	// within a bounded budget (constants below) so a dual-tier outage delays
-	// — rather than loses — the batch. The user row is included only when the
-	// send-time write failed to land it (the userPersisted flag gates the
-	// render — see send-time-user-message-persistence); on the ordinary path
-	// this batch is a pure event suffix. turn_usage write failure is logged
-	// but does NOT roll back the message batch (usage is observability data,
-	// messages are business data — see the turn-cost-tracking spec's "Usage
-	// write failure does not roll back messages" scenario). Title generation
-	// is NOT triggered here — it fired at send time, before the turn started
-	// (title-generation-cadence).
-	//
-	// Mid-turn flush interaction (context-compaction capability): when a
-	// mid-turn compaction flushed part of this turn already, only the
-	// post-flush suffix is persisted — the deterministic client_msg_ids would
-	// collapse the rows in MySQL, but the Redis msgs:{sid} read cache has no
-	// such dedup, so the suffix split keeps the cache list exact.
-	persistTurnEvents := func(events []stream.StreamEvent, usage map[string]any, interrupted bool) {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.FromContext(saveCtx).Error("panic saving event stream",
-					zap.String("op", "handler.send_message"),
-					zap.Any("recover", r))
-			}
-		}()
-
-		now := time.Now().UTC()
-		merged := MergeEvents(events)
-
-		// Cross-session memory capture (cross-session-memory capability):
-		// fire-and-forget on BOTH terminal paths (this closure runs on the
-		// error/cancel and the success path alike, exactly once each). Own
-		// goroutine so a slow OpenViking round trip never delays the
-		// message-batch write; own recover + WARN-only errors — the
-		// TitleService fire-and-forget pattern. saveCtx is detached from the
-		// HTTP request, so a client disconnect cannot kill the capture.
-		// The submitted content is the persisted pair (persist.userContent
-		// + top-level assistant tokens); recall tool-pair rows are never
-		// captured (capture sources only the user/assistant pair).
-		if h.memSvc.Enabled() {
-			tc := memory.TurnCapture{
-				UserID:        userID,
-				SessionID:     sessionID,
-				UserContent:   persist.userContent,
-				AssistantText: topLevelAssistantText(merged),
-				UserAt:        persist.userMsgTime,
-				TurnEndAt:     now,
-			}
-			go func(tc memory.TurnCapture) {
-				defer func() {
-					if r := recover(); r != nil {
-						logger.FromContext(saveCtx).Error("panic capturing turn to memory",
-							zap.String("op", "handler.send_message"),
-							zap.Any("recover", r))
-					}
-				}()
-				if err := h.memSvc.CaptureTurn(saveCtx, tc); err != nil {
-					logger.FromContext(saveCtx).Warn("memory capture failed; turn unaffected",
+			switch res.Outcome {
+			case run.AdmitQueued:
+				// The message waits behind the running turn. Persist its
+				// observable state now — meta (status queued, so cancel and
+				// the events endpoint answer it correctly) and the queued
+				// event on the run log (so the SSE response below replays
+				// it and Last-Event-ID resume sees the wait as part of the
+				// run). The user message row is NOT written here: it lands
+				// at pump time inside startTurn (design D4 — an enqueue-
+				// time row would leak into the running turn's mid-turn
+				// compaction recovery and would sort before the previous
+				// turn's assistant rows).
+				claimsCommitted = true
+				if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
+					SessionID: sessionID,
+					UserID:    userID,
+					Status:    run.StatusQueued,
+					Model:     turnModel,
+					CreatedAt: tr.userMsgTime.Format(time.RFC3339),
+				}); err != nil {
+					logger.FromContext(ctx).Warn("queued run meta init failed",
 						zap.String("op", "handler.send_message"),
-						zap.String("user_id", tc.UserID),
+						zap.String("run_id", tid),
 						zap.Error(err))
 				}
-			}(tc)
-		}
-
-		batch, consumed := persist.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(), now,
-			roundRenderOptions{terminal: true, interrupted: interrupted})
-
-		if len(batch.msgs) > 0 || len(batch.calls) > 0 {
-			// Bounded retry (harden-turn-persistence D4): the batch carries
-			// deterministic client_msg_ids, so redelivery collapses to one
-			// row per message — retrying the whole SaveMessagesBatch is
-			// safe. A dual-tier outage delays the terminal batch (and with
-			// it the claim release) by at most the budget; after the budget
-			// it is an ERROR, not a silent loss.
-			var lastErr error
-			deadline := time.Now().Add(turnPersistBudget)
-			for attempt := 1; attempt <= turnPersistAttempts; attempt++ {
-				if err := h.sessSvc.SaveFinalMessages(saveCtx, userID, batch.msgs, batch.calls); err != nil {
-					lastErr = err
-					logger.FromContext(saveCtx).Warn("turn-end message persist attempt failed",
+				if err := h.runs.Store.AppendEvent(ctx, tid, stream.QueuedEvent(tid, res.Position)); err != nil {
+					logger.FromContext(ctx).Warn("queued event append failed",
 						zap.String("op", "handler.send_message"),
-						zap.Int("attempt", attempt),
-						zap.Int("rows", len(batch.msgs)),
+						zap.String("run_id", tid),
 						zap.Error(err))
-					if attempt == turnPersistAttempts || !time.Now().Add(turnPersistRetryBackoff).Before(deadline) {
-						break
-					}
-					time.Sleep(turnPersistRetryBackoff)
-					continue
 				}
-				lastErr = nil
-				break
+				// The SSE response is just another subscription to this
+				// run's event log: it replays the queued event, then tails
+				// (possibly for a long time) until the pump starts the turn
+				// and events flow — or a cancel flips the status terminal
+				// and the loop closes the stream. A client disconnect only
+				// drops the subscription; the resume endpoint re-attaches
+				// by the same run id. No resultCh wait exists here: the
+				// turn goroutine is spawned later by the pump, not by this
+				// request.
+				if sseErr := h.writeRunEvents(ctx, c.Writer, h.runs, tid, "0",
+					map[string]string{"X-Run-Id": tid}, nil); sseErr != nil && !errors.Is(sseErr, context.Canceled) {
+					logger.FromContext(ctx).Warn("sse write returned error",
+						zap.String("op", "handler.send_message"),
+						zap.Error(sseErr))
+				}
+				return
+			case run.AdmitFull:
+				// Depth cap: reject with the queue analog of SESSION_BUSY.
+				// The deferred rollback releases this request's staged
+				// attachment claims (claimsCommitted is still false).
+				c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+					"code":    "QUEUE_FULL",
+					"message": fmt.Sprintf("the session queue is full (%d pending messages)", h.queueMaxDepth),
+				}})
+				return
+			default: // run.AdmitClaimed — the fast path.
+				claimsCommitted = true
+				started = h.startTurn(ctx, tr)
 			}
-			if lastErr != nil {
-				logger.FromContext(saveCtx).Error("turn-end message persist budget exhausted; batch not durable",
-					zap.String("op", "handler.send_message"),
-					zap.String("session_id", sessionID),
-					zap.String("run_id", tid),
-					zap.Int("rows", len(batch.msgs)),
-					zap.Error(lastErr))
-			}
-			flushed.mark(consumed)
 		}
-
-		// Persist per-agent token cost into turn_usage AFTER the message
-		// batch. Failure is logged only — never roll back messages.
-		if tu, ok := buildTurnUsage(sessionID, tid, userID, turnModel, usage); ok {
-			if err := h.sessSvc.SaveTurnUsage(saveCtx, tu); err != nil {
-				logger.FromContext(saveCtx).Warn("save turn_usage failed; messages persisted",
-					zap.String("op", "handler.send_message"),
-					zap.Error(err))
-			}
-		}
-	}
-
-	go func() {
-		// Registry teardown: Unregister last so Finish (which unblocks
-		// WaitAll) happens while the entry still resolves.
-		defer h.runs.Registry.Unregister(tid)
-		defer regRun.Finish()
-		events, usage, err := h.orch.Handle(turnCtx, workspaceRoot, skillsDir, userID, messages, hub, hooks, sel.override())
-		hub.Close()
-		// Wait for the drainer to flush the final events into the log BEFORE
-		// flipping the run terminal: the status write must never precede the
-		// last replayable event.
-		<-drainDone
-
-		// Turn outcome logging (moved from the handler side so it records at
-		// the moment persistence starts): any orchestrator error interrupts
-		// the turn after content may already have been streamed to the client.
-		// That includes an explicit cancellation via the cancel endpoint or
-		// graceful shutdown (context.Canceled — a client disconnect no longer
-		// cancels the turn) AND upstream/transport/timeout failures such as a
-		// model-provider 429 or 5xx. In every case the partial event stream is
-		// persisted below so the reloaded session history matches what the
-		// user saw and the user's own message is never silently lost.
+	} else {
+		// Legacy single-slot claim (queue disabled): byte-for-byte the
+		// pre-capability behavior — including the 409 SESSION_BUSY body
+		// carrying the active run id so the client can attach instead of
+		// waiting blindly. A claim TRANSPORT failure degrades to running
+		// unguarded (WARN) rather than rejecting the chat.
+		holder, claimed, err := h.runs.Store.ClaimSession(ctx, sessionID, tid)
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				logger.FromContext(saveCtx).Warn("turn cancelled; persisting partial interrupted turn",
-					zap.String("op", "handler.send_message"),
-					zap.String("user_id", userID),
-					zap.Int("event_count", len(events)),
-					zap.Error(err))
-			} else {
-				logger.FromContext(saveCtx).Error("orchestrator failed; persisting partial turn",
-					zap.String("op", "handler.send_message"),
-					zap.String("user_id", userID),
-					zap.Int("event_count", len(events)),
-					zap.Error(err))
-			}
+			logger.FromContext(ctx).Warn("session run claim failed; proceeding without mutual exclusion",
+				zap.String("op", "handler.send_message"),
+				zap.Error(err))
+			claimsCommitted = true
+			started = h.startTurn(ctx, tr)
+		} else if !claimed {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+				"code":    "SESSION_BUSY",
+				"message": "a turn is already running for this session",
+				"run_id":  holder,
+			}})
+			return
+		} else {
+			// The request now owns the session run slot; validation failures
+			// below no longer roll staged attachments back.
+			claimsCommitted = true
+			started = h.startTurn(ctx, tr)
 		}
-
-		// Heartbeat keeper (harden-turn-persistence D3): the drainer has exited
-		// (final drain done), but persistence below may span seconds under
-		// retry. Keep run:{rid}:alive and the claim TTL armed so an attach
-		// cannot misclassify this still-finalizing run as dead and force-clear
-		// the claim mid-persist.
-		stopHeartbeat := startPersistHeartbeat(saveCtx, h.runs.Store, tid, sessionID, run.HeartbeatEvery)
-
-		// Stop the incremental persister FIRST (blocking until any in-flight
-		// batch resolves) so the terminal batch below is exclusive and its
-		// suffix starts at the final cursor value.
-		stopIncremental()
-
-		// Terminal persistence BEFORE Finalize (harden-turn-persistence D2):
-		// the session claim is only released after this turn's message batch
-		// is durable, making generating:false a reliable "history complete"
-		// signal for clients.
-		persistTurnEvents(events, usage, err != nil)
-
-		// (Drain-before-release D5 is retired with the ingest queue: the
-		// terminal batch above is a synchronous transactional MySQL write —
-		// history is complete the moment it returns.)
-		stopHeartbeat()
-
-		// Terminal run bookkeeping (turn-detach-resume) runs ON THE TURN
-		// goroutine, not the HTTP handler's: SSE subscribers (including this
-		// request's own response) close their streams on the terminal status,
-		// so it must be published without depending on the handler's own
-		// progress. Status first (unblocks SSE readers), then the session
-		// release (lifts SESSION_BUSY), then the retain-window expiry — all
-		// strictly after the terminal message batch is durable.
-		turnStatus := run.StatusDone
-		switch {
-		case err == nil:
-		case errors.Is(err, context.Canceled):
-			turnStatus = run.StatusCancelled
-		default:
-			turnStatus = run.StatusError
-		}
-		finalizeCtx := agent.WithSessionID(trace.WithContext(context.Background(), tid), sessionID)
-		h.runs.Finalize(finalizeCtx, tid, sessionID, turnStatus)
-		turnCancel()
-
-		resultCh <- runResult{events: events, usage: usage, err: err}
-	}()
+	}
 
 	// The SSE response is just another subscription to the run's event log:
 	// it returns when the client disconnects (turn keeps running) or the run
@@ -1165,7 +799,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// enriched request ctx (session_id + trace_id) is passed rather than the
 	// bare request ctx so the subscription loop's logs correlate with the turn
 	// (tool-call-log-correlation); cancellation semantics are identical.
-	if sseErr := h.writeRunEvents(ctx, c.Writer, h.runs, tid, "0", map[string]string{"X-Run-Id": tid}, regRun.Done()); sseErr != nil && !errors.Is(sseErr, context.Canceled) {
+	if sseErr := h.writeRunEvents(ctx, c.Writer, h.runs, tid, "0", map[string]string{"X-Run-Id": tid}, started.turnDone); sseErr != nil && !errors.Is(sseErr, context.Canceled) {
 		logger.FromContext(ctx).Warn("sse write returned error",
 			zap.String("op", "handler.send_message"),
 			zap.Error(sseErr))
@@ -1179,7 +813,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// persisted the terminal message batch (with bounded retry) and run the
 	// pre-release drain (harden-turn-persistence) — the handler side has no
 	// persistence duty left.
-	<-resultCh
+	<-started.resultCh
 }
 
 // buildTurnUsage materializes a model.TurnUsage from the done event's usage

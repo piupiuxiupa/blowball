@@ -23,23 +23,23 @@
 
 ## 4. 起轮核心抽取（纯重构，行为不变）
 
-- [ ] 4.1 `internal/handler/turn_start.go`：把 `SendMessage` 自「认领成功」到「turn goroutine + SSE 订阅等待」的段落抽成 `startTurn`（含前置段 RecoverMessages/缝合/recall、title 触发、meta 写入、send-time 用户行落库、hooks/tap/incremental persister、终局持久化 + Finalize + 接续钩子位）；入参显式携带 userMsgTime（HTTP 路径 = 请求时刻，pump 路径 = 接续时刻，D4）与已解析 selection
-- [ ] 4.2 `SendMessage` 改为调用 `startTurn`，队列禁用时全链路行为 byte-for-byte 不变；`internal/handler` 现有测试（message_stream/turn_run/persist/attachment/memory_stream 等）全量不改断言通过
-- [ ] 4.3 `statusSuffix`（`prompt.RenderStatus`）渲染点移入 `startTurn`（pump 路径取接续时环境信息）；落库内容与进上下文内容保持同一份
+- [x] 4.1 `internal/handler/turn_start.go`：把 `SendMessage` 自「认领成功」到「turn goroutine + SSE 订阅等待」的段落抽成 `startTurn`（含前置段 RecoverMessages/缝合/recall、title 触发、meta 写入、send-time 用户行落库、hooks/tap/incremental persister、终局持久化 + Finalize + 接续钩子位）；入参显式携带 userMsgTime（HTTP 路径 = 请求时刻，pump 路径 = 接续时刻，D4）与已解析 selection
+- [x] 4.2 `SendMessage` 改为调用 `startTurn`，队列禁用时全链路行为 byte-for-byte 不变；`internal/handler` 现有测试（message_stream/turn_run/persist/attachment/memory_stream 等）全量不改断言通过
+- [x] 4.3 `statusSuffix`（`prompt.RenderStatus`）渲染点移入 `startTurn`（pump 路径取接续时环境信息）；落库内容与进上下文内容保持同一份
 
 ## 5. 入队路径（admit 失败不再 409）
 
-- [ ] 5.1 `SendMessage`：`messages.queue.enabled` 且认领被占时构造 `QueueEntry`（入队前完成全部既有校验与附件 staged claim 提交）调用 `AdmitMessage`——`claimed` → 立即 `startTurn`（快路径不变）；`queued` → `InitMeta(status=queued)` + `AppendEvent(queued 事件)` + `X-Run-Id` 头 + `writeRunEvents` 订阅（无 resultCh 等待，SSE 循环自然运行到终局）；`full` → 409 `QUEUE_FULL`；传输错误 → WARN 后直接 `startTurn`（D7 降级）
-- [ ] 5.2 `internal/handler` 单测：入队分支（entry 快照字段齐全、queued 事件先于 agent_start、`QUEUE_FULL`、Redis 故障降级起轮、默认关闭仍 409）
-- [ ] 5.3 队列等待期的用户行不落库断言：入队后 `GET /messages` 不含该消息（D4 等待期不可见）
+- [x] 5.1 `SendMessage`：`messages.queue.enabled` 且认领被占时构造 `QueueEntry`（入队前完成全部既有校验与附件 staged claim 提交）调用 `AdmitMessage`——`claimed` → 立即 `startTurn`（快路径不变）；`queued` → `InitMeta(status=queued)` + `AppendEvent(queued 事件)` + `X-Run-Id` 头 + `writeRunEvents` 订阅（无 resultCh 等待，SSE 循环自然运行到终局）；`full` → 409 `QUEUE_FULL`；传输错误 → WARN 后直接 `startTurn`（D7 降级）
+- [x] 5.2 `internal/handler` 单测：入队分支（entry 快照字段齐全、queued 事件先于 agent_start、`QUEUE_FULL`、Redis 故障降级起轮、默认关闭仍 409）
+- [x] 5.3 队列等待期的用户行不落库断言：入队后 `GET /messages` 不含该消息（D4 等待期不可见）
 
 ## 6. 接续路径（pump）
 
-- [ ] 6.1 turn goroutine 终局尾部（`Finalize` 之后）：队列启用且未停机时调 `PumpHead`——弹头认领成功则以条目重建请求等价物调 `startTurn`（`SetStatus(queued→running)`、recall/title/turn-start 压缩照 D8 全套触发）；认领被占推回则结束
-- [ ] 6.2 `startTurn` 的 meta 写入兼容两条入口（首次 `InitMeta(running)` vs 已存在 queued meta 时 `SetStatus(running)`）；用户行 `msg_time` 取 startTurn 时刻（接续语义 D4，排序测试断言 userA < assistantA < queuedUserB）
-- [ ] 6.3 停机闸门：进程级「不再起轮」信号（优雅关闭序列置位），pump 前检查；停机时条目留队
-- [ ] 6.4 mid-turn compaction 防泄漏测试：turn A 运行中入队 B 并触发 mid-round 压缩，断言重写后的 round 不含 B（D4 坑一）
-- [ ] 6.5 端到端接续测试（fake orchestrator）：A 轮 done 后 B 自动起轮、B 的 SSE 流（原连接或 resume）收到 queued → agent_start → … → done、历史含 A 完整终局批次
+- [x] 6.1 turn goroutine 终局尾部（`Finalize` 之后）：队列启用且未停机时调 `PumpHead`——弹头认领成功则以条目重建请求等价物调 `startTurn`（`SetStatus(queued→running)`、recall/title/turn-start 压缩照 D8 全套触发）；认领被占推回则结束
+- [x] 6.2 `startTurn` 的 meta 写入兼容两条入口（首次 `InitMeta(running)` vs 已存在 queued meta 时 `SetStatus(running)`）；用户行 `msg_time` 取 startTurn 时刻（接续语义 D4，排序测试断言 userA < assistantA < queuedUserB）
+- [x] 6.3 停机闸门：进程级「不再起轮」信号（优雅关闭序列置位），pump 前检查；停机时条目留队
+- [x] 6.4 mid-turn compaction 防泄漏测试：turn A 运行中入队 B 并触发 mid-round 压缩，断言重写后的 round 不含 B（D4 坑一）
+- [x] 6.5 端到端接续测试（fake orchestrator）：A 轮 done 后 B 自动起轮、B 的 SSE 流（原连接或 resume）收到 queued → agent_start → … → done、历史含 A 完整终局批次
 
 ## 7. reconciler 兜底
 
