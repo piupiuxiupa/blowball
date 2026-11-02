@@ -11,7 +11,9 @@ info:
 
     1.1.0 — turn-detach-resume (disconnecting from an SSE stream no longer
     cancels the turn; run ids, session-busy 409, cancel/resume-by-run-id
-    endpoints, `generating`/`run_id` on the session list) and
+    endpoints, `generating`/`run_id` on the session list; with
+    `messages.queue.enabled` the busy session instead accepts messages into
+    a per-session FIFO queue continued as the next turn) and
     per-request-model-selection (`model`/`reasoning_effort` request params,
     `GET /api/v1/models`).
 
@@ -109,6 +111,15 @@ components:
             while `generating` is true. This is the reload discovery path: a
             reloaded page has lost the `X-Run-Id` header and event meta it
             saw when the turn started, so it recovers the run id from here.
+        queued_count:
+          type: integer
+          description: |
+            How many of the user's messages wait in the session's queue
+            (session-message-queue). Present only when
+            `messages.queue.enabled` is true AND the depth is > 0; omitted
+            otherwise (additive — old clients ignore it). The pending
+            messages themselves come from
+            `GET /api/v1/sessions/{session_id}/queue`.
     SessionListResponse:
       type: object
       required: [sessions]
@@ -117,6 +128,37 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SessionListEntry'
+    SessionQueueEntry:
+      type: object
+      required: [run_id, content, model, enqueued_at]
+      properties:
+        run_id:
+          type: string
+          description: |
+            The queued message's run id — the enqueueing request's trace id.
+            Doubles as the cancel target while queued (dequeue) and as the
+            SSE attach id once the pump starts its turn.
+        content:
+          type: string
+          description: The message content as sent (before the environment status suffix).
+        model:
+          type: string
+          description: The resolved catalog model name the turn will run on.
+        enqueued_at:
+          type: string
+          format: date-time
+          description: Admission (request arrival) time. Display only — the persisted user row takes the continuation time.
+        attachments:
+          type: array
+          description: Image attachment references carried by the message.
+          items: {$ref: '#/components/schemas/AttachmentRef'}
+    SessionQueueResponse:
+      type: object
+      required: [queue]
+      properties:
+        queue:
+          type: array
+          items: {$ref: '#/components/schemas/SessionQueueEntry'}
     SessionDetail:
       type: object
       description: |
@@ -149,6 +191,12 @@ components:
           description: |
             The active turn's run id — the attach/cancel target. Present only
             while `generating` is true (the reload discovery path).
+        queued_count:
+          type: integer
+          description: |
+            The session's queued-message count (session-message-queue),
+            mirroring the list entry: present only when
+            `messages.queue.enabled` is true AND the depth is > 0.
     CreateSessionResponse:
       type: object
       required: [session_id]
@@ -561,11 +609,16 @@ components:
           type: string
         status:
           type: string
-          enum: [cancelling, running, done, error, cancelled, interrupted]
+          enum: [cancelling, running, queued, done, error, cancelled, interrupted]
           description: |
             `cancelling` — accepted; the owning process will finalize the run
-            (persisting partial output). The remaining values are terminal
-            states reported by idempotent cancels of finished runs.
+            (persisting partial output). `queued` — the message is still
+            waiting in the session's queue (session-message-queue; returned
+            when a cancel races the queue pump, retry to catch the run once
+            it starts). The remaining values are terminal states reported by
+            idempotent cancels of finished runs — including cancels of
+            queued-but-never-started runs, which dequeue the message and
+            report `cancelled`.
     # ---- SSE event payloads -------------------------------------------------
     # Every sub-agent-produced event additionally carries the optional
     # meta.parent_tool_call_id (subagent-run-identity capability): the id of
@@ -573,6 +626,24 @@ components:
     # consumers attribute interleaved parallel same-name invocations; events
     # from the top-level agent (Confucius) and user rows never carry it, and
     # older frontends simply ignore the unknown key.
+    SSEQueued:
+      type: object
+      required: [type]
+      description: |
+        Queue admission announcement (session-message-queue): the FIRST event
+        on a queued run's log, written at enqueue time — the POST /messages
+        SSE stream opens with it, then tails (possibly for a long time) until
+        the previous turn finishes and the pump starts this message's turn;
+        the turn's `agent_start` and the rest follow on the same stream. Like
+        `done` it never passes through a hub and is never persisted as a
+        message row; `Last-Event-ID` resume replays it like any other event.
+      properties:
+        type: {type: string, enum: [queued]}
+        meta:
+          type: object
+          properties:
+            run_id: {type: string, description: The queued message's run id (the future turn's id, equal to the enqueueing request's trace id).}
+            queue_position: {type: integer, description: 1-based queue depth at admission time (informational).}
     SSEAgentStart:
       type: object
       required: [type, agent]
@@ -1509,6 +1580,40 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+  /api/v1/sessions/{session_id}/queue:
+    get:
+      tags: [Session]
+      summary: List the session's queued messages (session-message-queue).
+      description: |
+        Returns the messages waiting in the session's FIFO queue, in enqueue
+        order (session-message-queue, requires `messages.queue.enabled`).
+        This is the authoritative channel for a reloaded frontend to rebuild
+        its pending-message bubbles: a queued message is NOT in the
+        message-history endpoint until its turn starts (the user row is
+        persisted at continuation time), so the queue endpoint plus the
+        session detail's `queued_count` carry the waiting state. Entries
+        carry the admission-time snapshot fields; `run_id` doubles as the
+        cancel target (POST `.../turns/{run_id}/cancel` removes the entry)
+        and the SSE attach id once the turn starts. A queue-read failure
+        degrades to an empty 200 (the queue is presentation-state; the
+        entries themselves are the durable record until their turns run).
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The session's queued entries in enqueue order.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionQueueResponse'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
   /api/v1/sessions/{session_id}/subagents/{agent_instance_id}/runs:
     get:
       tags: [Session]
@@ -1811,6 +1916,7 @@ paths:
             text/event-stream:
               schema:
                 oneOf:
+                  - $ref: '#/components/schemas/SSEQueued'
                   - $ref: '#/components/schemas/SSEAgentStart'
                   - $ref: '#/components/schemas/SSEToken'
                   - $ref: '#/components/schemas/SSEReasoning'
@@ -1853,8 +1959,12 @@ paths:
         '409':
           description: |
             The session already has a running turn (single active run per
-            session). The error object carries the active `run_id` so the
-            client can attach to the running turn instead of retrying.
+            session) — with `messages.queue.enabled` false (the default). The
+            error object carries the active `run_id` so the client can attach
+            to the running turn instead of retrying. With the queue enabled,
+            the busy case is instead ACCEPTED (200, `queued` event); the 409
+            here is then only `QUEUE_FULL`: the session's queue already holds
+            `messages.queue.max_depth` entries.
           content:
             application/json:
               schema:
@@ -1863,16 +1973,16 @@ paths:
                 properties:
                   error:
                     type: object
-                    required: [code, message, run_id]
+                    required: [code, message]
                     properties:
                       code:
                         type: string
-                        enum: [SESSION_BUSY]
+                        enum: [SESSION_BUSY, QUEUE_FULL]
                       message:
                         type: string
                       run_id:
                         type: string
-                        description: The currently running turn's run id (attach target).
+                        description: Present on SESSION_BUSY only — the currently running turn's run id (attach target).
         '500':
           $ref: '#/components/responses/Internal'
   /api/v1/sessions/{session_id}/turns/{run_id}/cancel:
@@ -1881,14 +1991,20 @@ paths:
       summary: Cancel a running turn by run id (turn-detach-resume).
       description: |
         Cancels the turn identified by `run_id` and releases its resources.
-        Three outcomes: the run is in THIS agent process (cancelled
+        Four outcomes: the run is in THIS agent process (cancelled
         immediately, partial output persists through the interrupted-turn
         path), the run heartbeats on another replica (a Redis cancel flag is
-        raised; the owning process cancels within one heartbeat period), or
-        the run is dead (crashed process — force-cleared to `interrupted`,
-        session unlocked). Cancelling an already-terminal run is idempotent
-        and reports the terminal status. The run must belong to the caller
-        and the path session, otherwise 404.
+        raised; the owning process cancels within one heartbeat period), the
+        run is dead (crashed process — force-cleared to `interrupted`,
+        session unlocked), or the run is QUEUED (session-message-queue: the
+        message is waiting in the session's queue — it is dequeued, the run
+        reports `cancelled`, and its waiting SSE subscribers close). A queued
+        run has no heartbeat by design and must never be misread as dead.
+        Cancelling the running turn leaves the session's other queued
+        messages intact (they continue as usual). Cancelling an
+        already-terminal run is idempotent and reports the terminal status.
+        The run must belong to the caller and the path session, otherwise
+        404.
       parameters:
         - name: session_id
           in: path
@@ -1924,7 +2040,11 @@ paths:
         retention window passed (or never existed) returns 410 — fall back to
         the ordinary message-history read. If a status-running run's process
         died, the stream replays what was logged, then emits a synthesized
-        terminal `done` event carrying `usage.error = "interrupted..."`.
+        terminal `done` event carrying `usage.error = "interrupted..."`. A
+        QUEUED run (session-message-queue) tails its `queued` event and waits
+        — it has no heartbeat by design and is never misread as dead; the
+        turn's events follow on the same stream once the queue continues
+        it.
       parameters:
         - name: session_id
           in: path
@@ -1953,6 +2073,7 @@ paths:
             text/event-stream:
               schema:
                 oneOf:
+                  - $ref: '#/components/schemas/SSEQueued'
                   - $ref: '#/components/schemas/SSEAgentStart'
                   - $ref: '#/components/schemas/SSEToken'
                   - $ref: '#/components/schemas/SSEPlanUpdated'
