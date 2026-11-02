@@ -936,6 +936,12 @@ type testEnv struct {
 	llm       agent.LLMClient
 	sessSvc   *service.SessionService
 	msgSvc    *service.MessageService
+	// streamH / turnRunH / sessH are exposed for queue-feature tests
+	// (session-message-queue) that flip the streaming handler's queue mode
+	// and the session handler's queued-count markers after construction.
+	streamH  *handler.MessageStreamHandler
+	turnRunH *handler.TurnRunHandler
+	sessH    *handler.SessionHandler
 }
 
 // waitForPersistedTurn waits until the session holds at least min message
@@ -1072,6 +1078,8 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 		Login:                  func(*gin.Context) {},
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
+		SessionGet:             sessH.GetSession,
+		SessionQueue:           handler.NewQueueHandler(sessSvc, run.NewManager(redisSvc.RunStore(), nil)).ListQueue,
 		SessionMessages:        sessH.GetSessionMessages,
 		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
 		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
@@ -1108,6 +1116,9 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 		llm:       llm,
 		sessSvc:   sessSvc,
 		msgSvc:    msgSvc,
+		streamH:   streamH,
+		turnRunH:  turnRunH,
+		sessH:     sessH,
 	}
 }
 
@@ -1173,6 +1184,8 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		Login:                  func(*gin.Context) {},
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
+		SessionGet:             sessH.GetSession,
+		SessionQueue:           handler.NewQueueHandler(sessSvc, run.NewManager(redisSvc.RunStore(), nil)).ListQueue,
 		SessionMessages:        sessH.GetSessionMessages,
 		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
 		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
@@ -1209,6 +1222,9 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 		llm:       llm,
 		sessSvc:   sessSvc,
 		msgSvc:    msgSvc,
+		streamH:   streamH,
+		turnRunH:  turnRunH,
+		sessH:     sessH,
 	}
 }
 
@@ -1279,6 +1295,8 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 		Login:                  func(*gin.Context) {},
 		SessionList:            sessH.ListSessions,
 		SessionCreate:          sessH.CreateSession,
+		SessionGet:             sessH.GetSession,
+		SessionQueue:           handler.NewQueueHandler(sessSvc, run.NewManager(redisSvc.RunStore(), nil)).ListQueue,
 		SessionMessages:        sessH.GetSessionMessages,
 		SubAgentRuns:           handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).ListRuns,
 		SubAgentRunDetail:      handler.NewSubAgentHandler(service.NewSubAgentService(mysqlFake)).GetRun,
@@ -1315,6 +1333,9 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 		llm:       llm,
 		sessSvc:   sessSvc,
 		msgSvc:    msgSvc,
+		streamH:   streamH,
+		turnRunH:  turnRunH,
+		sessH:     sessH,
 	}
 }
 
