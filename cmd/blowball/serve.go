@@ -121,7 +121,9 @@ func serve(configPath, dataRoot, role string) error {
 		Redis: rt.redisStore,
 		FS:    rt.fsStore,
 	}
-	sessSvc := service.NewSessionService(sessDeps).WithAttachmentDir(rt.fsStore.UserAttachmentDir)
+	sessSvc := service.NewSessionService(sessDeps).
+		WithAttachmentDir(rt.fsStore.UserAttachmentDir).
+		WithQueueClearer(rt.redisStore.RunStore().ClearQueue)
 
 	// 3. Engine + health check. Each role gets its own engine with the standard
 	// middleware chain (Recovery → Trace → CORS); auth is applied per-route-group
@@ -136,23 +138,26 @@ func serve(configPath, dataRoot, role string) error {
 	var rawFlusher *llmraw.Flusher
 	var runReg *run.Registry
 	var memSvc *memory.Service
+	var queueStop func()
 	switch role {
 	case "all":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
-		agentDeps, mgr, fl, reg, mem := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
 		rawFlusher = fl
 		runReg = reg
 		memSvc = mem
+		queueStop = stopQueue
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	case "api":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
 	case "agent":
-		agentDeps, mgr, fl, reg, mem := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc)
 		mcpMgr = mgr
 		rawFlusher = fl
 		runReg = reg
 		memSvc = mem
+		queueStop = stopQueue
 		handler.RegisterAgentRoutes(engine, agentDeps)
 	}
 	if mcpMgr != nil {
@@ -202,6 +207,14 @@ func serve(configPath, dataRoot, role string) error {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Info("shutting down server", zap.String("role", role))
+
+	// Session message queue: gate new turns (and park the reconciler) before
+	// anything else drains, so the shutdown-bound turn cancels never pump the
+	// queued heads — entries survive in Redis for the post-restart reconciler.
+	if queueStop != nil {
+		queueStop()
+		log.Info("session message queue reconciler stopped", zap.String("role", role))
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 	defer cancel()
@@ -507,6 +520,13 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	// The run store feeds the session list's generating flag; the api role
 	// reads the shared Redis claims but never constructs a run registry.
 	sessionHandler := handler.NewSessionHandler(sessSvc, titleSvc, rt.redisStore.RunStore())
+	// Session message queue (session-message-queue): the queue read endpoint
+	// and the additive queued_count markers ride the same Store-only view —
+	// both stay off (byte-for-byte responses) when the queue is disabled.
+	queueHandler := handler.NewQueueHandler(sessSvc, run.NewManager(rt.redisStore.RunStore(), nil))
+	if cfg.Messages.Queue.Enabled {
+		sessionHandler.EnableQueueInfo()
+	}
 	subAgentService := service.NewSubAgentService(rt.mysqlStore)
 	subAgentHandler := handler.NewSubAgentHandler(subAgentService)
 	workspaceHandler := handler.NewWorkspaceHandler(rt.fsStore, MaxUploadBytes, handler.OnlyOfficeSettings{
@@ -528,6 +548,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		SessionList:                      sessionHandler.ListSessions,
 		SessionCreate:                    sessionHandler.CreateSession,
 		SessionGet:                       sessionHandler.GetSession,
+		SessionQueue:                     queueHandler.ListQueue,
 		SessionMessages:                  sessionHandler.GetSessionMessages,
 		AttachmentUpload:                 attachmentHandler.Upload,
 		AttachmentStagedUpload:           attachmentHandler.UploadStaged,
@@ -566,7 +587,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 // populated with only the agent-route handlers (SendMessage, MCPTools) plus
 // the auth middleware, the MCP manager so serveRun can defer its Close, and
 // the raw-capture flusher so serveRun can drain it on shutdown.
-func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry, *memory.Service) {
+func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry, *memory.Service, func()) {
 	cfg := rt.cfg
 	dataDir := rt.dataDir
 	fsStore := rt.fsStore
@@ -757,13 +778,34 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	turnRunHandler := handler.NewTurnRunHandler(runMgr)
 	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn, rt.mcpMarket)
 
+	// Session message queue (session-message-queue, messages.queue): default
+	// OFF — every line below is skipped and the send path keeps the 409
+	// SESSION_BUSY behavior byte-for-byte. Enabled: queue admission replaces
+	// the busy rejection, the turn goroutine's tail pumps the queued head,
+	// and the reconciler (agent role only) drains crash residue + re-arms
+	// queued-run TTLs.
+	var queueStop func()
+	if cfg.Messages.Queue.Enabled {
+		streamHandler.EnableMessageQueue(cfg.Messages.QueueMaxDepthLimit())
+		turnRunHandler.SetQueueCancelRollback(streamHandler.RollbackQueuedAttachments)
+		reconciler := handler.NewQueueReconciler(streamHandler, 0)
+		reconciler.Start()
+		queueStop = func() {
+			// Gate new turns FIRST so the shutdown-bound cancels cannot pump
+			// the queued head as the process goes down; then park the
+			// reconciler. Entries stay enqueued for the post-restart pass.
+			streamHandler.StopNewTurns()
+			reconciler.Close()
+		}
+	}
+
 	return handler.RouteDeps{
 		AuthMW:      middleware.AuthMiddleware(cfg.JWT.Secret),
 		SendMessage: streamHandler.SendMessage,
 		TurnCancel:  turnRunHandler.CancelTurn,
 		TurnEvents:  turnRunHandler.TurnEvents,
 		MCPTools:    mcpHandler.Tools,
-	}, mcpManager, rawFlusher, runMgr.Registry, memSvc
+	}, mcpManager, rawFlusher, runMgr.Registry, memSvc, queueStop
 }
 
 // newEngine builds a gin.Engine with the standard middleware chain shared by

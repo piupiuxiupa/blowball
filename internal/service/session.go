@@ -40,6 +40,10 @@ type SessionService struct {
 	// Wired from the fs store rather than the FSStore interface so the small
 	// store seam stays focused on the message path.
 	attachmentDir func(userID, sessionID string) string
+	// clearQueue drops a session's queued message entries (session-message-
+	// queue); nil (unwired, or the queue disabled) skips the delete-time
+	// clear. Queued entries are not message rows and are never archived.
+	clearQueue func(ctx context.Context, sessionID string) error
 }
 
 // NewSessionService wires a SessionService from the bundled deps. The same
@@ -52,6 +56,14 @@ func NewSessionService(deps SessionDeps) *SessionService {
 		drain: deps.DrainMessageQueue,
 		nudge: deps.NudgeMessageFlush,
 	}
+}
+
+// WithQueueClearer registers the delete-time queue purge (session-message-
+// queue). Separate setter so existing wiring/test call sites stay untouched;
+// nil preserves the pre-queue delete behavior exactly.
+func (s *SessionService) WithQueueClearer(fn func(ctx context.Context, sessionID string) error) *SessionService {
+	s.clearQueue = fn
+	return s
 }
 
 // WithAttachmentDir registers the per-session attachment directory resolver
@@ -229,6 +241,16 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID st
 	}
 	if err := s.redis.DelSessionCache(ctx, sessionID); err != nil {
 		log.Warn("redis session cache clear failed; key expires on TTL", zap.Error(err))
+	}
+	// 3b) Queue clear (session-message-queue): the session's queued entries
+	// are transient request snapshots — not message rows, no archive mirror.
+	// Best-effort like the cache clears; a failure leaves an inert queue key
+	// (the sessions' rows are gone, so a pumped entry fails its session
+	// re-validation and finalizes as error).
+	if s.clearQueue != nil {
+		if err := s.clearQueue(ctx, sessionID); err != nil {
+			log.Warn("session queue clear failed; entries finalize as error on pump", zap.Error(err))
+		}
 	}
 	// 4) Attachment directory removal (add-image-attachments). The registry
 	// rows were already archived and purged inside the step-② transaction

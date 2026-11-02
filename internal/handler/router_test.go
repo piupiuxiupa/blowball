@@ -61,10 +61,11 @@ func routeSet(r *gin.Engine) []string {
 
 // expectedAPIRoutes is the exact route set the api role registers
 // (RegisterHealthz + RegisterAPIRoutes): health, auth, session CRUD, message
-// history read, workspace file CRUD, the OnlyOffice save callback, skills,
-// the model catalog list (per-request-model-selection), and the per-user LLM
-// token management routes (user-llm-token). It must NOT contain the streaming
-// message endpoint or the MCP tool list.
+// history read, the queued-message list (session-message-queue), workspace
+// file CRUD, the OnlyOffice save callback, skills, the model catalog list
+// (per-request-model-selection), and the per-user LLM token management routes
+// (user-llm-token). It must NOT contain the streaming message endpoint or the
+// MCP tool list.
 var expectedAPIRoutes = []string{
 	"DELETE /api/v1/me/llm-token",
 	"DELETE /api/v1/sessions/:session_id",
@@ -73,6 +74,7 @@ var expectedAPIRoutes = []string{
 	"GET /api/v1/sessions/:session_id",
 	"GET /api/v1/sessions/:session_id/attachments/:attachment_id/content",
 	"GET /api/v1/sessions/:session_id/messages",
+	"GET /api/v1/sessions/:session_id/queue",
 	"GET /api/v1/sessions/:session_id/subagents/:agent_instance_id/runs",
 	"GET /api/v1/sessions/:session_id/subagents/:agent_instance_id/runs/:run_id",
 	"GET /api/v1/skills",

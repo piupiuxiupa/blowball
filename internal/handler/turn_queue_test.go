@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
+	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/stream"
 )
 
@@ -226,6 +229,7 @@ type queueEnv struct {
 	stub    *queueStubOrchestrator
 	streamH *MessageStreamHandler
 	msgSvc  *service.MessageService
+	sessSvc *service.SessionService
 	mysql   *handlerFakeMySQL
 	redis   *handlerFakeRedis
 	next    func() string
@@ -262,7 +266,12 @@ func newQueueEnvWithStore(t *testing.T, stub *queueStubOrchestrator, maxDepth in
 	r.POST("/api/v1/sessions/:session_id/messages", streamH.SendMessage)
 	r.POST("/api/v1/sessions/:session_id/turns/:run_id/cancel", turnH.CancelTurn)
 	r.GET("/api/v1/sessions/:session_id/turns/:run_id/events", turnH.TurnEvents)
-	return &queueEnv{engine: r, store: store, reg: reg, stub: stub, streamH: streamH, msgSvc: msgSvc, mysql: mysql, redis: redis, next: next}
+	r.GET("/api/v1/sessions/:session_id/queue", handlerQueueRoute(sessSvc, runs))
+	return &queueEnv{engine: r, store: store, reg: reg, stub: stub, streamH: streamH, msgSvc: msgSvc, sessSvc: sessSvc, mysql: mysql, redis: redis, next: next}
+}
+
+func handlerQueueRoute(sessSvc *service.SessionService, runs *run.Manager) gin.HandlerFunc {
+	return NewQueueHandler(sessSvc, runs).ListQueue
 }
 
 func newQueueEnv(t *testing.T, stub *queueStubOrchestrator, maxDepth int) *queueEnv {
@@ -559,4 +568,222 @@ func TestQueue_ShutdownGateSkipsPump(t *testing.T) {
 	meta, ok, _ := env.store.GetMeta(context.Background(), "trace-2")
 	require.True(t, ok)
 	require.Equal(t, run.StatusQueued, meta.Status, "queued run must not be started during shutdown")
+}
+
+// ── queue read API, reconciler, and session-state tests ────────────────────
+
+// TestQueueRead_ListQueue: the queue read endpoint returns the entries in
+// enqueue order with the snapshot fields, and 404s foreign/missing sessions
+// without disclosing them.
+func TestQueueRead_ListQueue(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// Seed: a held claim plus two queued entries behind it.
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-a")
+	require.NoError(t, err)
+	for i, id := range []string{"trace-2", "trace-3"} {
+		_, err := env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+			RunID: id, SessionID: "sess-1", UserID: "user-1",
+			Content: "msg " + id, Model: "test-model",
+			EnqueuedAt: time.Unix(1700000000+int64(i), 0).UTC(),
+		}, 8)
+		require.NoError(t, err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1/queue", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Queue []struct {
+			RunID      string `json:"run_id"`
+			Content    string `json:"content"`
+			Model      string `json:"model"`
+			EnqueuedAt string `json:"enqueued_at"`
+		} `json:"queue"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Queue, 2)
+	require.Equal(t, "trace-2", resp.Queue[0].RunID)
+	require.Equal(t, "msg trace-2", resp.Queue[0].Content)
+	require.Equal(t, "test-model", resp.Queue[0].Model)
+	require.Equal(t, "trace-3", resp.Queue[1].RunID, "entries must be in enqueue order")
+
+	// Wrong owner: 404, existence not disclosed.
+	env.mysql.mu.Lock()
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-1", UserID: "user-2"}
+	env.mysql.mu.Unlock()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1/queue", nil)
+	w2 := httptest.NewRecorder()
+	env.engine.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusNotFound, w2.Code)
+	require.Contains(t, w2.Body.String(), "NOT_FOUND")
+}
+
+// TestQueueReconciler_ContinuesCrashResidue (task 7.3): a queue left behind
+// by a process that died between claim release and pump is continued by the
+// reconciler within one cycle — same pump path, same turn semantics.
+func TestQueueReconciler_ContinuesCrashResidue(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// Crash residue: run-a claimed, B admitted behind it, then run-a's claim
+	// expired/released without any pump running (the owning process died).
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-a")
+	require.NoError(t, err)
+	entry := run.QueueEntry{RunID: "trace-2", SessionID: "sess-1", UserID: "user-1",
+		Content: "queued B", Model: "test-model", EnqueuedAt: time.Unix(1700000000, 0).UTC()}
+	_, err = env.store.AdmitMessage(ctx, "sess-1", entry, 8)
+	require.NoError(t, err)
+	require.NoError(t, env.store.InitMeta(ctx, "trace-2", run.RunMeta{
+		SessionID: "sess-1", UserID: "user-1", Status: run.StatusQueued, Model: "test-model"}))
+	require.NoError(t, env.store.AppendEvent(ctx, "trace-2", stream.QueuedEvent("trace-2", 1)))
+	require.NoError(t, env.store.ReleaseSession(ctx, "sess-1", "run-a"))
+
+	// B's turn can run to completion immediately (release gate pre-closed).
+	close(env.stub.release)
+
+	reconciler := NewQueueReconciler(env.streamH, 10*time.Millisecond)
+	reconciler.Start()
+	defer reconciler.Close()
+
+	require.Eventually(t, func() bool {
+		return env.stub.started.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond, "reconciler never continued the crashed residue")
+	require.Eventually(t, func() bool {
+		n, _ := env.store.QueueLen(ctx, "sess-1")
+		return n == 0
+	}, 2*time.Second, 10*time.Millisecond, "queue never drained")
+	require.Eventually(t, func() bool {
+		meta, ok, _ := env.store.GetMeta(ctx, "trace-2")
+		return ok && meta.Status == run.StatusDone
+	}, 3*time.Second, 10*time.Millisecond, "reconciled run never finalized")
+}
+
+// TestQueueReconciler_RespectsShutdownGate: with the gate tripped, the
+// reconciler leaves entries enqueued (the post-restart contract).
+func TestQueueReconciler_RespectsShutdownGate(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-a")
+	require.NoError(t, err)
+	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+		RunID: "trace-2", SessionID: "sess-1", UserID: "user-1", Content: "queued B",
+	}, 8)
+	require.NoError(t, err)
+	require.NoError(t, env.store.ReleaseSession(ctx, "sess-1", "run-a"))
+
+	env.streamH.StopNewTurns()
+	reconciler := NewQueueReconciler(env.streamH, 10*time.Millisecond)
+	reconciler.Start()
+	defer reconciler.Close()
+
+	// A few cycles pass; nothing starts.
+	time.Sleep(100 * time.Millisecond)
+	require.Zero(t, env.stub.started.Load(), "reconciler started a turn while the shutdown gate was tripped")
+	n, _ := env.store.QueueLen(ctx, "sess-1")
+	require.Equal(t, 1, n)
+}
+
+// TestSessionQueuedCount (task 8.2): with queue info enabled, list and
+// detail carry queued_count for non-empty queues and omit it otherwise;
+// disabled keeps the fields absent (additive contract).
+func TestSessionQueuedCount(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	ctx := context.Background()
+
+	store := run.NewMemStore()
+	// s-1 has a running claim + two queued entries; s-2 is idle.
+	_, _, err := store.ClaimSession(ctx, "s-1", "run-9")
+	require.NoError(t, err)
+	for _, id := range []string{"q-1", "q-2"} {
+		_, err := store.AdmitMessage(ctx, "s-1", run.QueueEntry{RunID: id, SessionID: "s-1"}, 8)
+		require.NoError(t, err)
+	}
+
+	env.mysql.mu.Lock()
+	env.mysql.listSessionsRows = []mysqlstore.SessionWithTitle{
+		{SessionID: "s-1", UserID: "user-1", Title: "Alpha", UpdateTime: time.Unix(1_700_000_010, 0).UTC()},
+		{SessionID: "s-2", UserID: "user-1", Title: "Beta", UpdateTime: time.Unix(1_700_000_005, 0).UTC()},
+	}
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "s-1", UserID: "user-1"}
+	env.mysql.mu.Unlock()
+
+	buildEngine := func(queueInfo bool) *gin.Engine {
+		h := NewSessionHandler(
+			newSessionSvc(sessionDeps(env.mysql, env.redis, env.fs)),
+			service.NewTitleService(nil, env.mysql, config.OpenAIConfig{TitleModel: "title-model"}),
+			store,
+		)
+		if queueInfo {
+			h.EnableQueueInfo()
+		}
+		r := gin.New()
+		r.Use(func(c *gin.Context) {
+			c.Set(middleware.UserIDKey, "user-1")
+			c.Set(middleware.TraceIDKey, "trace-1")
+			c.Next()
+		})
+		r.GET("/api/v1/sessions", h.ListSessions)
+		r.GET("/api/v1/sessions/:session_id", h.GetSession)
+		return r
+	}
+
+	// Enabled: queued_count present on s-1 only.
+	w := httptest.NewRecorder()
+	buildEngine(true).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	var listResp struct {
+		Sessions []struct {
+			SessionID   string `json:"session_id"`
+			QueuedCount *int   `json:"queued_count"`
+		} `json:"sessions"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &listResp))
+	require.Len(t, listResp.Sessions, 2)
+	require.NotNil(t, listResp.Sessions[0].QueuedCount)
+	require.Equal(t, 2, *listResp.Sessions[0].QueuedCount)
+	require.Nil(t, listResp.Sessions[1].QueuedCount, "idle session must omit queued_count")
+
+	w = httptest.NewRecorder()
+	buildEngine(true).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/s-1", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), `"queued_count":2`, "body: %s", w.Body.String())
+
+	// Disabled (default): the field is absent — additive contract.
+	w = httptest.NewRecorder()
+	buildEngine(false).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	require.NotContains(t, w.Body.String(), "queued_count", "disabled handler must not emit queued_count")
+}
+
+// TestDeleteSession_ClearsQueue (task 8.3): session deletion invokes the
+// registered queue clearer with the session id (entries are transient
+// snapshots, never archived); an unwired service skips it entirely.
+func TestDeleteSession_ClearsQueue(t *testing.T) {
+	env := newSessionHandlerEnv(t, nil)
+	ctx := context.Background()
+
+	var cleared []string
+	sessSvc := newSessionSvc(sessionDeps(env.mysql, env.redis, env.fs)).
+		WithQueueClearer(func(_ context.Context, sessionID string) error {
+			cleared = append(cleared, sessionID)
+			return nil
+		})
+	env.mysql.mu.Lock()
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-1", UserID: "user-1"}
+	env.mysql.mu.Unlock()
+
+	require.NoError(t, sessSvc.DeleteSession(ctx, "user-1", "sess-1"))
+	require.Equal(t, []string{"sess-1"}, cleared, "delete did not clear the session queue")
+
+	// Unwired (the default pre-queue wiring): no queue interaction at all —
+	// and the delete itself still succeeds.
+	bare := newSessionSvc(sessionDeps(env.mysql, env.redis, env.fs))
+	env.mysql.mu.Lock()
+	env.mysql.getSessionByIDFound = &model.Session{SessionID: "sess-2", UserID: "user-1"}
+	env.mysql.mu.Unlock()
+	require.NoError(t, bare.DeleteSession(ctx, "user-1", "sess-2"))
+	require.Len(t, cleared, 1, "unwired service must not touch the queue")
 }

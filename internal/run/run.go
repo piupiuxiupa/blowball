@@ -243,6 +243,10 @@ type Store interface {
 	// QueueEntries returns the session's queued entries in enqueue order.
 	QueueEntries(ctx context.Context, sessionID string) ([]QueueEntry, error)
 
+	// QueuedSessions lists every session that currently has a queued entry
+	// (the reconciler's scan surface; unordered).
+	QueuedSessions(ctx context.Context) ([]string, error)
+
 	// TouchQueued re-arms the run-key family TTL (events/meta) for a queued
 	// run without touching the heartbeat or the claim — the queue's wait can
 	// outlast RunKeyTTL, and the reconciler keeps the replay surface alive.

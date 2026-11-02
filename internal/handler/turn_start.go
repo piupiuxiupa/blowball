@@ -651,13 +651,11 @@ func (h *MessageStreamHandler) pumpQueuedNext(sessionID string) {
 	if h.newTurnsStopped() {
 		return // graceful shutdown: leave the entry to the post-restart reconciler
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	ctx = agent.WithSessionID(trace.WithContext(ctx, ""), sessionID)
-
-	entry, ok, err := h.runs.Store.PumpHead(ctx, sessionID)
+	popCtx, popCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	entry, ok, err := h.runs.Store.PumpHead(popCtx, sessionID)
+	popCancel()
 	if err != nil {
-		logger.FromContext(ctx).Warn("queue pump: pop head failed; leaving the queue for the reconciler",
+		logger.FromContext(agent.WithSessionID(popCtx, sessionID)).Warn("queue pump: pop head failed; leaving the queue for the reconciler",
 			zap.String("op", "handler.pump_queue"),
 			zap.String("session_id", sessionID),
 			zap.Error(err))
@@ -666,6 +664,16 @@ func (h *MessageStreamHandler) pumpQueuedNext(sessionID string) {
 	if !ok {
 		return // empty queue, or the claim is held by a racing admission
 	}
+	// The pumped turn's working context: detached, carrying the entry's own
+	// run identity (trace_id = run_id) and user/session attribution so its
+	// preamble reads, logs, and raw-capture rows correlate like an HTTP
+	// request's would. The 60s bound covers the synchronous preamble
+	// (history recovery, recall, send-time persistence) only — the turn
+	// goroutine derives its own detached contexts.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ctx = agent.WithUserID(agent.WithSessionID(trace.WithContext(ctx, entry.RunID), entry.SessionID), entry.UserID)
+
 	req, fatalErr := h.turnRequestFromQueueEntry(ctx, entry)
 	if fatalErr != nil {
 		// The entry cannot start (e.g. its session vanished between enqueue

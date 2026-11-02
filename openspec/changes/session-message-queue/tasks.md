@@ -43,15 +43,15 @@
 
 ## 7. reconciler 兜底
 
-- [ ] 7.1 `internal/handler`（或 `internal/run`）新增队列 reconciler：定时 `SCAN queue:*`（cursor 续传、每轮有界），认领空闲的会话执行 `PumpHead` 起轮（复用 6.1 路径），并对 queued run 调 `TouchQueued` 重臂 TTL；WARN-only 失败；优雅关闭退出
-- [ ] 7.2 `cmd/blowball/serve.go` `wireAgent`：队列启用时构造并启动 reconciler（agent/all 角色）；api 角色不构造
-- [ ] 7.3 测试：模拟「释放后未 pump」残留 → reconciler 周期内接续；queued run TTL 被续臂（MemStore Now 注入时间推进）
+- [x] 7.1 `internal/handler`（或 `internal/run`）新增队列 reconciler：定时 `SCAN queue:*`（cursor 续传、每轮有界），认领空闲的会话执行 `PumpHead` 起轮（复用 6.1 路径），并对 queued run 调 `TouchQueued` 重臂 TTL；WARN-only 失败；优雅关闭退出
+- [x] 7.2 `cmd/blowball/serve.go` `wireAgent`：队列启用时构造并启动 reconciler（agent/all 角色）；api 角色不构造
+- [x] 7.3 测试：模拟「释放后未 pump」残留 → reconciler 周期内接续；queued run TTL 被续臂（MemStore Now 注入时间推进）
 
 ## 8. 队列读 API 与会话状态增补
 
-- [ ] 8.1 `internal/handler/queue.go` + `internal/handler/router.go`（api 分区）：`GET /api/v1/sessions/:session_id/queue`——所有权校验（404 不泄露），按入队顺序返回 `{run_id, content, model, enqueued_at, attachments}`；仅依赖 Store 读原语
-- [ ] 8.2 session 列表/详情：队列启用时为深度 >0 的会话 additive 携带 `queued_count`（列表用 pipeline 批量 LLEN，读取失败 WARN 降级省略字段——同 `generating` 降级惯例）
-- [ ] 8.3 `internal/service/session.go` `DeleteSession`：删除序列中 `ClearQueue`（排队条目不归档）；对应会话的 queued run 订阅按终局语义收流的测试
+- [x] 8.1 `internal/handler/queue.go` + `internal/handler/router.go`（api 分区）：`GET /api/v1/sessions/:session_id/queue`——所有权校验（404 不泄露），按入队顺序返回 `{run_id, content, model, enqueued_at, attachments}`；仅依赖 Store 读原语
+- [x] 8.2 session 列表/详情：队列启用时为深度 >0 的会话 additive 携带 `queued_count`（列表用 pipeline 批量 LLEN，读取失败 WARN 降级省略字段——同 `generating` 降级惯例）
+- [x] 8.3 `internal/service/session.go` `DeleteSession`：删除序列中 `ClearQueue`（排队条目不归档）；对应会话的 queued run 订阅按终局语义收流的测试
 
 ## 9. 契约与文档同步
 

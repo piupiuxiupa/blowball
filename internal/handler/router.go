@@ -51,6 +51,11 @@ type RouteDeps struct {
 	// run_id active-turn markers). Required.
 	SessionGet gin.HandlerFunc
 
+	// SessionQueue handles GET /api/v1/sessions/:session_id/queue — the
+	// queued-message list (session-message-queue; api partition, read-only
+	// over the run Store's queue primitives). Required.
+	SessionQueue gin.HandlerFunc
+
 	// SendMessage handles POST /api/v1/sessions/:session_id/messages (SSE). Required.
 	SendMessage gin.HandlerFunc
 
@@ -263,6 +268,7 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.GET("/sessions", deps.SessionList)
 	authed.POST("/sessions", deps.SessionCreate)
 	authed.GET("/sessions/:session_id", deps.SessionGet)
+	authed.GET("/sessions/:session_id/queue", deps.SessionQueue)
 	authed.GET("/sessions/:session_id/messages", deps.SessionMessages)
 	authed.POST("/sessions/:session_id/attachments", deps.AttachmentUpload)
 	// Staged upload (add-staged-attachment-upload): upload images before any

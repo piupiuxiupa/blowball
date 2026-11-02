@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -28,6 +29,11 @@ type SessionHandler struct {
 	// list can mark sessions with a running turn (turn-detach-resume). Nil
 	// (e.g. unit tests) lists every session with generating=false.
 	runStore run.Store
+	// queueInfo turns on the additive queued_count field on list/detail
+	// entries (session-message-queue): the depth of the session's message
+	// queue. Off (the default) keeps the responses byte-for-byte
+	// pre-capability. Wired via EnableQueueInfo at wiring time.
+	queueInfo bool
 }
 
 // NewSessionHandler wires the CRUD handler with its session service, the
@@ -44,6 +50,26 @@ func NewSessionHandler(
 		titleSvc: titleSvc,
 		runStore: runStore,
 	}
+}
+
+// EnableQueueInfo turns on the additive queued_count marker on the session
+// list and detail entries (session-message-queue, messages.queue.enabled).
+// Depth reads fail-open to "omit the field" — same degradation family as the
+// generating flag.
+func (h *SessionHandler) EnableQueueInfo() { h.queueInfo = true }
+
+// queuedCount reads one session's queue depth, degrading to 0 (field
+// omitted) on a read failure.
+func (h *SessionHandler) queuedCount(ctx context.Context, sessionID string) int {
+	n, err := h.runStore.QueueLen(ctx, sessionID)
+	if err != nil {
+		logger.FromContext(ctx).Warn("queue depth lookup failed; omitting queued_count",
+			zap.String("op", "handler.session_queue"),
+			zap.String("session_id", sessionID),
+			zap.Error(err))
+		return 0
+	}
+	return n
 }
 
 // updateTitleRequest is the JSON body for PATCH /api/v1/sessions/:session_id.
@@ -252,6 +278,10 @@ type sessionListEntry struct {
 	// generating: it is THE reload discovery path, since a reloaded page has
 	// lost the X-Run-Id header / event meta it saw when the turn started.
 	RunID string `json:"run_id,omitempty"`
+	// QueuedCount reports how many of the user's messages wait in the
+	// session's queue (session-message-queue). Present only when the queue
+	// feature is enabled AND the depth is > 0 — additive, old clients ignore.
+	QueuedCount int `json:"queued_count,omitempty"`
 }
 
 // ListSessions handles GET /api/v1/sessions. Returns 200 with the user's
@@ -296,13 +326,17 @@ func (h *SessionHandler) ListSessions(c *gin.Context) {
 	entries := make([]sessionListEntry, 0, len(sessions))
 	for _, s := range sessions {
 		rid := activeRuns[s.SessionID]
-		entries = append(entries, sessionListEntry{
+		e := sessionListEntry{
 			SessionID:  s.SessionID,
 			Title:      s.Title,
 			UpdateTime: s.UpdateTime.UTC().Format(time.RFC3339),
 			Generating: rid != "",
 			RunID:      rid,
-		})
+		}
+		if h.queueInfo && h.runStore != nil {
+			e.QueuedCount = h.queuedCount(ctx, s.SessionID)
+		}
+		entries = append(entries, e)
 	}
 	c.JSON(http.StatusOK, gin.H{"sessions": entries})
 }
@@ -319,6 +353,10 @@ type getSessionResponse struct {
 	// reload discovery path for attach/cancel).
 	Generating bool   `json:"generating"`
 	RunID      string `json:"run_id,omitempty"`
+	// QueuedCount mirrors the list entry (session-message-queue): the
+	// session's queue depth, present only when the feature is enabled and
+	// the depth is > 0.
+	QueuedCount int `json:"queued_count,omitempty"`
 }
 
 // GetSession handles GET /api/v1/sessions/:session_id. It returns the session
@@ -361,14 +399,18 @@ func (h *SessionHandler) GetSession(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, getSessionResponse{
+	resp := getSessionResponse{
 		SessionID:  detail.Session.SessionID,
 		Title:      detail.Title,
 		CreateTime: detail.Session.CreateTime.UTC().Format(time.RFC3339),
 		UpdateTime: detail.Session.UpdateTime.UTC().Format(time.RFC3339),
 		Generating: rid != "",
 		RunID:      rid,
-	})
+	}
+	if h.queueInfo && h.runStore != nil {
+		resp.QueuedCount = h.queuedCount(ctx, sessionID)
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // UpdateTitle handles PATCH /api/v1/sessions/:session_id. It lets the session

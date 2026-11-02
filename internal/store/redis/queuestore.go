@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lush/blowball/internal/run"
@@ -184,4 +185,23 @@ func (s *RunStore) ClearQueue(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("runstore: clear queue: %w", err)
 	}
 	return nil
+}
+
+// QueuedSessions implements run.Store: SCAN over the queue key family. Redis
+// auto-deletes an empty list, so every match is a session with pending work
+// (barring a key racing towards deletion, which the pump's atomic pop makes
+// harmless).
+func (s *RunStore) QueuedSessions(ctx context.Context) ([]string, error) {
+	var out []string
+	iter := s.client.Scan(ctx, 0, "queue:*", 100).Iterator()
+	for iter.Next(ctx) {
+		sid := strings.TrimPrefix(iter.Val(), "queue:")
+		if sid != "" {
+			out = append(out, sid)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("runstore: queued sessions scan: %w", err)
+	}
+	return out, nil
 }

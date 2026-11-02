@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -311,6 +312,18 @@ func (m *MemStore) ClearQueue(_ context.Context, sessionID string) error {
 	defer m.mu.Unlock()
 	delete(m.queues, sessionID)
 	return nil
+}
+
+// QueuedSessions implements Store (sorted for deterministic tests).
+func (m *MemStore) QueuedSessions(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.queues))
+	for sid := range m.queues {
+		out = append(out, sid)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Alive implements Store.
