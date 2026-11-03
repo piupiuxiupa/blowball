@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +25,7 @@ import (
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
+	"github.com/lush/blowball/internal/store/fs"
 	mysqlstore "github.com/lush/blowball/internal/store/mysql"
 	"github.com/lush/blowball/internal/stream"
 )
@@ -229,6 +232,8 @@ type queueEnv struct {
 	sessSvc *service.SessionService
 	mysql   *handlerFakeMySQL
 	redis   *handlerFakeRedis
+	atts    *fakeAttachmentStore
+	dataDir string
 	next    func() string
 }
 
@@ -246,7 +251,10 @@ func newQueueEnvWithStore(t *testing.T, stub *queueStubOrchestrator, maxDepth in
 
 	reg := run.NewRegistry()
 	runs := run.NewManager(store, reg)
-	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, stub, "/tmp/blowball-test-data", runs, testSelectionConfig(), 0)
+	atts := &fakeAttachmentStore{rows: map[string]model.Attachment{}}
+	dataDir := t.TempDir()
+	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, stub, dataDir, runs, testSelectionConfig(), 0).
+		WithAttachmentStore(atts)
 	streamH.EnableMessageQueue(maxDepth)
 	turnH := NewTurnRunHandler(runs)
 	turnH.SetQueueCancelRollback(streamH.RollbackQueuedAttachments)
@@ -264,7 +272,7 @@ func newQueueEnvWithStore(t *testing.T, stub *queueStubOrchestrator, maxDepth in
 	r.POST("/api/v1/sessions/:session_id/turns/:run_id/cancel", turnH.CancelTurn)
 	r.GET("/api/v1/sessions/:session_id/turns/:run_id/events", turnH.TurnEvents)
 	r.GET("/api/v1/sessions/:session_id/queue", handlerQueueRoute(sessSvc, runs))
-	return &queueEnv{engine: r, store: store, reg: reg, stub: stub, streamH: streamH, msgSvc: msgSvc, sessSvc: sessSvc, mysql: mysql, redis: redis, next: next}
+	return &queueEnv{engine: r, store: store, reg: reg, stub: stub, streamH: streamH, msgSvc: msgSvc, sessSvc: sessSvc, mysql: mysql, redis: redis, atts: atts, dataDir: dataDir, next: next}
 }
 
 func handlerQueueRoute(sessSvc *service.SessionService, runs *run.Manager) gin.HandlerFunc {
@@ -897,7 +905,7 @@ func TestQueue_MetaRebuildAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	entry := run.QueueEntry{RunID: "trace-2", SessionID: "sess-1", UserID: "user-1",
 		Content: "queued B", Model: "test-model",
-		Selection:   run.QueueSelection{Model: "test-model", MaxContextTokens: 128000, MaxCompletionTokens: 8192},
+		Selection:  run.QueueSelection{Model: "test-model", MaxContextTokens: 128000, MaxCompletionTokens: 8192},
 		EnqueuedAt: time.Unix(1700000000, 0).UTC()}
 	_, err = env.store.AdmitMessage(ctx, "sess-1", entry, 8)
 	require.NoError(t, err)
@@ -982,4 +990,139 @@ func TestQueueReconciler_RotatesBeyondCap(t *testing.T) {
 		}
 		return true
 	}, 1*time.Second, 10*time.Millisecond, "the rotation never covered the tail sessions")
+}
+
+// ── review round 2 behavior tests ──────────────────────────────────────────
+
+// countCalls counts recorded calls with the given prefix.
+func countCalls(calls []string, prefix string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestQueue_StartupHeartbeatSustained (review round 2, fix 1): the
+// pre-publish beat alone covers only HeartbeatTTL (15s); the send-time
+// persistence runs BEFORE the drainer starts beating. Holding the direct
+// MySQL write blocks startTurn mid-startup — the heartbeat keeper must keep
+// beating during that window (the drainer cannot be the source: startTurn
+// has not reached it).
+func TestQueue_StartupHeartbeatSustained(t *testing.T) {
+	store := newRecordingStore()
+	env := newQueueEnvWithStore(t, newQueueStub(), 8, store)
+
+	// Hold the first direct write (turn A's send-time user row) so the
+	// startup phase is observably long.
+	entered := make(chan struct{}, 1)
+	hold := make(chan struct{})
+	env.mysql.setAppendMessagesHold(entered, hold)
+
+	wA := env.postMessageAsync("sess-1", "message A")
+	<-entered
+
+	// At this point: the pre-publish beat fired, the meta is published
+	// (running), and the persist is blocked — the drainer has NOT started.
+	// The keeper must sustain the beat: after one full tick (5s) at least a
+	// second Heartbeat for this run exists while the persist is still held.
+	require.Eventually(t, func() bool {
+		return countCalls(store.snapshot(), "Heartbeat:trace-1") >= 2
+	}, 8*time.Second, 50*time.Millisecond,
+		"no sustained heartbeat during the blocked startup persist — the queue SSE would misclassify the run as dead past 15s")
+
+	// The alive key exists throughout (not expired) and the run is running.
+	alive, err := env.store.Alive(context.Background(), "trace-1")
+	require.NoError(t, err)
+	require.True(t, alive, "alive key missing during the blocked startup persist")
+	meta, ok, err := env.store.GetMeta(context.Background(), "trace-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, run.StatusRunning, meta.Status)
+
+	close(hold)
+	close(env.stub.release)
+	select {
+	case <-wA:
+	case <-time.After(10 * time.Second):
+		t.Fatal("turn A never completed after the hold released")
+	}
+}
+
+// TestQueueCancel_SharedAttachmentKept (review round 2, fix 3): a queued
+// message's newly-claimed attachment may be referenced by ANOTHER accepted
+// queued message (same-session reuse is legal). Cancelling the first message
+// must not roll the shared attachment back — only unreferenced ids are
+// restored to staging.
+func TestQueueCancel_SharedAttachmentKept(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// Plant two staged attachments.
+	stagingDir := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope)
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+	for _, id := range []string{"att-shared", "att-solo"} {
+		env.atts.rows[id] = model.Attachment{ID: id, UserID: "user-1", Filename: id + ".png", MIME: "image/png", Size: 4}
+		require.NoError(t, os.WriteFile(filepath.Join(stagingDir, id+".png"), []byte("data"), 0o644))
+	}
+
+	// A holder claim so admissions queue.
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-holder")
+	require.NoError(t, err)
+
+	// B enqueues first and claims both attachments into the session (the
+	// bind the real send path performs before admission): files move into
+	// the session dir, rows become session-bound.
+	sessDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	for _, id := range []string{"att-shared", "att-solo"} {
+		sid := "sess-1"
+		env.atts.rows[id] = model.Attachment{ID: id, UserID: "user-1", SessionID: &sid, Filename: id + ".png", MIME: "image/png", Size: 4}
+		require.NoError(t, os.Rename(filepath.Join(stagingDir, id+".png"), filepath.Join(sessDir, id+".png")))
+	}
+	ref := model.MessageAttachmentRef{ID: "att-shared", Filename: "att-shared.png", MIME: "image/png"}
+	soloRef := model.MessageAttachmentRef{ID: "att-solo", Filename: "att-solo.png", MIME: "image/png"}
+	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+		RunID: "trace-b", SessionID: "sess-1", UserID: "user-1", Content: "B",
+		Attachments:  []model.MessageAttachmentRef{ref, soloRef},
+		NewlyClaimed: []string{"att-shared", "att-solo"},
+	}, 8)
+	require.NoError(t, err)
+
+	// C enqueues referencing the SHARED attachment (bound by B's claim —
+	// legal same-session reuse; C's NewlyClaimed is empty).
+	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+		RunID: "trace-c", SessionID: "sess-1", UserID: "user-1", Content: "C",
+		Attachments: []model.MessageAttachmentRef{ref},
+	}, 8)
+	require.NoError(t, err)
+
+	// Cancel B: the shared attachment must SURVIVE (C still references it);
+	// the solo one rolls back.
+	w := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/turns/trace-b/cancel", nil)
+	w.Header.Set("Authorization", "Bearer x") // auth bypassed by the test middleware anyway
+	rec := httptest.NewRecorder()
+	env.engine.ServeHTTP(rec, w)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"status":"cancelled"`)
+
+	shared := env.atts.rows["att-shared"]
+	solo := env.atts.rows["att-solo"]
+	require.NotNil(t, shared.SessionID, "shared attachment was unbound although another accepted message still references it")
+	require.Equal(t, "sess-1", *shared.SessionID)
+	require.Nil(t, solo.SessionID, "unreferenced attachment was not rolled back to staging")
+
+	// Files follow the rows: shared stays in the session dir, solo returns
+	// to staging.
+	_, statErr := os.Stat(filepath.Join(sessDir, "att-shared.png"))
+	require.NoError(t, statErr, "shared attachment file must stay bound for the surviving message")
+	_, statErr = os.Stat(filepath.Join(stagingDir, "att-solo.png"))
+	require.NoError(t, statErr, "solo attachment file must return to staging")
+
+	// C is untouched by the cancel.
+	n, err := env.store.QueueLen(ctx, "sess-1")
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
 }

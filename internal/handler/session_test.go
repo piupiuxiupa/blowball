@@ -143,6 +143,11 @@ type handlerFakeMySQL struct {
 	// appendMessagesErrFirst fails only the first N AppendMessages calls
 	// (harden-turn-persistence: send-time dual failure, turn-end recovery).
 	appendMessagesErrFirst int
+	// appendMessagesEntered/appendMessagesHold gate AppendMessages for tests
+	// that need the synchronous direct write to block (see
+	// setAppendMessagesHold).
+	appendMessagesEntered chan struct{}
+	appendMessagesHold    chan struct{}
 	// finalBatchHold parks the terminal AppendFinalBatch call — a timing
 	// probe for shutdown-order tests.
 	finalBatchEntered chan struct{}
@@ -239,6 +244,18 @@ func (m *handlerFakeMySQL) GetTitle(_ context.Context, _ string) (*model.Title, 
 }
 func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Message) ([]int64, error) {
 	m.mu.Lock()
+	entered, hold := m.appendMessagesEntered, m.appendMessagesHold
+	m.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if hold != nil {
+		<-hold
+	}
+	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.appendMessagesCalls++
 	m.appendMessagesArg = msgs
@@ -254,6 +271,17 @@ func (m *handlerFakeMySQL) AppendMessages(_ context.Context, msgs []model.Messag
 		ids[i] = int64(i + 1)
 	}
 	return ids, nil
+}
+
+// setAppendMessagesHold arms a blocking gate on AppendMessages (mirroring
+// setFinalBatchHold): every call signals `entered` and parks on `hold` until
+// the test releases it. Used to hold the send-time user-row persist while
+// tests observe the startup heartbeat keeper (session-message-queue).
+func (m *handlerFakeMySQL) setAppendMessagesHold(entered, hold chan struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appendMessagesEntered = entered
+	m.appendMessagesHold = hold
 }
 
 func (m *handlerFakeMySQL) AppendFinalBatch(_ context.Context, msgs []model.Message, calls []model.ToolCall) error {

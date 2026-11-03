@@ -119,13 +119,52 @@ func (h *MessageStreamHandler) newTurnsStopped() bool { return h.turnsStopped.Lo
 // RollbackQueuedAttachments restores the staged-attachment claims a queued
 // entry made at enqueue time, when the entry is cancelled before its turn
 // starts (the queue-cancel path in TurnRunHandler). Only the newly-claimed
-// subset is restored — rows bound by earlier messages were never newly
-// claimed and must keep their session binding.
+// subset is a candidate — rows bound by earlier messages were never newly
+// claimed and keep their session binding — AND an id is only rolled back
+// when NO other still-accepted message references it (review fix, round 2):
+// same-session reuse is legal, so a later queued message can legitimately
+// reference an attachment whose binding THIS entry created. Rolling such an
+// id back would move the file back to staging and unbind it, breaking the
+// other message's already-accepted turn (missing-image placeholder, 404 on
+// the content endpoint). The surviving reference set is the session's
+// remaining queue entries — a persisted row cannot reference an id this
+// entry newly claimed (the binding would predate this entry and the claim
+// would not have been "new"). A queue-read failure skips the whole rollback
+// (fail-safe): an orphaned bound attachment follows the session lifecycle,
+// which is strictly better than breaking a live message.
 func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, entry run.QueueEntry) {
 	if len(entry.NewlyClaimed) == 0 {
 		return
 	}
-	h.rollbackNewAttachmentClaims(ctx, entry.UserID, entry.SessionID, entry.NewlyClaimed)
+	referenced := make(map[string]bool)
+	if remaining, err := h.runs.Store.QueueEntries(ctx, entry.SessionID); err != nil {
+		logger.FromContext(ctx).Warn("queued-cancel attachment rollback skipped; queue read failed",
+			zap.String("op", "handler.send_message"),
+			zap.String("session_id", entry.SessionID),
+			zap.String("run_id", entry.RunID),
+			zap.Error(err))
+		return
+	} else {
+		for _, e := range remaining {
+			if e.RunID == entry.RunID {
+				continue // defensive: the dequeue removed this entry already
+			}
+			for _, ref := range e.Attachments {
+				referenced[ref.ID] = true
+			}
+		}
+	}
+	ids := make([]string, 0, len(entry.NewlyClaimed))
+	for _, id := range entry.NewlyClaimed {
+		if referenced[id] {
+			continue // another accepted message still uses this attachment
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	h.rollbackNewAttachmentClaims(ctx, entry.UserID, entry.SessionID, ids)
 }
 
 // NewMessageStreamHandler wires the streaming handler with its services, the
@@ -1110,10 +1149,14 @@ func (h *MessageStreamHandler) newBudgetedRoundHook(tap *TurnEventTap, persist t
 // misclassifies the still-finalizing run as dead, force-clearing the claim
 // mid-persist. The keeper beats at the drainer's cadence (compare-and-rearm
 // semantics via Store.Heartbeat) until the returned stop function is called;
-// stop blocks until the keeper goroutine has exited.
+// stop is idempotent and blocks until the keeper goroutine has exited. The
+// same helper also serves as the STARTUP keeper (session-message-queue):
+// sustained beats between the pre-publish heartbeat and the drainer's first
+// beat, so a slow send-time persist cannot outlive the alive TTL.
 func startPersistHeartbeat(saveCtx context.Context, store run.Store, runID, sessionID string, every time.Duration) (stop func()) {
 	hbStop := make(chan struct{})
 	hbDone := make(chan struct{})
+	var once sync.Once
 	go func() {
 		defer close(hbDone)
 		ticker := time.NewTicker(every)
@@ -1135,7 +1178,7 @@ func startPersistHeartbeat(saveCtx context.Context, store run.Store, runID, sess
 		}
 	}()
 	return func() {
-		close(hbStop)
+		once.Do(func() { close(hbStop) })
 		<-hbDone
 	}
 }

@@ -319,3 +319,53 @@ func TestRunStore_ClearQueueTerminatesQueuedRuns(t *testing.T) {
 		}
 	}
 }
+
+// TestRunStore_ClearQueueDrainIsSnapshotAndDelete (review round 2, fix 2):
+// the clear drains exactly the entries present at the atomic snapshot+delete
+// step — an entry admitted AFTER the drain survives in the fresh queue (with
+// its queued meta) and is not swept by the retire loop, which would leave an
+// unretired, unpumpable, uncancellable run. The admission-after-drain entry
+// takes the pump's session-revalidation path on its own.
+func TestRunStore_ClearQueueDrainIsSnapshotAndDelete(t *testing.T) {
+	rs, _ := testRunStore(t)
+	ctx := context.Background()
+
+	// Two entries drained and retired...
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-holder"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, id := range []string{"run-a", "run-b"} {
+		if _, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry(id), 8); err != nil {
+			t.Fatalf("admit %s: %v", id, err)
+		}
+	}
+	if err := rs.ClearQueue(ctx, "sess-1"); err != nil {
+		t.Fatalf("clear queue: %v", err)
+	}
+	for _, id := range []string{"run-a", "run-b"} {
+		meta, ok, _ := rs.GetMeta(ctx, id)
+		if !ok || meta.Status != run.StatusCancelled {
+			t.Fatalf("run %s = (%+v,%v), want cancelled", id, meta, ok)
+		}
+	}
+
+	// ...and one admitted AFTER the drain: it must survive the sweep —
+	// queued, pumpable, cancellable — not silently deleted-and-orphaned.
+	if res, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry("run-late"), 8); err != nil || res.Outcome != run.AdmitQueued {
+		t.Fatalf("late admit = (%+v,%v), want AdmitQueued", res, err)
+	}
+	if n, _ := rs.QueueLen(ctx, "sess-1"); n != 1 {
+		t.Fatalf("QueueLen after late admit = %d, want 1 (the drain must not delete it)", n)
+	}
+	meta, ok, _ := rs.GetMeta(ctx, "run-late")
+	if !ok || meta.Status != run.StatusQueued {
+		t.Fatalf("late run = (%+v,%v), want queued meta", meta, ok)
+	}
+	// And the ordinary queued-cancel still terminates it.
+	if _, ok, err := rs.DequeueMessage(ctx, "sess-1", "run-late"); err != nil || !ok {
+		t.Fatalf("late dequeue = ok=%v err=%v, want ok=true (the entry survived the drain)", ok, err)
+	}
+	if err := rs.SetStatus(ctx, "run-late", run.StatusCancelled); err != nil {
+		t.Fatalf("late set status: %v", err)
+	}
+}

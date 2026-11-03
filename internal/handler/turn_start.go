@@ -292,22 +292,27 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 
 	// ── pre-publish heartbeat, run meta, send-time persistence ─────────────
 	//
-	// The FIRST heartbeat precedes the run's meta publication (review fix):
-	// a queued POST's SSE subscriber is already tailing this run's log, and
-	// writeRunEventStream's dead-run ladder fires on status=running with no
-	// alive key. The send-time persistence and the registry/drainer startup
-	// below can exceed the subscriber's one-second poll period — without the
-	// early beat, a subscriber would synthesize an interrupted done,
-	// force-release the claim, and race the still-starting turn against the
-	// next message. One synchronous beat here (kept alive by the drainer's
-	// periodic beats from then on) closes the window: whenever running is
-	// observable, alive already is.
+	// The FIRST heartbeat precedes the run's meta publication (review fix,
+	// round 1): a queued POST's SSE subscriber is already tailing this run's
+	// log, and writeRunEventStream's dead-run ladder fires on
+	// status=running with no alive key. The startup keeper below then
+	// SUSTAINS the beat (review fix, round 2): one synchronous beat covers
+	// only HeartbeatTTL (15s), while the send-time persistence and
+	// store-pool waits below all happen BEFORE the drainer starts its own
+	// beats — a slow start (dual-tier outage, pool contention) must not let
+	// the alive key expire while running is observable, or the tailing
+	// subscriber would synthesize an interrupted done, force-release the
+	// claim, and race this still-starting turn against the next message.
+	// The keeper beats at the drainer's cadence and is stopped once the
+	// drainer takes over.
 	if err := h.runs.Store.Heartbeat(ctx, tid, sessionID); err != nil {
 		logger.FromContext(ctx).Warn("pre-publish heartbeat failed; proceeding",
 			zap.String("op", "handler.send_message"),
 			zap.String("run_id", tid),
 			zap.Error(err))
 	}
+	stopStartupHeartbeat := startPersistHeartbeat(ctx, h.runs.Store, tid, sessionID, run.HeartbeatEvery)
+	defer stopStartupHeartbeat() // safety net; the explicit stop below is the normal exit
 
 	// Run meta (ownership + status + the turn's resolved model) in Redis.
 	// Best-effort: a failed write costs cancel/resume for this run, never the
@@ -451,6 +456,11 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 	// cross-process cancel flag. drained closes after the final drain, which
 	// orders the terminal status write strictly after the last event.
 	drainDone := run.StartDrainer(hub, h.runs.Store, h.runs.Registry, tid, sessionID, run.HeartbeatEvery)
+
+	// The drainer's goroutine performs its own first beat immediately — the
+	// startup keeper's job is done (the safety-net defer above is now a
+	// no-op: stop is idempotent).
+	stopStartupHeartbeat()
 
 	resultCh := make(chan runResult, 1)
 

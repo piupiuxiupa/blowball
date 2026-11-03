@@ -258,21 +258,36 @@ const retireQueuedScript = `if redis.call("EXISTS", KEYS[1]) == 1 then
 end
 return 0`
 
+// drainQueueScript atomically snapshots AND deletes the queue (review fix,
+// round 2): a POST that passed session validation can interleave with the
+// clear — an entry admitted between a separate LRANGE and DEL would be
+// deleted but absent from the retire snapshot, leaving its meta queued
+// forever (unpumpable, uncancellable, SSE waiting out the TTL). One script
+// returns exactly the entries it removed; anything admitted after it
+// survives in the fresh queue and takes the pump's session-revalidation →
+// finalize-as-error path.
+const drainQueueScript = `local raw = redis.call("LRANGE", KEYS[1], 0, -1)
+redis.call("DEL", KEYS[1])
+return raw`
+
 // ClearQueue implements run.Store: drop the queue and terminate every
-// dropped entry's run (cancelled + retain window). Entries popped by a pump
-// just before the DEL are not seen here — the pump's session re-validation
-// finalizes those as error on its own path.
+// dropped entry's run (cancelled + retain window). The snapshot and the
+// deletion are one atomic step; entries popped by a pump just before it are
+// not included — the pump's session re-validation finalizes those as error
+// on its own path.
 func (s *RunStore) ClearQueue(ctx context.Context, sessionID string) error {
 	logCmd(ctx, "run.clear_queue", queueKey(sessionID))
-	raw, err := s.client.LRange(ctx, queueKey(sessionID), 0, -1).Result()
+	res, err := s.client.Eval(ctx, drainQueueScript, []string{queueKey(sessionID)}).Result()
 	if err != nil {
 		return fmt.Errorf("runstore: clear queue: %w", err)
 	}
-	if err := s.client.Del(ctx, queueKey(sessionID)).Err(); err != nil {
-		return fmt.Errorf("runstore: clear queue: %w", err)
-	}
+	raw, _ := res.([]any)
 	retain := int(run.RetainAfterTerminal.Round(time.Second).Seconds())
-	for _, payload := range raw {
+	for _, item := range raw {
+		payload, ok := item.(string)
+		if !ok {
+			continue
+		}
 		var entry run.QueueEntry
 		if err := json.Unmarshal([]byte(payload), &entry); err != nil {
 			continue // malformed entries still left the queue with the DEL
