@@ -45,18 +45,6 @@ func (s *MessageService) ListToolCalls(ctx context.Context, sessionID string) ([
 	return s.deps.MySQL.ListToolCalls(ctx, sessionID)
 }
 
-// ListDurableMessages reads the session's messages straight from MySQL —
-// the AUTHORITATIVE tier — ignoring the Redis read cache. The cache is an
-// accelerator whose appends are best-effort (a failed append leaves rows
-// missing from an otherwise healthy key), so a RecoverMessages cache hit
-// can lag MySQL; decisions that must PROVE a row is absent — the
-// queued-cancel attachment rollback's reference closure — need this read,
-// not the cache-first one. (CompactionService's RecoverDurable exists for
-// the same reason: durable boundary cursors must not trust the cache.)
-func (s *MessageService) ListDurableMessages(ctx context.Context, sessionID string) ([]model.Message, error) {
-	return s.deps.MySQL.ListMessages(ctx, sessionID)
-}
-
 // RecoverMessages returns the full ordered message list for sessionID using
 // the priority chain Redis → MySQL, backfilling the cache on the MySQL
 // fallback so subsequent reads are cheaper. The filesystem no longer

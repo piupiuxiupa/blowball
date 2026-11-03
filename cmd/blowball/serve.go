@@ -787,7 +787,6 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	var queueStop func()
 	if cfg.Messages.Queue.Enabled {
 		streamHandler.EnableMessageQueue(cfg.Messages.QueueMaxDepthLimit())
-		turnRunHandler.SetQueueCancelRollback(streamHandler.RollbackQueuedAttachments)
 		reconciler := handler.NewQueueReconciler(streamHandler, 0)
 		reconciler.Start()
 		queueStop = func() {

@@ -49,7 +49,6 @@ func newQueueEnv(t *testing.T, llm agent.LLMClient, cfg *config.Config, maxDepth
 	t.Helper()
 	env := newTestEnvWithConfig(t, llm, cfg)
 	env.streamH.EnableMessageQueue(maxDepth)
-	env.turnRunH.SetQueueCancelRollback(env.streamH.RollbackQueuedAttachments)
 	env.sessH.EnableQueueInfo()
 	return env
 }

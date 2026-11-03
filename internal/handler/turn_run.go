@@ -25,24 +25,12 @@ import (
 // touch the agent layer directly.
 type TurnRunHandler struct {
 	runs *run.Manager
-	// queueRollback restores a queued entry's staged-attachment claims when
-	// it is cancelled before starting (session-message-queue). Wired from the
-	// streaming handler at construction time; nil (tests, unwired deployments)
-	// skips the rollback — a bound-but-unreferenced row then simply follows
-	// the session lifecycle.
-	queueRollback func(ctx context.Context, entry run.QueueEntry)
 }
 
 // NewTurnRunHandler wires the turn-lifecycle endpoints. A nil Manager is a
 // programming error (only the agent/all roles register these routes).
 func NewTurnRunHandler(runs *run.Manager) *TurnRunHandler {
 	return &TurnRunHandler{runs: runs}
-}
-
-// SetQueueCancelRollback installs the staged-attachment rollback hook used by
-// the queued-run cancel branch (session-message-queue).
-func (h *TurnRunHandler) SetQueueCancelRollback(fn func(ctx context.Context, entry run.QueueEntry)) {
-	h.queueRollback = fn
 }
 
 // runStreamBlock is the XREAD BLOCK window of the SSE subscriber loop: it
@@ -105,7 +93,7 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 	// falling through to the registry / alive / dead-run ladder below would
 	// misclassify it as a crashed run and mark it interrupted.
 	if meta.Status == run.StatusQueued {
-		entry, dequeued, err := h.runs.Store.DequeueMessage(ctx, sessionID, runID)
+		_, dequeued, err := h.runs.Store.DequeueMessage(ctx, sessionID, runID)
 		if err != nil {
 			logger.FromContext(ctx).Error("cancel: dequeue queued message failed",
 				zap.String("op", "handler.cancel_turn"),
@@ -117,9 +105,11 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 			// Terminal bookkeeping for a cancelled-before-start run: status
 			// first (unblocks waiting SSE readers via the terminal-status
 			// close path), no claim to release (a queued run never held one),
-			// then the retain window. The staged-attachment rollback is
-			// best-effort — a bound row that survives it follows the session
-			// lifecycle.
+			// then the retain window. Attachments the cancelled message
+			// claimed stay session-bound by design (the conservative
+			// lifecycle — see RollbackQueuedAttachments' replacement note in
+			// the design doc): any cancel-time unbind races a concurrent
+			// same-session reference, and session deletion is the cleanup.
 			if err := h.runs.Store.SetStatus(ctx, runID, run.StatusCancelled); err != nil {
 				logger.FromContext(ctx).Warn("cancel: set queued-run status failed",
 					zap.String("op", "handler.cancel_turn"),
@@ -129,9 +119,6 @@ func (h *TurnRunHandler) CancelTurn(c *gin.Context) {
 				logger.FromContext(ctx).Warn("cancel: retire queued run failed",
 					zap.String("op", "handler.cancel_turn"),
 					zap.String("run_id", runID), zap.Error(err))
-			}
-			if h.queueRollback != nil && len(entry.NewlyClaimed) > 0 {
-				h.queueRollback(ctx, entry)
 			}
 			c.JSON(http.StatusOK, turnStatusBody(runID, run.StatusCancelled))
 			return

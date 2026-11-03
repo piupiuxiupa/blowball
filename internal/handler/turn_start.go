@@ -842,22 +842,20 @@ func (h *MessageStreamHandler) turnRequestFromQueueEntry(ctx context.Context, en
 
 // queueEntryFromRequest snapshots an admission-validated request into the
 // queue's durable form (design D1): the resolved selection, the attachment
-// references (plus which ones this request newly claimed from staging, for
-// the cancel rollback), the login JWT the pumped turn's tool executions
-// will need, and the arrival time (display only — the persisted user row
-// takes pump time, see turnRequestFromQueueEntry).
-func queueEntryFromRequest(req *turnRequest, newlyClaimed []string, enqueuedAt time.Time) run.QueueEntry {
+// references, the login JWT the pumped turn's tool executions will need,
+// and the arrival time (display only — the persisted user row takes pump
+// time, see turnRequestFromQueueEntry).
+func queueEntryFromRequest(req *turnRequest, enqueuedAt time.Time) run.QueueEntry {
 	return run.QueueEntry{
-		RunID:        req.traceID,
-		SessionID:    req.sessionID,
-		UserID:       req.userID,
-		Content:      req.content,
-		Model:        req.sel.Model,
-		Selection:    selectionToQueue(req.sel),
-		Attachments:  req.attachments,
-		NewlyClaimed: newlyClaimed,
-		RawToken:     req.rawToken,
-		EnqueuedAt:   enqueuedAt,
+		RunID:       req.traceID,
+		SessionID:   req.sessionID,
+		UserID:      req.userID,
+		Content:     req.content,
+		Model:       req.sel.Model,
+		Selection:   selectionToQueue(req.sel),
+		Attachments: req.attachments,
+		RawToken:    req.rawToken,
+		EnqueuedAt:  enqueuedAt,
 	}
 }
 

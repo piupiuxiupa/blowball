@@ -159,130 +159,6 @@ func (h *MessageStreamHandler) WaitForStartupPumps(timeout time.Duration) bool {
 	}
 }
 
-// RollbackQueuedAttachments restores the staged-attachment claims a queued
-// entry made at enqueue time, when the entry is cancelled before its turn
-// starts (the queue-cancel path in TurnRunHandler). Only the newly-claimed
-// subset is a candidate — rows bound by earlier messages were never newly
-// claimed and keep their session binding — AND an id is only rolled back
-// when NOTHING that may still consume it references it. Same-session reuse
-// is legal, so the reference closure spans more than the remaining queue
-// (review fix, round 3): a message that referenced the id can already have
-// been pumped and even completed — its references live in the persisted rows
-// — or be mid-startup, popped from the queue with its user row not yet
-// durable. The checks:
-//
-//  1. the session's remaining queue entries (accepted, not yet started);
-//  2. the session's persisted message rows (hydrated attachment refs —
-//     covers pumped, running, and completed messages alike);
-//  3. a session claim whose holder's user row is NOT yet observable in the
-//     persisted rows — a startup in its pre-write window, a running turn
-//     whose send-time write failed (the row lands only at turn end), or a
-//     dead holder — suspends the whole rollback conservatively. The check
-//     is row-based, NOT heartbeat-based (review fix, round 4): a heartbeat
-//     proves the process is alive, not that the row is durable — the beat
-//     precedes the write in one startup phase and follows it in another,
-//     and the rows are shared across replicas where a beat is not.
-//
-// Any check failure skips the rollback (fail-safe): an orphaned bound
-// attachment follows the session lifecycle, which is strictly better than
-// breaking a live message's images and history links.
-func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, entry run.QueueEntry) {
-	if len(entry.NewlyClaimed) == 0 {
-		return
-	}
-	referenced := make(map[string]bool)
-	if remaining, err := h.runs.Store.QueueEntries(ctx, entry.SessionID); err != nil {
-		h.skipQueuedRollback(ctx, entry, "queue read failed", err)
-		return
-	} else {
-		for _, e := range remaining {
-			if e.RunID == entry.RunID {
-				continue // defensive: the dequeue removed this entry already
-			}
-			for _, ref := range e.Attachments {
-				referenced[ref.ID] = true
-			}
-		}
-	}
-	// Persisted rows: every started message's user row carries its
-	// attachment refs (the send-time write precedes registry registration),
-	// so this covers pumped, running, and completed references alike. The
-	// read is the AUTHORITATIVE MySQL tier, not RecoverMessages' cache-first
-	// path (review fix, round 5): the read cache is an accelerator whose
-	// appends are best-effort, so a cache hit can lag MySQL — proving a
-	// reference ABSENT from a possibly-stale cache would let the rollback
-	// delete an attachment a durable row still references.
-	prior, err := h.msgSvc.ListDurableMessages(ctx, entry.SessionID)
-	if err != nil {
-		h.skipQueuedRollback(ctx, entry, "persisted-rows read failed", err)
-		return
-	}
-	for _, m := range prior {
-		for _, ref := range m.Attachments {
-			referenced[ref.ID] = true
-		}
-	}
-	// Claim-holder USER-row guard (review fixes, rounds 4+5): a session
-	// claim whose holder's USER row is not observable in `prior` (the
-	// authoritative tier) is a startup before its send-time write, a running
-	// turn whose send-time write failed, or a dead holder — the holder's
-	// attachment references are invisible to checks 1 and 2, so suspend the
-	// whole rollback. The match is the holder's RoleUser row specifically:
-	// memory-recall's tool-call placeholder rows share the turn's trace id
-	// and are written BEFORE the user row, so an any-row TraceID match would
-	// pass the guard while the reference-carrying user row is still in
-	// flight. Row observability is replica-agnostic (the persistence is
-	// shared) and, unlike a heartbeat, actually proves the references are
-	// readable. A claim-read failure only loses this guard's extra safety,
-	// so it degrades to proceeding.
-	if claims, cerr := h.runs.Store.ActiveRuns(ctx, []string{entry.SessionID}); cerr == nil {
-		if holder := claims[entry.SessionID]; holder != "" {
-			holderUserRowDurable := false
-			for _, m := range prior {
-				if m.TraceID == holder && m.Role == model.RoleUser {
-					holderUserRowDurable = true
-					break
-				}
-			}
-			if !holderUserRowDurable {
-				h.skipQueuedRollback(ctx, entry, "claim holder's user row not durable; references unobservable", nil)
-				return
-			}
-		}
-	}
-	ids := make([]string, 0, len(entry.NewlyClaimed))
-	for _, id := range entry.NewlyClaimed {
-		if referenced[id] {
-			continue // something may still consume this attachment
-		}
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		return
-	}
-	h.rollbackNewAttachmentClaims(ctx, entry.UserID, entry.SessionID, ids)
-}
-
-// skipQueuedRollback logs why a queued-cancel attachment rollback was
-// suspended (the attachments stay bound; session deletion is the cleanup).
-func (h *MessageStreamHandler) skipQueuedRollback(ctx context.Context, entry run.QueueEntry, reason string, err error) {
-	log := logger.FromContext(ctx).Warn
-	if err != nil {
-		log = logger.FromContext(ctx).Error
-	}
-	fields := []zap.Field{
-		zap.String("op", "handler.send_message"),
-		zap.String("session_id", entry.SessionID),
-		zap.String("run_id", entry.RunID),
-		zap.String("reason", reason),
-	}
-	if err != nil {
-		fields = append(fields, zap.Error(err))
-	}
-	log("queued-cancel attachment rollback suspended; attachments stay bound", fields...)
-}
-
-
 // NewMessageStreamHandler wires the streaming handler with its services, the
 // orchestrator adapter, the run-lifecycle manager, and the dataDir used to
 // resolve per-user workspace and skills roots. compSvc is the
@@ -849,7 +725,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		// queue non-empty → append at the tail; depth cap → QUEUE_FULL.
 		// The entry carries the resolved snapshot, so the pumping process
 		// never re-resolves the request (D1).
-		entry := queueEntryFromRequest(tr, newlyClaimedAttachments, time.Now())
+		entry := queueEntryFromRequest(tr, now)
 		res, aerr := h.runs.Store.AdmitMessage(ctx, sessionID, entry, h.queueMaxDepth)
 		if aerr != nil {
 			// Admission transport failure: the queue itself is Redis, so
