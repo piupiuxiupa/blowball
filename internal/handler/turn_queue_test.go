@@ -1306,3 +1306,108 @@ func TestQueueCancel_StartingClaimSuspendsRollback(t *testing.T) {
 
 // ptrOf is a small test helper.
 func ptrOf(s string) *string { return &s }
+
+// ── review round 5 behavior tests ──────────────────────────────────────────
+
+// TestQueueCancel_RecallPlaceholderRowIsNotTheUserRow (review round 5, fix 1):
+// memory-recall's tool-call placeholder rows share the turn's trace id and
+// land BEFORE the user row — an any-row TraceID match would satisfy the
+// holder guard while the reference-carrying user row is still in flight.
+// Only the holder's RoleUser row counts.
+func TestQueueCancel_RecallPlaceholderRowIsNotTheUserRow(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// A STARTING holder whose recall placeholder row (Role=assistant, same
+	// trace id) is already durable, but whose user row is not.
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-starting")
+	require.NoError(t, err)
+	require.NoError(t, env.store.Heartbeat(ctx, "sess-1", "run-starting"))
+	env.mysql.listMessagesRows = []model.Message{{
+		SessionID: "sess-1", Agent: stream.AgentConfucius, Role: model.RoleAssistant,
+		TraceID: "run-starting", MsgTime: time.Unix(1700000000, 0).UTC(),
+		EventType: "tool_call", ToolCallID: "recall-1", Content: "memories",
+	}}
+
+	sessDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	env.atts.rows["att-x"] = model.Attachment{ID: "att-x", UserID: "user-1", SessionID: ptrOf("sess-1"), Filename: "att-x.png", MIME: "image/png", Size: 4}
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "att-x.png"), []byte("data"), 0o644))
+	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+		RunID: "trace-b", SessionID: "sess-1", UserID: "user-1", Content: "B",
+		Attachments:  []model.MessageAttachmentRef{{ID: "att-x", Filename: "att-x.png", MIME: "image/png"}},
+		NewlyClaimed: []string{"att-x"},
+	}, 8)
+	require.NoError(t, err)
+
+	w := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/turns/trace-b/cancel", nil)
+	rec := httptest.NewRecorder()
+	env.engine.ServeHTTP(rec, w)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// The placeholder row must NOT satisfy the guard: the user row is still
+	// in flight, so the rollback suspends and the attachment stays bound.
+	require.NotNil(t, env.atts.rows["att-x"].SessionID,
+		"a same-trace assistant placeholder row satisfied the holder guard — the user row was still in flight")
+	_, statErr := os.Stat(filepath.Join(sessDir, "att-x.png"))
+	require.NoError(t, statErr)
+}
+
+// TestQueueCancel_StaleCacheDoesNotHideDurableReference (review round 5, fix
+// 2): C's user row is durable in MySQL, its turn completed, and the claim was
+// released — but the Redis read cache (best-effort appends) still serves the
+// older snapshot without C. The reference closure must read the authoritative
+// tier, not prove absence from a possibly-stale cache.
+func TestQueueCancel_StaleCacheDoesNotHideDurableReference(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// The reviewer's scenario: B queued behind a running turn, then that turn
+	// (and C after it) completed and released the claim before the cancel.
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-prev")
+	require.NoError(t, err)
+	sessDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	env.atts.rows["att-shared"] = model.Attachment{ID: "att-shared", UserID: "user-1", SessionID: ptrOf("sess-1"), Filename: "att-shared.png", MIME: "image/png", Size: 4}
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "att-shared.png"), []byte("data"), 0o644))
+
+	// B queued with the shared attachment newly claimed; nothing else queued.
+	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+		RunID: "trace-b", SessionID: "sess-1", UserID: "user-1", Content: "B",
+		Attachments:  []model.MessageAttachmentRef{{ID: "att-shared", Filename: "att-shared.png", MIME: "image/png"}},
+		NewlyClaimed: []string{"att-shared"},
+	}, 8)
+	require.NoError(t, err)
+	// The predecessor completed: claim released, B left waiting behind a now
+	// idle session (the queue pump is not running in this unit test).
+	require.NoError(t, env.store.ReleaseSession(ctx, "sess-1", "run-prev"))
+
+	// The authoritative tier holds C's completed user row referencing the
+	// shared attachment; the read cache (a hit for RecoverMessages) is the
+	// OLD snapshot without it.
+	env.mysql.listMessagesRows = []model.Message{{
+		SessionID: "sess-1", Agent: "user", Role: model.RoleUser, TraceID: "trace-c",
+		Content: "C", MsgTime: time.Unix(1700000001, 0).UTC(),
+		Attachments: []model.MessageAttachmentRef{{ID: "att-shared", Filename: "att-shared.png", MIME: "image/png"}},
+	}}
+	stale, err := json.Marshal(model.Message{
+		SessionID: "sess-1", Agent: "user", Role: model.RoleUser, TraceID: "trace-old",
+		Content: "old row", MsgTime: time.Unix(1700000000, 0).UTC(),
+	})
+	require.NoError(t, err)
+	env.redis.mu.Lock()
+	env.redis.getResult = [][]byte{stale}
+	env.redis.mu.Unlock()
+
+	w := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/turns/trace-b/cancel", nil)
+	rec := httptest.NewRecorder()
+	env.engine.ServeHTTP(rec, w)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// The durable row's reference wins over the stale cache hit: the
+	// attachment must stay bound.
+	require.NotNil(t, env.atts.rows["att-shared"].SessionID,
+		"a stale cache hit hid the durable row's reference — the rollback deleted a live message's attachment")
+	_, statErr := os.Stat(filepath.Join(sessDir, "att-shared.png"))
+	require.NoError(t, statErr)
+}

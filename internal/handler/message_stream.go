@@ -206,8 +206,13 @@ func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, en
 	}
 	// Persisted rows: every started message's user row carries its
 	// attachment refs (the send-time write precedes registry registration),
-	// so this covers pumped, running, and completed references alike.
-	prior, err := h.msgSvc.RecoverMessages(ctx, entry.UserID, entry.SessionID)
+	// so this covers pumped, running, and completed references alike. The
+	// read is the AUTHORITATIVE MySQL tier, not RecoverMessages' cache-first
+	// path (review fix, round 5): the read cache is an accelerator whose
+	// appends are best-effort, so a cache hit can lag MySQL — proving a
+	// reference ABSENT from a possibly-stale cache would let the rollback
+	// delete an attachment a durable row still references.
+	prior, err := h.msgSvc.ListDurableMessages(ctx, entry.SessionID)
 	if err != nil {
 		h.skipQueuedRollback(ctx, entry, "persisted-rows read failed", err)
 		return
@@ -217,25 +222,30 @@ func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, en
 			referenced[ref.ID] = true
 		}
 	}
-	// Claim-holder row guard (review fix, round 4): a session claim whose
-	// holder's rows are not observable in `prior` is a startup before its
-	// send-time write, a running turn whose send-time write failed, or a
-	// dead holder — the holder's attachment references are invisible to
-	// checks 1 and 2, so suspend the whole rollback. Row observability is
-	// replica-agnostic (the persistence is shared) and, unlike a heartbeat,
-	// actually proves the references are readable. A claim-read failure only
-	// loses this guard's extra safety, so it degrades to proceeding.
+	// Claim-holder USER-row guard (review fixes, rounds 4+5): a session
+	// claim whose holder's USER row is not observable in `prior` (the
+	// authoritative tier) is a startup before its send-time write, a running
+	// turn whose send-time write failed, or a dead holder — the holder's
+	// attachment references are invisible to checks 1 and 2, so suspend the
+	// whole rollback. The match is the holder's RoleUser row specifically:
+	// memory-recall's tool-call placeholder rows share the turn's trace id
+	// and are written BEFORE the user row, so an any-row TraceID match would
+	// pass the guard while the reference-carrying user row is still in
+	// flight. Row observability is replica-agnostic (the persistence is
+	// shared) and, unlike a heartbeat, actually proves the references are
+	// readable. A claim-read failure only loses this guard's extra safety,
+	// so it degrades to proceeding.
 	if claims, cerr := h.runs.Store.ActiveRuns(ctx, []string{entry.SessionID}); cerr == nil {
 		if holder := claims[entry.SessionID]; holder != "" {
-			holderDurable := false
+			holderUserRowDurable := false
 			for _, m := range prior {
-				if m.TraceID == holder {
-					holderDurable = true
+				if m.TraceID == holder && m.Role == model.RoleUser {
+					holderUserRowDurable = true
 					break
 				}
 			}
-			if !holderDurable {
-				h.skipQueuedRollback(ctx, entry, "claim holder's rows not durable; references unobservable", nil)
+			if !holderUserRowDurable {
+				h.skipQueuedRollback(ctx, entry, "claim holder's user row not durable; references unobservable", nil)
 				return
 			}
 		}
