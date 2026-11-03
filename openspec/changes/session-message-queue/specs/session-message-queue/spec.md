@@ -127,6 +127,12 @@
 - **THEN** running 状态发布前 run 的 alive 心跳已存在（同步首发 + drainer 周期续臂）
 - **AND** 已尾随的 SSE 订阅者不会将运行中的 run 判定为死 run 并强制释放认领
 
+#### Scenario: 启动期心跳持续续臂至 drainer 接手
+
+- **WHEN** 发送时持久化（或存储池等待）耗时超过心跳 TTL（15 秒）且发生在 drainer 首拍之前
+- **THEN** 启动期心跳保活按 drainer 节奏持续续臂，alive 心跳不因单次首发过期
+- **AND** 已尾随的 SSE 订阅者在整个启动阶段都不会将 run 判定为死 run
+
 #### Scenario: 过期 meta 在接续时完整重建
 
 - **WHEN** 等待期超过 run-key TTL 且 reconciler 的续臂不可用，meta 已过期而队列条目仍在
@@ -154,6 +160,12 @@
 - **WHEN** 取消在扫描队列后、原子移除前，pump 弹出该条目并开始其 turn
 - **THEN** 移除实际未发生（删除计数为 0），系统 SHALL NOT 报告 cancelled 或回滚附件
 - **AND** 端点按 run 的当前状态作答，客户端重试后走运行中取消路径
+
+#### Scenario: 取消保留其他已接受消息引用的附件
+
+- **WHEN** 被取消的排队消息首次认领了附件 X，而另一条仍被接受的排队消息（或其后入队的消息）合法引用同一附件
+- **THEN** X 的会话绑定与文件 SHALL 保留，不随被取消消息回滚到 staging
+- **AND** 仅无任何剩余引用的附件被恢复到 staging 并解除绑定
 
 #### Scenario: 取消当前轮后队列继续
 

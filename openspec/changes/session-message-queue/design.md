@@ -60,9 +60,11 @@
 
 ### D5: 接续驱动 — turn goroutine 尾部 pump + reconciler 兜底 + 停机闸门
 
-- **正常路径**：turn goroutine 在 `Finalize` 之后同步调 `pumpQueue(sid)`：pump Lua 弹头认领，成功则调用与 HTTP 路径共享的「起轮核心」（D8），后者再起自己的 turn goroutine——轮与轮是 goroutine 链，不是栈递归。起轮核心在发布 running **之前**先同步一次心跳（评审修复）：排队 POST 的 SSE 订阅者已在尾随，发送时持久化与 drainer 启动可能超过订阅者的轮询周期，「running 且无 alive」会被死 run 检测误判并强制释放 claim；先建 alive 再发布状态后，running 可见时 alive 必已存在。
+- **正常路径**：turn goroutine 在 `Finalize` 之后同步调 `pumpQueue(sid)`：pump Lua 弹头认领，成功则调用与 HTTP 路径共享的「起轮核心」（D8），后者再起自己的 turn goroutine——轮与轮是 goroutine 链，不是栈递归。起轮核心在发布 running **之前**先同步一次心跳、并持续保活到 drainer 接手（评审修复两轮）：排队 POST 的 SSE 订阅者已在尾随，发送时持久化与 drainer 启动可能超过订阅者的轮询周期乃至 HeartbeatTTL（15s，「running 且无 alive」会被死 run 检测误判并强制释放 claim）；pre-publish 同步心跳之后由一个启动期 keeper（复用 startPersistHeartbeat，幂等 stop）按 drainer 节奏持续续臂，drainer 首拍即接管——任何时刻 running 可见则 alive 必未过期。
 - **崩溃残留**：进程死在「释放认领后、pump 前」，队列干等。agent 角色起一个 **reconciler** goroutine（模式照抄 `internal/msgflush`）：定时 `SCAN queue:*`（cursor 续传、每轮有界且**轮换处理起点**——评审修复：稳定的扫描顺序加上每轮上限会让尾部会话永久饥饿，轮换保证积压超过单轮上限时尾部同样获得 pump 机会与 TTL 续臂），对每个 sid 尝试 pump；顺带为 queued 状态 run 重臂 `run:{rid}:events`/`meta` TTL（`RunKeyTTL` 才 1h，深队列/慢轮会等到过期——SSE 订阅循环对 meta 消失的契约是收流，reconciler 使其罕见）。多副本安全：pump Lua 的 claim NX 互斥。若等待期 meta 已过期（reconciler 亦不可用），起轮时从 QueueEntry 重建**完整** RunMeta（含归属与 model 字段——仅写 status 的部分重建会让 cancel/events 的归属校验 404，评审修复）。
 - **停机闸门**：优雅关闭会取消运行中 turn，取消路径也走 Finalize——若不拦，关机时 pump 会把队头**顶起来跑**。pump 前 SHALL 检查进程级停机信号；停机时跳过，条目留在 Redis 由重启后的 reconciler 接续。
+
+取消排队消息的附件回滚按**剩余队列条目的引用集**过滤（评审修复二轮）：同会话复用合法——后到的排队消息可引用本条目首次认领的附件；被取消条目的 NewlyClaimed 中仍被其他已接受消息引用的 id 不回滚（保持绑定与文件），仅无人引用的恢复 staging。队列读失败时整体跳过回滚（fail-safe：孤儿绑定附件随会话删除清理，优于破坏存活消息）。
 
 ### D6: 新 run 状态 `queued` + 取消分支
 
@@ -102,7 +104,7 @@ messages:
 
 ### D11: 会话删除清空队列
 
-`DeleteSession` 在现有「drain → archive+purge → 清缓存」序列中增加清队列（数据库优先、缓存其次的既有次序内）：`ClearQueue` 删除 LIST 并将每个被丢弃的 queued run 置为 `cancelled` + 保留窗 retire（评审修复：仅删 LIST 会让等待中的 SSE 悬挂到 TTL）。排队条目不是消息行（尚未落库），无归档镜像义务——删除即弃。
+`DeleteSession` 在现有「drain → archive+purge → 清缓存」序列中增加清队列（数据库优先、缓存其次的既有次序内）：`ClearQueue` 以**单脚本原子快照+删除** LIST 并将每个被丢弃的 queued run 置为 `cancelled` + 保留窗 retire（评审修复两轮：仅删 LIST 会让等待中的 SSE 悬挂到 TTL；快照与删除分离则会让竞态入队的条目被删却未 retire——原子 drain 保证 retire 的恰是被删除的集合，drain 后到达的条目存活走 pump 的会话校验路径）。排队条目不是消息行（尚未落库），无归档镜像义务——删除即弃。
 
 ## Risks / Trade-offs
 

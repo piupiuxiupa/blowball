@@ -74,3 +74,10 @@
 - [x] 11.5 [P2] fromQueue 的 meta 过期时从 QueueEntry 重建完整 RunMeta（cancel/events 归属校验不再 404）
 - [x] 11.6 [P2] ClearQueue 终结被丢弃的 queued run（cancelled + retain 窗口），等待中的 SSE 收流
 - [x] 11.7 回归：make test 全量 + 新增行为级测试（顺序钉死、原子入队 pin、轮换、重建、终结）
+
+## 12. 评审修复（review round 2）
+
+- [x] 12.1 [P1] 启动期持续心跳保活（单次 pre-publish 心跳只覆盖 15s；持久化/drainer 接手前由 keeper 持续续臂）
+- [x] 12.2 [P2] ClearQueue 的快照+删除原子化（drain 后到达的条目存活走 pump 校验路径，不再被删除却未 retire）
+- [x] 12.3 [P2] 取消排队消息保留其他已接受消息仍引用的附件（回滚按剩余队列条目的引用集过滤）
+- [x] 12.4 回归：make test 全量 race + 三个新行为级测试（阻塞持久化期间的持续心跳、drain 语义、共享附件）
