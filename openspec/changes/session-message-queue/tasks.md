@@ -81,3 +81,9 @@
 - [x] 12.2 [P2] ClearQueue 的快照+删除原子化（drain 后到达的条目存活走 pump 校验路径，不再被删除却未 retire）
 - [x] 12.3 [P2] 取消排队消息保留其他已接受消息仍引用的附件（回滚按剩余队列条目的引用集过滤）
 - [x] 12.4 回归：make test 全量 race + 三个新行为级测试（阻塞持久化期间的持续心跳、drain 语义、共享附件）
+
+## 13. 评审修复（review round 3）
+
+- [x] 13.1 [P1] 关停屏障覆盖已出队未注册的起轮（shutdown 派生 ctx 取消准备、pop→spawn WaitGroup 等待、中止原子返队列 RequeueHead）
+- [x] 13.2 [P2] 附件引用闭包扩展（剩余队列 ∪ 已持久化行 ∪ 无心跳认领持有者的启动中守卫）
+- [x] 13.3 回归：make test 全量 race + 五个新行为级测试（RequeueHead、pump 中止返队列、startTurn 检查点、持久化引用保护、启动中守卫）

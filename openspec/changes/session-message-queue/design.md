@@ -62,9 +62,9 @@
 
 - **正常路径**：turn goroutine 在 `Finalize` 之后同步调 `pumpQueue(sid)`：pump Lua 弹头认领，成功则调用与 HTTP 路径共享的「起轮核心」（D8），后者再起自己的 turn goroutine——轮与轮是 goroutine 链，不是栈递归。起轮核心在发布 running **之前**先同步一次心跳、并持续保活到 drainer 接手（评审修复两轮）：排队 POST 的 SSE 订阅者已在尾随，发送时持久化与 drainer 启动可能超过订阅者的轮询周期乃至 HeartbeatTTL（15s，「running 且无 alive」会被死 run 检测误判并强制释放 claim）；pre-publish 同步心跳之后由一个启动期 keeper（复用 startPersistHeartbeat，幂等 stop）按 drainer 节奏持续续臂，drainer 首拍即接管——任何时刻 running 可见则 alive 必未过期。
 - **崩溃残留**：进程死在「释放认领后、pump 前」，队列干等。agent 角色起一个 **reconciler** goroutine（模式照抄 `internal/msgflush`）：定时 `SCAN queue:*`（cursor 续传、每轮有界且**轮换处理起点**——评审修复：稳定的扫描顺序加上每轮上限会让尾部会话永久饥饿，轮换保证积压超过单轮上限时尾部同样获得 pump 机会与 TTL 续臂），对每个 sid 尝试 pump；顺带为 queued 状态 run 重臂 `run:{rid}:events`/`meta` TTL（`RunKeyTTL` 才 1h，深队列/慢轮会等到过期——SSE 订阅循环对 meta 消失的契约是收流，reconciler 使其罕见）。多副本安全：pump Lua 的 claim NX 互斥。若等待期 meta 已过期（reconciler 亦不可用），起轮时从 QueueEntry 重建**完整** RunMeta（含归属与 model 字段——仅写 status 的部分重建会让 cancel/events 的归属校验 404，评审修复）。
-- **停机闸门**：优雅关闭会取消运行中 turn，取消路径也走 Finalize——若不拦，关机时 pump 会把队头**顶起来跑**。pump 前 SHALL 检查进程级停机信号；停机时跳过，条目留在 Redis 由重启后的 reconciler 接续。
+- **停机闸门（评审修复三轮）**：优雅关闭会取消运行中 turn，取消路径也走 Finalize——若不拦，关机时 pump 会把队头**顶起来跑**。闸门为通道 + shutdown 派生 context：pump 前检查（停机后不再弹出新条目）；已弹出条目的启动阶段（会话查找→历史恢复→发送时持久化，至多 60s）挂在该 context 上——停机即取消；startTurn 在 fromQueue 路径的**首个持久写之前**设检查点，中止时以 RequeueHead（LPUSH 回队头 + 自己的认领比较删除，单脚本原子）返还条目，重启后 reconciler 原样接续。pop→spawn 期间以 WaitGroup 跟踪（Register 发生在持久化之后，CancelAll/WaitAll 看不到这段窗口），serveRun 关停序列在闸门后等待其归零——既不在「主流程结束后」再启动任务，也不在进程退出时丢失已弹出的消息。
 
-取消排队消息的附件回滚按**剩余队列条目的引用集**过滤（评审修复二轮）：同会话复用合法——后到的排队消息可引用本条目首次认领的附件；被取消条目的 NewlyClaimed 中仍被其他已接受消息引用的 id 不回滚（保持绑定与文件），仅无人引用的恢复 staging。队列读失败时整体跳过回滚（fail-safe：孤儿绑定附件随会话删除清理，优于破坏存活消息）。
+取消排队消息的附件回滚按**完整引用闭包**过滤（评审修复二、三轮）：同会话复用合法——引用本条目首次认领附件的消息可能仍在队列、已被弹出启动、甚至已完成持久化。回滚仅作用于「无任何引用」的 id，引用集 = 剩余队列条目 ∪ 会话已持久化行（水合附件引用，覆盖已弹出/运行中/已完成）∪ 启动中守卫（会话认领存在但持有者无心跳 = 弹出未落库的 preamble，或已死持有者——引用不可观测时整体挂起回滚）。任一读取失败跳过回滚（fail-safe：孤儿绑定附件随会话删除清理，优于破坏存活消息）。残余窗口（极小×极小，已文档化）：跨副本取消时，另一副本上发送时写失败、行要到轮终才落库的运行中消息的引用不可见。
 
 ### D6: 新 run 状态 `queued` + 取消分支
 
