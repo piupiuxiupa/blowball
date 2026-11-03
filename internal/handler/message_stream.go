@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -88,12 +87,23 @@ type MessageStreamHandler struct {
 	// EnableMessageQueue at wiring time (kept out of the constructor so the
 	// pre-queue call sites and tests stay byte-for-byte).
 	queueMaxDepth int
-	// turnsStopped is the process-level "no new turns" gate tripped by
-	// graceful shutdown (session-message-queue D5): the pump tail checks it
-	// so a shutdown-bound cancel does not start the queued head as the
-	// process is going down — entries stay enqueued for the post-restart
-	// reconciler.
-	turnsStopped atomic.Bool
+	// stopNewTurns is the process-level shutdown gate: closed once by
+	// StopNewTurns, it stops new queue pops and aborts in-flight pump
+	// STARTUPS. shutdownCtx is cancelled with it, so a pump's preparation
+	// (session lookup, history recovery, send-time persistence — up to the
+	// 60s budget) fails fast instead of running past the shutdown barrier;
+	// an aborted startup returns its entry to the queue atomically
+	// (RequeueHead) for the post-restart reconciler.
+	stopNewTurns chan struct{}
+	stopOnce     sync.Once
+	shutdownCtx  context.Context
+	shutdownStop context.CancelFunc
+	// startupPumps tracks in-flight pump startups (pop → spawn). Shutdown
+	// waits for them (WaitForStartupPumps) after tripping the gate: once a
+	// startup's turn is SPAWNED it is registered and the registry's
+	// CancelAll/WaitAll covers it — the WaitGroup covers exactly the window
+	// the registry cannot see (review fix, round 3).
+	startupPumps sync.WaitGroup
 }
 
 // EnableMessageQueue turns on the in-session message queue
@@ -107,42 +117,80 @@ func (h *MessageStreamHandler) EnableMessageQueue(maxDepth int) {
 	}
 }
 
-// StopNewTurns trips the process-level shutdown gate: the queue pump tail
-// (and the reconciler) check it so graceful shutdown never starts a queued
-// turn while the process is going down — entries stay enqueued for the
-// post-restart reconciler.
-func (h *MessageStreamHandler) StopNewTurns() { h.turnsStopped.Store(true) }
+// StopNewTurns trips the process-level shutdown gate (idempotent): the
+// queue pump tail and the reconciler stop popping new entries, in-flight
+// pump STARTUPS are cancelled through shutdownCtx and return their entries
+// to the queue, and — combined with WaitForStartupPumps — graceful shutdown
+// never leaves a popped-but-unregistered turn behind that CancelAll cannot
+// see (review fix, round 3). Entries stay enqueued for the post-restart
+// reconciler.
+func (h *MessageStreamHandler) StopNewTurns() {
+	h.stopOnce.Do(func() {
+		close(h.stopNewTurns)
+		h.shutdownStop()
+	})
+}
 
 // newTurnsStopped reports whether the shutdown gate is tripped.
-func (h *MessageStreamHandler) newTurnsStopped() bool { return h.turnsStopped.Load() }
+func (h *MessageStreamHandler) newTurnsStopped() bool {
+	select {
+	case <-h.stopNewTurns:
+		return true
+	default:
+		return false
+	}
+}
+
+// WaitForStartupPumps waits (bounded) for every in-flight pump startup to
+// settle — aborted ones have requeued their entries by the time it returns
+// true. Returns false on timeout (a slow preparation may still requeue after
+// the caller proceeds; the caller logs and exits at its own bound).
+func (h *MessageStreamHandler) WaitForStartupPumps(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		h.startupPumps.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
 
 // RollbackQueuedAttachments restores the staged-attachment claims a queued
 // entry made at enqueue time, when the entry is cancelled before its turn
 // starts (the queue-cancel path in TurnRunHandler). Only the newly-claimed
 // subset is a candidate — rows bound by earlier messages were never newly
 // claimed and keep their session binding — AND an id is only rolled back
-// when NO other still-accepted message references it (review fix, round 2):
-// same-session reuse is legal, so a later queued message can legitimately
-// reference an attachment whose binding THIS entry created. Rolling such an
-// id back would move the file back to staging and unbind it, breaking the
-// other message's already-accepted turn (missing-image placeholder, 404 on
-// the content endpoint). The surviving reference set is the session's
-// remaining queue entries — a persisted row cannot reference an id this
-// entry newly claimed (the binding would predate this entry and the claim
-// would not have been "new"). A queue-read failure skips the whole rollback
-// (fail-safe): an orphaned bound attachment follows the session lifecycle,
-// which is strictly better than breaking a live message.
+// when NOTHING that may still consume it references it. Same-session reuse
+// is legal, so the reference closure spans more than the remaining queue
+// (review fix, round 3): a message that referenced the id can already have
+// been pumped and even completed — its references live in the persisted rows
+// — or be mid-startup, popped from the queue with its user row not yet
+// durable. The checks:
+//
+//  1. the session's remaining queue entries (accepted, not yet started);
+//  2. the session's persisted message rows (hydrated attachment refs —
+//     covers pumped, running, and completed messages alike);
+//  3. a session claim whose holder has no heartbeat yet — a startup in its
+//     pre-registration window (popped, not yet persisted, invisible to 1
+//     and 2) or a dead holder — suspends the whole rollback conservatively.
+//
+// Any check failure skips the rollback (fail-safe): an orphaned bound
+// attachment follows the session lifecycle, which is strictly better than
+// breaking a live message's images and history links. Residual window (rare
+// × rare, documented): a cross-replica cancel while another replica's pumped
+// turn is running with a FAILED send-time write (its row lands only at turn
+// end) can still miss the reference.
 func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, entry run.QueueEntry) {
 	if len(entry.NewlyClaimed) == 0 {
 		return
 	}
 	referenced := make(map[string]bool)
 	if remaining, err := h.runs.Store.QueueEntries(ctx, entry.SessionID); err != nil {
-		logger.FromContext(ctx).Warn("queued-cancel attachment rollback skipped; queue read failed",
-			zap.String("op", "handler.send_message"),
-			zap.String("session_id", entry.SessionID),
-			zap.String("run_id", entry.RunID),
-			zap.Error(err))
+		h.skipQueuedRollback(ctx, entry, "queue read failed", err)
 		return
 	} else {
 		for _, e := range remaining {
@@ -154,10 +202,36 @@ func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, en
 			}
 		}
 	}
+	// Persisted rows: every started message's user row carries its
+	// attachment refs (the send-time write precedes registry registration),
+	// so this covers pumped, running, and completed references alike.
+	prior, err := h.msgSvc.RecoverMessages(ctx, entry.UserID, entry.SessionID)
+	if err != nil {
+		h.skipQueuedRollback(ctx, entry, "persisted-rows read failed", err)
+		return
+	}
+	for _, m := range prior {
+		for _, ref := range m.Attachments {
+			referenced[ref.ID] = true
+		}
+	}
+	// Pre-registration startup guard: a claim holder without a heartbeat is
+	// a pumped entry whose user row is not durable yet (or a dead holder) —
+	// its references are not observable through 1 or 2, so suspend the whole
+	// rollback. A claim-read failure here only loses the guard's extra
+	// safety, not correctness of 1+2, so it degrades to proceeding.
+	if claims, cerr := h.runs.Store.ActiveRuns(ctx, []string{entry.SessionID}); cerr == nil {
+		if holder := claims[entry.SessionID]; holder != "" {
+			if alive, aerr := h.runs.Store.Alive(ctx, holder); aerr == nil && !alive {
+				h.skipQueuedRollback(ctx, entry, "claim holder starting or dead; references unobservable", nil)
+				return
+			}
+		}
+	}
 	ids := make([]string, 0, len(entry.NewlyClaimed))
 	for _, id := range entry.NewlyClaimed {
 		if referenced[id] {
-			continue // another accepted message still uses this attachment
+			continue // something may still consume this attachment
 		}
 		ids = append(ids, id)
 	}
@@ -166,6 +240,26 @@ func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, en
 	}
 	h.rollbackNewAttachmentClaims(ctx, entry.UserID, entry.SessionID, ids)
 }
+
+// skipQueuedRollback logs why a queued-cancel attachment rollback was
+// suspended (the attachments stay bound; session deletion is the cleanup).
+func (h *MessageStreamHandler) skipQueuedRollback(ctx context.Context, entry run.QueueEntry, reason string, err error) {
+	log := logger.FromContext(ctx).Warn
+	if err != nil {
+		log = logger.FromContext(ctx).Error
+	}
+	fields := []zap.Field{
+		zap.String("op", "handler.send_message"),
+		zap.String("session_id", entry.SessionID),
+		zap.String("run_id", entry.RunID),
+		zap.String("reason", reason),
+	}
+	if err != nil {
+		fields = append(fields, zap.Error(err))
+	}
+	log("queued-cancel attachment rollback suspended; attachments stay bound", fields...)
+}
+
 
 // NewMessageStreamHandler wires the streaming handler with its services, the
 // orchestrator adapter, the run-lifecycle manager, and the dataDir used to
@@ -206,6 +300,8 @@ func NewMessageStreamHandler(
 	}
 	h.newHub = func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) }
 	h.writeRunEvents = writeRunEventStream
+	h.stopNewTurns = make(chan struct{})
+	h.shutdownCtx, h.shutdownStop = context.WithCancel(context.Background())
 	return h
 }
 

@@ -58,10 +58,13 @@ type runResult struct {
 // channel the HTTP wrapper parks on after the SSE subscription ends, and the
 // registry entry's completion channel (the degraded no-Redis close signal the
 // SSE loop needs when the run store is unreachable). The pump path drops
-// both.
+// both. aborted is non-nil only on the pump path (review fix, round 3): the
+// shutdown gate tripped before the turn's first durable write, so startTurn
+// spawned nothing — the caller (pumpEntry) returns the entry to the queue.
 type startedTurn struct {
 	resultCh <-chan runResult
 	turnDone <-chan struct{}
+	aborted  error
 }
 
 // turnRequest is the resolved, start-ready form of one message turn. The
@@ -97,6 +100,10 @@ type turnRequest struct {
 	// instead of initializing a fresh one.
 	fromQueue bool
 }
+
+// errShutdownDuringStartup reports a pump startup aborted by the shutdown
+// gate before its first durable write — the caller requeues the entry.
+var errShutdownDuringStartup = errors.New("shutdown during queued startup")
 
 // startTurn runs the full turn pipeline for a request whose session claim is
 // held (or whose admission degraded to unguarded execution). It returns after
@@ -292,6 +299,17 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 
 	// ── pre-publish heartbeat, run meta, send-time persistence ─────────────
 	//
+	// Shutdown checkpoint (review fix, round 3, pump path only): the entry
+	// was popped and its claim transferred, but if the process is shutting
+	// down NOW the turn must not start — nothing durable has been written
+	// yet (the preamble above is read-only), so the clean move is to return
+	// the entry to the queue and let the post-restart reconciler continue
+	// it. The HTTP path never aborts here: an in-flight request is covered
+	// by srv.Shutdown waiting for the handler plus the registry's CancelAll.
+	if req.fromQueue && h.newTurnsStopped() {
+		return &startedTurn{aborted: errShutdownDuringStartup}
+	}
+
 	// The FIRST heartbeat precedes the run's meta publication (review fix,
 	// round 1): a queued POST's SSE subscriber is already tailing this run's
 	// log, and writeRunEventStream's dead-run ladder fires on
@@ -694,11 +712,9 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 
 // pumpQueuedNext continues a session's queued head after a turn's terminal
 // bookkeeping (session-message-queue, design D5): pop the head with the
-// atomic pop+claim transfer, rebuild the turn request from the entry
-// snapshot, and start the turn through the same startTurn pipeline an HTTP
-// request would use. A held claim (a racing admission won the slot) leaves
-// the head enqueued; graceful shutdown skips the pump so the entry survives
-// for the reconciler after restart.
+// atomic pop+claim transfer, then run the tracked startup. Skipped entirely
+// when the queue is disabled or the shutdown gate is already tripped (the
+// entry stays enqueued for the post-restart reconciler).
 func (h *MessageStreamHandler) pumpQueuedNext(sessionID string) {
 	if h.queueMaxDepth <= 0 {
 		return // queue disabled: byte-for-byte pre-capability behavior
@@ -719,21 +735,40 @@ func (h *MessageStreamHandler) pumpQueuedNext(sessionID string) {
 	if !ok {
 		return // empty queue, or the claim is held by a racing admission
 	}
-	// The pumped turn's working context: detached, carrying the entry's own
-	// run identity (trace_id = run_id) and user/session attribution so its
-	// preamble reads, logs, and raw-capture rows correlate like an HTTP
-	// request's would. The 60s bound covers the synchronous preamble
-	// (history recovery, recall, send-time persistence) only — the turn
-	// goroutine derives its own detached contexts.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	h.pumpEntry(entry)
+}
+
+// pumpEntry drives one popped entry through the startup and hands it to
+// startTurn. It is the shutdown barrier's tracked unit (review fix, round 3):
+// the WaitGroup spans exactly the pop→spawn window the registry cannot see
+// (Register happens after the send-time persistence), the preparation context
+// is cancelled by the shutdown gate, and an aborted startup — cancelled
+// preparation or the pre-durable-write checkpoint — returns the entry to the
+// queue FRONT atomically and releases its claim, so neither a turn starts
+// after graceful shutdown nor a popped message is lost at process exit.
+func (h *MessageStreamHandler) pumpEntry(entry run.QueueEntry) {
+	h.startupPumps.Add(1)
+	defer h.startupPumps.Done()
+
+	// The preparation context dies on the shutdown gate (the entry returns
+	// to the queue) or the 60s bound.
+	ctx, cancel := context.WithTimeout(h.shutdownCtx, 60*time.Second)
 	defer cancel()
 	ctx = agent.WithUserID(agent.WithSessionID(trace.WithContext(ctx, entry.RunID), entry.SessionID), entry.UserID)
 
 	req, fatalErr := h.turnRequestFromQueueEntry(ctx, entry)
 	if fatalErr != nil {
-		// The entry cannot start (e.g. its session vanished between enqueue
-		// and pump): finalize the run as error so the claim the pump just
-		// transferred is released and waiting SSE subscribers close.
+		if ctx.Err() != nil {
+			// Shutdown (or the bound) cancelled the preparation — the entry
+			// never started; put it back rather than finalizing it as an
+			// error.
+			h.requeueAbortedPump(entry)
+			return
+		}
+		// The entry genuinely cannot start (e.g. its session vanished
+		// between enqueue and pump): finalize the run as error so the claim
+		// the pump just transferred is released and waiting SSE subscribers
+		// close.
 		logger.FromContext(ctx).Warn("queue pump: entry cannot start; finalizing as error",
 			zap.String("op", "handler.pump_queue"),
 			zap.String("run_id", entry.RunID),
@@ -743,8 +778,36 @@ func (h *MessageStreamHandler) pumpQueuedNext(sessionID string) {
 		h.runs.Finalize(finCtx, entry.RunID, entry.SessionID, run.StatusError)
 		return
 	}
-	h.startTurn(ctx, req)
+	started := h.startTurn(ctx, req)
+	if started != nil && started.aborted != nil {
+		// The shutdown checkpoint fired before any durable write: the entry
+		// never started. Requeue it for the post-restart reconciler.
+		h.requeueAbortedPump(entry)
+		return
+	}
 }
+
+// requeueAbortedPump returns a popped-but-unstarted entry to the queue front
+// and releases its claim (atomic). A requeue failure loses the entry — the
+// queue feature is Redis-dependent, so this is an ERROR, with the claim TTL
+// as the session's backstop.
+func (h *MessageStreamHandler) requeueAbortedPump(entry run.QueueEntry) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.runs.Store.RequeueHead(ctx, entry.SessionID, entry); err != nil {
+		logger.FromContext(ctx).Error("queue pump: aborted startup requeue failed; entry lost",
+			zap.String("op", "handler.pump_queue"),
+			zap.String("session_id", entry.SessionID),
+			zap.String("run_id", entry.RunID),
+			zap.Error(err))
+		return
+	}
+	logger.FromContext(ctx).Info("queue pump: startup aborted; entry requeued for the post-restart reconciler",
+		zap.String("op", "handler.pump_queue"),
+		zap.String("session_id", entry.SessionID),
+		zap.String("run_id", entry.RunID))
+}
+
 
 // turnRequestFromQueueEntry rebuilds a start-ready turn request from a
 // queued entry snapshot (design D1: the snapshot — not the raw request

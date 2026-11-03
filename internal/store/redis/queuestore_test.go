@@ -369,3 +369,60 @@ func TestRunStore_ClearQueueDrainIsSnapshotAndDelete(t *testing.T) {
 		t.Fatalf("late set status: %v", err)
 	}
 }
+
+// TestRunStore_RequeueHead (review round 3): a shutdown-aborted startup
+// returns its entry to the queue FRONT and releases its own claim —
+// atomically; a claim that moved on is left untouched.
+func TestRunStore_RequeueHead(t *testing.T) {
+	rs, _ := testRunStore(t)
+	ctx := context.Background()
+
+	// Holder runs; b and c queue behind it.
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-holder"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, id := range []string{"run-b", "run-c"} {
+		if _, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry(id), 8); err != nil {
+			t.Fatalf("admit %s: %v", id, err)
+		}
+	}
+	if err := rs.ReleaseSession(ctx, "sess-1", "run-holder"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// The pump pops run-b: the claim transfers to it.
+	popped, ok, err := rs.PumpHead(ctx, "sess-1")
+	if err != nil || !ok || popped.RunID != "run-b" {
+		t.Fatalf("pump = (%q,%v,%v), want run-b", popped.RunID, ok, err)
+	}
+	if got := testGetClaim(rs, "sess-1"); got != "run-b" {
+		t.Fatalf("claim after pop = %q, want run-b", got)
+	}
+
+	// Shutdown aborts the startup: the entry returns to the FRONT (ahead of
+	// run-c) and the claim it holds is released in the same atomic step.
+	if err := rs.RequeueHead(ctx, "sess-1", popped); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	entries, err := rs.QueueEntries(ctx, "sess-1")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("queue after requeue = (%v,%v), want 2 entries", entries, err)
+	}
+	if entries[0].RunID != "run-b" || entries[1].RunID != "run-c" {
+		t.Fatalf("requeued order = [%s %s], want [run-b run-c] (front)", entries[0].RunID, entries[1].RunID)
+	}
+	if got := testGetClaim(rs, "sess-1"); got != "" {
+		t.Fatalf("claim after requeue = %q, want released", got)
+	}
+
+	// A claim that moved on is left alone: reclaim, pop, re-acquire, then
+	// replace the claim and requeue again — the foreign claim survives.
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-other"); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if err := rs.RequeueHead(ctx, "sess-1", popped); err != nil {
+		t.Fatalf("requeue 2: %v", err)
+	}
+	if got := testGetClaim(rs, "sess-1"); got != "run-other" {
+		t.Fatalf("foreign claim disturbed by requeue: %q", got)
+	}
+}

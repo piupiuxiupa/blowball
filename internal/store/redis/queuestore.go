@@ -168,6 +168,34 @@ func (s *RunStore) PumpHead(ctx context.Context, sessionID string) (run.QueueEnt
 // successful dequeue (review fix — a cancelled-and-actually-started run).
 const dequeueScript = `return redis.call("LREM", KEYS[1], 1, ARGV[1])`
 
+// requeueHeadScript atomically returns one popped entry to the queue front
+// and releases the session claim when it still points at that entry's run.
+// The entry is requeued unconditionally (never dropped); the claim release
+// is compare-and-delete so a claim that already moved on (expired, cleared,
+// or reclaimed by a newer run) is left alone.
+const requeueHeadScript = `redis.call("LPUSH", KEYS[1], ARGV[1])
+if redis.call("GET", KEYS[2]) == ARGV[2] then
+	redis.call("DEL", KEYS[2])
+	return 1
+end
+return 0`
+
+// RequeueHead implements run.Store (shutdown abort of a popped-not-started
+// entry: front-of-queue return + own-claim release in one atomic step).
+func (s *RunStore) RequeueHead(ctx context.Context, sessionID string, entry run.QueueEntry) error {
+	payload, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("runstore: requeue head: marshal: %w", err)
+	}
+	logCmd(ctx, "run.requeue_head", queueKey(sessionID))
+	if _, err := s.client.Eval(ctx, requeueHeadScript,
+		[]string{queueKey(sessionID), sessionRunKey(sessionID)},
+		payload, entry.RunID).Result(); err != nil {
+		return fmt.Errorf("runstore: requeue head: %w", err)
+	}
+	return nil
+}
+
 // DequeueMessage implements run.Store: locate the entry by run id over the
 // (depth-bounded) list, then remove it atomically by exact payload. ok=false
 // covers both "never queued" and "a pump took it between the scan and the

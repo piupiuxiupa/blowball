@@ -792,10 +792,20 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		reconciler.Start()
 		queueStop = func() {
 			// Gate new turns FIRST so the shutdown-bound cancels cannot pump
-			// the queued head as the process goes down; then park the
-			// reconciler. Entries stay enqueued for the post-restart pass.
+			// the queued head as the process goes down; in-flight pump
+			// STARTUPS are cancelled through the gate's context and return
+			// their popped entries to the queue; then park the reconciler
+			// and wait for the startups to settle — the pop→spawn window is
+			// invisible to CancelAll/WaitAll (Register happens after the
+			// send-time persistence), so without this barrier a slow
+			// preparation could spawn a turn after the drain or lose the
+			// popped entry at exit (review fix, round 3).
 			streamHandler.StopNewTurns()
 			reconciler.Close()
+			if !streamHandler.WaitForStartupPumps(15 * time.Second) {
+				log.Warn("queue pump startups still in flight at shutdown bound; entries may requeue after exit",
+					zap.String("role", rt.role))
+			}
 		}
 	}
 

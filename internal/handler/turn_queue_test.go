@@ -1068,9 +1068,12 @@ func TestQueueCancel_SharedAttachmentKept(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(stagingDir, id+".png"), []byte("data"), 0o644))
 	}
 
-	// A holder claim so admissions queue.
+	// A holder claim so admissions queue — WITH a heartbeat, as a real
+	// running turn's holder always has (the pre-registration guard suspends
+	// rollbacks for heartbeat-less holders).
 	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-holder")
 	require.NoError(t, err)
+	require.NoError(t, env.store.Heartbeat(ctx, "run-holder", "sess-1"))
 
 	// B enqueues first and claims both attachments into the session (the
 	// bind the real send path performs before admission): files move into
@@ -1126,3 +1129,166 @@ func TestQueueCancel_SharedAttachmentKept(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 }
+
+// ── review round 3 behavior tests ──────────────────────────────────────────
+
+// TestQueue_PumpAbortRequeuesEntry (review round 3, fix 1): a popped entry
+// whose startup is aborted by the shutdown gate never starts a turn and is
+// returned to the queue FRONT with its claim released — the post-restart
+// reconciler finds exactly the pre-pop state.
+func TestQueue_PumpAbortRequeuesEntry(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// Residue: holder claimed, B queued behind it, holder's claim released
+	// without a pump (crash) — then the entry is popped (claim transferred)
+	// exactly as a pump would.
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-holder")
+	require.NoError(t, err)
+	entry := run.QueueEntry{RunID: "trace-2", SessionID: "sess-1", UserID: "user-1",
+		Content: "queued B", Model: "test-model",
+		Selection:  run.QueueSelection{Model: "test-model", MaxContextTokens: 128000, MaxCompletionTokens: 8192},
+		EnqueuedAt: time.Unix(1700000000, 0).UTC()}
+	_, err = env.store.AdmitMessage(ctx, "sess-1", entry, 8)
+	require.NoError(t, err)
+	require.NoError(t, env.store.ReleaseSession(ctx, "sess-1", "run-holder"))
+	popped, ok, err := env.store.PumpHead(ctx, "sess-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "trace-2", popped.RunID)
+
+	// The shutdown gate trips before the startup's first durable write.
+	env.streamH.StopNewTurns()
+
+	// The startup aborts: no turn, entry requeued to the front, claim
+	// released, meta still queued.
+	env.streamH.pumpEntry(popped)
+	require.Zero(t, env.stub.started.Load(), "an aborted startup must not start a turn")
+	entries, err := env.store.QueueEntries(ctx, "sess-1")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "trace-2", entries[0].RunID)
+	runs, _ := env.store.ActiveRuns(ctx, []string{"sess-1"})
+	require.Empty(t, runs["sess-1"], "the aborted startup's claim must be released")
+	meta, ok, err := env.store.GetMeta(ctx, "trace-2")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, run.StatusQueued, meta.Status)
+	// Nothing durable was written for the aborted turn.
+	require.Nil(t, env.mysql.appendMessagesArg)
+}
+
+// TestQueue_StartTurnShutdownCheckpoint (review round 3, fix 1): with the
+// gate tripped, a fromQueue startTurn aborts before ANY durable write — no
+// registry entry, no user row, no meta flip — and reports the abort.
+func TestQueue_StartTurnShutdownCheckpoint(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	env.streamH.StopNewTurns()
+
+	req := &turnRequest{
+		sessionID: "sess-1", userID: "user-1", traceID: "trace-9",
+		content: "queued", sel: selectionFromQueue(run.QueueSelection{Model: "test-model"}),
+		fromQueue: true, metaCreatedAt: time.Unix(1700000000, 0).UTC(),
+	}
+	started := env.streamH.startTurn(context.Background(), req)
+	require.NotNil(t, started)
+	require.ErrorIs(t, started.aborted, errShutdownDuringStartup)
+	require.Zero(t, env.stub.started.Load())
+	_, registered := env.reg.Get("trace-9")
+	require.False(t, registered) // no run ever registered
+	require.Nil(t, env.mysql.appendMessagesArg)
+}
+
+// TestQueueCancel_PersistedReferenceKept (review round 3, fix 2): the
+// reviewer's interleave — message C referenced the shared attachment, was
+// pumped, and COMPLETED (its row persisted) before B's cancel runs the
+// reference check. C is in neither the queue nor a starting state; only the
+// persisted-rows scan can protect the attachment.
+func TestQueueCancel_PersistedReferenceKept(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// Running holder (heartbeat armed).
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-holder")
+	require.NoError(t, err)
+	require.NoError(t, env.store.Heartbeat(ctx, "run-holder", "sess-1"))
+
+	// Attachments bound by B's enqueue.
+	stagingDir := filepath.Join(env.dataDir, "user-1", "attachments", fs.AttachmentStagingScope)
+	sessDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	for _, id := range []string{"att-shared", "att-solo"} {
+		env.atts.rows[id] = model.Attachment{ID: id, UserID: "user-1", SessionID: ptrOf("sess-1"), Filename: id + ".png", MIME: "image/png", Size: 4}
+		require.NoError(t, os.WriteFile(filepath.Join(sessDir, id+".png"), []byte("data"), 0o644))
+	}
+	// B queued with both ids newly claimed — and NOTHING else in the queue.
+	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+		RunID: "trace-b", SessionID: "sess-1", UserID: "user-1", Content: "B",
+		Attachments: []model.MessageAttachmentRef{
+			{ID: "att-shared", Filename: "att-shared.png", MIME: "image/png"},
+			{ID: "att-solo", Filename: "att-solo.png", MIME: "image/png"},
+		},
+		NewlyClaimed: []string{"att-shared", "att-solo"},
+	}, 8)
+	require.NoError(t, err)
+
+	// C was pumped and COMPLETED before the cancel: its persisted user row
+	// references the shared attachment (rows are what the history read
+	// serves; the queue no longer holds C).
+	env.mysql.listMessagesRows = []model.Message{{
+		SessionID: "sess-1", Agent: "user", Role: model.RoleUser,
+		Content:   "C", MsgTime: time.Unix(1700000001, 0).UTC(),
+		Attachments: []model.MessageAttachmentRef{{ID: "att-shared", Filename: "att-shared.png", MIME: "image/png"}},
+	}}
+
+	w := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/turns/trace-b/cancel", nil)
+	rec := httptest.NewRecorder()
+	env.engine.ServeHTTP(rec, w)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	require.NotNil(t, env.atts.rows["att-shared"].SessionID, "persisted reference was not protected")
+	require.Equal(t, "sess-1", *env.atts.rows["att-shared"].SessionID)
+	require.Nil(t, env.atts.rows["att-solo"].SessionID, "unreferenced attachment was not rolled back")
+	_, statErr := os.Stat(filepath.Join(sessDir, "att-shared.png"))
+	require.NoError(t, statErr)
+	_, statErr = os.Stat(filepath.Join(stagingDir, "att-solo.png"))
+	require.NoError(t, statErr)
+}
+
+// TestQueueCancel_StartingClaimSuspendsRollback (review round 3, fix 2): a
+// claim holder without a heartbeat is a startup in its pre-registration
+// window (popped, user row not yet durable) — its references are
+// unobservable, so the whole rollback suspends (attachments stay bound).
+func TestQueueCancel_StartingClaimSuspendsRollback(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// A STARTING holder: claim held, no heartbeat yet (the preamble runs).
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-starting")
+	require.NoError(t, err)
+
+	sessDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	env.atts.rows["att-x"] = model.Attachment{ID: "att-x", UserID: "user-1", SessionID: ptrOf("sess-1"), Filename: "att-x.png", MIME: "image/png", Size: 4}
+	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "att-x.png"), []byte("data"), 0o644))
+	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
+		RunID: "trace-b", SessionID: "sess-1", UserID: "user-1", Content: "B",
+		Attachments: []model.MessageAttachmentRef{{ID: "att-x", Filename: "att-x.png", MIME: "image/png"}},
+		NewlyClaimed: []string{"att-x"},
+	}, 8)
+	require.NoError(t, err)
+
+	w := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/turns/trace-b/cancel", nil)
+	rec := httptest.NewRecorder()
+	env.engine.ServeHTTP(rec, w)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// The rollback is suspended entirely: the starting holder's references
+	// cannot be ruled out, so the attachment stays bound.
+	require.NotNil(t, env.atts.rows["att-x"].SessionID, "rollback ran while a starting claim holder could still reference the attachment")
+	_, statErr := os.Stat(filepath.Join(sessDir, "att-x.png"))
+	require.NoError(t, statErr, "the file must stay bound while the rollback is suspended")
+}
+
+// ptrOf is a small test helper.
+func ptrOf(s string) *string { return &s }

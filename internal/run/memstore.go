@@ -280,6 +280,19 @@ func (m *MemStore) PumpHead(_ context.Context, sessionID string) (QueueEntry, bo
 	return head, true, nil
 }
 
+// RequeueHead implements Store: unshift the entry and release the claim when
+// it still points at the entry's run (one critical section).
+func (m *MemStore) RequeueHead(_ context.Context, sessionID string, entry QueueEntry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.queues[sessionID] = append([]QueueEntry{entry}, m.queues[sessionID]...)
+	if m.claims[sessionID] == entry.RunID {
+		delete(m.claims, sessionID)
+		delete(m.claimExp, sessionID)
+	}
+	return nil
+}
+
 // DequeueMessage implements Store (remove by run id; claim untouched).
 func (m *MemStore) DequeueMessage(_ context.Context, sessionID, runID string) (QueueEntry, bool, error) {
 	m.mu.Lock()

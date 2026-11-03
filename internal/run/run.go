@@ -239,6 +239,13 @@ type Store interface {
 	// claim, and by the reconciler for crash residue.
 	PumpHead(ctx context.Context, sessionID string) (entry QueueEntry, ok bool, err error)
 
+	// RequeueHead atomically returns a popped entry to the queue FRONT and
+	// releases the session claim when it still points at the entry's run
+	// (shutdown aborted the startup between the pop and the spawn — the
+	// post-restart reconciler re-pumps the head). When the claim already
+	// moved on, the entry is still requeued; it waits for the next free slot.
+	RequeueHead(ctx context.Context, sessionID string, entry QueueEntry) error
+
 	// DequeueMessage removes the queued entry identified by runID (cancel of a
 	// queued run). ok=false when no such entry exists. The claim is untouched
 	// (a queued run never held it).
