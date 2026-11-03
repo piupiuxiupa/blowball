@@ -160,7 +160,7 @@
 
 ### Requirement: 排队 run 的取消
 
-取消端点 SHALL 支持取消 `queued` 状态的 run：按 run_id 定位并移除队列条目、状态置 `cancelled`、按既有保留窗 retire；条目携带的附件 staged claim SHALL 被回滚。排队 run（非 terminal、不在本进程 registry、无心跳）SHALL NOT 被死 run 强清路径误判为 `interrupted`。取消端点对排队 run 与终局 run 一样幂等。取消运行中 turn SHALL NOT 影响该会话队列中其余条目的接续。
+取消端点 SHALL 支持取消 `queued` 状态的 run：按 run_id 定位并移除队列条目、状态置 `cancelled`、按既有保留窗 retire。被取消消息认领的附件 SHALL 保持会话绑定（保守生命周期，评审第 6 轮定稿）：附件在绑定期间始终可被同会话消息合法引用，任何取消时点的解绑都与并发引用登记存在无法用快照读取关闭的竞态——取消路径不执行任何破坏性附件操作，绑定与文件随会话删除清理。排队 run（非 terminal、不在本进程 registry、无心跳）SHALL NOT 被死 run 强清路径误判为 `interrupted`。取消端点对排队 run 与终局 run 一样幂等。取消运行中 turn SHALL NOT 影响该会话队列中其余条目的接续。
 
 #### Scenario: 取消排队中的消息
 
@@ -173,28 +173,6 @@
 - **WHEN** 取消在扫描队列后、原子移除前，pump 弹出该条目并开始其 turn
 - **THEN** 移除实际未发生（删除计数为 0），系统 SHALL NOT 报告 cancelled 或回滚附件
 - **AND** 端点按 run 的当前状态作答，客户端重试后走运行中取消路径
-
-#### Scenario: 取消保留其他已接受消息引用的附件
-
-- **WHEN** 被取消的排队消息首次认领了附件 X，而另一条仍被接受的排队消息（或其后入队的消息）合法引用同一附件
-- **THEN** X 的会话绑定与文件 SHALL 保留，不随被取消消息回滚到 staging
-- **AND** 仅无任何剩余引用的附件被恢复到 staging 并解除绑定
-
-#### Scenario: 已弹出或已持久化消息的引用受保护
-
-- **WHEN** 引用附件 X 的消息已被 pump 弹出（无论处于启动准备、运行中还是已完成持久化）而不在剩余队列中
-- **THEN** 持久化行的附件引用 SHALL 纳入保护集合（读取权威持久层，非读缓存）；会话认领的持有者的 RoleUser 用户行在持久层不可见（启动准备、发送时写失败运行中、或已死）时整体挂起回滚
-- **AND** 不以「队列中无引用」或「持有者心跳存活」推断附件无人使用——只有持有者用户行的可观测性才算数
-
-#### Scenario: 同 Trace 的占位行不满足持有者守卫
-
-- **WHEN** 持有者的 memory-recall 占位行（同 TraceID、assistant 角色）已落库而其用户行仍在写入
-- **THEN** 守卫 SHALL NOT 被该占位行满足，回滚整体挂起
-
-#### Scenario: 陈旧读缓存不隐藏持久引用
-
-- **WHEN** 持久层已含引用附件 X 的用户行（消息已完成、认领已释放），而 Redis 读缓存因追加失败仍服务不含该行的旧快照
-- **THEN** 引用闭包 SHALL 以权威持久层为准，X 不被回滚
 
 #### Scenario: 取消当前轮后队列继续
 
@@ -231,7 +209,7 @@
 - **THEN** 其 LLM 上下文包含上一轮的完整用户消息与 assistant 输出（终局批次已 durable）
 - **AND** title cadence、recall、turn-start 压缩检查按该轮语义照常执行
 
-### Requirement: 队列配置与回滚
+### Requirement: 队列配置与回退
 
 `messages.queue.enabled` SHALL 默认为 false：省略或关闭时，消息发送路径行为 SHALL 与既有行为完全一致（运行中 turn 的会话 POST 返回 409 `SESSION_BUSY`，无队列读写、无 queued 状态与 `queued` 事件、无 reconciler）。`messages.queue.max_depth` SHALL 为正整数（默认 8），非正值 SHALL 在配置加载时被拒绝。回滚 SHALL 只需关闭开关并重启 agent 角色进程。
 

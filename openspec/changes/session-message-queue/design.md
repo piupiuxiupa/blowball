@@ -64,14 +64,12 @@
 - **崩溃残留**：进程死在「释放认领后、pump 前」，队列干等。agent 角色起一个 **reconciler** goroutine（模式照抄 `internal/msgflush`）：定时 `SCAN queue:*`（cursor 续传、每轮有界且**轮换处理起点**——评审修复：稳定的扫描顺序加上每轮上限会让尾部会话永久饥饿，轮换保证积压超过单轮上限时尾部同样获得 pump 机会与 TTL 续臂），对每个 sid 尝试 pump；顺带为 queued 状态 run 重臂 `run:{rid}:events`/`meta` TTL（`RunKeyTTL` 才 1h，深队列/慢轮会等到过期——SSE 订阅循环对 meta 消失的契约是收流，reconciler 使其罕见）。多副本安全：pump Lua 的 claim NX 互斥。若等待期 meta 已过期（reconciler 亦不可用），起轮时从 QueueEntry 重建**完整** RunMeta（含归属与 model 字段——仅写 status 的部分重建会让 cancel/events 的归属校验 404，评审修复）。
 - **停机闸门（评审修复三轮）**：优雅关闭会取消运行中 turn，取消路径也走 Finalize——若不拦，关机时 pump 会把队头**顶起来跑**。闸门为通道 + shutdown 派生 context：pump 前检查（停机后不再弹出新条目）；已弹出条目的启动阶段（会话查找→历史恢复→发送时持久化，至多 60s）挂在该 context 上——停机即取消；startTurn 在 fromQueue 路径的**首个持久写之前**设检查点，中止时以 RequeueHead（LPUSH 回队头 + 自己的认领比较删除，单脚本原子）返还条目，重启后 reconciler 原样接续。pop→spawn 期间以 WaitGroup 跟踪（Register 发生在持久化之后，CancelAll/WaitAll 看不到这段窗口），serveRun 关停序列在闸门后等待其归零——既不在「主流程结束后」再启动任务，也不在进程退出时丢失已弹出的消息。
 
-取消排队消息的附件回滚按**完整引用闭包**过滤（评审修复二至四轮）：同会话复用合法——引用本条目首次认领附件的消息可能仍在队列、已被弹出启动、甚至已完成持久化。回滚仅作用于「无任何引用」的 id，引用集 = 剩余队列条目 ∪ 会话已持久化行（水合附件引用，覆盖已弹出/运行中/已完成，**经 ListDurableMessages 直读权威 MySQL 层**——读缓存是 best-effort 加速层，命中可能滞后，不能用于证明引用缺席）∪ **持有者用户行守卫**（会话认领的持有者的 RoleUser 用户行在持久层不可见 = 弹出未落库的 preamble、发送时写失败运行中（行要到轮终才落库）、或已死持有者——引用不可观测时整体挂起回滚；匹配必须是用户行本身：memory-recall 的 tool-call 占位行与用户行同 TraceID 且先落库，任意行匹配会假阳性）。守卫以**行可观测性**为准而非心跳：心跳在起轮的一个阶段先于行写、另一阶段后于行写，且跨副本下行共享而心跳不共享。任一读取失败跳过回滚（fail-safe：孤儿绑定附件随会话删除清理，优于破坏存活消息）。
-
 ### D6: 新 run 状态 `queued` + 取消分支
 
 `run:{rid}:meta.status` 增加常量 `queued`（入队时 `InitMeta` 置入；pump 起轮时置 `running`；不参与 `Terminal` 判定）。消费方适配：
 
 - **`writeRunEventStream`**：queued ≠ running，不触发死 run 检测（无 alive key），自然空尾随；取消置 cancelled 后按终局收流。
-- **`CancelTurn`**：现状对「非 terminal、registry 未命中、无心跳」的 run 走 **dead-run force-clear → interrupted**——排队 run 恰好长这样，会被误判。新增 queued 分支：`LREM` 出队（按 run_id 定位条目）+ `SetStatus(cancelled)` + `Retire`；条目携带的附件 staged claim 逐一回滚（复用 `rollbackNewAttachmentClaims`）。取消运行中轮后队列照常接续（用户想全停则逐条取消或删会话）。
+- **`CancelTurn`**：现状对「非 terminal、registry 未命中、无心跳」的 run 走 **dead-run force-clear → interrupted**——排队 run 恰好长这样，会被误判。新增 queued 分支：`LREM` 出队（按 run_id 定位条目）+ `SetStatus(cancelled)` + `Retire`。被取消消息认领的附件**保守保留绑定**（评审第 6 轮定稿，取代第 2–5 轮的回滚+引用闭包方案）：附件在绑定期间始终可被同会话消息合法引用，任何「快照干净后解绑」都与并发引用登记存在无法用重读关闭的 TOCTOU（引用登记走 MySQL/Redis 两个原子域，解绑是跨域破坏性动作）；锁协议会给 POST 路径引入新失败模式，不值。孤儿绑定附件随会话删除清理。取消运行中轮后队列照常接续（用户想全停则逐条取消或删会话）。
 - **`TurnEvents`**：meta 存在且归属匹配即可订阅（现状已如此），queued 状态天然可尾随。
 
 ### D7: Redis 故障降级 — 直接起轮
@@ -85,7 +83,7 @@ admit Lua 不可执行（Redis 不可达）时：无法入队（队列本身就�
 - HTTP 快路径：admit 返回 claimed → 立即 `startTurn`（行为与现状 byte-identical）。
 - pump 路径：pump Lua 返回 entry → 用条目快照重建请求等价物 → `startTurn`。recall/title 均在此时触发（此时上一轮答案已在历史，recall 查询质量更高）；title cadence 的用户序数照算——「409 从不触发」平移为「排队在 pump 时触发」。
 
-HTTP 侧保留的职责：请求绑定与全部入队前校验、附件 staged claim 提交（入队即提交，防重复引用；取消时按条目回滚）、admit 调用、SSE 响应写出。`statusSuffix`（prompt.RenderStatus）移到起轮时渲染（pump 路径拿到更新鲜的环境信息；落库内容与进上下文内容保持同一份）。
+HTTP 侧保留的职责：请求绑定与全部入队前校验、附件 staged claim 提交（入队即提交，防重复引用；被拒请求的请求内回滚保留——条目未发布无竞态）、admit 调用、SSE 响应写出。`statusSuffix`（prompt.RenderStatus）移到起轮时渲染（pump 路径拿到更新鲜的环境信息；落库内容与进上下文内容保持同一份）。
 
 ### D9: 配置 — `messages.queue` 默认关
 
