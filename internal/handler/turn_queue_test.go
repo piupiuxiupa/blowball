@@ -878,7 +878,7 @@ func TestQueue_HeartbeatPrecedesRunningStatus(t *testing.T) {
 
 	calls := store.snapshot()
 	for _, tc := range []struct{ runID, statusCall string }{
-		{"trace-1", "InitMeta:trace-1:running"},
+		{"trace-1", "SetStatus:trace-1:running"},
 		{"trace-2", "SetStatus:trace-2:running"},
 	} {
 		beat := firstIndex(calls, "Heartbeat:"+tc.runID)
@@ -1005,18 +1005,17 @@ func countCalls(calls []string, prefix string) int {
 	return n
 }
 
-// TestQueue_StartupHeartbeatSustained (review round 2, fix 1): the
-// pre-publish beat alone covers only HeartbeatTTL (15s); the send-time
-// persistence runs BEFORE the drainer starts beating. Holding the direct
-// MySQL write blocks startTurn mid-startup — the heartbeat keeper must keep
-// beating during that window (the drainer cannot be the source: startTurn
-// has not reached it).
-func TestQueue_StartupHeartbeatSustained(t *testing.T) {
+// TestQueue_StartupPersistStaysQueued (review round 4): the send-time
+// persistence runs while the run's status is still QUEUED — the dead-run
+// ladder only fires on running, so a slow write needs no heartbeat; the
+// heartbeat and the running publication appear only after the row is
+// durable (the basis of the queued-cancel reference guard's row check).
+func TestQueue_StartupPersistStaysQueued(t *testing.T) {
 	store := newRecordingStore()
 	env := newQueueEnvWithStore(t, newQueueStub(), 8, store)
 
-	// Hold the first direct write (turn A's send-time user row) so the
-	// startup phase is observably long.
+	// Hold the first direct write (the send-time user row) so the startup
+	// phase is observably long.
 	entered := make(chan struct{}, 1)
 	hold := make(chan struct{})
 	env.mysql.setAppendMessagesHold(entered, hold)
@@ -1024,24 +1023,22 @@ func TestQueue_StartupHeartbeatSustained(t *testing.T) {
 	wA := env.postMessageAsync("sess-1", "message A")
 	<-entered
 
-	// At this point: the pre-publish beat fired, the meta is published
-	// (running), and the persist is blocked — the drainer has NOT started.
-	// The keeper must sustain the beat: after one full tick (5s) at least a
-	// second Heartbeat for this run exists while the persist is still held.
-	require.Eventually(t, func() bool {
-		return countCalls(store.snapshot(), "Heartbeat:trace-1") >= 2
-	}, 8*time.Second, 50*time.Millisecond,
-		"no sustained heartbeat during the blocked startup persist — the queue SSE would misclassify the run as dead past 15s")
-
-	// The alive key exists throughout (not expired) and the run is running.
-	alive, err := env.store.Alive(context.Background(), "trace-1")
-	require.NoError(t, err)
-	require.True(t, alive, "alive key missing during the blocked startup persist")
+	// During the held write: the meta exists in the QUEUED state (never
+	// running — the ladder cannot fire), and no heartbeat has been sent
+	// yet (the beat follows the write now).
 	meta, ok, err := env.store.GetMeta(context.Background(), "trace-1")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, run.StatusRunning, meta.Status)
+	require.Equal(t, run.StatusQueued, meta.Status,
+		"the send-time write must run in the queued state — a running status here would open the dead-run ladder window")
+	require.Zero(t, countCalls(store.snapshot(), "Heartbeat:trace-1"),
+		"the heartbeat must follow the send-time write (round-4 ordering)")
+	alive, err := env.store.Alive(context.Background(), "trace-1")
+	require.NoError(t, err)
+	require.False(t, alive)
 
+	// Release: the write lands, the heartbeat fires, running is published
+	// (after the beat), and the turn completes.
 	close(hold)
 	close(env.stub.release)
 	select {
@@ -1049,6 +1046,11 @@ func TestQueue_StartupHeartbeatSustained(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("turn A never completed after the hold released")
 	}
+	require.Eventually(t, func() bool {
+		calls := store.snapshot()
+		return firstIndex(calls, "Heartbeat:trace-1") >= 0 &&
+			firstIndex(calls, "Heartbeat:trace-1") < firstIndex(calls, "SetStatus:trace-1:running")
+	}, 3*time.Second, 10*time.Millisecond, "the heartbeat must precede the running publication after the write")
 }
 
 // TestQueueCancel_SharedAttachmentKept (review round 2, fix 3): a queued
@@ -1068,12 +1070,16 @@ func TestQueueCancel_SharedAttachmentKept(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(stagingDir, id+".png"), []byte("data"), 0o644))
 	}
 
-	// A holder claim so admissions queue — WITH a heartbeat, as a real
-	// running turn's holder always has (the pre-registration guard suspends
-	// rollbacks for heartbeat-less holders).
+	// A holder claim so admissions queue — with its user row observable in
+	// the persisted rows (a real running turn's send-time write landed; the
+	// row-based guard requires it before any rollback proceeds).
 	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-holder")
 	require.NoError(t, err)
 	require.NoError(t, env.store.Heartbeat(ctx, "run-holder", "sess-1"))
+	env.mysql.listMessagesRows = []model.Message{{
+		SessionID: "sess-1", Agent: "user", Role: model.RoleUser, TraceID: "run-holder",
+		Content: "holder turn", MsgTime: time.Unix(1700000000, 0).UTC(),
+	}}
 
 	// B enqueues first and claims both attachments into the session (the
 	// bind the real send path performs before admission): files move into
@@ -1234,12 +1240,15 @@ func TestQueueCancel_PersistedReferenceKept(t *testing.T) {
 
 	// C was pumped and COMPLETED before the cancel: its persisted user row
 	// references the shared attachment (rows are what the history read
-	// serves; the queue no longer holds C).
-	env.mysql.listMessagesRows = []model.Message{{
-		SessionID: "sess-1", Agent: "user", Role: model.RoleUser,
-		Content:   "C", MsgTime: time.Unix(1700000001, 0).UTC(),
-		Attachments: []model.MessageAttachmentRef{{ID: "att-shared", Filename: "att-shared.png", MIME: "image/png"}},
-	}}
+	// serves; the queue no longer holds C). The holder's own row is durable
+	// too, so the row guard lets the rollback proceed.
+	env.mysql.listMessagesRows = []model.Message{
+		{SessionID: "sess-1", Agent: "user", Role: model.RoleUser, TraceID: "run-holder",
+			Content: "holder turn", MsgTime: time.Unix(1700000000, 0).UTC()},
+		{SessionID: "sess-1", Agent: "user", Role: model.RoleUser,
+			Content: "C", MsgTime: time.Unix(1700000001, 0).UTC(),
+			Attachments: []model.MessageAttachmentRef{{ID: "att-shared", Filename: "att-shared.png", MIME: "image/png"}}},
+	}
 
 	w := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-1/turns/trace-b/cancel", nil)
 	rec := httptest.NewRecorder()
@@ -1263,9 +1272,13 @@ func TestQueueCancel_StartingClaimSuspendsRollback(t *testing.T) {
 	env := newQueueEnv(t, newQueueStub(), 8)
 	ctx := context.Background()
 
-	// A STARTING holder: claim held, no heartbeat yet (the preamble runs).
+	// A STARTING holder: claim held, HEARTBEAT PRESENT (the round-4
+	// interleave — a beat says nothing about row durability), but its user
+	// row is not in the persisted rows yet (the send-time write is in
+	// flight or failed).
 	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-starting")
 	require.NoError(t, err)
+	require.NoError(t, env.store.Heartbeat(ctx, "sess-1", "run-starting"))
 
 	sessDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
 	require.NoError(t, os.MkdirAll(sessDir, 0o755))
@@ -1273,7 +1286,7 @@ func TestQueueCancel_StartingClaimSuspendsRollback(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "att-x.png"), []byte("data"), 0o644))
 	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
 		RunID: "trace-b", SessionID: "sess-1", UserID: "user-1", Content: "B",
-		Attachments: []model.MessageAttachmentRef{{ID: "att-x", Filename: "att-x.png", MIME: "image/png"}},
+		Attachments:  []model.MessageAttachmentRef{{ID: "att-x", Filename: "att-x.png", MIME: "image/png"}},
 		NewlyClaimed: []string{"att-x"},
 	}, 8)
 	require.NoError(t, err)
@@ -1283,8 +1296,9 @@ func TestQueueCancel_StartingClaimSuspendsRollback(t *testing.T) {
 	env.engine.ServeHTTP(rec, w)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	// The rollback is suspended entirely: the starting holder's references
-	// cannot be ruled out, so the attachment stays bound.
+	// The rollback is suspended entirely: the holder is alive but its rows
+	// are not observable — a heartbeat must NOT be read as "references are
+	// durable" (round-4 fix), so the attachment stays bound.
 	require.NotNil(t, env.atts.rows["att-x"].SessionID, "rollback ran while a starting claim holder could still reference the attachment")
 	_, statErr := os.Stat(filepath.Join(sessDir, "att-x.png"))
 	require.NoError(t, statErr, "the file must stay bound while the rollback is suspended")

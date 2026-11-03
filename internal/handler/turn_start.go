@@ -297,7 +297,7 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 		}
 	}
 
-	// ── pre-publish heartbeat, run meta, send-time persistence ─────────────
+	// ── run meta (queued), send-time persistence, heartbeat, running ───────
 	//
 	// Shutdown checkpoint (review fix, round 3, pump path only): the entry
 	// was popped and its claim transferred, but if the process is shutting
@@ -310,72 +310,33 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 		return &startedTurn{aborted: errShutdownDuringStartup}
 	}
 
-	// The FIRST heartbeat precedes the run's meta publication (review fix,
-	// round 1): a queued POST's SSE subscriber is already tailing this run's
-	// log, and writeRunEventStream's dead-run ladder fires on
-	// status=running with no alive key. The startup keeper below then
-	// SUSTAINS the beat (review fix, round 2): one synchronous beat covers
-	// only HeartbeatTTL (15s), while the send-time persistence and
-	// store-pool waits below all happen BEFORE the drainer starts its own
-	// beats — a slow start (dual-tier outage, pool contention) must not let
-	// the alive key expire while running is observable, or the tailing
-	// subscriber would synthesize an interrupted done, force-release the
-	// claim, and race this still-starting turn against the next message.
-	// The keeper beats at the drainer's cadence and is stopped once the
-	// drainer takes over.
-	if err := h.runs.Store.Heartbeat(ctx, tid, sessionID); err != nil {
-		logger.FromContext(ctx).Warn("pre-publish heartbeat failed; proceeding",
-			zap.String("op", "handler.send_message"),
-			zap.String("run_id", tid),
-			zap.Error(err))
-	}
-	stopStartupHeartbeat := startPersistHeartbeat(ctx, h.runs.Store, tid, sessionID, run.HeartbeatEvery)
-	defer stopStartupHeartbeat() // safety net; the explicit stop below is the normal exit
-
-	// Run meta (ownership + status + the turn's resolved model) in Redis.
-	// Best-effort: a failed write costs cancel/resume for this run, never the
-	// turn itself.
-	//
-	// A pumped entry's meta was published atomically with its admission
-	// (status queued) — but the run-key TTL may have expired under a long
-	// wait (the reconciler's keep-alive is best-effort). Flipping a MISSING
-	// meta via SetStatus alone would rebuild a hash with only the status
-	// field, and the cancel / events endpoints' ownership checks would 404 —
-	// so re-initialize the FULL meta from the request/entry snapshot when it
-	// is gone (review fix).
-	if req.fromQueue {
-		if _, ok, err := h.runs.Store.GetMeta(ctx, tid); err == nil && ok {
-			if err := h.runs.Store.SetStatus(ctx, tid, run.StatusRunning); err != nil {
-				logger.FromContext(ctx).Warn("queued run status flip failed",
-					zap.String("op", "handler.send_message"),
-					zap.String("run_id", tid),
-					zap.Error(err))
-			}
-		} else {
-			if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
-				SessionID: sessionID,
-				UserID:    userID,
-				Status:    run.StatusRunning,
-				Model:     turnModel,
-				CreatedAt: req.metaCreatedAt.Format(time.RFC3339),
-			}); err != nil {
-				logger.FromContext(ctx).Warn("queued run meta rebuild failed",
-					zap.String("op", "handler.send_message"),
-					zap.String("run_id", tid),
-					zap.Error(err))
-			}
+	// Run meta (ownership + status + the turn's resolved model) in Redis,
+	// published in the QUEUED state before any durable write of this turn
+	// (review fix, round 4): during the send-time persistence below the
+	// status stays queued, and writeRunEventStream's dead-run ladder only
+	// fires on running — so a slow write (dual-tier outage, pool contention)
+	// needs no heartbeat at all; the already-tailing queue SSE simply keeps
+	// waiting, exactly as it did while the message sat in the queue. A
+	// pumped entry's meta was published atomically with its admission; a
+	// FRESH run initializes it here; a meta that expired under a long wait
+	// (the reconciler's keep-alive is best-effort) is re-initialized in FULL
+	// from the request/entry snapshot — a status-only rebuild would leave
+	// the cancel / events endpoints' ownership checks 404-ing (review fix,
+	// round 1). Best-effort throughout: a failed write costs cancel/resume
+	// for this run, never the turn itself.
+	if _, ok, err := h.runs.Store.GetMeta(ctx, tid); err != nil || !ok {
+		if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
+			SessionID: sessionID,
+			UserID:    userID,
+			Status:    run.StatusQueued,
+			Model:     turnModel,
+			CreatedAt: req.metaCreatedAt.Format(time.RFC3339),
+		}); err != nil {
+			logger.FromContext(ctx).Warn("run meta init failed",
+				zap.String("op", "handler.send_message"),
+				zap.String("run_id", tid),
+				zap.Error(err))
 		}
-	} else if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
-		SessionID: sessionID,
-		UserID:    userID,
-		Status:    run.StatusRunning,
-		Model:     turnModel,
-		CreatedAt: req.metaCreatedAt.Format(time.RFC3339),
-	}); err != nil {
-		logger.FromContext(ctx).Warn("run meta init failed",
-			zap.String("op", "handler.send_message"),
-			zap.String("run_id", tid),
-			zap.Error(err))
 	}
 
 	// Send-time user-row persistence (send-time-user-message-persistence):
@@ -426,6 +387,43 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 			zap.Error(err))
 	} else {
 		flushed.markUserPersisted()
+	}
+
+	// ── heartbeat, then publish running ────────────────────────────────────
+	//
+	// The heartbeat comes AFTER the send-time persistence (review fix, round
+	// 4): in the reverse order an observer could see Alive=true while the
+	// user row was still in flight — a heartbeat proves the process is alive,
+	// not that the row (and its attachment references) is durable, which is
+	// what the queued-cancel reference guard needs. With this order two
+	// invariants hold together:
+	//
+	//   running ⇒ alive — the status flip below happens only after the
+	//   synchronous beat (round 1), and the startup keeper sustains the beat
+	//   at the drainer's cadence until the drainer takes over (round 2), so
+	//   a tailing subscriber never sees running without a live heartbeat;
+	//
+	//   alive ⇒ row write attempted — the beat follows the send-time write,
+	//   so a running turn's row is either already readable through the
+	//   shared persistence or its send-time write failed (the row then lands
+	//   at turn end); the reference guard checks row observability directly
+	//   rather than trusting the heartbeat for it.
+	if err := h.runs.Store.Heartbeat(ctx, tid, sessionID); err != nil {
+		logger.FromContext(ctx).Warn("pre-publish heartbeat failed; proceeding",
+			zap.String("op", "handler.send_message"),
+			zap.String("run_id", tid),
+			zap.Error(err))
+	}
+	stopStartupHeartbeat := startPersistHeartbeat(ctx, h.runs.Store, tid, sessionID, run.HeartbeatEvery)
+	defer stopStartupHeartbeat() // safety net; the explicit stop below is the normal exit
+
+	// Publish running — both paths flip here (the meta was ensured in the
+	// queued state above), AFTER the row write and the first heartbeat.
+	if err := h.runs.Store.SetStatus(ctx, tid, run.StatusRunning); err != nil {
+		logger.FromContext(ctx).Warn("run status flip to running failed",
+			zap.String("op", "handler.send_message"),
+			zap.String("run_id", tid),
+			zap.Error(err))
 	}
 
 	// The turn context: detached, but carrying the same trace/session

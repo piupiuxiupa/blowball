@@ -174,16 +174,18 @@ func (h *MessageStreamHandler) WaitForStartupPumps(timeout time.Duration) bool {
 //  1. the session's remaining queue entries (accepted, not yet started);
 //  2. the session's persisted message rows (hydrated attachment refs —
 //     covers pumped, running, and completed messages alike);
-//  3. a session claim whose holder has no heartbeat yet — a startup in its
-//     pre-registration window (popped, not yet persisted, invisible to 1
-//     and 2) or a dead holder — suspends the whole rollback conservatively.
+//  3. a session claim whose holder's user row is NOT yet observable in the
+//     persisted rows — a startup in its pre-write window, a running turn
+//     whose send-time write failed (the row lands only at turn end), or a
+//     dead holder — suspends the whole rollback conservatively. The check
+//     is row-based, NOT heartbeat-based (review fix, round 4): a heartbeat
+//     proves the process is alive, not that the row is durable — the beat
+//     precedes the write in one startup phase and follows it in another,
+//     and the rows are shared across replicas where a beat is not.
 //
 // Any check failure skips the rollback (fail-safe): an orphaned bound
 // attachment follows the session lifecycle, which is strictly better than
-// breaking a live message's images and history links. Residual window (rare
-// × rare, documented): a cross-replica cancel while another replica's pumped
-// turn is running with a FAILED send-time write (its row lands only at turn
-// end) can still miss the reference.
+// breaking a live message's images and history links.
 func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, entry run.QueueEntry) {
 	if len(entry.NewlyClaimed) == 0 {
 		return
@@ -215,15 +217,25 @@ func (h *MessageStreamHandler) RollbackQueuedAttachments(ctx context.Context, en
 			referenced[ref.ID] = true
 		}
 	}
-	// Pre-registration startup guard: a claim holder without a heartbeat is
-	// a pumped entry whose user row is not durable yet (or a dead holder) —
-	// its references are not observable through 1 or 2, so suspend the whole
-	// rollback. A claim-read failure here only loses the guard's extra
-	// safety, not correctness of 1+2, so it degrades to proceeding.
+	// Claim-holder row guard (review fix, round 4): a session claim whose
+	// holder's rows are not observable in `prior` is a startup before its
+	// send-time write, a running turn whose send-time write failed, or a
+	// dead holder — the holder's attachment references are invisible to
+	// checks 1 and 2, so suspend the whole rollback. Row observability is
+	// replica-agnostic (the persistence is shared) and, unlike a heartbeat,
+	// actually proves the references are readable. A claim-read failure only
+	// loses this guard's extra safety, so it degrades to proceeding.
 	if claims, cerr := h.runs.Store.ActiveRuns(ctx, []string{entry.SessionID}); cerr == nil {
 		if holder := claims[entry.SessionID]; holder != "" {
-			if alive, aerr := h.runs.Store.Alive(ctx, holder); aerr == nil && !alive {
-				h.skipQueuedRollback(ctx, entry, "claim holder starting or dead; references unobservable", nil)
+			holderDurable := false
+			for _, m := range prior {
+				if m.TraceID == holder {
+					holderDurable = true
+					break
+				}
+			}
+			if !holderDurable {
+				h.skipQueuedRollback(ctx, entry, "claim holder's rows not durable; references unobservable", nil)
 				return
 			}
 		}
