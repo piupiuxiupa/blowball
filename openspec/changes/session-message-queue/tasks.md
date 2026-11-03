@@ -87,3 +87,9 @@
 - [x] 13.1 [P1] 关停屏障覆盖已出队未注册的起轮（shutdown 派生 ctx 取消准备、pop→spawn WaitGroup 等待、中止原子返队列 RequeueHead）
 - [x] 13.2 [P2] 附件引用闭包扩展（剩余队列 ∪ 已持久化行 ∪ 无心跳认领持有者的启动中守卫）
 - [x] 13.3 回归：make test 全量 race + 五个新行为级测试（RequeueHead、pump 中止返队列、startTurn 检查点、持久化引用保护、启动中守卫）
+
+## 14. 评审修复（review round 4）
+
+- [x] 14.1 [P2] 起轮持久写顺序重排：用户行落库 → 心跳 → 发布 running（慢写期间状态保持 queued，死 run 检测本就不触发；alive 不再先于行落库出现）
+- [x] 14.2 [P2] 附件守卫改为「claim holder 的行可观测」（行本位而非心跳本位；跨副本可见，顺带关闭发送时写失败的残余窗口）
+- [x] 14.3 回归：make test 全量 race + 测试更新（心跳顺序钉死、慢写期间 queued 状态、持久引用/启动中守卫含 Alive=true 变体）
