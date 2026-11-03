@@ -87,6 +87,11 @@ type turnRequest struct {
 	// stitching branch (the HTTP path copies it from its session lookup; the
 	// pump path re-reads the session row).
 	contextCompacted bool
+	// metaCreatedAt is the CreatedAt the run meta carries: request time for
+	// the HTTP paths, the entry's enqueue time for a pumped run (whose meta
+	// may need rebuilding after TTL expiry — restoring the original creation
+	// timestamp, not the pump's).
+	metaCreatedAt time.Time
 	// fromQueue marks a pumped queued entry: the run meta already exists in
 	// the queued state (created at enqueue), so startTurn flips it to running
 	// instead of initializing a fresh one.
@@ -285,24 +290,64 @@ func (h *MessageStreamHandler) startTurn(ctx context.Context, req *turnRequest) 
 		}
 	}
 
+	// ── pre-publish heartbeat, run meta, send-time persistence ─────────────
+	//
+	// The FIRST heartbeat precedes the run's meta publication (review fix):
+	// a queued POST's SSE subscriber is already tailing this run's log, and
+	// writeRunEventStream's dead-run ladder fires on status=running with no
+	// alive key. The send-time persistence and the registry/drainer startup
+	// below can exceed the subscriber's one-second poll period — without the
+	// early beat, a subscriber would synthesize an interrupted done,
+	// force-release the claim, and race the still-starting turn against the
+	// next message. One synchronous beat here (kept alive by the drainer's
+	// periodic beats from then on) closes the window: whenever running is
+	// observable, alive already is.
+	if err := h.runs.Store.Heartbeat(ctx, tid, sessionID); err != nil {
+		logger.FromContext(ctx).Warn("pre-publish heartbeat failed; proceeding",
+			zap.String("op", "handler.send_message"),
+			zap.String("run_id", tid),
+			zap.Error(err))
+	}
+
 	// Run meta (ownership + status + the turn's resolved model) in Redis.
 	// Best-effort: a failed write costs cancel/resume for this run, never the
-	// turn itself. A pumped queued entry already has its meta (initialized
-	// queued at enqueue); flip it to running so cancel/attach treat it as a
-	// live run from this moment.
+	// turn itself.
+	//
+	// A pumped entry's meta was published atomically with its admission
+	// (status queued) — but the run-key TTL may have expired under a long
+	// wait (the reconciler's keep-alive is best-effort). Flipping a MISSING
+	// meta via SetStatus alone would rebuild a hash with only the status
+	// field, and the cancel / events endpoints' ownership checks would 404 —
+	// so re-initialize the FULL meta from the request/entry snapshot when it
+	// is gone (review fix).
 	if req.fromQueue {
-		if err := h.runs.Store.SetStatus(ctx, tid, run.StatusRunning); err != nil {
-			logger.FromContext(ctx).Warn("queued run status flip failed",
-				zap.String("op", "handler.send_message"),
-				zap.String("run_id", tid),
-				zap.Error(err))
+		if _, ok, err := h.runs.Store.GetMeta(ctx, tid); err == nil && ok {
+			if err := h.runs.Store.SetStatus(ctx, tid, run.StatusRunning); err != nil {
+				logger.FromContext(ctx).Warn("queued run status flip failed",
+					zap.String("op", "handler.send_message"),
+					zap.String("run_id", tid),
+					zap.Error(err))
+			}
+		} else {
+			if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
+				SessionID: sessionID,
+				UserID:    userID,
+				Status:    run.StatusRunning,
+				Model:     turnModel,
+				CreatedAt: req.metaCreatedAt.Format(time.RFC3339),
+			}); err != nil {
+				logger.FromContext(ctx).Warn("queued run meta rebuild failed",
+					zap.String("op", "handler.send_message"),
+					zap.String("run_id", tid),
+					zap.Error(err))
+			}
 		}
 	} else if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
 		SessionID: sessionID,
 		UserID:    userID,
 		Status:    run.StatusRunning,
 		Model:     turnModel,
-		CreatedAt: req.userMsgTime.Format(time.RFC3339),
+		CreatedAt: req.metaCreatedAt.Format(time.RFC3339),
 	}); err != nil {
 		logger.FromContext(ctx).Warn("run meta init failed",
 			zap.String("op", "handler.send_message"),
@@ -719,6 +764,7 @@ func (h *MessageStreamHandler) turnRequestFromQueueEntry(ctx context.Context, en
 		rawToken:         entry.RawToken,
 		userMsgTime:      time.Now(),
 		contextCompacted: sess.ContextCompacted,
+		metaCreatedAt:    entry.EnqueuedAt,
 		fromQueue:        true,
 	}, nil
 }

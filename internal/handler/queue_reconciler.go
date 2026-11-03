@@ -36,8 +36,17 @@ const (
 type QueueReconciler struct {
 	h        *MessageStreamHandler
 	interval time.Duration
-	stop     chan struct{}
-	done     chan struct{}
+	// maxSessions caps the sessions handled per cycle (a var so tests can
+	// shrink it; production takes queueReconcileMaxSessions).
+	maxSessions int
+	// cursor is the rotation offset into the scan result, advanced by the
+	// number of sessions each cycle handled (review fix: a stable scan order
+	// with more entries than the cap would otherwise re-process the same
+	// head every cycle and starve the tail — both its pump chances AND its
+	// TouchQueued TTL keep-alive). Owned by the run-loop goroutine.
+	cursor int
+	stop   chan struct{}
+	done   chan struct{}
 }
 
 // NewQueueReconciler builds a reconciler over the streaming handler (it reuses
@@ -47,7 +56,13 @@ func NewQueueReconciler(h *MessageStreamHandler, interval time.Duration) *QueueR
 	if interval <= 0 {
 		interval = queueReconcileInterval
 	}
-	return &QueueReconciler{h: h, interval: interval, stop: make(chan struct{}), done: make(chan struct{})}
+	return &QueueReconciler{
+		h:           h,
+		interval:    interval,
+		maxSessions: queueReconcileMaxSessions,
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
+	}
 }
 
 // Start launches the reconcile loop; call exactly once.
@@ -85,8 +100,11 @@ func (r *QueueReconciler) run() {
 // cycle performs one bounded scan: touch every queued run's TTL (even behind
 // a held claim — a long running turn must not let the waiting entries'
 // replay surface expire), then try to continue each claim-free queue's head.
-// Every failure is WARN-only: a reconciler problem must never disturb the
-// running turns (the standing run-store contract).
+// The handling window ROTATES across cycles (see QueueReconciler.cursor), so
+// a backlog larger than one cycle's cap still gets full coverage — the tail
+// is neither pumped nor TTL-starved. Every failure is WARN-only: a
+// reconciler problem must never disturb the running turns (the standing
+// run-store contract).
 func (r *QueueReconciler) cycle() {
 	if r.h.newTurnsStopped() {
 		return
@@ -101,10 +119,18 @@ func (r *QueueReconciler) cycle() {
 			zap.Error(err))
 		return
 	}
-	for i, sid := range sids {
-		if i >= queueReconcileMaxSessions {
-			break
-		}
+	n := len(sids)
+	if n == 0 {
+		r.cursor = 0
+		return
+	}
+	handled := n
+	if handled > r.maxSessions {
+		handled = r.maxSessions
+	}
+	start := r.cursor % n
+	for i := 0; i < handled; i++ {
+		sid := sids[(start+i)%n]
 		// TTL keep-alive for the waiting entries (best-effort).
 		if entries, err := r.h.runs.Store.QueueEntries(ctx, sid); err == nil {
 			for _, e := range entries {
@@ -121,4 +147,5 @@ func (r *QueueReconciler) cycle() {
 		// running or an admission just won the slot) leaves the queue alone.
 		r.h.pumpQueuedNext(sid)
 	}
+	r.cursor = (start + handled) % n
 }

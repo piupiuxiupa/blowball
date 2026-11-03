@@ -220,7 +220,10 @@ func (m *MemStore) claimHeldLocked(sessionID string) bool {
 }
 
 // AdmitMessage implements Store (one lock critical section = the atomic
-// claim-or-enqueue admission).
+// claim-or-enqueue admission, including the queued publication: meta + the
+// queued event land with the RPUSH, never after it — a pump that pops the
+// entry the instant it is queued can never observe the initial state
+// arriving late).
 func (m *MemStore) AdmitMessage(_ context.Context, sessionID string, entry QueueEntry, maxDepth int) (AdmitResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -233,7 +236,26 @@ func (m *MemStore) AdmitMessage(_ context.Context, sessionID string, entry Queue
 		return AdmitResult{Outcome: AdmitFull}, nil
 	}
 	m.queues[sessionID] = append(m.queues[sessionID], entry)
-	return AdmitResult{Outcome: AdmitQueued, Position: len(m.queues[sessionID])}, nil
+	pos := len(m.queues[sessionID])
+	// Atomic publication of the queued state: meta (first writer wins — a
+	// rebuild path may have re-created it) plus the queued event, mirroring
+	// the Redis admit script.
+	if _, ok := m.meta[entry.RunID]; !ok {
+		m.meta[entry.RunID] = RunMeta{
+			SessionID: entry.SessionID,
+			UserID:    entry.UserID,
+			Status:    StatusQueued,
+			Model:     entry.Model,
+			CreatedAt: entry.EnqueuedAt.Format(time.RFC3339),
+		}
+	}
+	m.expire[entry.RunID] = m.now().Add(RunKeyTTL)
+	seq := len(m.streams[entry.RunID]) + 1
+	m.streams[entry.RunID] = append(m.streams[entry.RunID], memEntry{
+		Entry:   Entry{ID: strconv.Itoa(seq) + "-1", Event: stream.QueuedEvent(entry.RunID, pos)},
+		expires: m.now().Add(RunKeyTTL),
+	})
+	return AdmitResult{Outcome: AdmitQueued, Position: pos}, nil
 }
 
 // PumpHead implements Store: pop head + claim transfer in one critical
@@ -306,11 +328,24 @@ func (m *MemStore) TouchQueued(_ context.Context, runID string) error {
 	return nil
 }
 
-// ClearQueue implements Store.
+// ClearQueue implements Store: drop every entry and terminate each dropped
+// run as cancelled with the terminal retain window — subscribers tailing
+// those runs observe a terminal status and close instead of waiting out the
+// meta TTL.
 func (m *MemStore) ClearQueue(_ context.Context, sessionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	entries := m.queues[sessionID]
 	delete(m.queues, sessionID)
+	for _, e := range entries {
+		if meta, ok := m.meta[e.RunID]; ok {
+			meta.Status = StatusCancelled
+			m.meta[e.RunID] = meta
+			m.expire[e.RunID] = m.now().Add(RetainAfterTerminal)
+		}
+		delete(m.alive, e.RunID)
+		delete(m.cancels, e.RunID)
+	}
 	return nil
 }
 

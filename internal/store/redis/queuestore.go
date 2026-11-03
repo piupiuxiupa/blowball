@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lush/blowball/internal/run"
+	"github.com/lush/blowball/internal/stream"
 )
 
 // Queue admission/continuation commands over the shared *redis.Client
@@ -26,19 +27,46 @@ func queueKey(sid string) string { return "queue:" + sid }
 //
 //	claim free AND queue empty → claim it for ARGV[1] (the fast path,
 //	                               byte-identical to a successful SET NX)
-//	otherwise LLEN < maxDepth   → RPUSH ARGV[3] (the entry JSON), report depth
+//	otherwise LLEN < maxDepth   → RPUSH ARGV[3] (the entry JSON) AND — in
+//	                               the same atomic step — initialize the
+//	                               run's meta (HSET session_id/user_id/
+//	                               status=queued/model/created_at + TTL) and
+//	                               append the `queued` event to the run log
+//	                               (XADD + TTL), then report the depth
 //	otherwise                   → full
 //
-// The claim-vs-queue decision and the RPUSH are one atomic step, so a message
-// arriving in the release→pump window sees the queue non-empty and cannot
-// jump the line by claiming directly.
+// The FIFO seal: the claim-vs-queue decision and the RPUSH are one atomic
+// step, so a message arriving in the release→pump window sees the queue
+// non-empty and cannot jump the line by claiming directly. The publication
+// seal (review fix): the entry, its meta, and its queued event become
+// visible together — a pump that pops the entry the instant it is queued can
+// never see the initial meta state written afterwards (which could overwrite
+// running or even done). ARGV[10] is the prebuilt queued-event JSON frame
+// with the position substituted inside the script (the position is only
+// known after the RPUSH); its wire shape is pinned by
+// TestRunStore_AdmitPublishesQueuedState against stream.QueuedEvent.
 const admitScript = `if not redis.call("GET", KEYS[1]) and redis.call("LLEN", KEYS[2]) == 0 then
-	redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[4])
+	redis.call("SET", KEYS[1], ARGV[1], "EX", tonumber(ARGV[4]))
 	return {"claimed", 0}
 end
 if redis.call("LLEN", KEYS[2]) < tonumber(ARGV[2]) then
 	redis.call("RPUSH", KEYS[2], ARGV[3])
-	return {"queued", redis.call("LLEN", KEYS[2])}
+	local pos = redis.call("LLEN", KEYS[2])
+	redis.call("HSET", KEYS[3],
+		"session_id", ARGV[6],
+		"user_id", ARGV[7],
+		"status", "queued",
+		"model", ARGV[8],
+		"created_at", ARGV[9])
+	redis.call("EXPIRE", KEYS[3], tonumber(ARGV[5]))
+	-- gsub returns (string, count); bind it so the count does not expand
+	-- into XADD's argument list. The substitution includes the placeholder's
+	-- JSON quotes so the position lands as a NUMBER, matching the
+	-- stream.QueuedEvent wire shape (pinned by test).
+	local ev = string.gsub(ARGV[10], '"__POS__"', tostring(pos))
+	redis.call("XADD", KEYS[4], "*", "e", ev)
+	redis.call("EXPIRE", KEYS[4], tonumber(ARGV[5]))
+	return {"queued", pos}
 end
 return {"full", 0}`
 
@@ -56,15 +84,36 @@ redis.call("LPOP", KEYS[2])
 redis.call("SET", KEYS[1], ARGV[2], "EX", ARGV[3])
 return 1`
 
+// queueEventPlaceholder is the admission-time depth marker inside the
+// prebuilt queued-event frame; the admit script substitutes it with the
+// actual post-RPUSH depth (which only it can know).
+const queueEventPlaceholder = "__POS__"
+
 // AdmitMessage implements run.Store.
 func (s *RunStore) AdmitMessage(ctx context.Context, sessionID string, entry run.QueueEntry, maxDepth int) (run.AdmitResult, error) {
 	payload, err := json.Marshal(entry)
 	if err != nil {
 		return run.AdmitResult{}, fmt.Errorf("runstore: marshal queue entry: %w", err)
 	}
+	// The queued event frame with the position placeholder; the shape is the
+	// stream.QueuedEvent shape (pinned by test), so decoding it on the read
+	// side yields the same event the hub path would have produced.
+	frame, err := json.Marshal(stream.StreamEvent{
+		Type: stream.EventQueued,
+		Meta: map[string]any{
+			stream.MetaRunID:         entry.RunID,
+			stream.MetaQueuePosition: queueEventPlaceholder,
+		},
+	})
+	if err != nil {
+		return run.AdmitResult{}, fmt.Errorf("runstore: marshal queued event: %w", err)
+	}
+	runTTL := int(run.RunKeyTTLWithJitter().Round(time.Second).Seconds())
 	logCmd(ctx, "run.admit_message", queueKey(sessionID))
-	res, err := s.client.Eval(ctx, admitScript, []string{sessionRunKey(sessionID), queueKey(sessionID)},
-		entry.RunID, maxDepth, payload, int(run.SessionClaimTTL/time.Second)).Result()
+	res, err := s.client.Eval(ctx, admitScript,
+		[]string{sessionRunKey(sessionID), queueKey(sessionID), runMetaKey(entry.RunID), runEventsKey(entry.RunID)},
+		entry.RunID, maxDepth, payload, int(run.SessionClaimTTL/time.Second), runTTL,
+		entry.SessionID, entry.UserID, entry.Model, entry.EnqueuedAt.Format(time.RFC3339), string(frame)).Result()
 	if err != nil {
 		return run.AdmitResult{}, fmt.Errorf("runstore: admit message: %w", err)
 	}
@@ -111,9 +160,19 @@ func (s *RunStore) PumpHead(ctx context.Context, sessionID string) (run.QueueEnt
 	return entry, true, nil
 }
 
+// dequeueScript removes exactly one occurrence of the payload and returns
+// the removal count. Doing the LREM inside the script makes the
+// "entry was still listed when we scanned it" observation and the removal
+// atomic: if a pump popped the entry between the Go-side scan and this
+// script, the LREM removes nothing and the caller must NOT report a
+// successful dequeue (review fix — a cancelled-and-actually-started run).
+const dequeueScript = `return redis.call("LREM", KEYS[1], 1, ARGV[1])`
+
 // DequeueMessage implements run.Store: locate the entry by run id over the
-// (depth-bounded) list, then LREM the exact stored payload. The claim is
-// untouched — a queued run never held it.
+// (depth-bounded) list, then remove it atomically by exact payload. ok=false
+// covers both "never queued" and "a pump took it between the scan and the
+// removal" — the caller answers from the CURRENT run state either way. The
+// claim is untouched — a queued run never held it.
 func (s *RunStore) DequeueMessage(ctx context.Context, sessionID, runID string) (run.QueueEntry, bool, error) {
 	logCmd(ctx, "run.dequeue_message", queueKey(sessionID))
 	raw, err := s.client.LRange(ctx, queueKey(sessionID), 0, -1).Result()
@@ -126,8 +185,14 @@ func (s *RunStore) DequeueMessage(ctx context.Context, sessionID, runID string) 
 			continue // mirror entriesFromMessages: a malformed entry must not break the scan
 		}
 		if entry.RunID == runID {
-			if err := s.client.LRem(ctx, queueKey(sessionID), 1, payload).Err(); err != nil {
+			n, err := s.client.Eval(ctx, dequeueScript, []string{queueKey(sessionID)}, payload).Int()
+			if err != nil {
 				return run.QueueEntry{}, false, fmt.Errorf("runstore: dequeue message: %w", err)
+			}
+			if n == 0 {
+				// The entry left the queue between the scan and the LREM —
+				// a pump claimed it; the dequeue did not happen.
+				return run.QueueEntry{}, false, nil
 			}
 			return entry, true, nil
 		}
@@ -178,11 +243,48 @@ func (s *RunStore) TouchQueued(ctx context.Context, runID string) error {
 	return nil
 }
 
-// ClearQueue implements run.Store.
+// retireQueuedScript terminates one dropped queued run — but only if its meta
+// still exists (a long-waited entry whose key family expired stays expired;
+// HSET-ing a status-only stub would break the ownership fields). Sets
+// cancelled, drops the heartbeat/cancel keys, and moves meta/events to the
+// terminal retain window so subscribers tailing the run close promptly
+// (review fix: the clear previously left them waiting out the full TTL).
+const retireQueuedScript = `if redis.call("EXISTS", KEYS[1]) == 1 then
+	redis.call("HSET", KEYS[1], "status", ARGV[1])
+	redis.call("DEL", KEYS[2], KEYS[3])
+	redis.call("EXPIRE", KEYS[1], tonumber(ARGV[2]))
+	redis.call("EXPIRE", KEYS[4], tonumber(ARGV[2]))
+	return 1
+end
+return 0`
+
+// ClearQueue implements run.Store: drop the queue and terminate every
+// dropped entry's run (cancelled + retain window). Entries popped by a pump
+// just before the DEL are not seen here — the pump's session re-validation
+// finalizes those as error on its own path.
 func (s *RunStore) ClearQueue(ctx context.Context, sessionID string) error {
 	logCmd(ctx, "run.clear_queue", queueKey(sessionID))
+	raw, err := s.client.LRange(ctx, queueKey(sessionID), 0, -1).Result()
+	if err != nil {
+		return fmt.Errorf("runstore: clear queue: %w", err)
+	}
 	if err := s.client.Del(ctx, queueKey(sessionID)).Err(); err != nil {
 		return fmt.Errorf("runstore: clear queue: %w", err)
+	}
+	retain := int(run.RetainAfterTerminal.Round(time.Second).Seconds())
+	for _, payload := range raw {
+		var entry run.QueueEntry
+		if err := json.Unmarshal([]byte(payload), &entry); err != nil {
+			continue // malformed entries still left the queue with the DEL
+		}
+		logCmd(ctx, "run.clear_queue_run", runMetaKey(entry.RunID))
+		if _, err := s.client.Eval(ctx, retireQueuedScript,
+			[]string{runMetaKey(entry.RunID), runAliveKey(entry.RunID), runCancelKey(entry.RunID), runEventsKey(entry.RunID)},
+			run.StatusCancelled, retain).Result(); err != nil {
+			// Best-effort per run: one failing retirement must not abort the
+			// rest of the sweep (the run's own TTL remains the backstop).
+			return fmt.Errorf("runstore: clear queue retire %s: %w", entry.RunID, err)
+		}
 	}
 	return nil
 }

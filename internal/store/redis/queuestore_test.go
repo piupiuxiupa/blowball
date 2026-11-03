@@ -207,3 +207,115 @@ func TestRunStore_TouchQueuedRearmsTTL(t *testing.T) {
 		t.Fatalf("meta TTL after touch = %s, want re-armed toward 1h", ttl)
 	}
 }
+
+// TestRunStore_AdmitPublishesQueuedState pins the atomic publication (review
+// fix 3): a queued admission creates the run meta (full ownership fields,
+// status queued) and appends the queued event in the SAME script as the
+// RPUSH — and the appended event decodes to exactly stream.QueuedEvent's
+// shape, pinning the Lua-built frame against the Go constructor (if either
+// side drifts, this fails).
+func TestRunStore_AdmitPublishesQueuedState(t *testing.T) {
+	rs, _ := testRunStore(t)
+	ctx := context.Background()
+
+	// Hold the claim so admission queues.
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	entry := redisQueueEntry("run-q")
+	res, err := rs.AdmitMessage(ctx, "sess-1", entry, 8)
+	if err != nil || res.Outcome != run.AdmitQueued {
+		t.Fatalf("admit = (%+v,%v), want AdmitQueued", res, err)
+	}
+
+	// Meta: published with the entry, status queued, full fields.
+	meta, ok, err := rs.GetMeta(ctx, "run-q")
+	if err != nil || !ok {
+		t.Fatalf("meta after admit = (%+v,%v,%v), want exists", meta, ok, err)
+	}
+	if meta.Status != run.StatusQueued || meta.SessionID != "sess-1" ||
+		meta.UserID != "u1" || meta.Model != "gpt-test" {
+		t.Fatalf("meta = %+v, want full queued meta", meta)
+	}
+
+	// Event log: exactly one queued event, byte-shape-equal to the Go
+	// constructor's output for the admission position.
+	entries, err := rs.ReadEvents(ctx, "run-q", "0", 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("events = (%v,%v), want exactly the queued event", entries, err)
+	}
+	got := entries[0].Event
+	want := stream.QueuedEvent("run-q", res.Position)
+	if got.Type != want.Type || got.Agent != want.Agent || got.Content != want.Content {
+		t.Fatalf("event = %+v, want %+v", got, want)
+	}
+	if got.Meta[stream.MetaRunID] != "run-q" {
+		t.Fatalf("event run_id = %v, want run-q", got.Meta[stream.MetaRunID])
+	}
+	if pos, _ := got.Meta[stream.MetaQueuePosition].(float64); int(pos) != res.Position {
+		t.Fatalf("event queue_position = %v, want %d", got.Meta[stream.MetaQueuePosition], res.Position)
+	}
+}
+
+// TestRunStore_DequeueAfterPumpMisses: once the pump has popped the entry,
+// the dequeue reports ok=false — the cancel endpoint must answer from the
+// run's current state instead of claiming a cancellation that never
+// happened (review fix 2: the LREM count, not just its error, decides).
+func TestRunStore_DequeueAfterPumpMisses(t *testing.T) {
+	rs, _ := testRunStore(t)
+	ctx := context.Background()
+
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry("run-b"), 8); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if err := rs.ReleaseSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, ok, err := rs.PumpHead(ctx, "sess-1"); err != nil || !ok {
+		t.Fatalf("pump = (%v,%v), want ok", ok, err)
+	}
+	// The pump took the entry: a dequeue attempt for the same run must NOT
+	// report success (it did not remove anything).
+	if _, ok, err := rs.DequeueMessage(ctx, "sess-1", "run-b"); err != nil || ok {
+		t.Fatalf("dequeue after pump = ok=%v err=%v, want ok=false (nothing removed)", ok, err)
+	}
+}
+
+// TestRunStore_ClearQueueTerminatesQueuedRuns (review fix 6): clearing the
+// queue retires every dropped run as cancelled with the retain window, so
+// tailing subscribers observe a terminal status and close.
+func TestRunStore_ClearQueueTerminatesQueuedRuns(t *testing.T) {
+	rs, _ := testRunStore(t)
+	ctx := context.Background()
+
+	if _, _, err := rs.ClaimSession(ctx, "sess-1", "run-a"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, id := range []string{"run-b", "run-c"} {
+		if _, err := rs.AdmitMessage(ctx, "sess-1", redisQueueEntry(id), 8); err != nil {
+			t.Fatalf("admit %s: %v", id, err)
+		}
+	}
+	if err := rs.ClearQueue(ctx, "sess-1"); err != nil {
+		t.Fatalf("clear queue: %v", err)
+	}
+	if n, _ := rs.QueueLen(ctx, "sess-1"); n != 0 {
+		t.Fatalf("QueueLen after clear = %d, want 0", n)
+	}
+	for _, id := range []string{"run-b", "run-c"} {
+		meta, ok, err := rs.GetMeta(ctx, id)
+		if err != nil || !ok {
+			t.Fatalf("meta %s = (%+v,%v,%v), want exists (cancelled, full fields)", meta, ok, err, id)
+		}
+		if meta.Status != run.StatusCancelled {
+			t.Fatalf("run %s status = %q, want cancelled", id, meta.Status)
+		}
+		// Ownership fields survive the retirement (no status-only stub).
+		if meta.SessionID != "sess-1" || meta.UserID != "u1" {
+			t.Fatalf("run %s meta = %+v, want full ownership fields", id, meta)
+		}
+	}
+}

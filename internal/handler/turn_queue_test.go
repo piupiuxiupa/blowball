@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,12 +48,7 @@ func seedQueuedRun(t *testing.T, env *turnRunTestEnv, runID string, newlyClaimed
 	res, err := env.store.AdmitMessage(ctx, "sess-1", entry, 8)
 	require.NoError(t, err)
 	require.Equal(t, run.AdmitQueued, res.Outcome)
-	require.NoError(t, env.store.InitMeta(ctx, runID, run.RunMeta{
-		SessionID: "sess-1", UserID: "user-1",
-		Status: run.StatusQueued, Model: "gpt-test",
-		CreatedAt: entry.EnqueuedAt.Format(time.RFC3339),
-	}))
-	require.NoError(t, env.store.AppendEvent(ctx, runID, stream.QueuedEvent(runID, res.Position)))
+	// AdmitMessage publishes the meta (queued) and the queued event atomically.
 	return entry
 }
 
@@ -637,9 +634,6 @@ func TestQueueReconciler_ContinuesCrashResidue(t *testing.T) {
 		Content: "queued B", Model: "test-model", EnqueuedAt: time.Unix(1700000000, 0).UTC()}
 	_, err = env.store.AdmitMessage(ctx, "sess-1", entry, 8)
 	require.NoError(t, err)
-	require.NoError(t, env.store.InitMeta(ctx, "trace-2", run.RunMeta{
-		SessionID: "sess-1", UserID: "user-1", Status: run.StatusQueued, Model: "test-model"}))
-	require.NoError(t, env.store.AppendEvent(ctx, "trace-2", stream.QueuedEvent("trace-2", 1)))
 	require.NoError(t, env.store.ReleaseSession(ctx, "sess-1", "run-a"))
 
 	// B's turn can run to completion immediately (release gate pre-closed).
@@ -786,4 +780,206 @@ func TestDeleteSession_ClearsQueue(t *testing.T) {
 	env.mysql.mu.Unlock()
 	require.NoError(t, bare.DeleteSession(ctx, "user-1", "sess-2"))
 	require.Len(t, cleared, 1, "unwired service must not touch the queue")
+}
+
+// ── review-fix behavior tests ──────────────────────────────────────────────
+
+// recordingStore wraps the MemStore, recording the lifecycle call sequence
+// (method + run id) so tests can pin ORDERING guarantees — the pre-publish
+// heartbeat before the running status, and the reconciler's rotation
+// coverage.
+type recordingStore struct {
+	*run.MemStore
+	mu    sync.Mutex
+	calls []string
+}
+
+func newRecordingStore() *recordingStore { return &recordingStore{MemStore: run.NewMemStore()} }
+
+func (r *recordingStore) record(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, fmt.Sprintf(format, args...))
+}
+
+func (r *recordingStore) Heartbeat(ctx context.Context, runID, sessionID string) error {
+	r.record("Heartbeat:%s", runID)
+	return r.MemStore.Heartbeat(ctx, runID, sessionID)
+}
+
+func (r *recordingStore) SetStatus(ctx context.Context, runID, status string) error {
+	r.record("SetStatus:%s:%s", runID, status)
+	return r.MemStore.SetStatus(ctx, runID, status)
+}
+
+func (r *recordingStore) InitMeta(ctx context.Context, runID string, m run.RunMeta) error {
+	r.record("InitMeta:%s:%s", runID, m.Status)
+	return r.MemStore.InitMeta(ctx, runID, m)
+}
+
+func (r *recordingStore) TouchQueued(ctx context.Context, runID string) error {
+	r.record("TouchQueued:%s", runID)
+	return r.MemStore.TouchQueued(ctx, runID)
+}
+
+func (r *recordingStore) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+// firstIndex returns the index of the first recorded call matching prefix,
+// or -1.
+func firstIndex(calls []string, prefix string) int {
+	for i, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestQueue_HeartbeatPrecedesRunningStatus pins the review fix 1 ordering:
+// for BOTH turn start paths (fresh HTTP admission and the queue pump), the
+// first Heartbeat precedes the running publication. A queued POST's SSE
+// subscriber is already tailing; if running were observable before the alive
+// key existed, the subscriber's dead-run ladder would force-clear the claim
+// while the turn is still starting.
+func TestQueue_HeartbeatPrecedesRunningStatus(t *testing.T) {
+	store := newRecordingStore()
+	env := newQueueEnvWithStore(t, newQueueStub(), 8, store)
+
+	// Fresh HTTP admission (trace-1) and a pumped queued turn (trace-2).
+	wA := env.postMessageAsync("sess-1", "message A")
+	env.awaitClaim(t, true)
+	wB := env.postMessageAsync("sess-1", "message B")
+	env.awaitQueueDepth(t, 1)
+	close(env.stub.release)
+	select {
+	case <-wA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn A never completed")
+	}
+	select {
+	case <-wB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued turn B never completed")
+	}
+
+	calls := store.snapshot()
+	for _, tc := range []struct{ runID, statusCall string }{
+		{"trace-1", "InitMeta:trace-1:running"},
+		{"trace-2", "SetStatus:trace-2:running"},
+	} {
+		beat := firstIndex(calls, "Heartbeat:"+tc.runID)
+		publish := firstIndex(calls, tc.statusCall)
+		require.NotEqual(t, -1, beat, "%s: no heartbeat recorded", tc.runID)
+		require.NotEqual(t, -1, publish, "%s: no running publication recorded", tc.runID)
+		require.Less(t, beat, publish,
+			"%s: running published (call #%d) before the first heartbeat (call #%d) — the dead-run ladder window is open",
+			tc.runID, publish, beat)
+	}
+}
+
+// TestQueue_MetaRebuildAfterExpiry (review fix 5): a queued entry whose meta
+// expired under a long wait (crashed reconciler, queue list has no TTL) is
+// rebuilt with the FULL RunMeta at pump time — not a status-only stub — so
+// the cancel and events endpoints' ownership checks keep working.
+func TestQueue_MetaRebuildAfterExpiry(t *testing.T) {
+	env := newQueueEnv(t, newQueueStub(), 8)
+	ctx := context.Background()
+
+	// Seed: a crashed run held the claim, B queued behind it, then the claim
+	// was released without a pump.
+	_, _, err := env.store.ClaimSession(ctx, "sess-1", "run-a")
+	require.NoError(t, err)
+	entry := run.QueueEntry{RunID: "trace-2", SessionID: "sess-1", UserID: "user-1",
+		Content: "queued B", Model: "test-model",
+		Selection:   run.QueueSelection{Model: "test-model", MaxContextTokens: 128000, MaxCompletionTokens: 8192},
+		EnqueuedAt: time.Unix(1700000000, 0).UTC()}
+	_, err = env.store.AdmitMessage(ctx, "sess-1", entry, 8)
+	require.NoError(t, err)
+	require.NoError(t, env.store.ReleaseSession(ctx, "sess-1", "run-a"))
+
+	// Expire the run-key family: the queue list survives (no TTL), the meta
+	// does not.
+	mem := env.store.(*run.MemStore)
+	origNow := mem.Now
+	mem.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	_, ok, err := env.store.GetMeta(ctx, "trace-2") // triggers the lazy expiry
+	require.NoError(t, err)
+	require.False(t, ok, "meta should have expired")
+	mem.Now = origNow
+
+	// The reconciler continues the residue; the pumped turn rebuilds the
+	// FULL meta from the entry snapshot.
+	close(env.stub.release)
+	reconciler := NewQueueReconciler(env.streamH, 10*time.Millisecond)
+	reconciler.Start()
+	defer reconciler.Close()
+	require.Eventually(t, func() bool {
+		meta, ok, _ := env.store.GetMeta(ctx, "trace-2")
+		return ok && run.Terminal(meta.Status)
+	}, 3*time.Second, 10*time.Millisecond, "reconciled run never finalized")
+
+	meta, ok, err := env.store.GetMeta(ctx, "trace-2")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, run.StatusDone, meta.Status)
+	// The rebuilt meta carries the full ownership fields — a status-only
+	// stub would leave the cancel/events ownership checks 404-ing.
+	require.Equal(t, "sess-1", meta.SessionID)
+	require.Equal(t, "user-1", meta.UserID)
+	require.Equal(t, "test-model", meta.Model)
+	require.Equal(t, entry.EnqueuedAt.Format(time.RFC3339), meta.CreatedAt,
+		"the rebuild restores the enqueue-time creation timestamp")
+}
+
+// TestQueueReconciler_RotatesBeyondCap (review fix 4): with more queued
+// sessions than one cycle's cap, the handling window ROTATES — the tail
+// sessions get their TouchQueued keep-alive within later cycles instead of
+// being starved by a stable scan order.
+func TestQueueReconciler_RotatesBeyondCap(t *testing.T) {
+	store := newRecordingStore()
+	env := newQueueEnvWithStore(t, newQueueStub(), 8, store)
+	ctx := context.Background()
+
+	// Five sessions, each with a HELD claim (a long running turn) and one
+	// queued entry — nothing is pumpable, so the reconciler's only visible
+	// effect is the TTL keep-alive (TouchQueued), which the recorder tracks.
+	const sessions = 5
+	ids := make([]string, 0, sessions)
+	for i := 0; i < sessions; i++ {
+		sid := fmt.Sprintf("sess-%d", i)
+		ids = append(ids, sid)
+		rid := fmt.Sprintf("trace-%d", i)
+		_, _, err := store.ClaimSession(ctx, sid, "run-holder-"+rid)
+		require.NoError(t, err)
+		_, err = store.AdmitMessage(ctx, sid, run.QueueEntry{
+			RunID: rid, SessionID: sid, UserID: "user-1", Content: "q", Model: "test-model",
+		}, 8)
+		require.NoError(t, err)
+	}
+
+	reconciler := NewQueueReconciler(env.streamH, 10*time.Millisecond)
+	reconciler.maxSessions = 2
+	reconciler.Start()
+	defer reconciler.Close()
+
+	// With cap 2 and five sorted sessions, cycles 1-2 cover traces 0-3 and
+	// cycle 3 rotates onto the tail — the discriminating contract: EVERY
+	// queued run is covered within a few cycles. (Without the rotation the
+	// stable scan order would re-touch only traces 0-1 forever and the tail
+	// would starve — both its pump chances and its TTL keep-alive.)
+	_ = ids
+	require.Eventually(t, func() bool {
+		for i := 0; i < sessions; i++ {
+			if firstIndex(store.snapshot(), fmt.Sprintf("TouchQueued:trace-%d", i)) < 0 {
+				return false
+			}
+		}
+		return true
+	}, 1*time.Second, 10*time.Millisecond, "the rotation never covered the tail sessions")
 }

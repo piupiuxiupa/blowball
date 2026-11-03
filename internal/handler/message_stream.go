@@ -670,6 +670,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 	// pre-extraction behavior); the pump path mints its own at continuation
 	// time — see turn_start.go's turnRequestFromQueueEntry for the ordering
 	// rationale.
+	now := time.Now()
 	tr := &turnRequest{
 		sessionID:        sessionID,
 		userID:           userID,
@@ -678,8 +679,9 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		attachments:      userAttachments,
 		sel:              sel,
 		rawToken:         rawToken,
-		userMsgTime:      time.Now(),
+		userMsgTime:      now,
 		contextCompacted: sess.ContextCompacted,
+		metaCreatedAt:    now,
 	}
 
 	var started *startedTurn
@@ -705,35 +707,21 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 		} else {
 			switch res.Outcome {
 			case run.AdmitQueued:
-				// The message waits behind the running turn. Persist its
-				// observable state now — meta (status queued, so cancel and
-				// the events endpoint answer it correctly) and the queued
-				// event on the run log (so the SSE response below replays
-				// it and Last-Event-ID resume sees the wait as part of the
-				// run). The user message row is NOT written here: it lands
-				// at pump time inside startTurn (design D4 — an enqueue-
-				// time row would leak into the running turn's mid-turn
-				// compaction recovery and would sort before the previous
-				// turn's assistant rows).
+				// The message waits behind the running turn. AdmitMessage
+				// published its observable state ATOMICALLY with the RPUSH —
+				// meta (status queued, so cancel and the events endpoint
+				// answer it correctly) and the `queued` event on the run log
+				// — so a pump that consumes the entry the instant it is
+				// queued can never observe the initial state written late
+				// (an unconditional follow-up InitMeta could overwrite
+				// running or even done; review fix). The SSE response below
+				// replays the queued event, then tails (possibly for a long
+				// time) until the pump starts the turn; the user message row
+				// is NOT written here — it lands at pump time inside
+				// startTurn (design D4: an enqueue-time row would leak into
+				// the running turn's mid-turn compaction recovery and would
+				// sort before the previous turn's assistant rows).
 				claimsCommitted = true
-				if err := h.runs.Store.InitMeta(ctx, tid, run.RunMeta{
-					SessionID: sessionID,
-					UserID:    userID,
-					Status:    run.StatusQueued,
-					Model:     turnModel,
-					CreatedAt: tr.userMsgTime.Format(time.RFC3339),
-				}); err != nil {
-					logger.FromContext(ctx).Warn("queued run meta init failed",
-						zap.String("op", "handler.send_message"),
-						zap.String("run_id", tid),
-						zap.Error(err))
-				}
-				if err := h.runs.Store.AppendEvent(ctx, tid, stream.QueuedEvent(tid, res.Position)); err != nil {
-					logger.FromContext(ctx).Warn("queued event append failed",
-						zap.String("op", "handler.send_message"),
-						zap.String("run_id", tid),
-						zap.Error(err))
-				}
 				// The SSE response is just another subscription to this
 				// run's event log: it replays the queued event, then tails
 				// (possibly for a long time) until the pump starts the turn

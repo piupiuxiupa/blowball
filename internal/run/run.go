@@ -221,9 +221,15 @@ type Store interface {
 	// AdmitMessage atomically admits one queued-message candidate to a
 	// session: claims the session run slot when it is free AND the queue is
 	// empty (the caller must then start its turn immediately, exactly like a
-	// successful ClaimSession), otherwise appends the entry at the queue tail
-	// (AdmitQueued, Position = its 1-based depth), or reports AdmitFull when
-	// the queue already holds maxDepth entries.
+	// successful ClaimSession), otherwise — in the SAME atomic step as the
+	// RPUSH — initializes the run's meta (status queued, ownership and model
+	// fields from the entry) and appends the `queued` event to
+	// run:{rid}:events, so the entry is never consumable before its
+	// observable state exists (a pump that wins the race right after the
+	// admission can never see the initial state written late — review fix:
+	// an unconditional follow-up InitMeta could overwrite running/done).
+	// Reports AdmitQueued (Position = the entry's 1-based depth) or
+	// AdmitFull when the queue already holds maxDepth entries.
 	AdmitMessage(ctx context.Context, sessionID string, entry QueueEntry, maxDepth int) (AdmitResult, error)
 
 	// PumpHead atomically pops the queue head and transfers the session claim
@@ -252,8 +258,12 @@ type Store interface {
 	// outlast RunKeyTTL, and the reconciler keeps the replay surface alive.
 	TouchQueued(ctx context.Context, runID string) error
 
-	// ClearQueue drops every queued entry of the session (session deletion;
-	// entries are not message rows and are never archived).
+	// ClearQueue drops every queued entry of the session (session deletion)
+	// AND terminates each dropped entry's run — status cancelled plus the
+	// terminal retain window — so subscribers tailing those runs close
+	// promptly instead of waiting out the meta TTL (the entries can never be
+	// pumped after the clear). Entries are not message rows and are never
+	// archived.
 	ClearQueue(ctx context.Context, sessionID string) error
 
 
