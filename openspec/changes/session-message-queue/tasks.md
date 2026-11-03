@@ -64,3 +64,13 @@
 - [x] 10.1 `test/integration/`：全链路排队场景——运行中连续发 B/C、按序接续、每条独立 model/effort、取消排队消息、取消当前轮后队列继续、深度上限、停机跳过接续、崩溃残留 reconciler 接续
 - [x] 10.2 队列禁用回归：现有集成测试全量通过（byte-for-byte 行为保持的最终验收）
 - [x] 10.3 `make lint && make test` 全绿；按组提交 Conventional Commits（feat(queue): …）
+
+## 11. 评审修复（review round 1）
+
+- [x] 11.1 [P1] startTurn 在发布 running 前先同步心跳（queued 订阅者的死 run 检测窗口关闭）
+- [x] 11.2 [P1] DequeueMessage 用原子 LREM 计数判定真实出队（与 pump 竞争时不得误报 cancelled）
+- [x] 11.3 [P2] 入队原子化：admit Lua 同步发布 entry + meta(queued) + queued 事件（消费开始后不得回写初始状态）
+- [x] 11.4 [P2] reconciler 轮换处理起点（尾部会话不再饥饿，TouchQueued 全覆盖）
+- [x] 11.5 [P2] fromQueue 的 meta 过期时从 QueueEntry 重建完整 RunMeta（cancel/events 归属校验不再 404）
+- [x] 11.6 [P2] ClearQueue 终结被丢弃的 queued run（cancelled + retain 窗口），等待中的 SSE 收流
+- [x] 11.7 回归：make test 全量 + 新增行为级测试（顺序钉死、原子入队 pin、轮换、重建、终结）
