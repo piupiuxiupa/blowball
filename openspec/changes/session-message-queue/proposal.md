@@ -16,7 +16,7 @@
 - **用户行落库时机**：排队消息的用户消息行在 **pump 起轮时**（认领之后、orchestrator 之前）写入——保持 send-time persist 的「写在 turn 全部历史读之后」不变量，并规避 mid-turn compaction `RecoverDurable` 把排队消息捞进运行中 turn 上下文的泄漏。等待期的消息不在 `GET /messages`，由新队列读 API 呈现。
 - **队列读 API** `GET /api/v1/sessions/:session_id/queue`（前端刷新后恢复 pending 气泡的权威渠道）；session 列表/详情 additive 增补 `queued_count`。
 - **深度上限**：`messages.queue.max_depth`（默认 8），满时 409 `QUEUE_FULL`；输入校验（1MB body、token 估算、model/effort 解析、附件校验）全部在入队前完成，即时 400。
-- **配置与回滚**：`messages.queue: {enabled: false, max_depth: 8}` 默认关——关闭时 409 行为 byte-for-byte 不变，回滚 = 关开关（zero-behavior-change 约定）。
+- **配置与回退**：`messages.queue: {enabled: false, max_depth: 8}` 默认关——关闭时 409 行为 byte-for-byte 不变，回退 = 关开关（zero-behavior-change 约定）。
 - **每条消息一轮**：接续轮与今天的 POST 轮共用同一条"起轮"路径——title cadence 照算（pump 时触发）、memory recall 在 pump 时查询（此时上一轮答案已在历史）、turn-start 压缩检查、`turn_usage`、独立 model/effort 全部照旧。
 - **会话删除**：`DeleteSession` 顺带清除 `queue:{sid}`。
 
@@ -24,7 +24,7 @@
 
 ### New Capabilities
 
-- `session-message-queue`: 会话内消息排队与自动接续——admission/pump FIFO 语义、队列存储与条目快照、queued run 状态与 `queued` SSE 事件、接续驱动（pump + reconciler）、排队消息的落库时机、深度上限与 `QUEUE_FULL`、队列读 API、`messages.queue` 配置与回滚、崩溃/停机/删除语义。
+- `session-message-queue`: 会话内消息排队与自动接续——admission/pump FIFO 语义、队列存储与条目快照、queued run 状态与 `queued` SSE 事件、接续驱动（pump + reconciler）、排队消息的落库时机、深度上限与 `QUEUE_FULL`、队列读 API、`messages.queue` 配置与回退、崩溃/停机/删除语义。
 
 ### Modified Capabilities
 

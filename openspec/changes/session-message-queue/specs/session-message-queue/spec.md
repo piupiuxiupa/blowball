@@ -165,13 +165,13 @@
 #### Scenario: 取消排队中的消息
 
 - **WHEN** 用户对 queued 状态的 run 调用取消端点
-- **THEN** 条目出队、状态置 `cancelled`、附件 staged claim 回滚
+- **THEN** 条目出队、状态置 `cancelled`、附件绑定与文件原样保留（保守生命周期，随会话删除清理）
 - **AND** 等待该 run 的 SSE 订阅按终局语义收流
 
 #### Scenario: 取消与接续竞争
 
 - **WHEN** 取消在扫描队列后、原子移除前，pump 弹出该条目并开始其 turn
-- **THEN** 移除实际未发生（删除计数为 0），系统 SHALL NOT 报告 cancelled 或回滚附件
+- **THEN** 移除实际未发生（删除计数为 0），系统 SHALL NOT 报告 cancelled
 - **AND** 端点按 run 的当前状态作答，客户端重试后走运行中取消路径
 
 #### Scenario: 取消当前轮后队列继续
@@ -211,7 +211,7 @@
 
 ### Requirement: 队列配置与回退
 
-`messages.queue.enabled` SHALL 默认为 false：省略或关闭时，消息发送路径行为 SHALL 与既有行为完全一致（运行中 turn 的会话 POST 返回 409 `SESSION_BUSY`，无队列读写、无 queued 状态与 `queued` 事件、无 reconciler）。`messages.queue.max_depth` SHALL 为正整数（默认 8），非正值 SHALL 在配置加载时被拒绝。回滚 SHALL 只需关闭开关并重启 agent 角色进程。
+`messages.queue.enabled` SHALL 默认为 false：省略或关闭时，消息发送路径行为 SHALL 与既有行为完全一致（运行中 turn 的会话 POST 返回 409 `SESSION_BUSY`，无队列读写、无 queued 状态与 `queued` 事件、无 reconciler）。`messages.queue.max_depth` SHALL 为正整数（默认 8），非正值 SHALL 在配置加载时被拒绝。回退 SHALL 只需关闭开关并重启 agent 角色进程。
 
 #### Scenario: 默认关闭行为不变
 
