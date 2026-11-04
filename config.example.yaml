@@ -194,6 +194,19 @@ messages:
   #   enabled: true
   #   max_depth: 8   # 409 QUEUE_FULL beyond this; positive, no "0 = disable"
 
+# Persistent scheduled agent tasks. Default OFF: task management APIs still
+# work after migration 026 is applied, but no background materialization,
+# recovery, or execution starts. Enable only on agent/all processes (the api
+# role never starts a scheduler). Existing databases must apply
+# migrations/026_scheduled_agent_tasks.sql manually before enabling.
+# Rollback: set enabled: false and restart agent processes in order; retain
+# the tables/history and do not replay consumed slots.
+scheduled_tasks:
+  enabled: false
+  # poll_interval: 5s       # positive; bounded 100-record scans
+  # max_concurrent: 4       # positive; per Agent process, not a chat resource partition
+  # max_run_duration: 10m   # positive; starts at the startup fence, partial output is preserved
+
 # Cross-session long-term memory backed by an external OpenViking server
 # (cross-session-memory capability; auto-only v1: recall at turn start,
 # capture at turn end — the model makes zero tool calls). Default OFF: omit

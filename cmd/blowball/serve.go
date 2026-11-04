@@ -32,6 +32,7 @@ import (
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/run"
+	"github.com/lush/blowball/internal/scheduler"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/storage"
@@ -213,7 +214,7 @@ func serve(configPath, dataRoot, role string) error {
 	// queued heads — entries survive in Redis for the post-restart reconciler.
 	if queueStop != nil {
 		queueStop()
-		log.Info("session message queue reconciler stopped", zap.String("role", role))
+		log.Info("agent turn admission and scheduler stopped", zap.String("role", role))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
@@ -786,29 +787,49 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	turnRunHandler := handler.NewTurnRunHandler(runMgr)
 	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn, rt.mcpMarket)
 
+	// Optional scheduled-agent runtime. Only agent/all reaches this builder, so
+	// the api role stays CRUD-only and a combined role starts exactly one
+	// scheduler sharing the same turn executor and run registry.
+	var scheduledRuntime *scheduler.Scheduler
+	if cfg.ScheduledTasks.Enabled {
+		scheduledRuntime = scheduler.New(scheduler.Dependencies{
+			Store: rt.mysqlStore, Turns: streamHandler.TurnExecutor(), Sessions: sessSvc,
+			Tokens: service.NewExecutionTokenIssuer(cfg.JWT.Secret, cfg.ScheduledTasks.MaxRunDurationValue()+2*time.Minute),
+			Runs:   runMgr, ModelSelection: handler.NewModelSelectionConfig(cfg),
+			Config: scheduler.Config{
+				PollInterval: cfg.ScheduledTasks.PollIntervalValue(), LeaseDuration: 30 * time.Second,
+				MaxRunDuration: cfg.ScheduledTasks.MaxRunDurationValue(), MaxConcurrent: cfg.ScheduledTasks.MaxConcurrentValue(),
+				ScanBatch: 100, MaxAttempts: 3, RetryBackoff: time.Second,
+			},
+		})
+		scheduledRuntime.Start()
+		log.Info("scheduled agent task runtime started", zap.String("role", rt.role))
+	}
+
 	// Session message queue (session-message-queue, messages.queue): default
-	// OFF — every line below is skipped and the send path keeps the 409
-	// SESSION_BUSY behavior byte-for-byte. Enabled: queue admission replaces
-	// the busy rejection, the turn goroutine's tail pumps the queued head,
-	// and the reconciler (agent role only) drains crash residue + re-arms
-	// queued-run TTLs.
-	var queueStop func()
+	// OFF — enablement is confined to this opt-in block. The stop closure is
+	// always present because the scheduler shares the same shutdown gate even
+	// when the interactive FIFO is disabled.
+	var queueReconciler *handler.QueueReconciler
 	if cfg.Messages.Queue.Enabled {
 		streamHandler.EnableMessageQueue(cfg.Messages.QueueMaxDepthLimit())
-		reconciler := handler.NewQueueReconciler(streamHandler, 0)
-		reconciler.Start()
-		queueStop = func() {
-			// Gate new turns FIRST so the shutdown-bound cancels cannot pump
-			// the queued head as the process goes down; in-flight pump
-			// STARTUPS are cancelled through the gate's context and return
-			// their popped entries to the queue; then park the reconciler
-			// and wait for the startups to settle — the pop→spawn window is
-			// invisible to CancelAll/WaitAll (Register happens after the
-			// send-time persistence), so without this barrier a slow
-			// preparation could spawn a turn after the drain or lose the
-			// popped entry at exit (review fix, round 3).
-			streamHandler.StopNewTurns()
-			reconciler.Close()
+		queueReconciler = handler.NewQueueReconciler(streamHandler, 0)
+		queueReconciler.Start()
+	}
+	var queueStop func()
+	queueStop = func() {
+		// Gate new interactive/background turns FIRST so no new turn can cross
+		// a startup fence while shutdown drains existing work.
+		streamHandler.StopNewTurns()
+		if scheduledRuntime != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+			if err := scheduledRuntime.Shutdown(ctx); err != nil {
+				log.Warn("scheduler shutdown wait timed out; proceeding", zap.Error(err))
+			}
+			cancel()
+		}
+		if queueReconciler != nil {
+			queueReconciler.Close()
 			if !streamHandler.WaitForStartupPumps(15 * time.Second) {
 				log.Warn("queue pump startups still in flight at shutdown bound; entries may requeue after exit",
 					zap.String("role", rt.role))

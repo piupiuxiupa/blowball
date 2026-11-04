@@ -376,7 +376,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	// the login token, which flows from here into every tool execution ctx so
 	// luban/executor market lookups survive the HTTP request's lifetime.
 	turnCtx, turnCancel := context.WithCancel(context.Background())
-	turnCtx = skillmarket.WithToken(agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID), req.RawToken)
+	turnCtx = skillmarket.WithToken(agent.WithUserID(agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID), agent.UserIDFromContext(ctx)), req.RawToken)
 	regRun := e.runs.Registry.Register(tid, turnCancel)
 
 	workspaceRoot := filepath.Join(e.dataDir, userID, "workspace")

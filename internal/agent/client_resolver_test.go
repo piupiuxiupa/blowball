@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -135,6 +137,42 @@ func TestClientResolver_TokenUpdateTakesEffectOnNextCall(t *testing.T) {
 	resp, err := r.StreamChat(userCtx("user-1"), LLMRequest{Model: "gpt-5"}, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "from fallback", resp.Content)
+}
+
+func TestClientResolver_ConfiguredTokenFailureDoesNotFallback(t *testing.T) {
+	tokens := &fakeTokenStore{}
+	tokens.set("user-1", "sk-invalid-user-token")
+	fallback := newFake(fakeResponse{content: "from fallback"})
+	factory := &recordingFactory{fake: newFake(fakeResponse{err: errors.New("401 unauthorized")})}
+	r := NewClientResolver(fallback, config.OpenAIConfig{APIKey: "sk-global"}, nil, tokens)
+	r.SetClientFactory(factory.build)
+
+	_, err := r.StreamChat(userCtx("user-1"), LLMRequest{Model: "gpt-5"}, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unauthorized")
+	assert.Empty(t, fallback.calls, "an authenticated user-token failure must never retry against the global key")
+}
+
+func TestClientResolver_ConfiguredTokenNeverAppearsInRawCapture(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseSuccessBody))
+	}))
+	defer srv.Close()
+	const userToken = "sk-raw-capture-secret"
+	tokens := &fakeTokenStore{}
+	tokens.set("user-1", userToken)
+	sink := &fakeCaptureSink{}
+	resolver := NewClientResolver(newFake(), config.OpenAIConfig{BaseURL: srv.URL}, sink, tokens)
+	resolver.SetClientFactory(func(cfg config.OpenAIConfig, sink RawCaptureSink) LLMClient {
+		return NewOpenAIClientWithSink(cfg, sink)
+	})
+
+	_, err := resolver.StreamChat(userCtx("user-1"), LLMRequest{Model: "gpt-test"}, nil, nil)
+	require.NoError(t, err)
+	for _, rec := range sink.snapshot() {
+		assert.NotContains(t, rec.Raw, userToken, "raw request/response capture must never include the credential")
+	}
 }
 
 func TestClientResolver_StoreErrorFailsExplicitly(t *testing.T) {

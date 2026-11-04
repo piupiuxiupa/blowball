@@ -114,6 +114,45 @@ func (s *SessionService) CreateSession(ctx context.Context, userID string) (stri
 	return sessionID, nil
 }
 
+// EnsureSessionWithID idempotently prepares a caller-reserved session. A
+// repeated preparation returns the same owner session; an existing session
+// belonging to another user is rejected. A concurrent insert that loses the
+// race succeeds only after the same owner row is visible.
+func (s *SessionService) EnsureSessionWithID(ctx context.Context, userID, sessionID, traceID string) (*model.Session, error) {
+	if userID == "" || sessionID == "" {
+		return nil, fmt.Errorf("session.ensure: user and session ids are required")
+	}
+	existing, err := s.mysql.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		if existing.UserID != userID {
+			return nil, fmt.Errorf("session.ensure: owner mismatch")
+		}
+		return existing, nil
+	}
+	if err := s.fs.EnsureUserDirs(ctx, userID); err != nil {
+		return nil, fmt.Errorf("session.ensure: user dirs: %w", err)
+	}
+	sess := model.Session{SessionID: sessionID, UserID: userID, TraceID: traceID}
+	if err := s.mysql.CreateSession(ctx, sess); err != nil {
+		existing, lookupErr := s.mysql.GetSessionByID(ctx, sessionID)
+		if lookupErr == nil && existing != nil && existing.UserID == userID {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("session.ensure: persist: %w", err)
+	}
+	created, err := s.mysql.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if created == nil {
+		return nil, fmt.Errorf("session.ensure: created row is not readable")
+	}
+	return created, nil
+}
+
 // GetSessionByID returns the session matching sessionID. It is a thin wrapper
 // over the MySQL store so handlers can validate ownership without importing
 // the store package.

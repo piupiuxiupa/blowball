@@ -31,6 +31,16 @@ func TestFilterEnv(t *testing.T) {
 	}
 }
 
+func TestFilterEnvDoesNotForwardExecutionJWT(t *testing.T) {
+	t.Setenv("BLOWBALL_EXECUTION_JWT", "sk-runtime-secret")
+	got := filterEnv([]string{"PATH", "PYTHON*"})
+	for name, value := range got {
+		if name == "BLOWBALL_EXECUTION_JWT" || value == "sk-runtime-secret" {
+			t.Fatalf("execution JWT leaked into bash environment at %s", name)
+		}
+	}
+}
+
 func TestFilterEnvEmptyPatterns(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	got := filterEnv(nil)

@@ -18,24 +18,25 @@ import (
 
 // Config is the root configuration tree mirroring config.yaml.
 type Config struct {
-	Server      ServerConfig      `yaml:"server"`
-	OpenAI      OpenAIConfig      `yaml:"openai"`
-	MySQL       MySQLConfig       `yaml:"mysql"`
-	Redis       RedisConfig       `yaml:"redis"`
-	Auth        AuthConfig        `yaml:"auth"`
-	JWT         JWTConfig         `yaml:"jwt"`
-	Agents      AgentsConfig      `yaml:"agents"`
-	Tools       ToolsConfig       `yaml:"tools"`
-	MCP         MCPConfig         `yaml:"mcp"`
-	Landlock    LandlockConfig    `yaml:"landlock"`
-	Logging     LoggingConfig     `yaml:"logging"`
-	OnlyOffice  OnlyOfficeConfig  `yaml:"onlyoffice"`
-	Artifact    ArtifactConfig    `yaml:"artifact"`
-	Storage     StorageConfig     `yaml:"storage"`
-	Messages    MessagesConfig    `yaml:"messages"`
-	Memory      MemoryConfig      `yaml:"memory"`
-	SkillMarket SkillMarketConfig `yaml:"skill_market"`
-	MCPMarket   MCPMarketConfig   `yaml:"mcp_market"`
+	Server         ServerConfig         `yaml:"server"`
+	OpenAI         OpenAIConfig         `yaml:"openai"`
+	MySQL          MySQLConfig          `yaml:"mysql"`
+	Redis          RedisConfig          `yaml:"redis"`
+	Auth           AuthConfig           `yaml:"auth"`
+	JWT            JWTConfig            `yaml:"jwt"`
+	Agents         AgentsConfig         `yaml:"agents"`
+	Tools          ToolsConfig          `yaml:"tools"`
+	MCP            MCPConfig            `yaml:"mcp"`
+	Landlock       LandlockConfig       `yaml:"landlock"`
+	Logging        LoggingConfig        `yaml:"logging"`
+	OnlyOffice     OnlyOfficeConfig     `yaml:"onlyoffice"`
+	Artifact       ArtifactConfig       `yaml:"artifact"`
+	Storage        StorageConfig        `yaml:"storage"`
+	Messages       MessagesConfig       `yaml:"messages"`
+	ScheduledTasks ScheduledTasksConfig `yaml:"scheduled_tasks"`
+	Memory         MemoryConfig         `yaml:"memory"`
+	SkillMarket    SkillMarketConfig    `yaml:"skill_market"`
+	MCPMarket      MCPMarketConfig      `yaml:"mcp_market"`
 }
 
 // WorkspaceBackendLocal is the default workspace storage backend: per-user
@@ -198,6 +199,52 @@ func (m MessagesConfig) validate() error {
 	}
 	if m.Queue.MaxDepth != nil && *m.Queue.MaxDepth <= 0 {
 		return fmt.Errorf("messages.queue.max_depth: must be positive (got %d)", *m.Queue.MaxDepth)
+	}
+	return nil
+}
+
+// ScheduledTasksConfig controls the optional in-agent scheduler. Pointer
+// fields distinguish omission (use defaults) from an explicitly invalid zero.
+type ScheduledTasksConfig struct {
+	Enabled        bool           `yaml:"enabled"`
+	PollInterval   *time.Duration `yaml:"poll_interval"`
+	MaxConcurrent  *int           `yaml:"max_concurrent"`
+	MaxRunDuration *time.Duration `yaml:"max_run_duration"`
+}
+
+func (c ScheduledTasksConfig) PollIntervalValue() time.Duration {
+	if c.PollInterval != nil {
+		return *c.PollInterval
+	}
+	return 5 * time.Second
+}
+
+func (c ScheduledTasksConfig) MaxConcurrentValue() int {
+	if c.MaxConcurrent != nil {
+		return *c.MaxConcurrent
+	}
+	return 4
+}
+
+func (c ScheduledTasksConfig) MaxRunDurationValue() time.Duration {
+	if c.MaxRunDuration != nil {
+		return *c.MaxRunDuration
+	}
+	return 10 * time.Minute
+}
+
+func (c ScheduledTasksConfig) validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.PollInterval != nil && *c.PollInterval <= 0 {
+		return fmt.Errorf("scheduled_tasks.poll_interval: must be positive")
+	}
+	if c.MaxConcurrent != nil && *c.MaxConcurrent <= 0 {
+		return fmt.Errorf("scheduled_tasks.max_concurrent: must be positive")
+	}
+	if c.MaxRunDuration != nil && *c.MaxRunDuration <= 0 {
+		return fmt.Errorf("scheduled_tasks.max_run_duration: must be positive")
 	}
 	return nil
 }
@@ -1831,6 +1878,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Messages.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.ScheduledTasks.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Memory.validate(); err != nil {
