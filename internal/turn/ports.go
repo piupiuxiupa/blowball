@@ -1,4 +1,4 @@
-package handler
+package turn
 
 import (
 	"context"
@@ -132,6 +132,14 @@ func (t *TurnEventTap) serve(reply chan []stream.StreamEvent, events []stream.St
 	reply <- out
 }
 
+// Serve replies to one snapshot request from an adapter implementation.
+func (t *TurnEventTap) Serve(reply chan []stream.StreamEvent, events []stream.StreamEvent) {
+	t.serve(reply, events)
+}
+
+// Done closes when the event-collection goroutine exits.
+func (t *TurnEventTap) Done() <-chan struct{} { return t.done }
+
 // close marks the tap dead; pending and future Snapshots return nil.
 func (t *TurnEventTap) close() {
 	t.closeOnce.Do(func() { close(t.done) })
@@ -145,6 +153,12 @@ func (t *TurnEventTap) requests() chan chan []stream.StreamEvent {
 	}
 	return t.reqCh
 }
+
+// Close exposes tap teardown to transport-adapter test doubles.
+func (t *TurnEventTap) Close() { t.close() }
+
+// Requests exposes the snapshot request channel to adapter implementations.
+func (t *TurnEventTap) Requests() chan chan []stream.StreamEvent { return t.requests() }
 
 // orchestratorAdapter wraps a *agent.Orchestrator to satisfy OrchestratorRunner.
 // The underlying orchestrator's Handle returns only an error; we recover the
@@ -160,9 +174,11 @@ func (t *TurnEventTap) requests() chan chan []stream.StreamEvent {
 // innerRunner is the adapter's seam around the concrete orchestrator: exactly
 // the (*agent.Orchestrator).Handle signature. Tests substitute a fake that
 // writes canned events instead of driving the real agent loop.
-type innerRunner interface {
+type InnerRunner interface {
 	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, override agent.ModelOverride) error
 }
+
+type innerRunner = InnerRunner
 
 // budgetedInnerRunner is the optional extension used when a turn installs the
 // request estimator. Keeping it separate from innerRunner preserves every
@@ -183,6 +199,11 @@ type orchestratorAdapter struct {
 // The agent-role bootstrap should pass the result to NewMessageStreamHandler.
 func NewOrchestratorAdapter(o *agent.Orchestrator) OrchestratorRunner {
 	return &orchestratorAdapter{inner: o}
+}
+
+// NewOrchestratorAdapterFromRunner wraps the small runner seam directly.
+func NewOrchestratorAdapterFromRunner(inner InnerRunner) OrchestratorRunner {
+	return &orchestratorAdapter{inner: inner}
 }
 
 // Handle implements OrchestratorRunner.

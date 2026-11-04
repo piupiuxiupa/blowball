@@ -319,13 +319,13 @@ func TestStitchCompacted_RecallPairMiddleAndTail(t *testing.T) {
 	inj := newRecallInjection("sess-1", "trace-r", "question", res)
 
 	rows := append(compactionRows(2), []model.Message{
-		{ID: 5, MsgTime: msgTime.Add(10 * time.Minute), MsgIndex: -1, SessionID: "sess-1", Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: recallToolName, TraceID: "trace-r", ClientMsgID: "trace-r:-1", ToolCallID: inj.callID},
+		{ID: 5, MsgTime: msgTime.Add(10 * time.Minute), MsgIndex: -1, SessionID: "sess-1", Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeToolCall, Content: recallToolName, TraceID: "trace-r", ClientMsgID: "trace-r:-1", ToolCallID: inj.CallID()},
 		{ID: 6, MsgTime: msgTime.Add(10 * time.Minute), MsgIndex: 0, SessionID: "sess-1", Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "recall turn", TraceID: "trace-r"},
 		{ID: 7, MsgTime: msgTime.Add(11 * time.Minute), MsgIndex: 1, SessionID: "sess-1", Agent: model.AgentConfucius, Role: model.RoleAssistant, EventType: model.EventTypeMessage, Content: "recall answer", TraceID: "trace-r"},
 	}...)
 	calls := []model.ToolCall{{
-		SessionID: "sess-1", TurnID: "trace-r", ToolCallID: inj.callID,
-		Name: recallToolName, Arguments: inj.args, Result: inj.frame,
+		SessionID: "sess-1", TurnID: "trace-r", ToolCallID: inj.CallID(),
+		Name: recallToolName, Arguments: inj.Args(), Result: inj.Frame(),
 		Status: model.ToolCallStatusCompleted,
 	}}
 	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(rows, calls)
@@ -373,7 +373,7 @@ func TestStitchCompacted_RecallPairMiddleAndTail(t *testing.T) {
 		if m.Role == "tool" && m.Name == recallToolName {
 			found = true
 			assert.Contains(t, m.Content, "<user-memories>")
-			assert.Equal(t, inj.callID, m.ToolCallID)
+			assert.Equal(t, inj.CallID(), m.ToolCallID)
 		}
 	}
 	assert.True(t, found, "a tail recall pair must survive compaction verbatim")
@@ -476,12 +476,12 @@ func TestBudgetedRoundHook_ExplicitTurnStartForceUsesTurnStartTrigger(t *testing
 	tap := NewTurnEventTap()
 	go func() {
 		select {
-		case req := <-tap.requests():
-			tap.serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
-		case <-tap.done:
+		case req := <-tap.Requests():
+			tap.Serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
+		case <-tap.Done():
 		}
 	}()
-	defer tap.close()
+	defer tap.Close()
 	hook := env.stream.newBudgetedRoundHook(tap, turnPersistInfo{
 		sessionID: "sess-1", userID: "user-1", traceID: "trace-1",
 	}, &turnFlushState{}, 100000, 80000, "gpt-test")
@@ -518,12 +518,12 @@ func TestBudgetedRoundHook_ReturnsDurableLiveProjection(t *testing.T) {
 	tap := NewTurnEventTap()
 	go func() {
 		select {
-		case req := <-tap.requests():
-			tap.serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
-		case <-tap.done:
+		case req := <-tap.Requests():
+			tap.Serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
+		case <-tap.Done():
 		}
 	}()
-	defer tap.close()
+	defer tap.Close()
 	hook := env.stream.newBudgetedRoundHook(tap, turnPersistInfo{
 		sessionID: "sess-1", userID: "user-1", traceID: "trace-live",
 	}, &turnFlushState{}, 100000, 80000, "gpt-test")
@@ -586,13 +586,13 @@ func TestTurnEventTap_SnapshotAndClose(t *testing.T) {
 	ctx := context.Background()
 
 	go func() {
-		req := <-tap.requests()
-		tap.serve(req, []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "x")})
+		req := <-tap.Requests()
+		tap.Serve(req, []stream.StreamEvent{stream.TokenEvent(stream.AgentConfucius, "x")})
 	}()
 	got := tap.Snapshot(ctx)
 	require.Len(t, got, 1)
 
-	tap.close()
+	tap.Close()
 	require.Nil(t, tap.Snapshot(ctx), "closed tap must yield nil snapshots")
 }
 
@@ -630,8 +630,8 @@ func TestBudgetedRoundHook_triggersCompactionBeforeHardLimit(t *testing.T) {
 	h := env.stream
 	tap := NewTurnEventTap()
 	go func() {
-		req := <-tap.requests()
-		tap.serve(req, nil)
+		req := <-tap.Requests()
+		tap.Serve(req, nil)
 	}()
 	persist := turnPersistInfo{sessionID: "sess-1", userID: "user-1", traceID: "trace-1"}
 	flushed := &turnFlushState{}
@@ -650,12 +650,12 @@ func TestBudgetedRoundHook_ZeroUsageDoesNotForceCompaction(t *testing.T) {
 	tap := NewTurnEventTap()
 	go func() {
 		select {
-		case req := <-tap.requests():
-			tap.serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
-		case <-tap.done:
+		case req := <-tap.Requests():
+			tap.Serve(req, []stream.StreamEvent{stream.AgentStartEvent(stream.AgentConfucius)})
+		case <-tap.Done():
 		}
 	}()
-	defer tap.close()
+	defer tap.Close()
 	hook := env.stream.newBudgetedRoundHook(tap, turnPersistInfo{
 		sessionID: "sess-1", userID: "user-1", traceID: "trace-1",
 	}, &turnFlushState{}, 100000, 80000, "gpt-test")

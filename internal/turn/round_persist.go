@@ -1,4 +1,4 @@
-package handler
+package turn
 
 import (
 	"encoding/json"
@@ -10,13 +10,13 @@ import (
 	"github.com/lush/blowball/internal/stream"
 )
 
-// roundBatch is one round-boundary persistence unit (refactor-message-
+// RoundBatch is one round-boundary persistence unit (refactor-message-
 // storage): the assistant final row, one tiny tool PLACEHOLDER row per call
 // (the positional anchor in the messages stream), and the canonical
 // tool_calls payload rows — all written in a single cross-table transaction.
-type roundBatch struct {
-	msgs  []model.Message
-	calls []model.ToolCall
+type RoundBatch struct {
+	Msgs  []model.Message
+	Calls []model.ToolCall
 }
 
 // roundState accumulates one LLM round while walking the merged event
@@ -37,14 +37,14 @@ func newRoundState(firstOrd int) *roundState {
 	return &roundState{firstOrd: firstOrd, callOrd: map[string]int{}}
 }
 
-// roundRenderOptions selects what the renderer closes.
-type roundRenderOptions struct {
+// RoundRenderOptions selects what the renderer closes.
+type RoundRenderOptions struct {
 	// terminal closes the final round even without a following-round token
 	// (turn end, or the compaction hook flushing at a round boundary).
-	terminal bool
+	Terminal bool
 	// interrupted marks the LAST emitted assistant row as truncated
 	// (cancel / provider-error path).
-	interrupted bool
+	Interrupted bool
 }
 
 // buildRoundFinalBatch renders final rows for merged[from:] plus the user row
@@ -62,21 +62,21 @@ type roundRenderOptions struct {
 // stream). The second return value is the merged ordinal consumed; the
 // caller advances the shared cursor only on persist success, and the
 // deterministic client_msg_id {trace}:{ordinal} collapses any redelivery.
-func (p turnPersistInfo) buildRoundFinalBatch(
+func (p PersistInfo) BuildRoundFinalBatch(
 	merged []stream.StreamEvent,
 	from int,
 	userPersisted bool,
 	now time.Time,
-	opts roundRenderOptions,
-) (roundBatch, int) {
-	var batch roundBatch
+	opts RoundRenderOptions,
+) (RoundBatch, int) {
+	var batch RoundBatch
 	consumed := from
 
 	if from > len(merged) {
 		from = len(merged)
 	}
 	if from == 0 && !userPersisted {
-		batch.msgs = append(batch.msgs, UserMessage(p.sessionID, p.traceID, p.userContent, p.userMsgTime, p.userAttachments...))
+		batch.Msgs = append(batch.Msgs, UserMessage(p.SessionID, p.TraceID, p.UserContent, p.UserMsgTime, p.UserAttachments...))
 	}
 
 	// spawnInstances maps a spawn tool_call id to the sub-agent instance it
@@ -92,11 +92,11 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			return
 		}
 		status := ""
-		if opts.interrupted && last {
+		if opts.Interrupted && last {
 			status = model.MessageStatusInterrupted
 		}
-		batch.msgs = append(batch.msgs, model.Message{
-			SessionID:        p.sessionID,
+		batch.Msgs = append(batch.Msgs, model.Message{
+			SessionID:        p.SessionID,
 			MsgTime:          now,
 			Agent:            model.AgentConfucius,
 			MsgIndex:         r.firstOrd,
@@ -105,8 +105,8 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			Status:           status,
 			Content:          r.content.String(),
 			ReasoningContent: r.reasoning.String(),
-			TraceID:          p.traceID,
-			ClientMsgID:      deterministicClientMsgID(p.traceID, r.firstOrd),
+			TraceID:          p.TraceID,
+			ClientMsgID:      deterministicClientMsgID(p.TraceID, r.firstOrd),
 		})
 		for i, c := range r.calls {
 			// A tool-first round opens on the same ordinal as its first call;
@@ -116,16 +116,16 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			if ord < from {
 				continue // placeholder already persisted by an earlier render
 			}
-			batch.msgs = append(batch.msgs, model.Message{
-				SessionID:   p.sessionID,
+			batch.Msgs = append(batch.Msgs, model.Message{
+				SessionID:   p.SessionID,
 				MsgTime:     now,
 				Agent:       model.AgentConfucius,
 				MsgIndex:    ord,
 				Role:        model.RoleAssistant,
 				EventType:   model.EventTypeToolCall,
 				Content:     c.Name,
-				TraceID:     p.traceID,
-				ClientMsgID: deterministicClientMsgID(p.traceID, ord),
+				TraceID:     p.TraceID,
+				ClientMsgID: deterministicClientMsgID(p.TraceID, ord),
 				ToolCallID:  c.ToolCallID,
 				// A spawn placeholder carries the dispatched instance id:
 				// the frontend's lazy-load link into the sub-agent
@@ -139,19 +139,19 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			if ord < from {
 				continue
 			}
-			batch.msgs = append(batch.msgs, model.Message{
-				SessionID:   p.sessionID,
+			batch.Msgs = append(batch.Msgs, model.Message{
+				SessionID:   p.SessionID,
 				MsgTime:     now,
 				Agent:       model.AgentConfucius,
 				MsgIndex:    ord,
 				Role:        "",
 				EventType:   model.EventTypeAgentError,
 				Content:     r.errMsg[j],
-				TraceID:     p.traceID,
-				ClientMsgID: deterministicClientMsgID(p.traceID, ord),
+				TraceID:     p.TraceID,
+				ClientMsgID: deterministicClientMsgID(p.TraceID, ord),
 			})
 		}
-		batch.calls = append(batch.calls, r.calls...)
+		batch.Calls = append(batch.Calls, r.calls...)
 	}
 
 	// Walk the whole stream so ordinals are render-independent; emit is
@@ -210,8 +210,8 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			}
 			cur.callOrd[id] = len(cur.calls)
 			cur.calls = append(cur.calls, model.ToolCall{
-				SessionID:  p.sessionID,
-				TurnID:     p.traceID,
+				SessionID:  p.SessionID,
+				TurnID:     p.TraceID,
 				ToolCallID: id,
 				Name:       e.Content,
 				Arguments:  args,
@@ -235,16 +235,16 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 				if i < from {
 					continue
 				}
-				batch.msgs = append(batch.msgs, model.Message{
-					SessionID:   p.sessionID,
+				batch.Msgs = append(batch.Msgs, model.Message{
+					SessionID:   p.SessionID,
 					MsgTime:     now,
 					Agent:       model.AgentConfucius,
 					MsgIndex:    i,
 					Role:        "",
 					EventType:   model.EventTypeAgentError,
 					Content:     e.Content,
-					TraceID:     p.traceID,
-					ClientMsgID: deterministicClientMsgID(p.traceID, i),
+					TraceID:     p.TraceID,
+					ClientMsgID: deterministicClientMsgID(p.TraceID, i),
 				})
 				if i+1 > consumed {
 					consumed = i + 1
@@ -257,27 +257,27 @@ func (p turnPersistInfo) buildRoundFinalBatch(
 			cur.errMsg = append(cur.errMsg, e.Content)
 
 		case stream.EventArtifact:
-			if !opts.terminal || i < from {
+			if !opts.Terminal || i < from {
 				continue // terminal metadata is claimed only by the terminal render
 			}
 			artifactRows = append(artifactRows, model.Message{
-				SessionID:   p.sessionID,
+				SessionID:   p.SessionID,
 				MsgTime:     now,
 				MsgIndex:    i,
 				Role:        "",
 				EventType:   model.EventTypeArtifact,
 				Content:     e.Content,
-				TraceID:     p.traceID,
-				ClientMsgID: deterministicClientMsgID(p.traceID, i),
+				TraceID:     p.TraceID,
+				ClientMsgID: deterministicClientMsgID(p.TraceID, i),
 			})
 		}
 	}
 
-	if opts.terminal {
+	if opts.Terminal {
 		if cur != nil {
 			emit(cur, true)
 		}
-		batch.msgs = append(batch.msgs, artifactRows...)
+		batch.Msgs = append(batch.Msgs, artifactRows...)
 		// Terminal renders (compaction flush, turn end) close everything.
 		consumed = len(merged)
 	}

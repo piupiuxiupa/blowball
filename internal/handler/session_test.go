@@ -58,8 +58,8 @@ func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir,
 	var tapMu sync.Mutex
 	var collected []stream.StreamEvent
 	if tap := hooks.Tap; tap != nil {
-		defer tap.close()
-		reqs := tap.requests()
+		defer tap.Close()
+		reqs := tap.Requests()
 		go func() {
 			for {
 				select {

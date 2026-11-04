@@ -36,17 +36,17 @@ func TestRecallInjection_DeterministicIdentity(t *testing.T) {
 	b := newRecallInjection("sess-1", "trace-1", "q", res)
 	c := newRecallInjection("sess-1", "trace-2", "q", res)
 
-	assert.Equal(t, a.callID, b.callID)
-	assert.Equal(t, a.args, b.args)
-	assert.NotEqual(t, a.callID, c.callID)
-	assert.Contains(t, a.args, `"entries":["viking://u/mem/a"]`)
+	assert.Equal(t, a.CallID(), b.CallID())
+	assert.Equal(t, a.Args(), b.Args())
+	assert.NotEqual(t, a.CallID(), c.CallID())
+	assert.Contains(t, a.Args(), `"entries":["viking://u/mem/a"]`)
 
-	ph, call := a.persistRows("sess-1", "trace-1", time.Unix(0, 0).UTC())
+	ph, call := a.PersistRows("sess-1", "trace-1", time.Unix(0, 0).UTC())
 	assert.Equal(t, "trace-1:-1", ph.ClientMsgID)
-	assert.Equal(t, a.callID, ph.ToolCallID)
-	assert.Equal(t, a.callID, call.ToolCallID)
-	assert.Equal(t, a.args, call.Arguments)
-	assert.Equal(t, a.frame, call.Result)
+	assert.Equal(t, a.CallID(), ph.ToolCallID)
+	assert.Equal(t, a.CallID(), call.ToolCallID)
+	assert.Equal(t, a.Args(), call.Arguments)
+	assert.Equal(t, a.Frame(), call.Result)
 	assert.Equal(t, model.ToolCallStatusCompleted, call.Status)
 	assert.Equal(t, "trace-1", call.TurnID)
 }
@@ -60,7 +60,7 @@ func TestInjectedRecallKeys_Derivation(t *testing.T) {
 		memory.RecallEntry{Key: "viking://u/mem/a", Line: "- [memory 87%] a"},
 		memory.RecallEntry{Key: "sha256:abc", Line: "- [memory 80%] b"},
 	)
-	history := append(newRecallInjection("s", "t1", "q", res).agentMessages(),
+	history := append(newRecallInjection("s", "t1", "q", res).AgentMessages(),
 		agent.Message{Role: "user", Content: "q"},
 		agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
 			ID:       "other",
@@ -92,10 +92,10 @@ func TestRecallPairAppendOnlyReplay(t *testing.T) {
 	// Turn 1: pair + user sent to the orchestrator...
 	res1 := recallResult(memory.RecallEntry{Key: "viking://u/mem/a", Line: "- [memory 87%] fact a"})
 	inj1 := newRecallInjection(sessionID, trace1, "question one", res1)
-	sent1 := append(inj1.agentMessages(), agent.Message{Role: "user", Content: "question one"})
+	sent1 := append(inj1.AgentMessages(), agent.Message{Role: "user", Content: "question one"})
 
 	// ...then persisted exactly as the send-time / turn-end paths write rows.
-	ph1, call1 := inj1.persistRows(sessionID, trace1, ts)
+	ph1, call1 := inj1.PersistRows(sessionID, trace1, ts)
 	rows1 := []model.Message{
 		ph1,
 		UserMessage(sessionID, trace1, "question one", ts),
@@ -127,7 +127,7 @@ func TestRecallPairAppendOnlyReplay(t *testing.T) {
 	}
 	require.Len(t, newEntries, 1, "already-injected entry must be filtered")
 	inj2 := newRecallInjection(sessionID, trace2, "question two", recallResult(newEntries...))
-	sent2 := append(append([]agent.Message{}, got1...), inj2.agentMessages()...)
+	sent2 := append(append([]agent.Message{}, got1...), inj2.AgentMessages()...)
 	sent2 = append(sent2, agent.Message{Role: "user", Content: "question two"})
 	assert.Equal(t, got1, sent2[:len(got1)], "turn 2 extends the prefix; it never rewrites it")
 }
@@ -155,7 +155,7 @@ func TestMemoryRecall_SecondTurnNoNewEntriesNoInjection(t *testing.T) {
 		Line: "- [memory 87%] User runs fish shell on macOS.",
 	})
 	inj := newRecallInjection("sess-1", trace0, "first question", res)
-	ph, call := inj.persistRows("sess-1", trace0, ts)
+	ph, call := inj.PersistRows("sess-1", trace0, ts)
 	env.mysql.listMessagesRows = []model.Message{
 		ph,
 		UserMessage("sess-1", trace0, "first question", ts),
@@ -199,6 +199,6 @@ func TestMemoryRecall_SecondTurnNoNewEntriesNoInjection(t *testing.T) {
 
 	// Sanity: the args round-trip through the persisted pair.
 	var args recallArgs
-	require.NoError(t, json.Unmarshal([]byte(inj.args), &args))
+	require.NoError(t, json.Unmarshal([]byte(inj.Args()), &args))
 	assert.Equal(t, []string{"viking://user/user-1/memories/prefs"}, args.Entries)
 }

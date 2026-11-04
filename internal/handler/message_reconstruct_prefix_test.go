@@ -99,7 +99,7 @@ func TestMessagesToAgentMessages_RecallPairAndNarratedToolAppendOnlyReplay(t *te
 	ts := time.Unix(1_700_000_000, 0).UTC()
 	res := recallResult(memory.RecallEntry{Key: "viking://u/mem/a", Line: "- [memory 87%] fact a"})
 	inj := newRecallInjection(sessionID, traceRec, "question", res)
-	recallPH, recallCall := inj.persistRows(sessionID, traceRec, ts)
+	recallPH, recallCall := inj.PersistRows(sessionID, traceRec, ts)
 
 	rows := []model.Message{
 		recallPH,
@@ -120,7 +120,7 @@ func TestMessagesToAgentMessages_RecallPairAndNarratedToolAppendOnlyReplay(t *te
 		Arguments: `{ "q": "x" }`, Result: "result", Status: model.ToolCallStatusCompleted,
 	}
 
-	live := append(inj.agentMessages(),
+	live := append(inj.AgentMessages(),
 		agent.Message{Role: "user", Content: "question"},
 		agent.Message{
 			Role: "assistant", Content: "checking", ReasoningContent: "reason",

@@ -174,6 +174,25 @@ func (m *MemStore) ClaimSession(_ context.Context, sessionID, runID string) (str
 	return runID, true, nil
 }
 
+// ClaimBackgroundSession implements Store (idle claim + empty FIFO in one lock).
+func (m *MemStore) ClaimBackgroundSession(_ context.Context, sessionID, runID string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if holder, ok := m.claims[sessionID]; ok && m.now().Before(m.claimExp[sessionID]) {
+		return holder, false, nil
+	}
+	if len(m.queues[sessionID]) > 0 {
+		holder := ""
+		if len(m.queues[sessionID]) > 0 {
+			holder = m.queues[sessionID][0].RunID
+		}
+		return holder, false, nil
+	}
+	m.claims[sessionID] = runID
+	m.claimExp[sessionID] = m.now().Add(SessionClaimTTL)
+	return runID, true, nil
+}
+
 // ReleaseSession implements Store (compare-and-delete).
 func (m *MemStore) ReleaseSession(_ context.Context, sessionID, runID string) error {
 	m.mu.Lock()

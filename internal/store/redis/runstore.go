@@ -201,6 +201,34 @@ func (s *RunStore) ClaimSession(ctx context.Context, sessionID, runID string) (s
 	return holder, false, nil
 }
 
+// claimBackgroundScript admits a headless run only when both the session claim
+// and the interactive FIFO are idle. The queue check and claim are one atomic
+// operation, so a background turn can never jump a queued chat message.
+const claimBackgroundScript = `local holder = redis.call("GET", KEYS[1])
+if holder then return {0, holder} end
+if redis.call("LLEN", KEYS[2]) > 0 then return {0, "queued"} end
+redis.call("SET", KEYS[1], ARGV[1], "EX", tonumber(ARGV[2]))
+return {1, ARGV[1]}`
+
+// ClaimBackgroundSession implements run.Store with fail-closed queue-aware
+// admission for scheduled/headless turns.
+func (s *RunStore) ClaimBackgroundSession(ctx context.Context, sessionID, runID string) (string, bool, error) {
+	key := sessionRunKey(sessionID)
+	logCmd(ctx, "run.claim_background_session", key)
+	res, err := s.client.Eval(ctx, claimBackgroundScript, []string{key, queueKey(sessionID)},
+		runID, int(run.SessionClaimTTL/time.Second)).Result()
+	if err != nil {
+		return "", false, fmt.Errorf("runstore: claim background session: %w", err)
+	}
+	parts, ok := res.([]any)
+	if !ok || len(parts) != 2 {
+		return "", false, fmt.Errorf("runstore: claim background session: unexpected script reply %v", res)
+	}
+	claimed, _ := parts[0].(int64)
+	holder, _ := parts[1].(string)
+	return holder, claimed == 1, nil
+}
+
 // ReleaseSession implements run.Store: Lua compare-and-delete.
 func (s *RunStore) ReleaseSession(ctx context.Context, sessionID, runID string) error {
 	key := sessionRunKey(sessionID)

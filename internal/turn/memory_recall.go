@@ -1,4 +1,4 @@
-package handler
+package turn
 
 import (
 	"crypto/sha256"
@@ -28,52 +28,52 @@ const recallToolName = "recall_memories"
 // duplicate the full query.
 const recallQueryPreviewRunes = 160
 
-// recallArgs is the deterministic JSON object carried in the synthetic
+// RecallArgs is the deterministic JSON object carried in the synthetic
 // call's arguments. entries is the machine-readable injected-key set the
 // next turn derives session-scoped dedupe from — no separately stored
 // session state.
-type recallArgs struct {
+type RecallArgs struct {
 	Query   string   `json:"query"`
 	Entries []string `json:"entries"`
 }
 
-// recallInjection is one turn's synthetic recall tool pair, built at turn
+// RecallInjection is one turn's synthetic recall tool pair, built at turn
 // start (memory-recall-cache-stable): the in-memory agent messages sent to
 // the orchestrator, plus everything needed to persist the pair through the
 // ordinary message/tool-call rows so reconstruction replays it verbatim.
-type recallInjection struct {
+type RecallInjection struct {
 	callID string
-	args   string // marshaled recallArgs — byte-stable across send and replay
+	args   string // marshaled RecallArgs — byte-stable across send and replay
 	frame  string // rendered <user-memories> block (the tool result content)
 }
 
-// newRecallInjection derives the pair's deterministic identity from the
+// NewRecallInjection derives the pair's deterministic identity from the
 // session and turn trace: the same (session, turn) always mints the same
 // tool_call_id, so at-least-once redelivery of the send-time batch
 // collapses onto one row pair (tool_calls UK + client_msg_id).
-func newRecallInjection(sessionID, traceID, query string, res memory.RecallResult) recallInjection {
+func NewRecallInjection(sessionID, traceID, query string, res memory.RecallResult) RecallInjection {
 	keys := make([]string, len(res.Entries))
 	for i, e := range res.Entries {
 		keys[i] = e.Key
 	}
-	args, err := json.Marshal(recallArgs{Query: queryPreview(query), Entries: keys})
+	args, err := json.Marshal(RecallArgs{Query: queryPreview(query), Entries: keys})
 	if err != nil {
 		// Marshal of a plain struct with string fields cannot fail; keep the
 		// defensive fallback simple and deterministic.
 		args = []byte(`{"entries":[]}`)
 	}
-	return recallInjection{
+	return RecallInjection{
 		callID: deterministicRecallCallID(sessionID, traceID),
 		args:   string(args),
 		frame:  res.Frame,
 	}
 }
 
-// agentMessages returns the pair exactly as history reconstruction emits it
+// AgentMessages returns the pair exactly as history reconstruction emits it
 // (flushToolCalls): one assistant message carrying the call, one tool
 // message carrying the frame. Keeping the shapes byte-identical is the
 // append-only contract — the next turn replays what this turn sent.
-func (r recallInjection) agentMessages() []agent.Message {
+func (r RecallInjection) AgentMessages() []agent.Message {
 	return []agent.Message{
 		{
 			Role: "assistant",
@@ -94,14 +94,18 @@ func (r recallInjection) agentMessages() []agent.Message {
 	}
 }
 
-// persistRows renders the durable pair: one tool-call PLACEHOLDER row (the
+// PersistRows renders the durable pair: one tool-call PLACEHOLDER row (the
 // ordering anchor reconstruction joins on) plus the canonical tool_calls
 // row. msg_index -1 sorts the placeholder strictly before the turn's user
 // row (msg_index 0) under the shared msg_time — the (msg_time, msg_index)
 // stream order then matches the payload order: pair, user message, assistant
 // rows. The client_msg_id {trace}:-1 is unique per turn and idempotent on
 // redelivery.
-func (r recallInjection) persistRows(sessionID, traceID string, ts time.Time) (model.Message, model.ToolCall) {
+func (r RecallInjection) CallID() string { return r.callID }
+func (r RecallInjection) Args() string   { return r.args }
+func (r RecallInjection) Frame() string  { return r.frame }
+
+func (r RecallInjection) PersistRows(sessionID, traceID string, ts time.Time) (model.Message, model.ToolCall) {
 	placeholder := model.Message{
 		SessionID:   sessionID,
 		MsgTime:     ts,
@@ -152,7 +156,7 @@ func queryPreview(q string) string {
 // history's own durability — and naturally shrinks after compaction
 // summarizes old pairs away (bounded re-injection; the prefix is broken at
 // the compaction boundary regardless).
-func injectedRecallKeys(msgs []agent.Message) map[string]struct{} {
+func InjectedRecallKeys(msgs []agent.Message) map[string]struct{} {
 	var set map[string]struct{}
 	for _, m := range msgs {
 		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
@@ -162,7 +166,7 @@ func injectedRecallKeys(msgs []agent.Message) map[string]struct{} {
 			if tc.Function.Name != recallToolName {
 				continue
 			}
-			var args recallArgs
+			var args RecallArgs
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 				continue // malformed legacy arguments: skip rather than fail the turn
 			}

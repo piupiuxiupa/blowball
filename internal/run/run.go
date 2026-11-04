@@ -131,7 +131,7 @@ type QueueEntry struct {
 	Selection   QueueSelection               `json:"selection"`
 	Attachments []model.MessageAttachmentRef `json:"attachments,omitempty"`
 	RawToken    string                       `json:"raw_token,omitempty"`
-	EnqueuedAt   time.Time `json:"enqueued_at"`
+	EnqueuedAt  time.Time                    `json:"enqueued_at"`
 }
 
 // QueueSelection is the queue-entry form of a turn's resolved model selection
@@ -197,6 +197,10 @@ type Store interface {
 	// (SET NX). ok=false means the claim failed and holder is the current
 	// holder's run id (possibly empty when unreadable).
 	ClaimSession(ctx context.Context, sessionID, runID string) (holder string, ok bool, err error)
+	// ClaimBackgroundSession atomically claims an idle session only when its
+	// FIFO is also empty. Unlike interactive admission, any store error is
+	// fail-closed: the caller must not start a model without mutual exclusion.
+	ClaimBackgroundSession(ctx context.Context, sessionID, runID string) (holder string, ok bool, err error)
 	// ReleaseSession deletes the claim when it still points at runID, so a
 	// stale releaser cannot unlock a session already reclaimed by a newer run.
 	ReleaseSession(ctx context.Context, sessionID, runID string) error
@@ -267,7 +271,6 @@ type Store interface {
 	// pumped after the clear). Entries are not message rows and are never
 	// archived.
 	ClearQueue(ctx context.Context, sessionID string) error
-
 
 	// Heartbeat refreshes run:{rid}:alive (HeartbeatTTL), re-arms the
 	// event/meta TTLs (RunKeyTTLWithJitter in Redis), and compare-and-rearms

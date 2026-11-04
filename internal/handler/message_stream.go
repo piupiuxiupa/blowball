@@ -26,7 +26,7 @@ import (
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/store/fs"
-	"github.com/lush/blowball/internal/stream"
+	turnexec "github.com/lush/blowball/internal/turn"
 )
 
 // MessageStreamHandler owns the streaming message endpoint
@@ -74,7 +74,7 @@ type MessageStreamHandler struct {
 	// tokens.go; a non-positive value skips the token check (the 1MB
 	// request-body cap below stays in force regardless).
 	maxInputTokens int
-	newHub         func() *stream.Hub
+	turns          *turnexec.Executor
 	// writeRunEvents is the SSE subscription seam over the run event log —
 	// the same implementation the resume endpoint uses. Tests may stub it.
 	// turnDone is the owning turn's completion channel (the degraded-path
@@ -87,17 +87,8 @@ type MessageStreamHandler struct {
 	// EnableMessageQueue at wiring time (kept out of the constructor so the
 	// pre-queue call sites and tests stay byte-for-byte).
 	queueMaxDepth int
-	// stopNewTurns is the process-level shutdown gate: closed once by
-	// StopNewTurns, it stops new queue pops and aborts in-flight pump
-	// STARTUPS. shutdownCtx is cancelled with it, so a pump's preparation
-	// (session lookup, history recovery, send-time persistence — up to the
-	// 60s budget) fails fast instead of running past the shutdown barrier;
-	// an aborted startup returns its entry to the queue atomically
-	// (RequeueHead) for the post-restart reconciler.
-	stopNewTurns chan struct{}
-	stopOnce     sync.Once
-	shutdownCtx  context.Context
-	shutdownStop context.CancelFunc
+	// shutdown stops new queue/background starts and cancels preparations.
+	shutdown *turnexec.ShutdownGate
 	// startupPumps tracks in-flight pump startups (pop → spawn). Shutdown
 	// waits for them (WaitForStartupPumps) after tripping the gate: once a
 	// startup's turn is SPAWNED it is registered and the registry's
@@ -125,20 +116,12 @@ func (h *MessageStreamHandler) EnableMessageQueue(maxDepth int) {
 // see (review fix, round 3). Entries stay enqueued for the post-restart
 // reconciler.
 func (h *MessageStreamHandler) StopNewTurns() {
-	h.stopOnce.Do(func() {
-		close(h.stopNewTurns)
-		h.shutdownStop()
-	})
+	h.shutdown.Stop()
 }
 
 // newTurnsStopped reports whether the shutdown gate is tripped.
 func (h *MessageStreamHandler) newTurnsStopped() bool {
-	select {
-	case <-h.stopNewTurns:
-		return true
-	default:
-		return false
-	}
+	return h.shutdown.Stopped()
 }
 
 // WaitForStartupPumps waits (bounded) for every in-flight pump startup to
@@ -184,6 +167,7 @@ func NewMessageStreamHandler(
 	selection ModelSelectionConfig,
 	maxInputTokens int,
 ) *MessageStreamHandler {
+	gate := turnexec.NewShutdownGate()
 	h := &MessageStreamHandler{
 		sessSvc:        sessSvc,
 		msgSvc:         msgSvc,
@@ -195,19 +179,27 @@ func NewMessageStreamHandler(
 		dataDir:        dataDir,
 		selection:      selection,
 		maxInputTokens: maxInputTokens,
+		shutdown:       gate,
 	}
-	h.newHub = func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) }
+	h.turns = turnexec.NewExecutor(turnexec.Dependencies{
+		Sessions: sessSvc, Messages: msgSvc, Titles: titleSvc,
+		Compaction: compSvc, Memory: memSvc, Orchestrator: orch,
+		DataDir: dataDir, Runs: runs, Shutdown: gate,
+	})
+	h.turns.SetQueuePump(h.pumpQueuedNext)
 	h.writeRunEvents = writeRunEventStream
-	h.stopNewTurns = make(chan struct{})
-	h.shutdownCtx, h.shutdownStop = context.WithCancel(context.Background())
 	return h
 }
+
+// TurnExecutor exposes the shared headless entry point to agent-role wiring.
+func (h *MessageStreamHandler) TurnExecutor() *turnexec.Executor { return h.turns }
 
 // WithArtifactService wires the turn-artifacts capability (nil disables it,
 // preserving pre-capability behavior). Separate from the constructor so the
 // many existing wiring/test call sites stay untouched.
 func (h *MessageStreamHandler) WithArtifactService(s *artifact.Service) *MessageStreamHandler {
 	h.artifacts = s
+	h.turns.SetArtifactService(s)
 	return h
 }
 

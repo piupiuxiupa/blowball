@@ -13,12 +13,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
+	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/stream"
+	turnexec "github.com/lush/blowball/internal/turn"
 )
 
 // This file covers harden-turn-persistence: the terminal message batch is
@@ -88,12 +91,13 @@ func (r *recordingRedis) AppendMessagesCache(ctx context.Context, sessionID stri
 // persistTestEnv is a minimal SendMessage harness with recording seams on the
 // run store, the Redis dual write, and the drain primitive.
 type persistTestEnv struct {
-	engine *gin.Engine
-	store  *recordingRunStore
-	redis  *recordingRedis
-	mysql  *handlerFakeMySQL
-	log    *orderLog
-	reg    *run.Registry
+	engine  *gin.Engine
+	streamH *MessageStreamHandler
+	store   *recordingRunStore
+	redis   *recordingRedis
+	mysql   *handlerFakeMySQL
+	log     *orderLog
+	reg     *run.Registry
 }
 
 func newPersistTestEnv(t *testing.T, stub *stubOrchestrator, drainErr error) *persistTestEnv {
@@ -130,6 +134,7 @@ func newPersistTestEnv(t *testing.T, stub *stubOrchestrator, drainErr error) *pe
 	})
 	engine.POST("/api/v1/sessions/:session_id/messages", streamH.SendMessage)
 	env.engine = engine
+	env.streamH = streamH
 	env.store = store
 	env.redis = redis
 	env.mysql = mysql
@@ -164,6 +169,56 @@ func doneStub() *stubOrchestrator {
 			}),
 		},
 	}
+}
+
+// TestStartTurn_WithoutSubscriberPersistsAndFinalizes pins the transport-
+// independent behavior the scheduled-task executor will reuse: once admission
+// has succeeded, the shared turn pipeline drains its own event stream and
+// reaches durable terminal state without an HTTP request or SSE reader.
+func TestStartTurn_WithoutSubscriberPersistsAndFinalizes(t *testing.T) {
+	env := newPersistTestEnv(t, doneStub(), nil)
+	ctx := agent.WithUserID(context.Background(), "user-1")
+	holder, ok, err := env.store.ClaimSession(ctx, "sess-1", "headless-run")
+	require.NoError(t, err)
+	require.Equal(t, "headless-run", holder)
+	require.True(t, ok)
+
+	sel, code, msg := resolveModelSelection(testSelectionConfig(), "", "")
+	require.Empty(t, code, msg)
+	now := time.Now().UTC()
+	started := env.streamH.startTurn(ctx, &turnRequest{
+		sessionID:     "sess-1",
+		userID:        "user-1",
+		traceID:       "headless-run",
+		content:       "offline work",
+		sel:           sel,
+		userMsgTime:   now,
+		metaCreatedAt: now,
+	})
+	require.NotNil(t, started)
+	require.NoError(t, started.aborted)
+
+	select {
+	case result := <-started.resultCh:
+		require.NoError(t, result.Err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("headless turn blocked without an SSE subscriber")
+	}
+
+	batches := env.redis.dualBatchSnapshot()
+	require.Len(t, batches, 2)
+	require.Len(t, batches[0], 1)
+	require.Equal(t, model.RoleUser, batches[0][0].Role)
+	require.Equal(t, "offline work"+prompt.RenderStatus(), batches[0][0].Content)
+	require.Len(t, batches[1], 1)
+	require.Equal(t, model.RoleAssistant, batches[1][0].Role)
+	require.Equal(t, "Hello", batches[1][0].Content)
+
+	meta, ok, err := env.store.GetMeta(context.Background(), "headless-run")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, run.StatusDone, meta.Status)
+	requireTerminalSuffix(t, env.log.snapshot(), terminalOrder)
 }
 
 // terminalOrder is the harden-turn-persistence terminal sequence for the
@@ -383,9 +438,8 @@ func (s *heartbeatRecordingStore) count() int {
 // persisted early; (c) the terminal batch is a pure suffix; (d) no token
 // event rows exist at all.
 func TestRoundPersistence_ClosedRoundsLandDuringTurn(t *testing.T) {
-	oldEvery := incrementalPersistEvery
-	incrementalPersistEvery = 20 * time.Millisecond
-	t.Cleanup(func() { incrementalPersistEvery = oldEvery })
+	oldEvery := turnexec.SetIncrementalPersistEvery(20 * time.Millisecond)
+	t.Cleanup(func() { turnexec.SetIncrementalPersistEvery(oldEvery) })
 
 	stub := &stubOrchestrator{
 		interEventDelay: 150 * time.Millisecond,

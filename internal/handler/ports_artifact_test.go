@@ -54,7 +54,7 @@ func TestAdapter_EmitsArtifactEventsBeforeDone(t *testing.T) {
 		stream.TokenEvent(stream.AgentConfucius, "see "),
 		stream.TokenEvent(stream.AgentConfucius, "[a](blowball://workspace/a.md)"),
 	}}
-	adapter := &orchestratorAdapter{inner: inner}
+	adapter := newOrchestratorAdapter(inner)
 
 	hub := stream.NewHub(stream.DefaultHubBufferSize)
 	received := make(chan []stream.StreamEvent, 1)
@@ -107,7 +107,7 @@ func TestAdapter_FinalizeTurnExcludesSubAgentText(t *testing.T) {
 		subAgent,
 		stream.TokenEvent(stream.AgentConfucius, "[top](blowball://workspace/top.md)"),
 	}}
-	adapter := &orchestratorAdapter{inner: inner}
+	adapter := newOrchestratorAdapter(inner)
 	hub := stream.NewHub(stream.DefaultHubBufferSize)
 	hub.Close()
 
@@ -126,7 +126,7 @@ func TestAdapter_NoFinalizeHookIsZeroChange(t *testing.T) {
 	inner := &fakeInnerRunner{emit: []stream.StreamEvent{
 		stream.TokenEvent(stream.AgentConfucius, "hi"),
 	}}
-	adapter := &orchestratorAdapter{inner: inner}
+	adapter := newOrchestratorAdapter(inner)
 
 	hub := stream.NewHub(stream.DefaultHubBufferSize)
 	received := make(chan []stream.StreamEvent, 1)
@@ -147,7 +147,7 @@ func TestAdapter_NoFinalizeHookIsZeroChange(t *testing.T) {
 
 func TestAdapter_EmptyArtifactsStillTagDone(t *testing.T) {
 	inner := &fakeInnerRunner{}
-	adapter := &orchestratorAdapter{inner: inner}
+	adapter := newOrchestratorAdapter(inner)
 
 	hub := stream.NewHub(stream.DefaultHubBufferSize)
 	received := make(chan []stream.StreamEvent, 1)
