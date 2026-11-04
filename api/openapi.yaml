@@ -642,8 +642,8 @@ components:
         meta:
           type: object
           properties:
-            run_id: {type: string, description: The queued message's run id (the future turn's id, equal to the enqueueing request's trace id).}
-            queue_position: {type: integer, description: 1-based queue depth at admission time (informational).}
+            run_id: {type: string, description: "The queued message's run id (the future turn's id, equal to the enqueueing request's trace id)."}
+            queue_position: {type: integer, description: "1-based queue depth at admission time (informational)."}
     SSEAgentStart:
       type: object
       required: [type, agent]
