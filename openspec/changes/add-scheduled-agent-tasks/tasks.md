@@ -55,5 +55,5 @@
 - [x] 7.2 添加多副本、停机补跑、物化前后崩溃、准备/启动竞争、未知投递及终态回写失败的故障注入测试。
 - [x] 7.3 验证暂停/删除/用户禁用/目标会话删除与执行竞争，并确认运行中的聊天不被后台任务抢占。
 - [x] 7.4 验证 Redis 事件保留窗过期后 MySQL 历史仍在，以及 all/api/agent 路由归属与无 Agent 依赖的 API 故障隔离。
-- [ ] 7.5 运行相关包测试、go vet 和 make test，修复本变更引入的回归；同步 proposal、design、specs、tasks 与实际行为。
-- [ ] 7.6 运行 OpenSpec strict 校验，检查 API/迁移/配置说明；每个完成的自包含阶段测试通过后创建 scoped Conventional Commit，不提交凭证或构建产物。
+- [x] 7.5 运行相关包测试、go vet 和 make test，修复本变更引入的回归；同步 proposal、design、specs、tasks 与实际行为。
+- [x] 7.6 运行 OpenSpec strict 校验，检查 API/迁移/配置说明；每个完成的自包含阶段测试通过后创建 scoped Conventional Commit，不提交凭证或构建产物。
