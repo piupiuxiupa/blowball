@@ -18,11 +18,11 @@
 
 ## 3. 任务管理服务与 HTTP 契约
 
-- [ ] 3.1 实现不构造 Agent 运行时的任务管理服务，校验 name/prompt、当前模型/effort、时间规则和目标会话归属。
-- [ ] 3.2 实现任务创建/列表/详情/PATCH/DELETE 与 runs 历史 handler，测试 201/200/204、400/401/404 及分页边界。
-- [ ] 3.3 实现暂停/恢复/修改/删除与执行状态的协调，覆盖快照不变、启动 fence 竞争、cron 恢复不补暂停期间槽位及 at 不隐式重放。
-- [ ] 3.4 更新 api/all 的路由 wiring，确认 agent 不注册管理路由、api 不实例化 Orchestrator/LLM/工具/沙箱。
-- [ ] 3.5 在 api/openapi.yaml 补充全部端点、DTO、状态/原因、错误、分页及 UTC 时间说明，并验证契约与 handler 一致。
+- [x] 3.1 实现不构造 Agent 运行时的任务管理服务，校验 name/prompt、当前模型/effort、时间规则和目标会话归属。
+- [x] 3.2 实现任务创建/列表/详情/PATCH/DELETE 与 runs 历史 handler，测试 201/200/204、400/401/404 及分页边界。
+- [x] 3.3 实现暂停/恢复/修改/删除与执行状态的协调，覆盖快照不变、启动 fence 竞争、cron 恢复不补暂停期间槽位及 at 不隐式重放。
+- [x] 3.4 更新 api/all 的路由 wiring，确认 agent 不注册管理路由、api 不实例化 Orchestrator/LLM/工具/沙箱。
+- [x] 3.5 在 api/openapi.yaml 补充全部端点、DTO、状态/原因、错误、分页及 UTC 时间说明，并验证契约与 handler 一致。
 
 ## 4. 调度与到期策略
 

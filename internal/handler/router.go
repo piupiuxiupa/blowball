@@ -86,6 +86,13 @@ type RouteDeps struct {
 	// SessionDelete handles DELETE /api/v1/sessions/:session_id. Required.
 	SessionDelete gin.HandlerFunc
 
+	ScheduledTaskCreate gin.HandlerFunc
+	ScheduledTaskList   gin.HandlerFunc
+	ScheduledTaskGet    gin.HandlerFunc
+	ScheduledTaskUpdate gin.HandlerFunc
+	ScheduledTaskDelete gin.HandlerFunc
+	ScheduledTaskRuns   gin.HandlerFunc
+
 	// SessionUpdateTitle handles PATCH /api/v1/sessions/:session_id. Required.
 	SessionUpdateTitle gin.HandlerFunc
 
@@ -278,6 +285,15 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.GET("/sessions/:session_id/subagents/:agent_instance_id/runs/:run_id", deps.SubAgentRunDetail)
 	authed.PATCH("/sessions/:session_id", deps.SessionUpdateTitle)
 	authed.DELETE("/sessions/:session_id", deps.SessionDelete)
+
+	// Scheduled task management is CRUD-only and belongs to api/all. The
+	// agent partition deliberately does not register these routes.
+	authed.POST("/scheduled-tasks", deps.ScheduledTaskCreate)
+	authed.GET("/scheduled-tasks", deps.ScheduledTaskList)
+	authed.GET("/scheduled-tasks/:task_id", deps.ScheduledTaskGet)
+	authed.PATCH("/scheduled-tasks/:task_id", deps.ScheduledTaskUpdate)
+	authed.DELETE("/scheduled-tasks/:task_id", deps.ScheduledTaskDelete)
+	authed.GET("/scheduled-tasks/:task_id/runs", deps.ScheduledTaskRuns)
 
 	// Attachment content read (add-image-attachments): browser-native
 	// elements (<img>) cannot send the Authorization header, so this one

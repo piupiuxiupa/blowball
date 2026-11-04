@@ -342,6 +342,51 @@ func TestScheduledTaskUpdateLeavesMaterializedSnapshotUnchanged(t *testing.T) {
 	require.NotContains(t, current.SnapshotJSON, "sk-user-secret")
 }
 
+func TestScheduledTaskPauseCoordinatesWithStartFence(t *testing.T) {
+	store := setupScheduledTaskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+
+	for _, crossFirst := range []bool{false, true} {
+		task := scheduledTaskFixture(fmt.Sprintf("task-pause-race-%v", crossFirst), "user-1")
+		require.NoError(t, store.CreateScheduledTask(ctx, task))
+		runs, err := store.MaterializeScheduledTasks(ctx, now, 10)
+		require.NoError(t, err)
+		require.Len(t, runs, 1)
+		claim, claimed, err := store.ClaimScheduledRun(ctx, runs[0].OccurrenceID, now, time.Minute, 3)
+		require.NoError(t, err)
+		require.True(t, claimed)
+		launched, err := store.MarkScheduledRunLaunching(ctx, runs[0].OccurrenceID, claim.ClaimToken, now)
+		require.NoError(t, err)
+		require.True(t, launched)
+		if crossFirst {
+			crossed, err := store.CrossScheduledStartFence(ctx, runs[0].OccurrenceID, claim.ClaimToken, now)
+			require.NoError(t, err)
+			require.True(t, crossed)
+		}
+
+		task.Enabled = false
+		task.PausedReason = model.ScheduledReasonTaskPaused
+		updated, err := store.UpdateScheduledTask(ctx, task)
+		require.NoError(t, err)
+		require.True(t, updated)
+		crossed, err := store.CrossScheduledStartFence(ctx, runs[0].OccurrenceID, claim.ClaimToken, now)
+		require.NoError(t, err)
+		require.False(t, crossed, "a paused task can never cross a later fence")
+
+		current, err := store.GetScheduledTaskRun(ctx, runs[0].OccurrenceID)
+		require.NoError(t, err)
+		if crossFirst {
+			require.Equal(t, model.ScheduledRunRunning, current.Status, "pause must not cancel an already-fenced run")
+			require.NotNil(t, current.StartedAt)
+		} else {
+			require.Equal(t, model.ScheduledRunCancelled, current.Status)
+			require.Equal(t, model.ScheduledReasonTaskPaused, current.Reason)
+			require.Nil(t, current.StartedAt)
+		}
+	}
+}
+
 func TestScheduledRunMissingUserAuthorization(t *testing.T) {
 	store := setupScheduledTaskStore(t)
 	ctx := context.Background()

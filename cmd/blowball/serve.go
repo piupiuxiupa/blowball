@@ -538,6 +538,8 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	skillHandler := handler.NewSkillHandler(rt.fsStore, rt.market)
 	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
 	llmTokenHandler := handler.NewLLMTokenHandler(service.NewLLMTokenService(rt.mysqlStore))
+	scheduledTaskHandler := handler.NewScheduledTaskHandler(service.NewScheduledTaskService(
+		rt.mysqlStore, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit()))
 	artifactHandler := handler.NewArtifactHandler(newArtifactService(rt))
 	attachmentHandler := handler.NewAttachmentHandler(rt.mysqlStore, sessSvc, rt.fsStore)
 
@@ -556,6 +558,12 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		SubAgentRuns:                     subAgentHandler.ListRuns,
 		SubAgentRunDetail:                subAgentHandler.GetRun,
 		SessionDelete:                    sessionHandler.DeleteSession,
+		ScheduledTaskCreate:              scheduledTaskHandler.Create,
+		ScheduledTaskList:                scheduledTaskHandler.List,
+		ScheduledTaskGet:                 scheduledTaskHandler.Get,
+		ScheduledTaskUpdate:              scheduledTaskHandler.Update,
+		ScheduledTaskDelete:              scheduledTaskHandler.Delete,
+		ScheduledTaskRuns:                scheduledTaskHandler.Runs,
 		SessionUpdateTitle:               sessionHandler.UpdateTitle,
 		WorkspaceList:                    workspaceHandler.List,
 		WorkspaceUpload:                  workspaceHandler.Upload,

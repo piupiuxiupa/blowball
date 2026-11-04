@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: blowball Multi-Agent Backend API
-  version: "1.2.0"
+  version: "1.3.0"
   description: |
     HTTP API surface for the blowball multi-agent backend.
 
@@ -19,6 +19,10 @@ info:
 
     1.2.0 — per-run dynamic sub-agent transcript snapshots and lazily loaded
     sub-agent run list/detail endpoints.
+
+    1.3.0 — persistent user-owned scheduled agent tasks (`at` and standard
+    five-field `cron`), owner-only management and durable occurrence history.
+    Absolute schedule/execution timestamps are RFC3339 values in UTC.
 
     Workspace file endpoints are transparent to the physical storage backend:
     requests and responses are identical whether `storage.workspace.backend` is
@@ -1287,6 +1291,155 @@ components:
         not through this body.
       properties:
         error: {type: integer, description: "0 on success, non-0 to trigger a DocumentServer retry."}
+    ScheduleRule:
+      type: object
+      description: |
+        Structured time rule. `at` requires an RFC3339 `run_at` with an
+        explicit offset; `cron` requires exactly five fields in `expression`.
+        Both require an explicit IANA `timezone`. Cron macros, `@every`,
+        seconds, and expression timezone prefixes are rejected. Absolute
+        instants returned by the API are UTC.
+      required: [type, timezone]
+      properties:
+        type:
+          type: string
+          enum: [at, cron]
+        run_at:
+          type: string
+          format: date-time
+          example: "2026-11-05T09:30:00+08:00"
+        expression:
+          type: string
+          example: "30 9 * * *"
+        timezone:
+          type: string
+          example: Asia/Shanghai
+    ScheduledSessionPolicy:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [new, existing]
+          default: new
+          description: >-
+            `new` creates one independent owner session per occurrence;
+            `existing` explicitly targets an owner session and is rechecked at
+            execution time.
+        session_id:
+          type: string
+          description: Required for `existing`; forbidden for `new`.
+    ScheduledTaskCreate:
+      type: object
+      required: [name, prompt, schedule]
+      properties:
+        name: {type: string, maxLength: 255}
+        prompt:
+          type: string
+          description: Non-empty instruction, bounded by the interactive message byte/token limits.
+        schedule: {$ref: '#/components/schemas/ScheduleRule'}
+        session:
+          allOf:
+            - $ref: '#/components/schemas/ScheduledSessionPolicy'
+          default: {mode: new}
+        model:
+          type: string
+          description: Optional catalog model; omitted uses the deployment default.
+        reasoning_effort:
+          type: string
+          enum: [none, low, medium, high, xhigh, max]
+          description: Optional effort; omitted uses the deployment default.
+        enabled:
+          type: boolean
+          default: true
+    ScheduledTaskPatch:
+      type: object
+      description: |
+        Partial update; omitted fields are unchanged. Configuration edits affect
+        future materialized snapshots only. Disabling cancels unstarted
+        occurrences but does not cancel a running turn. Resuming cron computes
+        the next slot after the resume time. Re-enabling a consumed `at` does
+        not replay it; explicitly supplying a new future `run_at` reschedules it.
+      properties:
+        name: {type: string, maxLength: 255}
+        prompt: {type: string}
+        schedule: {$ref: '#/components/schemas/ScheduleRule'}
+        session: {$ref: '#/components/schemas/ScheduledSessionPolicy'}
+        model: {type: string}
+        reasoning_effort:
+          type: string
+          enum: [none, low, medium, high, xhigh, max]
+        enabled: {type: boolean}
+    ScheduledTask:
+      type: object
+      required: [task_id, name, prompt, schedule, session, enabled, revision, create_time, update_time]
+      properties:
+        task_id: {type: string}
+        name: {type: string}
+        prompt: {type: string}
+        schedule: {$ref: '#/components/schemas/ScheduleRule'}
+        session: {$ref: '#/components/schemas/ScheduledSessionPolicy'}
+        model: {type: string}
+        reasoning_effort: {type: string}
+        enabled: {type: boolean}
+        next_run_at:
+          type: string
+          format: date-time
+          description: Next unmaterialized UTC slot; omitted when a one-shot is consumed.
+        revision: {type: integer, format: int64}
+        paused_reason:
+          type: string
+          enum: [TASK_PAUSED, USER_UNAVAILABLE, SESSION_UNAVAILABLE, TASK_DELETED]
+        create_time: {type: string, format: date-time, description: UTC timestamp.}
+        update_time: {type: string, format: date-time, description: UTC timestamp.}
+    ScheduledTaskListResponse:
+      type: object
+      required: [tasks, limit, offset]
+      properties:
+        tasks:
+          type: array
+          items: {$ref: '#/components/schemas/ScheduledTask'}
+        limit: {type: integer}
+        offset: {type: integer}
+    ScheduledTaskRun:
+      type: object
+      description: |
+        Durable occurrence/execution fact. It remains available after Redis
+        event replay retention expires. Message content, tool activity,
+        artifacts, and usage use the associated session/run read APIs.
+      required: [occurrence_id, task_id, revision, scheduled_for, run_id, session_id, session_mode, status, attempt_count, create_time, update_time]
+      properties:
+        occurrence_id: {type: string}
+        task_id: {type: string}
+        revision: {type: integer, format: int64}
+        scheduled_for: {type: string, format: date-time, description: Planned UTC slot.}
+        run_id: {type: string, description: Stable turn Run identity used by cancel/events APIs.}
+        session_id: {type: string}
+        session_mode:
+          type: string
+          enum: [new, existing]
+        status:
+          type: string
+          enum: [pending, preparing, launching, running, succeeded, error, skipped, cancelled, interrupted]
+        reason:
+          type: string
+          enum: [TASK_OVERLAP, SESSION_BUSY, USER_UNAVAILABLE, SESSION_UNAVAILABLE, TASK_TIMEOUT, TASK_PAUSED, TASK_DELETED, ADMISSION_UNAVAILABLE, START_REJECTED, RESULT_UNKNOWN]
+        attempt_count: {type: integer, description: Persistent safe-not-started claim count.}
+        next_attempt_at: {type: string, format: date-time, description: UTC retry eligibility time.}
+        started_at: {type: string, format: date-time, description: UTC startup-fence crossing time.}
+        finished_at: {type: string, format: date-time, description: UTC terminal time.}
+        error: {type: string}
+        create_time: {type: string, format: date-time, description: UTC timestamp.}
+        update_time: {type: string, format: date-time, description: UTC timestamp.}
+    ScheduledTaskRunListResponse:
+      type: object
+      required: [runs, limit, offset]
+      properties:
+        runs:
+          type: array
+          items: {$ref: '#/components/schemas/ScheduledTaskRun'}
+        limit: {type: integer}
+        offset: {type: integer}
   responses:
     BadRequest:
       description: Malformed request body or missing field.
@@ -1432,6 +1585,179 @@ paths:
                 userNotFound:    {value: {error: {code: UNAUTHORIZED, message: "user not found"}}}
                 userDisabled:    {value: {error: {code: UNAUTHORIZED, message: "user disabled"}}}
                 unauthorized:    {value: {error: {code: UNAUTHORIZED, message: "unauthorized"}}}
+  /api/v1/scheduled-tasks:
+    post:
+      tags: [scheduled-tasks]
+      summary: Create a user-owned scheduled task
+      description: |
+        Validates and persists the task but does not execute an Agent. The
+        owner comes only from the JWT; client-supplied user identities are not
+        accepted. `at` must be future at creation; cron is five-field only.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScheduledTaskCreate'}
+      responses:
+        '201':
+          description: Task created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledTask'}
+        '400':
+          description: >-
+            INVALID_JSON, INVALID_NAME, INVALID_PROMPT, INVALID_SCHEDULE,
+            INVALID_SESSION, INVALID_MODEL, INVALID_EFFORT, or CONTENT_TOO_LONG.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '401':
+          description: Missing or invalid JWT (UNAUTHORIZED).
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '404':
+          description: The existing target session is absent or belongs to another user.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '413':
+          description: REQUEST_TOO_LARGE — the JSON body exceeds 1MB.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    get:
+      tags: [scheduled-tasks]
+      summary: List the authenticated user's tasks
+      description: Tasks are ordered by creation time and task ID descending; soft-deleted tasks are omitted.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+          description: Values above 100 are clamped to 100.
+        - name: offset
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Owner-scoped page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledTaskListResponse'}
+        '400':
+          description: INVALID_PAGINATION.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '401':
+          description: Missing or invalid JWT.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  /api/v1/scheduled-tasks/{task_id}:
+    parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [scheduled-tasks]
+      summary: Read one scheduled task
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Task found.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledTask'}
+        '401':
+          description: Missing or invalid JWT.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '404':
+          description: Missing, soft-deleted, or owned by another user (NOT_FOUND).
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    patch:
+      tags: [scheduled-tasks]
+      summary: Update, pause, or resume a scheduled task
+      description: |
+        Ordinary edits affect future snapshots only. Pause/delete coordination
+        prevents starts before the startup fence; an already-running turn is
+        not implicitly cancelled or rerun. Use the ordinary Run cancel endpoint
+        for explicit cancellation.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScheduledTaskPatch'}
+      responses:
+        '200':
+          description: Updated task.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledTask'}
+        '400':
+          description: Invalid schedule, text, model/effort, session policy, or JSON.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '401':
+          description: Missing or invalid JWT.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '404':
+          description: Task or existing target session is absent/foreign.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '413':
+          description: REQUEST_TOO_LARGE — the JSON body exceeds 1MB.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    delete:
+      tags: [scheduled-tasks]
+      summary: Soft-delete a scheduled task
+      description: |
+        Prevents future materialization and cancels occurrences that have not
+        crossed the startup fence. Historical occurrence facts and any running
+        turn's ordinary session persistence are retained.
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Task soft-deleted; no response body.
+        '401':
+          description: Missing or invalid JWT.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '404':
+          description: Missing, already deleted, or owned by another user.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  /api/v1/scheduled-tasks/{task_id}/runs:
+    get:
+      tags: [scheduled-tasks]
+      summary: List durable occurrence and execution history
+      description: |
+        Runs are ordered by `scheduled_for` and internal ID descending. This
+        MySQL history does not expire with the Redis Run event retention
+        window. If the associated session was deleted, execution facts remain
+        but conversation content is no longer guaranteed to be readable.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+          description: Values above 100 are clamped to 100.
+        - name: offset
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Owner-scoped run-history page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledTaskRunListResponse'}
+        '400':
+          description: INVALID_PAGINATION.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '401':
+          description: Missing or invalid JWT.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '404':
+          description: Missing, soft-deleted, or owned by another user.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
   /api/v1/sessions:
     get:
       tags: [Session]
