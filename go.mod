@@ -13,6 +13,7 @@ require (
 	github.com/landlock-lsm/go-landlock v0.8.1
 	github.com/openai/openai-go/v3 v3.39.0
 	github.com/redis/go-redis/v9 v9.20.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.11.1
 	github.com/volcengine/OpenViking/sdk/go v0.0.1
 	go.uber.org/goleak v1.3.0
