@@ -83,6 +83,105 @@ func TestHTTPTransport_NoSessionID(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestHTTPTransport_PreservesTrailingSlash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp/" {
+			http.NotFound(w, r)
+			return
+		}
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch req.Method {
+		case "initialize":
+			writeResponse(t, w, req.ID, InitializeResult{ProtocolVersion: "2024-11-05"})
+		case "tools/list":
+			writeResponse(t, w, req.ID, ToolsListResult{Tools: []Tool{{Name: "stock_quote"}}})
+		default:
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	tr := NewHTTPTransport(srv.URL+"/mcp/", nil, time.Second)
+	defer tr.Close()
+
+	_, err := tr.Initialize(t.Context(), InitializeParams{ProtocolVersion: "2024-11-05"})
+	require.NoError(t, err)
+	list, err := tr.ListTools(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []Tool{{Name: "stock_quote"}}, list.Tools)
+}
+
+func TestHTTPTransport_InvalidDiscoveryResults(t *testing.T) {
+	routeError := json.RawMessage(`{"isError":true,"structuredContent":{"code":400,"message":"request path not found"},"content":[{"type":"text","text":"request path not found"}]}`)
+	tests := []struct {
+		name   string
+		method string
+		result json.RawMessage
+		field  string
+	}{
+		{"initialize_vendor_error", "initialize", routeError, "protocolVersion"},
+		{"initialize_missing_protocol", "initialize", json.RawMessage(`{}`), "protocolVersion"},
+		{"initialize_empty_protocol", "initialize", json.RawMessage(`{"protocolVersion":""}`), "protocolVersion"},
+		{"tools_vendor_error", "tools/list", routeError, "tools"},
+		{"tools_missing_array", "tools/list", json.RawMessage(`{}`), "tools"},
+		{"tools_null_array", "tools/list", json.RawMessage(`{"tools":null}`), "tools"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req Request
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if req.Method != tt.method {
+					http.Error(w, "unexpected method", http.StatusBadRequest)
+					return
+				}
+				writeResponse(t, w, req.ID, tt.result)
+			}))
+			defer srv.Close()
+
+			tr := NewHTTPTransport(srv.URL, nil, time.Second)
+			defer tr.Close()
+
+			if tt.method == "initialize" {
+				result, err := tr.Initialize(t.Context(), InitializeParams{ProtocolVersion: "2024-11-05"})
+				require.ErrorContains(t, err, tt.field)
+				require.Nil(t, result)
+			} else {
+				result, err := tr.ListTools(t.Context())
+				require.ErrorContains(t, err, tt.field)
+				require.Nil(t, result)
+			}
+		})
+	}
+}
+
+func TestHTTPTransport_EmptyToolsArray(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeResponse(t, w, req.ID, ToolsListResult{Tools: []Tool{}})
+	}))
+	defer srv.Close()
+
+	tr := NewHTTPTransport(srv.URL, nil, time.Second)
+	defer tr.Close()
+
+	list, err := tr.ListTools(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, list.Tools)
+	require.Empty(t, list.Tools)
+}
+
 func TestHTTPTransport_SSEResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "application/json, text/event-stream", r.Header.Get("Accept"))

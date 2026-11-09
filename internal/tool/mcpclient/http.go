@@ -47,7 +47,7 @@ func NewHTTPTransport(baseURL string, headers map[string]string, timeout time.Du
 		timeout = 30 * time.Second
 	}
 	return &HTTPTransport{
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: baseURL,
 		headers: headers,
 		httpClient: &http.Client{
 			Timeout: timeout,
@@ -66,6 +66,9 @@ func (t *HTTPTransport) Initialize(ctx context.Context, params InitializeParams)
 	if err := extractResult(resp, &result); err != nil {
 		return nil, err
 	}
+	if result.ProtocolVersion == "" {
+		return nil, errors.New("http initialize: invalid result: missing protocolVersion")
+	}
 	return &result, nil
 }
 
@@ -78,6 +81,9 @@ func (t *HTTPTransport) ListTools(ctx context.Context) (*ToolsListResult, error)
 	var result ToolsListResult
 	if err := extractResult(resp, &result); err != nil {
 		return nil, err
+	}
+	if result.Tools == nil {
+		return nil, errors.New("http tools/list: invalid result: missing tools array")
 	}
 	return &result, nil
 }
