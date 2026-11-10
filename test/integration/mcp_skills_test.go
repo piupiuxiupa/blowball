@@ -241,9 +241,10 @@ func TestIntegration_AgentSkillCatalog(t *testing.T) {
 	// Second LLM round carries the luban_read_skill result.
 	req2 := llm.confuciusRequest()
 	require.GreaterOrEqual(t, len(req2.Messages), 3)
-	last := req2.Messages[len(req2.Messages)-1]
-	assert.Equal(t, "tool", last.Role)
-	assert.Contains(t, last.Content, "# Style")
+	lastTool := req2.Messages[len(req2.Messages)-2]
+	assert.Equal(t, "tool", lastTool.Role)
+	assert.Contains(t, lastTool.Content, "# Style")
+	assert.Equal(t, agent.RuntimeStatusToolBudget, req2.Messages[len(req2.Messages)-1].RuntimeStatus)
 }
 
 func setupMCPIntegrationServer(t *testing.T, llm agent.LLMClient, cfg *config.Config, baseReg *tool.Registry, serverTools map[string][]string, loader *skill.Loader) (*gin.Engine, *memoryMySQL, *redisstore.Store) {

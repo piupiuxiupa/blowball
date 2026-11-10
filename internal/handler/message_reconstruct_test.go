@@ -58,6 +58,19 @@ func TestMessagesToAgentMessages_UserMessagesPreserved(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestMessagesToAgentMessages_LegacyInlineCurrentStatusPreserved(t *testing.T) {
+	content := "hello\n<current_status>\ntimestamp: 2026-01-02T03:04:05Z\n</current_status>"
+	prior := []model.Message{{
+		Agent: model.AgentUser, Role: model.RoleUser,
+		EventType: model.EventTypeMessage, Content: content,
+	}}
+
+	got, err := MessagesToAgentMessages(prior, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, content, got[0].Content)
+}
+
 func TestMessagesToAgentMessages_MarkersIgnored(t *testing.T) {
 	prior := []model.Message{
 		{Agent: model.AgentUser, Role: model.RoleUser, EventType: model.EventTypeMessage, Content: "hello"},

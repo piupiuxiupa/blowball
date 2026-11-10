@@ -201,6 +201,10 @@ type Message struct {
 	ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"` // set on role="tool"
 	Name             string         `json:"name,omitempty"`         // optional, set on role="tool"
+	// RuntimeStatus marks a cache-only synthetic user message. It never
+	// participates in durable message JSON or provider conversion.
+	RuntimeStatus    string `json:"-"`
+	RuntimeStatusSeq int64  `json:"-"`
 }
 
 // MessageImage is one raw image payload bound for an image_url content part

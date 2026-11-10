@@ -9,6 +9,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCollectLiveMessages_SkipsCurrentStatusBeforeUser(t *testing.T) {
+	current := Message{
+		Role: "user", Content: "question",
+		Images: []MessageImage{{AttachmentID: "att-current", Filename: "current.png", MIMEType: "image/png"}},
+	}
+	messages := []Message{
+		{Role: "user", Content: "older"},
+		{Role: "user", Content: "status", RuntimeStatus: RuntimeStatusCurrent},
+		current,
+	}
+
+	live := collectLiveMessages(messages)
+	require.Len(t, live, 1)
+	assert.Equal(t, current, live[0])
+}
+
 func TestApplyLiveOverlay_RepeatedAttachmentUsesRetainedOccurrence(t *testing.T) {
 	live := Message{
 		Role:    "user",

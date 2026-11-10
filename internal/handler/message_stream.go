@@ -212,6 +212,13 @@ func (h *MessageStreamHandler) WithAttachmentStore(store attachmentStore) *Messa
 	return h
 }
 
+// WithRuntimeStatusStore enables Redis-only append-only status replay without
+// changing the durable message services.
+func (h *MessageStreamHandler) WithRuntimeStatusStore(store turnexec.RuntimeStatusStore) *MessageStreamHandler {
+	h.turns.SetRuntimeStatusStore(store)
+	return h
+}
+
 // validateSendAttachment performs the non-mutating lookup/ownership half of
 // send-time attachment validation. Row-state semantics:
 //   - unknown id / foreign owner    → 404 (no existence leak)
@@ -1068,6 +1075,7 @@ func (h *MessageStreamHandler) compactMidTurn(ctx context.Context, tap *TurnEven
 	if env, ok := agent.RequestEnvelopeFromContext(ctx); ok {
 		requestOverhead = agent.EstimateRenderedRequest(env.System, nil, env.Tools).Tokens
 	}
+	requestOverhead += agent.EstimateCurrentStatusOverhead(time.Now())
 	liveMessages := agent.LiveMessagesFromContext(ctx)
 
 	// ③ Compact the middle into a checkpoint.

@@ -221,7 +221,9 @@ consumer:
 	assert.Equal(t, "system", req.Messages[0].Role)
 	assert.Contains(t, req.Messages[0].Content, "confucius")
 	assert.Equal(t, "user", req.Messages[1].Role)
-	assert.Equal(t, "hi", req.Messages[1].Content)
+	assert.Contains(t, req.Messages[1].Content, "<current_status>")
+	assert.Equal(t, "user", req.Messages[2].Role)
+	assert.Equal(t, "hi", req.Messages[2].Content)
 }
 
 func TestOrchestrator_ExternalMCPTool(t *testing.T) {

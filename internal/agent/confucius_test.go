@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/stretchr/testify/assert"
@@ -98,9 +100,14 @@ func staticFactories(subAgents map[string]Agent) *spawnCoordinator {
 // "drain-first" pattern so events buffered at Close time are not lost.
 func runConfuciusAndCollect(t *testing.T, c *Confucius, messages []Message) ([]stream.StreamEvent, string, Usage, *TurnBreakdown, error) {
 	t.Helper()
+	return runConfuciusAndCollectContext(t, c, messages, context.Background())
+}
+
+func runConfuciusAndCollectContext(t *testing.T, c *Confucius, messages []Message, ctx context.Context) ([]stream.StreamEvent, string, Usage, *TurnBreakdown, error) {
+	t.Helper()
 	hub := stream.NewHub(0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	events := make([]stream.StreamEvent, 0, 32)
@@ -202,6 +209,67 @@ func TestConfucius_HandlesDirectly(t *testing.T) {
 		assert.NotEqual(t, stream.EventAgentError, e.Type)
 		assert.NotEqual(t, "Chongzhi", e.Agent, "sub-agent Chongzhi should not have been activated")
 	}
+}
+
+func TestConfucius_RuntimeStatus_AppendOnlyAcrossToolRound(t *testing.T) {
+	first := &fakeExecutor{name: "first_tool", result: "first"}
+	second := &fakeExecutor{name: "second_tool", result: "second"}
+	reg := tool.NewRegistry()
+	for _, fake := range []*fakeExecutor{first, second} {
+		require.NoError(t, reg.Register(&tool.ToolSpec{
+			Name: fake.name, Description: "fake tool",
+			ParametersJSON: json.RawMessage(`{"type":"object"}`), Execute: fake.execute,
+		}))
+	}
+	client := newFake(
+		fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{
+			{ID: "c1", Function: ToolCallFunction{Name: first.name, Arguments: `{}`}},
+			{ID: "c2", Function: ToolCallFunction{Name: second.name, Arguments: `{}`}},
+		}},
+		fakeResponse{content: "done", finishReason: "stop"},
+	)
+	c, err := NewConfucius(config.AgentConfig{
+		Name: "Confucius", SystemPrompt: "test", MaxRounds: 5,
+		Tools: []string{first.name, second.name},
+	}, client, reg, testSpawnCoordinator(reg, func(SubAgentSpec) (Agent, error) {
+		return nil, context.Canceled
+	}), testTurn())
+	require.NoError(t, err)
+
+	store := &fakeAgentRuntimeStatusStore{}
+	ctx := WithSessionID(trace.WithContext(context.Background(), "trace-1"), "s-1")
+	ctx = WithRuntimeStatusStore(ctx, store)
+	_, _, _, _, err = runConfuciusAndCollectContext(t, c, []Message{{Role: "user", Content: "go"}}, ctx)
+	require.NoError(t, err)
+	require.Len(t, client.calls, 2)
+
+	firstRequest := client.calls[0].Messages
+	require.Len(t, firstRequest, 3)
+	assert.Equal(t, "system", firstRequest[0].Role)
+	assert.Equal(t, "user", firstRequest[1].Role)
+	assert.Contains(t, firstRequest[1].Content, "<current_status>")
+	assert.Equal(t, Message{Role: "user", Content: "go"}, firstRequest[2])
+
+	secondRequest := client.calls[1].Messages
+	require.Greater(t, len(secondRequest), len(firstRequest))
+	assert.Equal(t, firstRequest, secondRequest[:len(firstRequest)],
+		"the complete previous request must remain an immutable prefix")
+	suffix := secondRequest[len(firstRequest):]
+	require.Len(t, suffix, 4)
+	assert.Equal(t, "assistant", suffix[0].Role)
+	assert.Equal(t, "c1", suffix[1].ToolCallID)
+	assert.Equal(t, "c2", suffix[2].ToolCallID)
+	assert.Equal(t, "user", suffix[3].Role)
+	assert.Contains(t, suffix[3].Content, "<tool_budget>")
+	assert.Contains(t, suffix[3].Content, "rounds_used: 1")
+	assert.Contains(t, suffix[3].Content, "max_rounds: 5")
+	assert.Contains(t, suffix[3].Content, "rounds_remaining: 4")
+	require.Len(t, store.entries, 2)
+	assert.Equal(t, "trace-1:0", store.entries[0].BeforeClientMsgID)
+	assert.Equal(t, "trace-1:2:tool_budget", store.entries[1].StatusID)
+	assert.Equal(t, int64(2), store.entries[1].Seq)
+	assert.Equal(t, "c2", store.entries[1].AfterToolCallID)
+	assert.Equal(t, suffix[3].Content, store.entries[1].Content)
 }
 
 func TestConfucius_CallsSubAgent_ThenSummarizes(t *testing.T) {

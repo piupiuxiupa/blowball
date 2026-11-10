@@ -17,7 +17,6 @@ import (
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/middleware"
 	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/stream"
@@ -209,7 +208,7 @@ func TestStartTurn_WithoutSubscriberPersistsAndFinalizes(t *testing.T) {
 	require.Len(t, batches, 2)
 	require.Len(t, batches[0], 1)
 	require.Equal(t, model.RoleUser, batches[0][0].Role)
-	require.Equal(t, "offline work"+prompt.RenderStatus(), batches[0][0].Content)
+	require.Equal(t, "offline work", batches[0][0].Content)
 	require.Len(t, batches[1], 1)
 	require.Equal(t, model.RoleAssistant, batches[1][0].Role)
 	require.Equal(t, "Hello", batches[1][0].Content)

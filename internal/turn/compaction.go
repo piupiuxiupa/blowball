@@ -68,6 +68,7 @@ func (e *Executor) compactMidTurn(ctx context.Context, tap *TurnEventTap, persis
 	if env, ok := agent.RequestEnvelopeFromContext(ctx); ok {
 		requestOverhead = agent.EstimateRenderedRequest(env.System, nil, env.Tools).Tokens
 	}
+	requestOverhead += agent.EstimateCurrentStatusOverhead(time.Now())
 	liveMessages := agent.LiveMessagesFromContext(ctx)
 
 	rec, ok := e.compSvc.Compact(ctx, service.CompactionInput{

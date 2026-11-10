@@ -6,6 +6,14 @@ Blowball is a Go backend for a multi-agent chat workspace. The executable CLI li
 
 OpenSpec change proposals live under `openspec/changes/`. Keep each change's proposal, design, delta specs, and task list synchronized with the implemented behavior; update `api/openapi.yaml` when implementation work introduces or changes a client-visible HTTP contract.
 
+## Runtime Context Conventions
+
+Keep durable canonical history (MySQL and `msgs:{session_id}`) separate from the active model transcript. Root `<current_status>` and root/SubAgent `<tool_budget>` messages are cache-only synthetic user messages: they never enter MySQL, SubAgent transcripts, SSE, titles, or real user ordinals. The root status log lives in `runtime_status:{session_id}` (with its id registry), is immutable and append-only, and replays only when every before-user/after-tool anchor is valid. A Redis miss or invalid anchor starts a fresh cache epoch; successful compaction clears old status and builds a fresh status on the new projection, while a stable `ContextCompacted` checkpoint does not clear or reset status. Replayed messages carry the real `RuntimeStatusSeq`; continue from the log's maximum sequence, never from its entry count. Candidate planning reserves one conservative fresh status in `RequestOverheadTokens` before accepting retained tail. Cache failures degrade with WARN logs and never fail a turn.
+
+`max_rounds` counts outer tool-calling rounds, not individual tool invocations. Parallel calls in one response consume one round; retries and length continuations do not increment it. Append one new countdown after each complete tool-result group without mutating older status. `current_status` precedes the real current user message, whose persisted/title/memory content remains the unmodified request text. Context-remaining values are conservative estimates that include system prompt, tools, existing status, and the new status itself.
+
+Compaction Tool Activity keeps the parent `mcp_call` count and nested per-`(server, tool)` call/success/error counts. Merge nested activity deterministically without double-counting children in top-level totals. Legacy or malformed calls stay in an unattributed residual; never invent old server/tool details or drop high-cardinality pairs with a Top-N cap.
+
 ## Build, Test, and Development Commands
 
 ```bash

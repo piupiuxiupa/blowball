@@ -245,6 +245,7 @@ func TestMemoryCapture_SuccessAndErrorPaths(t *testing.T) {
 	msgs := batch["messages"].([]any)
 	require.Len(t, msgs, 2)
 	assert.Contains(t, msgs[0].(map[string]any)["content"], "remember fish shell")
+	assert.NotContains(t, msgs[0].(map[string]any)["content"], "<current_status>")
 	assert.Equal(t, "final answer", msgs[1].(map[string]any)["content"])
 	for _, u := range ov.findUsers() {
 		assert.Equal(t, "user-1", u, "every OV request must carry the turn's user identity")

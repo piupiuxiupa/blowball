@@ -1064,6 +1064,7 @@ func newTestEnvWithAgents(t *testing.T, llm agent.LLMClient, agents config.Agent
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0).
+		WithRuntimeStatusStore(redisSvc).
 		WithAttachmentStore(mysqlFake)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	attachmentH := handler.NewAttachmentHandler(mysqlFake, sessSvc, fsSvc)
@@ -1170,6 +1171,7 @@ func newTestEnvWithRegistry(t *testing.T, llm agent.LLMClient, baseReg *tool.Reg
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0).
+		WithRuntimeStatusStore(redisSvc).
 		WithAttachmentStore(mysqlFake)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	attachmentH := handler.NewAttachmentHandler(mysqlFake, sessSvc, fsSvc)
@@ -1280,6 +1282,7 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
 	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0).
+		WithRuntimeStatusStore(redisSvc).
 		WithAttachmentStore(mysqlFake)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	attachmentH := handler.NewAttachmentHandler(mysqlFake, sessSvc, fsSvc)

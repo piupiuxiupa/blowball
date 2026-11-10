@@ -31,11 +31,12 @@ import (
 )
 
 type compactionBudgetLLM struct {
-	mu           sync.Mutex
-	requests     []agent.LLMRequest
-	mainCalls    int
-	summaryCalls int
-	firstMainErr error
+	mu                 sync.Mutex
+	requests           []agent.LLMRequest
+	mainCalls          int
+	summaryCalls       int
+	firstMainErr       error
+	firstMainToolCalls []agent.ToolCall
 }
 
 func (c *compactionBudgetLLM) StreamChat(
@@ -53,6 +54,9 @@ func (c *compactionBudgetLLM) StreamChat(
 		return agent.LLMResponse{Content: "BUDGET CHECKPOINT", FinishReason: "stop"}, nil
 	}
 	c.mainCalls++
+	if c.mainCalls == 1 && len(c.firstMainToolCalls) > 0 {
+		return agent.LLMResponse{FinishReason: "tool_calls", ToolCalls: c.firstMainToolCalls}, nil
+	}
 	if c.mainCalls == 1 && c.firstMainErr != nil {
 		return agent.LLMResponse{}, c.firstMainErr
 	}
@@ -180,7 +184,8 @@ func newCompactionTestEnv(
 	sessH := handler.NewSessionHandler(sessSvc, titleSvc, redisSvc.RunStore())
 	runMgr := run.NewManager(redisSvc.RunStore(), run.NewRegistry())
 	turnRunH := handler.NewTurnRunHandler(runMgr)
-	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0)
+	streamH := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, nil, handler.NewOrchestratorAdapter(orch), dataDir, runMgr, handler.NewModelSelectionConfig(cfg), 0).
+		WithRuntimeStatusStore(redisSvc)
 	wsH := handler.NewWorkspaceHandler(fsSvc, 1<<20, handler.OnlyOfficeSettings{})
 	mcpH := handler.NewMCPHandler(baseReg, nil, fsSvc.UserWorkspace, nil)
 	skillH := handler.NewSkillHandler(fsSvc, nil)
@@ -415,6 +420,9 @@ func TestCompaction_TurnStartPreflight_Budgeted(t *testing.T) {
 		}
 	}
 	require.NotNil(t, mainRequest, "the budgeted preflight must rewrite the first model request")
+	actual := agent.EstimateRenderedRequest("", mainRequest.Messages, mainRequest.Tools).Tokens
+	assert.LessOrEqual(t, actual, rec.InputBudgetTokens,
+		"the final request, including its fresh current_status, must fit the planned budget")
 }
 
 func TestCompaction_ProviderOverflow_BudgetedRecovery(t *testing.T) {
@@ -656,5 +664,6 @@ func TestCompaction_DisabledByDefault(t *testing.T) {
 	}
 	require.NotNil(t, toolRound)
 	assert.Equal(t, "seed user 0", toolRound.Messages[1].Content)
-	assert.Equal(t, "seed reply 7", toolRound.Messages[len(toolRound.Messages)-2].Content)
+	assert.Equal(t, "seed reply 7", toolRound.Messages[len(toolRound.Messages)-3].Content,
+		"current_status precedes the current user without replacing durable history")
 }

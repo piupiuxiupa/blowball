@@ -36,7 +36,6 @@ import (
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
-	"github.com/lush/blowball/internal/prompt"
 	"github.com/lush/blowball/internal/run"
 	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/stream"
@@ -50,6 +49,8 @@ import (
 // invariants — so every entry path produces the identical turn.
 func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	sessionID, userID, tid := req.SessionID, req.UserID, req.RunID
+	ctx = agent.WithSessionID(ctx, sessionID)
+	ctx = agent.WithRuntimeStatusStore(ctx, e.runtimeStatus)
 
 	sel := req.Selection
 	turnModel := sel.Model
@@ -77,7 +78,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 		priorCalls = nil
 	}
 
-	agentMsgs, _, err := MessagesToAgentMessagesIndexed(prior, priorCalls)
+	agentMsgs, lastRow, err := MessagesToAgentMessagesIndexed(prior, priorCalls)
 	if err != nil {
 		logger.FromContext(ctx).Warn("reconstruct messages failed; falling back to current message only",
 			zap.String("op", "handler.send_message"),
@@ -91,14 +92,20 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	// message, and budget are available.
 	if e.compSvc.Enabled() && req.ContextCompacted {
 		if durable, durableCalls, derr := e.compSvc.RecoverDurable(ctx, sessionID); derr == nil {
-			durableMsgs, _, rerr := MessagesToAgentMessagesIndexed(durable, durableCalls)
+			durableMsgs, durableLastRow, rerr := MessagesToAgentMessagesIndexed(durable, durableCalls)
 			if rerr != nil {
 				logger.FromContext(ctx).Warn("durable reconstruct failed; using full recovered history",
 					zap.String("op", "handler.send_message"),
 					zap.Error(rerr))
-			} else if activeRecord := e.compSvc.LatestCompactionRecord(ctx, sessionID); activeRecord != nil {
-				if stitched := stitchCompacted(durable, durableCalls, durableMsgs, activeRecord); stitched != nil {
-					agentMsgs = stitched
+			} else {
+				prior = durable
+				agentMsgs = durableMsgs
+				lastRow = durableLastRow
+				if activeRecord := e.compSvc.LatestCompactionRecord(ctx, sessionID); activeRecord != nil {
+					if stitched, attribution := stitchCompactedIndexed(durable, durableCalls, durableMsgs, durableLastRow, activeRecord); stitched != nil {
+						agentMsgs = stitched
+						lastRow = attribution
+					}
 				}
 			}
 		} else {
@@ -107,6 +114,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 				zap.Error(derr))
 		}
 	}
+	agentMsgs = e.replaySessionRuntimeStatus(ctx, sessionID, agentMsgs, lastRow, prior)
 
 	// Cross-session memory recall (cross-session-memory +
 	// memory-recall-cache-stable): query the user's OpenViking memory store
@@ -136,7 +144,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 			recall = &inj
 		}
 	}
-	content := req.Content + prompt.RenderStatus()
+	content := req.Content
 	// Current-turn inline images (K=1 window): the LIVE user message carries
 	// the image bytes read from disk; from the next turn on, reconstruction
 	// renders this row as text placeholders instead. A missing file degrades
@@ -377,6 +385,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	// luban/executor market lookups survive the HTTP request's lifetime.
 	turnCtx, turnCancel := context.WithCancel(context.Background())
 	turnCtx = skillmarket.WithToken(agent.WithUserID(agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID), agent.UserIDFromContext(ctx)), req.RawToken)
+	turnCtx = agent.WithRuntimeStatusStore(turnCtx, e.runtimeStatus)
 	regRun := e.runs.Registry.Register(tid, turnCancel)
 
 	workspaceRoot := filepath.Join(e.dataDir, userID, "workspace")

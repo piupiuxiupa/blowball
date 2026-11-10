@@ -39,7 +39,7 @@ func (s *Store) GetSessionCache(ctx context.Context, sessionID string) ([]byte, 
 // session-scoped caches that must not outlive the session. A missing key is a
 // no-op (Del does not error on non-existent keys).
 func (s *Store) DelSessionCache(ctx context.Context, sessionID string) error {
-	keys := []string{sessionKey(sessionID), compactionKey(sessionID)}
+	keys := []string{sessionKey(sessionID), compactionKey(sessionID), runtimeStatusKey(sessionID), runtimeStatusIDsKey(sessionID)}
 	logCmd(ctx, "session.del", keys[0])
 	return s.client.Del(ctx, keys...).Err()
 }

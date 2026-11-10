@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lush/blowball/internal/config"
+	"github.com/lush/blowball/internal/pkg/trace"
 	"github.com/lush/blowball/internal/stream"
 	"github.com/lush/blowball/internal/tool"
 	"github.com/lush/blowball/internal/tool/xizhi"
@@ -442,6 +443,41 @@ func TestConfuciusRun_LengthContinuation(t *testing.T) {
 
 	// No error events on the success path.
 	assert.Empty(t, findEvents(events, stream.EventAgentError))
+}
+
+func TestConfuciusRun_LengthContinuation_AppendsSameRoundBudget(t *testing.T) {
+	fake := &fakeExecutor{name: "fake_tool", result: "ok"}
+	reg := newSubAgentRegistryWithFake(t, fake)
+	client := newFake(
+		fakeResponse{finishReason: "length", toolCalls: []ToolCall{{
+			ID: "call-length", Function: ToolCallFunction{Name: fake.name, Arguments: `{}`},
+		}}},
+		fakeResponse{content: "done", finishReason: "stop"},
+	)
+	c, err := NewConfucius(config.AgentConfig{
+		Name: "Confucius", SystemPrompt: "sys", MaxRounds: 5, Tools: []string{fake.name},
+	}, client, reg, testSpawnCoordinator(reg, func(SubAgentSpec) (Agent, error) {
+		return nil, context.Canceled
+	}), ModelOverride{Model: "m", MaxCompletionTokens: 8192, LengthContinue: enabledPolicy(8192, 3)})
+	require.NoError(t, err)
+	store := &fakeAgentRuntimeStatusStore{}
+	ctx := WithSessionID(trace.WithContext(context.Background(), "trace-length"), "s-1")
+	ctx = WithRuntimeStatusStore(ctx, store)
+
+	_, content, _, _, err := runConfuciusAndCollectContext(t, c, []Message{{Role: "user", Content: "go"}}, ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "done", content)
+	require.Len(t, client.calls, 2)
+	first := client.calls[0].Messages
+	second := client.calls[1].Messages
+	require.Greater(t, len(second), len(first))
+	assert.Equal(t, first, second[:len(first)])
+	last := second[len(second)-1]
+	assert.Equal(t, RuntimeStatusToolBudget, last.RuntimeStatus)
+	assert.Contains(t, last.Content, "rounds_used: 1")
+	assert.Contains(t, last.Content, "rounds_remaining: 4")
+	require.Len(t, store.entries, 2)
+	assert.Equal(t, "call-length", store.entries[1].AfterToolCallID)
 }
 
 // Continuation attempts do not consume max_rounds: a max_rounds=1 agent that

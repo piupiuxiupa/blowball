@@ -57,6 +57,24 @@ func TestToOpenAIMessage_PlainUserUnchanged(t *testing.T) {
 	assert.JSONEq(t, `{"role":"user","content":"plain"}`, string(raw))
 }
 
+func TestCaptureRequestJSON_IncludesRuntimeStatus(t *testing.T) {
+	status := newToolBudgetMessage(1, 5)
+	req := LLMRequest{Messages: []Message{status}}
+	params := openai.ChatCompletionNewParams{Model: "gpt-test", Messages: toOpenAIMessages(req.Messages)}
+	raw, err := captureRequestJSON(req, params)
+	require.NoError(t, err)
+	var doc struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	require.Len(t, doc.Messages, 1)
+	assert.Equal(t, "user", doc.Messages[0].Role)
+	assert.Equal(t, status.Content, doc.Messages[0].Content)
+}
+
 func TestStripImages(t *testing.T) {
 	msgs := []Message{
 		{Role: "user", Content: "q", Images: []MessageImage{{AttachmentID: "a", MIMEType: "image/png", Data: []byte("x")}}},

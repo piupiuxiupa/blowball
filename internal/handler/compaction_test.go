@@ -547,8 +547,8 @@ func TestBudgetedRoundHook_ReturnsDurableLiveProjection(t *testing.T) {
 	require.NotNil(t, replaced)
 	require.Len(t, env.mysql.compactions, 1)
 	assert.Equal(t, env.mysql.compactions[0].PostCompactionTokens,
-		agent.EstimateRenderedRequest("", replaced, nil).Tokens,
-		"the handler must return the durable projection it measured, with live data already applied")
+		agent.EstimateRenderedRequest("", replaced, nil).Tokens+agent.EstimateCurrentStatusOverhead(time.Now()),
+		"the measured projection must include both durable live data and the reserved fresh status")
 	found := false
 	for _, msg := range replaced {
 		if len(msg.Images) > 0 && msg.Images[0].AttachmentID == "att-current" {

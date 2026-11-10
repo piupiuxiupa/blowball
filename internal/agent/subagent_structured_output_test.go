@@ -121,10 +121,11 @@ func TestSubAgentOutput_ToolCall(t *testing.T) {
 	// Verify the tool call was included in the final LLM request's messages.
 	require.Equal(t, 2, client.requestCount())
 	last := client.lastRequest()
-	require.Len(t, last.Messages, 4)
+	require.Len(t, last.Messages, 5)
 	assert.Equal(t, "tool", last.Messages[3].Role)
 	assert.Equal(t, "tc_1", last.Messages[3].ToolCallID)
 	assert.Contains(t, last.Messages[3].Content, "pong")
+	assert.Equal(t, RuntimeStatusToolBudget, last.Messages[4].RuntimeStatus)
 }
 
 // TestSubAgentOutput_DispatchesToolCallsOnStopFinishReason verifies that Liang dispatches
@@ -186,10 +187,11 @@ func TestSubAgentOutput_DispatchesToolCallsOnStopFinishReason(t *testing.T) {
 
 	require.Equal(t, 2, client.requestCount())
 	last := client.lastRequest()
-	require.Len(t, last.Messages, 4)
+	require.Len(t, last.Messages, 5)
 	assert.Equal(t, "tool", last.Messages[3].Role)
 	assert.Equal(t, "tc_stop", last.Messages[3].ToolCallID)
 	assert.Contains(t, last.Messages[3].Content, "pong")
+	assert.Equal(t, RuntimeStatusToolBudget, last.Messages[4].RuntimeStatus)
 }
 
 func TestSubAgentOutput_StreamsTokens(t *testing.T) {

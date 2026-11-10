@@ -35,8 +35,21 @@ func frameCompactedSummary(content string) string {
 // fails to reconstruct — the caller's contract is to degrade to the full
 // history, never to error the turn.
 func stitchCompacted(rows []model.Message, calls []model.ToolCall, agentMsgs []agent.Message, rec *model.ContextCompaction) []agent.Message {
-	if rec == nil || len(agentMsgs) == 0 {
-		return nil
+	out, _ := stitchCompactedWithAttribution(rows, calls, agentMsgs, nil, rec)
+	return out
+}
+
+func stitchCompactedIndexed(
+	rows []model.Message, calls []model.ToolCall, agentMsgs []agent.Message, lastRow []int, rec *model.ContextCompaction,
+) ([]agent.Message, []int) {
+	return stitchCompactedWithAttribution(rows, calls, agentMsgs, lastRow, rec)
+}
+
+func stitchCompactedWithAttribution(
+	rows []model.Message, calls []model.ToolCall, agentMsgs []agent.Message, lastRow []int, rec *model.ContextCompaction,
+) ([]agent.Message, []int) {
+	if rec == nil || len(agentMsgs) == 0 || (lastRow != nil && len(agentMsgs) != len(lastRow)) {
+		return nil, nil
 	}
 	ord := -1
 	for i := range rows {
@@ -48,16 +61,20 @@ func stitchCompacted(rows []model.Message, calls []model.ToolCall, agentMsgs []a
 		}
 	}
 	if ord < 0 {
-		return nil
+		return nil, nil
 	}
 	// The full calls list is safe here: tail rows join their calls by
 	// (trace, round); calls of compacted turns match no tail row and drop out.
-	tailMsgs, err := MessagesToAgentMessages(rows[ord+1:], calls)
+	tailMsgs, tailLastRow, err := MessagesToAgentMessagesIndexed(rows[ord+1:], calls)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	out := make([]agent.Message, 0, 2+len(tailMsgs))
 	anchor := agentMsgs[0]
+	anchorRow := -1
+	if len(lastRow) > 0 {
+		anchorRow = lastRow[0]
+	}
 	if rec.AnchorTruncated && strings.TrimSpace(rec.AnchorJSON) != "" {
 		var projected agent.Message
 		if err := json.Unmarshal([]byte(rec.AnchorJSON), &projected); err == nil {
@@ -68,7 +85,16 @@ func stitchCompacted(rows []model.Message, calls []model.ToolCall, agentMsgs []a
 	out = append(out, agent.Message{Role: "user", Content: frameCompactedSummary(rec.Content)})
 	applyRetainedResultSummaries(tailMsgs, calls, rec)
 	out = append(out, tailMsgs...)
-	return out
+
+	attribution := make([]int, 0, len(out))
+	attribution = append(attribution, anchorRow, -1)
+	for _, row := range tailLastRow {
+		if row >= 0 {
+			row += ord + 1
+		}
+		attribution = append(attribution, row)
+	}
+	return out, attribution
 }
 
 // applyRetainedResultSummaries replaces retained role=tool bodies with the

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/stream"
@@ -146,7 +147,24 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		return "", Usage{}, nil, ctx.Err()
 	}
 
-	round := append([]Message{}, messages...)
+	requestBudget := NewRequestBudget(c.turn.MaxContextTokens, c.turn.MaxCompletionTokens)
+	statusTimestamp := time.Now()
+	statusSeq := runtimeStatusSequence(messages) + 1
+	currentStatus := newCurrentStatusForRequest(c.cfg.SystemPrompt, messages, c.toolsJSON, statusTimestamp, requestBudget)
+	currentStatus.RuntimeStatusSeq = statusSeq
+	round := withInitialCurrentStatus(messages, currentStatus)
+	appendRootRuntimeStatus(ctx, currentStatus, statusSeq, true, "")
+	appendToolBudget := func(calls []ToolCall, roundsUsed int) {
+		statusSeq++
+		status := newToolBudgetMessage(roundsUsed, c.maxRounds)
+		status.RuntimeStatusSeq = statusSeq
+		round = append(round, status)
+		afterToolCallID := ""
+		if len(calls) > 0 {
+			afterToolCallID = calls[len(calls)-1].ID
+		}
+		appendRootRuntimeStatus(ctx, status, statusSeq, false, afterToolCallID)
+	}
 	// Capture the current user question and live inline fields once. The round
 	// is rewritten by compaction, so recollecting later would either miss the
 	// user after tool messages or mistake a bounded replay for the full input.
@@ -175,7 +193,6 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 	c.hitCapThisRun = false
 	c.overflowRecoveryUsed = false
 	c.preflightCompactionUsed = false
-	requestBudget := NewRequestBudget(c.turn.MaxContextTokens, c.turn.MaxCompletionTokens)
 	if c.turn.MaxContextTokens > 0 && c.turn.MaxCompletionTokens > 0 && !requestBudget.Valid() {
 		budgetErr := &InvalidRequestBudgetError{
 			ModelWindow:       requestBudget.ModelWindow,
@@ -224,7 +241,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 					if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
 						return c.roundHook(hctx, Usage{})
 					}); recovered != nil {
-						round = recovered
+						round = c.resetRuntimeStatusAfterCompaction(ctx, recovered, c.toolsJSON, statusTimestamp, requestBudget, &statusSeq)
 						i-- // compaction is not a model round
 						continue
 					}
@@ -255,6 +272,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			// propagation, and spawn tracking apply unchanged.
 			func(gctx context.Context, calls []ToolCall) {
 				c.executeAndRecordToolCalls(gctx, calls, hub, budget, tmeta, &total, byAgent, &round)
+				appendToolBudget(calls, i+1)
 			},
 			func(delta string) error {
 				assistantText += delta
@@ -290,7 +308,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 					if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
 						return c.roundHook(hctx, Usage{})
 					}); recovered != nil {
-						round = recovered
+						round = c.resetRuntimeStatusAfterCompaction(ctx, recovered, c.toolsJSON, statusTimestamp, requestBudget, &statusSeq)
 						i-- // recovery is not a model round
 						continue
 					}
@@ -360,6 +378,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 		// Dispatch all tool_calls in parallel. Sub-agent invocations are
 		// intercepted before the registry; regular tools go through it.
 		c.executeAndRecordToolCalls(ctx, resp.ToolCalls, hub, budget, tmeta, &total, byAgent, &round)
+		appendToolBudget(resp.ToolCalls, i+1)
 
 		// Between-rounds context-pressure seam (context-compaction, mid-turn
 		// trigger): after this round's tool results are appended and before
@@ -381,7 +400,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 				if replaced := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
 					return c.budgetedRoundHook(hctx, resp.Usage, c.lastRequestEstimate, c.cfg.SystemPrompt, withSystem(c.cfg.SystemPrompt, round), c.toolsJSON)
 				}); replaced != nil {
-					round = replaced
+					round = c.resetRuntimeStatusAfterCompaction(ctx, replaced, c.toolsJSON, statusTimestamp, requestBudget, &statusSeq)
 					// The preflight hook already compacted this round; do not
 					// invoke the legacy pressure hook again for the same
 					// snapshot.
@@ -401,7 +420,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			if replaced := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
 				return c.roundHook(hctx, lastUsage)
 			}); replaced != nil {
-				round = replaced
+				round = c.resetRuntimeStatusAfterCompaction(ctx, replaced, c.toolsJSON, statusTimestamp, requestBudget, &statusSeq)
 			}
 		}
 
@@ -441,7 +460,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 					if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
 						return c.roundHook(hctx, Usage{})
 					}); recovered != nil {
-						round = recovered
+						round = c.resetRuntimeStatusAfterCompaction(ctx, recovered, nil, statusTimestamp, requestBudget, &statusSeq)
 						wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
 						wrapMessages = append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction})
 						wrapEstimate = EstimateRenderedRequest("", wrapMessages, nil)
@@ -478,7 +497,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			if recovered := callCompactionHook(hookCtx, round, liveMessages, func(hctx context.Context) []Message {
 				return c.roundHook(hctx, Usage{})
 			}); recovered != nil {
-				round = recovered
+				round = c.resetRuntimeStatusAfterCompaction(ctx, recovered, c.toolsJSON, statusTimestamp, requestBudget, &statusSeq)
 				wrapReq.Messages = withSystem(c.cfg.SystemPrompt, round)
 				wrapEstimate = EstimateRenderedRequest(
 					"",

@@ -113,32 +113,34 @@ type Submission struct {
 
 // Dependencies are the shared services needed by the full turn pipeline.
 type Dependencies struct {
-	Sessions     *service.SessionService
-	Messages     *service.MessageService
-	Titles       *service.TitleService
-	Compaction   *service.CompactionService
-	Memory       *memory.Service
-	Orchestrator OrchestratorRunner
-	DataDir      string
-	Runs         *run.Manager
-	Artifacts    *artifact.Service
-	Shutdown     *ShutdownGate
+	Sessions      *service.SessionService
+	Messages      *service.MessageService
+	Titles        *service.TitleService
+	Compaction    *service.CompactionService
+	Memory        *memory.Service
+	Orchestrator  OrchestratorRunner
+	DataDir       string
+	Runs          *run.Manager
+	Artifacts     *artifact.Service
+	RuntimeStatus RuntimeStatusStore
+	Shutdown      *ShutdownGate
 }
 
 // Executor owns the transport-independent turn lifecycle.
 type Executor struct {
-	sessSvc   *service.SessionService
-	msgSvc    *service.MessageService
-	titleSvc  *service.TitleService
-	compSvc   *service.CompactionService
-	memSvc    *memory.Service
-	orch      OrchestratorRunner
-	runs      *run.Manager
-	dataDir   string
-	artifacts *artifact.Service
-	newHub    func() *stream.Hub
-	shutdown  *ShutdownGate
-	queuePump func(string)
+	sessSvc       *service.SessionService
+	msgSvc        *service.MessageService
+	titleSvc      *service.TitleService
+	compSvc       *service.CompactionService
+	memSvc        *memory.Service
+	orch          OrchestratorRunner
+	runs          *run.Manager
+	dataDir       string
+	artifacts     *artifact.Service
+	runtimeStatus RuntimeStatusStore
+	newHub        func() *stream.Hub
+	shutdown      *ShutdownGate
+	queuePump     func(string)
 }
 
 func NewExecutor(deps Dependencies) *Executor {
@@ -150,8 +152,9 @@ func NewExecutor(deps Dependencies) *Executor {
 		sessSvc: deps.Sessions, msgSvc: deps.Messages, titleSvc: deps.Titles,
 		compSvc: deps.Compaction, memSvc: deps.Memory, orch: deps.Orchestrator,
 		runs: deps.Runs, dataDir: deps.DataDir, artifacts: deps.Artifacts,
-		newHub:   func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) },
-		shutdown: gate,
+		runtimeStatus: deps.RuntimeStatus,
+		newHub:        func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) },
+		shutdown:      gate,
 	}
 }
 

@@ -757,7 +757,7 @@ func TestSendMessage_DirectAnswer_PersistsUserAndAssistantEvents_SSE(t *testing.
 	assert.Equal(t, model.RoleUser, userMsg.Role)
 	assert.Equal(t, 0, userMsg.MsgIndex)
 	assert.Contains(t, userMsg.Content, "hi there")
-	assert.Contains(t, userMsg.Content, "<current_status>")
+	assert.NotContains(t, userMsg.Content, "<current_status>")
 	require.NotEmpty(t, userMsg.ClientMsgID, "persisted rows carry the idempotency key")
 
 	// Batch 2 (turn-end): the assistant final only — the user row must not
@@ -1467,6 +1467,7 @@ func TestSendMessage_TitleInputIsFirstPlusCurrentMessage(t *testing.T) {
 	assert.Contains(t, content, "prior question 1", "the FIRST user message must be an anchor")
 	assert.Contains(t, content, "the fourth question", "the triggering message must be an anchor")
 	assert.NotContains(t, content, "Assistant", "assistant content must not be part of the title input")
+	assert.NotContains(t, content, "<current_status>", "runtime status must not be part of the title input")
 }
 
 // TestSendMessage_SessionBusy_DoesNotFireTitle verifies that a request

@@ -12,11 +12,28 @@ import (
 // ToolActivity is the bounded ledger entry for tool calls that move into the
 // checkpoint (outside the retained tail).
 type ToolActivity struct {
-	ToolName string   `json:"tool_name"`
-	Calls    int      `json:"calls"`
-	Success  int      `json:"success"`
-	Errors   int      `json:"errors"`
-	Examples []string `json:"examples,omitempty"`
+	ToolName   string              `json:"tool_name"`
+	Calls      int                 `json:"calls"`
+	Success    int                 `json:"success"`
+	Errors     int                 `json:"errors"`
+	Examples   []string            `json:"examples,omitempty"`
+	MCPServers []MCPServerActivity `json:"mcp_servers,omitempty"`
+}
+
+// MCPServerActivity groups remote tool calls made through mcp_call for one
+// configured per-user server.
+type MCPServerActivity struct {
+	ServerName string            `json:"server_name"`
+	Tools      []MCPToolActivity `json:"tools"`
+}
+
+// MCPToolActivity counts one remote tool without duplicating the parent
+// mcp_call entry in the top-level total.
+type MCPToolActivity struct {
+	ToolName string `json:"tool_name"`
+	Calls    int    `json:"calls"`
+	Success  int    `json:"success"`
+	Errors   int    `json:"errors"`
 }
 
 func BuildToolActivity(calls []agent.ToolCall, results map[string]string) []ToolActivity {
@@ -33,10 +50,24 @@ func BuildToolActivity(calls []agent.ToolCall, results map[string]string) []Tool
 		entry.Calls++
 		result := results[call.ID]
 		summary := SummarizeToolResult(call, result, 80)
-		if strings.Contains(summary, `"status":"error"`) {
+		failed := strings.Contains(summary, `"status":"error"`)
+		if failed {
 			entry.Errors++
 		} else {
 			entry.Success++
+		}
+		if call.Function.Name == "mcp_call" {
+			var args struct {
+				Server string `json:"server"`
+				Tool   string `json:"tool"`
+			}
+			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err == nil {
+				args.Server = strings.TrimSpace(args.Server)
+				args.Tool = strings.TrimSpace(args.Tool)
+				if args.Server != "" && args.Tool != "" {
+					addMCPToolActivity(entry, args.Server, args.Tool, failed)
+				}
+			}
 		}
 		if len(entry.Examples) < 3 {
 			args := truncateRunes(strings.TrimSpace(call.Function.Arguments), 120)
@@ -45,6 +76,39 @@ func BuildToolActivity(calls []agent.ToolCall, results map[string]string) []Tool
 		}
 	}
 	return ledger
+}
+
+func addMCPToolActivity(entry *ToolActivity, serverName, toolName string, failed bool) {
+	serverIndex := -1
+	for i := range entry.MCPServers {
+		if entry.MCPServers[i].ServerName == serverName {
+			serverIndex = i
+			break
+		}
+	}
+	if serverIndex < 0 {
+		entry.MCPServers = append(entry.MCPServers, MCPServerActivity{ServerName: serverName})
+		serverIndex = len(entry.MCPServers) - 1
+	}
+	server := &entry.MCPServers[serverIndex]
+	toolIndex := -1
+	for i := range server.Tools {
+		if server.Tools[i].ToolName == toolName {
+			toolIndex = i
+			break
+		}
+	}
+	if toolIndex < 0 {
+		server.Tools = append(server.Tools, MCPToolActivity{ToolName: toolName})
+		toolIndex = len(server.Tools) - 1
+	}
+	tool := &server.Tools[toolIndex]
+	tool.Calls++
+	if failed {
+		tool.Errors++
+	} else {
+		tool.Success++
+	}
 }
 
 func MergeToolActivity(groups ...[]ToolActivity) []ToolActivity {
@@ -65,6 +129,7 @@ func MergeToolActivity(groups ...[]ToolActivity) []ToolActivity {
 			entry.Calls += source.Calls
 			entry.Success += source.Success
 			entry.Errors += source.Errors
+			entry.MCPServers = mergeMCPServerActivities(entry.MCPServers, source.MCPServers)
 			for _, example := range source.Examples {
 				example = strings.TrimSpace(example)
 				if example == "" || containsString(entry.Examples, example) {
@@ -75,6 +140,52 @@ func MergeToolActivity(groups ...[]ToolActivity) []ToolActivity {
 				}
 			}
 		}
+	}
+	return merged
+}
+
+func mergeMCPServerActivities(groups ...[]MCPServerActivity) []MCPServerActivity {
+	merged := make([]MCPServerActivity, 0)
+	for _, group := range groups {
+		for _, sourceServer := range group {
+			if sourceServer.ServerName == "" {
+				continue
+			}
+			serverIndex := -1
+			for i := range merged {
+				if merged[i].ServerName == sourceServer.ServerName {
+					serverIndex = i
+					break
+				}
+			}
+			if serverIndex < 0 {
+				merged = append(merged, MCPServerActivity{ServerName: sourceServer.ServerName})
+				serverIndex = len(merged) - 1
+			}
+			server := &merged[serverIndex]
+			for _, sourceTool := range sourceServer.Tools {
+				if sourceTool.ToolName == "" {
+					continue
+				}
+				toolIndex := -1
+				for i := range server.Tools {
+					if server.Tools[i].ToolName == sourceTool.ToolName {
+						toolIndex = i
+						break
+					}
+				}
+				if toolIndex < 0 {
+					server.Tools = append(server.Tools, MCPToolActivity{ToolName: sourceTool.ToolName})
+					toolIndex = len(server.Tools) - 1
+				}
+				server.Tools[toolIndex].Calls += sourceTool.Calls
+				server.Tools[toolIndex].Success += sourceTool.Success
+				server.Tools[toolIndex].Errors += sourceTool.Errors
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return nil
 	}
 	return merged
 }
@@ -94,6 +205,31 @@ func RenderToolActivityLedger(ledger []ToolActivity) string {
 		for _, example := range activity.Examples[:minInt(len(activity.Examples), 3)] {
 			if example != "" {
 				fmt.Fprintf(&b, "  - %s\n", strings.ReplaceAll(example, "\n", " "))
+			}
+		}
+		attributedCalls, attributedSuccess, attributedErrors := 0, 0, 0
+		for _, server := range activity.MCPServers {
+			if server.ServerName == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "  - %s\n", server.ServerName)
+			for _, tool := range server.Tools {
+				if tool.ToolName == "" || tool.Calls == 0 {
+					continue
+				}
+				fmt.Fprintf(&b, "    - %s: %d calls, %d succeeded, %d failed\n",
+					tool.ToolName, tool.Calls, tool.Success, tool.Errors)
+				attributedCalls += tool.Calls
+				attributedSuccess += tool.Success
+				attributedErrors += tool.Errors
+			}
+		}
+		if activity.ToolName == "mcp_call" {
+			calls := max(activity.Calls-attributedCalls, 0)
+			success := max(activity.Success-attributedSuccess, 0)
+			errors := max(activity.Errors-attributedErrors, 0)
+			if calls > 0 {
+				fmt.Fprintf(&b, "  - unattributed: %d calls, %d succeeded, %d failed\n", calls, success, errors)
 			}
 		}
 	}

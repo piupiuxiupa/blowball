@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -141,7 +142,7 @@ func (s *SubAgent) Run(ctx context.Context, messages []Message, hub stream.Event
 	s.runMu.Unlock()
 	defer func() {
 		s.runMu.Lock()
-		s.lastMessages = append([]Message(nil), round...)
+		s.lastMessages = durableMessages(round)
 		s.runMu.Unlock()
 	}()
 	var finalContent string
@@ -188,6 +189,7 @@ func (s *SubAgent) Run(ctx context.Context, messages []Message, hub stream.Event
 			// through the same record path as the main loop.
 			func(gctx context.Context, calls []ToolCall) {
 				s.executeAndRecordToolCalls(gctx, calls, hub, &round, &usage)
+				round = append(round, newToolBudgetMessage(i+1, s.maxRounds))
 			},
 			func(delta string) error {
 				assistantText += delta
@@ -249,6 +251,7 @@ func (s *SubAgent) Run(ctx context.Context, messages []Message, hub stream.Event
 		}
 
 		s.executeAndRecordToolCalls(ctx, resp.ToolCalls, hub, &round, &usage)
+		round = append(round, newToolBudgetMessage(i+1, s.maxRounds))
 		// This iteration dispatched tools and did not break; flag a cap exit
 		// when it was the last allowed round so the post-loop wrap-up runs.
 		capped = i+1 == s.maxRounds
@@ -416,10 +419,16 @@ func (s *SubAgent) terminalResponseFormat(round []Message) (json.RawMessage, boo
 	if !s.toolsIsNotNil {
 		return s.responseFormat, true
 	}
-	// Tooled agent: terminal only when the preceding context is a tool result
-	// (we are synthesizing after a tool dispatch).
-	if len(round) > 0 && round[len(round)-1].Role == "tool" {
-		return s.responseFormat, true
+	// Tooled agent: terminal only when the latest durable message is a tool
+	// result. Cache-only status messages do not change that determination.
+	for _, message := range slices.Backward(round) {
+		if message.RuntimeStatus != "" {
+			continue
+		}
+		if message.Role == "tool" {
+			return s.responseFormat, true
+		}
+		break
 	}
 	return nil, false
 }

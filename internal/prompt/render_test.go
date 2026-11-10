@@ -1,8 +1,10 @@
 package prompt
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -284,6 +286,65 @@ func TestRenderSystemPrompt_BlowballMCPConstraint(t *testing.T) {
 	})
 	assert.Contains(t, with, "`.blowball/mcp/` namespace is managed exclusively via the `mcp_*` tools")
 	assert.Contains(t, with, "**NEVER** use `xizhi_*` tools")
+}
+
+func TestRenderCurrentStatus(t *testing.T) {
+	ts := time.Date(2026, 11, 10, 12, 34, 56, 0, time.UTC)
+	got := RenderCurrentStatus(ts, &ContextUsage{
+		EstimatedInputTokens:     120,
+		InputBudgetTokens:        1000,
+		EstimatedRemainingTokens: 880,
+	})
+	expected := `<current_status>
+timestamp: 2026-11-10T12:34:56Z
+context_usage:
+  estimated: true
+  estimated_input_tokens: 120
+  input_budget_tokens: 1000
+  estimated_remaining_tokens: 880
+note: latest runtime status supersedes earlier status
+</current_status>`
+	assert.Equal(t, expected, got)
+}
+
+func TestRenderCurrentStatus_WithoutBudget(t *testing.T) {
+	ts := time.Date(2026, 11, 10, 12, 34, 56, 0, time.UTC)
+	got := RenderCurrentStatus(ts, nil)
+	expected := `<current_status>
+timestamp: 2026-11-10T12:34:56Z
+note: latest runtime status supersedes earlier status
+</current_status>`
+	assert.Equal(t, expected, got)
+}
+
+func TestRenderCurrentStatusMeasurement_UsesConservativeNumericWidths(t *testing.T) {
+	ts := time.Date(2026, 11, 10, 12, 34, 56, 0, time.UTC)
+	got := RenderCurrentStatusMeasurement(ts)
+	conservative := strconv.Itoa(int(^uint(0) >> 1))
+	assert.Contains(t, got, "estimated_input_tokens: "+conservative)
+	assert.Contains(t, got, "input_budget_tokens: "+conservative)
+	assert.Contains(t, got, "estimated_remaining_tokens: "+conservative)
+}
+
+func TestRenderToolBudget(t *testing.T) {
+	tests := []struct {
+		name              string
+		roundsUsed        int
+		maxRounds         int
+		expectedRemaining string
+	}{
+		{name: "remaining rounds", roundsUsed: 1, maxRounds: 3, expectedRemaining: "2"},
+		{name: "clamp below zero", roundsUsed: 4, maxRounds: 3, expectedRemaining: "0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RenderToolBudget(tt.roundsUsed, tt.maxRounds)
+			assert.Contains(t, got, "rounds_used: "+strconv.Itoa(tt.roundsUsed))
+			assert.Contains(t, got, "max_rounds: "+strconv.Itoa(tt.maxRounds))
+			assert.Contains(t, got, "rounds_remaining: "+tt.expectedRemaining)
+			assert.Contains(t, got, "latest runtime status supersedes earlier status")
+		})
+	}
 }
 
 func mustRender(t *testing.T, in RenderInput) string {

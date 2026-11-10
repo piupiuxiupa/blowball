@@ -782,6 +782,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	// the bounded graceful-shutdown window.
 	runMgr := run.NewManager(rt.redisStore.RunStore(), run.NewRegistry())
 	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit()).
+		WithRuntimeStatusStore(rt.redisStore).
 		WithAttachmentStore(rt.mysqlStore).
 		WithArtifactService(newArtifactService(rt))
 	turnRunHandler := handler.NewTurnRunHandler(runMgr)

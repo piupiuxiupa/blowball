@@ -373,11 +373,50 @@ When the user's query involves any of the following, you **MUST** obtain the cur
 	`
 }
 
-func RenderStatus() string {
-	currentStatus := "\n" + `
-<current_status>
-	timestamp: ` + time.Now().Format(time.RFC3339) + `
-</current_status>
-`
-	return currentStatus
+// ContextUsage contains the conservative token budget values shown to the model.
+type ContextUsage struct {
+	EstimatedInputTokens     int
+	InputBudgetTokens        int
+	EstimatedRemainingTokens int
+}
+
+const latestStatusNote = "note: latest runtime status supersedes earlier status"
+
+// RenderCurrentStatus renders one standalone, immutable runtime-status message.
+func RenderCurrentStatus(timestamp time.Time, usage *ContextUsage) string {
+	var b strings.Builder
+	b.WriteString("<current_status>\n")
+	fmt.Fprintf(&b, "timestamp: %s\n", timestamp.Format(time.RFC3339))
+	if usage != nil {
+		b.WriteString("context_usage:\n")
+		b.WriteString("  estimated: true\n")
+		fmt.Fprintf(&b, "  estimated_input_tokens: %d\n", usage.EstimatedInputTokens)
+		fmt.Fprintf(&b, "  input_budget_tokens: %d\n", usage.InputBudgetTokens)
+		fmt.Fprintf(&b, "  estimated_remaining_tokens: %d\n", usage.EstimatedRemainingTokens)
+	}
+	b.WriteString(latestStatusNote)
+	b.WriteString("\n</current_status>")
+	return b.String()
+}
+
+// RenderCurrentStatusMeasurement renders the widest numeric form used when
+// accounting for a status message before its actual values are known.
+func RenderCurrentStatusMeasurement(timestamp time.Time) string {
+	maxInt := int(^uint(0) >> 1)
+	return RenderCurrentStatus(timestamp, &ContextUsage{
+		EstimatedInputTokens:     maxInt,
+		InputBudgetTokens:        maxInt,
+		EstimatedRemainingTokens: maxInt,
+	})
+}
+
+// RenderToolBudget renders the current agent's remaining tool-calling rounds.
+func RenderToolBudget(roundsUsed, maxRounds int) string {
+	remaining := max(maxRounds-roundsUsed, 0)
+	return fmt.Sprintf(`<tool_budget>
+rounds_used: %d
+max_rounds: %d
+rounds_remaining: %d
+%s
+</tool_budget>`, roundsUsed, maxRounds, remaining, latestStatusNote)
 }

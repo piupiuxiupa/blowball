@@ -364,6 +364,101 @@ func TestChooseTailForReservedBudget_IncludesPriorToolActivity(t *testing.T) {
 		"the preplanner must reduce the tail to account for the merged prior ledger")
 }
 
+func TestCompactionService_RecompactionMergesNestedMCPActivity(t *testing.T) {
+	m := &fakeMySQLStore{}
+	llm := &fakeLLMClient{resp: agent.LLMResponse{Content: "merged checkpoint"}}
+	svc := newCompactionTestService(m, &fakeRedisStore{}, llm, 1000)
+	rows, msgs, lastRow := compactionFixture(20)
+	msgs[8] = agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{
+		ID: "call-new", Function: agent.ToolCallFunction{Name: "mcp_call", Arguments: `{"server":"gildata","tool":"search"}`},
+	}}}
+	msgs[9] = agent.Message{Role: "tool", ToolCallID: "call-new", Name: "mcp_call", Content: `{"status":0,"result":"ok"}`}
+	priorActivity, err := json.Marshal([]ToolActivity{{
+		ToolName: "mcp_call", Calls: 2, Success: 2,
+		MCPServers: []MCPServerActivity{{
+			ServerName: "gildata", Tools: []MCPToolActivity{{ToolName: "search", Calls: 1, Success: 1}},
+		}},
+	}})
+	require.NoError(t, err)
+	m.compactions = append(m.compactions, model.ContextCompaction{
+		ID: 1, SessionID: "sess-comp", Content: "PRIOR",
+		BoundaryMsgTime: rows[7].MsgTime, BoundaryMsgIndex: rows[7].MsgIndex, BoundaryMsgID: rows[7].ID,
+		ToolActivityJSON: priorActivity,
+	})
+
+	rec, ok := svc.Compact(context.Background(), compactionInput(rows, msgs, lastRow))
+	require.True(t, ok)
+	assert.Equal(t, 3, rec.ToolActivityCount)
+	activity := DecodeToolActivity(rec.ToolActivityJSON)
+	require.Len(t, activity, 1)
+	assert.Equal(t, 3, activity[0].Calls)
+	require.Len(t, activity[0].MCPServers, 1)
+	assert.Equal(t, 2, activity[0].MCPServers[0].Tools[0].Calls)
+	assert.Contains(t, rec.Content, "  - gildata")
+	assert.Contains(t, rec.Content, "    - search: 2 calls, 2 succeeded, 0 failed")
+	assert.Contains(t, rec.Content, "  - unattributed: 1 calls, 1 succeeded, 0 failed")
+}
+
+func TestChooseTailForReservedBudget_PreservesHighCardinalityMCPActivity(t *testing.T) {
+	prior := []ToolActivity{{ToolName: "mcp_call", Calls: 50, Success: 50}}
+	for i := range 50 {
+		prior[0].MCPServers = append(prior[0].MCPServers, MCPServerActivity{
+			ServerName: fmt.Sprintf("server-%02d", i),
+			Tools:      []MCPToolActivity{{ToolName: "search", Calls: 1, Success: 1}},
+		})
+	}
+	msgs := make([]agent.Message, 20)
+	msgs[0] = agent.Message{Role: "user", Content: "anchor"}
+	for i := 1; i < 20; i++ {
+		msgs[i] = agent.Message{Role: "assistant", Content: strings.Repeat("tail ", 1000)}
+	}
+	in := CompactionInput{SessionID: "session-budget", AgentMsgs: msgs, InputBudget: 6000}
+	start, ok := chooseTailForReservedBudget(in, msgs[0], 1, 15, prior)
+	require.True(t, ok)
+	assert.Greater(t, start, 15, "the larger MCP ledger must reduce retained tail content")
+	merged := MergeToolActivity(prior, buildScopeToolActivity(msgs[1:start]))
+	require.Len(t, merged[0].MCPServers, 50)
+	rendered := RenderToolActivityLedger(merged)
+	for i := range 50 {
+		assert.Contains(t, rendered, fmt.Sprintf("  - server-%02d\n", i))
+	}
+
+	in.InputBudget = 128
+	_, ok = chooseTailForReservedBudget(in, msgs[0], 1, 15, prior)
+	assert.False(t, ok, "an irreducible candidate must fail instead of dropping MCP counts")
+	assert.Contains(t, compactionSystemPrompt, "Do NOT emit a Tool Activity section",
+		"MCP details remain deterministic and require no summarizer prompt change")
+}
+
+func TestChooseTailForReservedBudget_ReservesFreshCurrentStatus(t *testing.T) {
+	msgs := make([]agent.Message, 20)
+	msgs[0] = agent.Message{Role: "user", Content: "anchor"}
+	for i := 1; i < 15; i++ {
+		msgs[i] = agent.Message{Role: "assistant", Content: "middle"}
+	}
+	for i := 15; i < 20; i++ {
+		msgs[i] = agent.Message{Role: "assistant", Content: strings.Repeat("tail ", 1000)}
+	}
+	in := CompactionInput{SessionID: "status-budget", AgentMsgs: msgs, InputBudget: 1}
+	reservedSummary := strings.Repeat("x", compactionSummaryMaxTokens*4)
+	projected := buildCompactedProjection(msgs[0], msgs, 15, reservedSummary, nil)
+	in.InputBudget = agent.EstimateRenderedRequest("", projected, nil).Tokens
+	in.RequestOverheadTokens = 0
+
+	withoutStatus, ok := chooseTailForReservedBudget(in, msgs[0], 1, 15, nil)
+	require.True(t, ok)
+	assert.Equal(t, 15, withoutStatus, "the candidate without status overhead is exactly at budget")
+
+	in.RequestOverheadTokens = agent.EstimateCurrentStatusOverhead(time.Now())
+	withStatus, ok := chooseTailForReservedBudget(in, msgs[0], 1, 15, nil)
+	require.True(t, ok)
+	assert.Greater(t, withStatus, withoutStatus,
+		"the planner must shrink retained tail for the fresh current_status")
+	finalProjection := buildCompactedProjection(msgs[0], msgs, withStatus, "summary", nil)
+	finalCost := in.RequestOverheadTokens + agent.EstimateRenderedRequest("", finalProjection, nil).Tokens
+	assert.LessOrEqual(t, finalCost, in.InputBudget)
+}
+
 func TestCompactionService_Compact_SummaryFailureDegrades(t *testing.T) {
 	for name, llm := range map[string]*fakeLLMClient{
 		"llm error":  {err: errors.New("gateway 500")},
