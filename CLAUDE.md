@@ -6,6 +6,40 @@ Blowball is a Go backend for a multi-agent chat workspace. It exposes a JWT-secu
 
 `AGENTS.md` (repo root) is the companion contributor guide: coding style, commit conventions (Conventional Commits, commit after each completed feature), and the OpenSpec sync rule. Keep both in sync when behavior changes.
 
+## Standalone Scheduler split (extract-scheduler-service)
+
+Scheduling is no longer embedded in the main service. `services/scheduler/` is a
+separate binary (`make build-scheduler` → `bin/scheduler`) with its own config,
+MySQL store and mTLS gRPC listener; it owns only `scheduled_tasks` and
+`scheduled_task_runs` and never constructs an Agent, loads an LLM key or mounts a
+workspace. The main service keeps the turn engine, task conversations, `.cron`
+resource versions and authoritative execution receipts:
+
+- **Contracts** live in `api/proto/{scheduler,scheduledruntime}/v1` (generated
+  under `api/gen/go`; regenerate with `make proto`). `internal/rpcx` owns the
+  shared domain error codes, mutual-TLS config, per-method service-identity
+  authorization and deadline enforcement. Service identities are certificate
+  CommonNames: `blowball-scheduler` and `blowball-main`/`blowball-api`/`blowball-agent`.
+- **`internal/scheduledruntime`** is the agent/all Runtime: idempotent
+  `SubmitScheduledRun` acceptance (`scheduled_execution_receipts`), CAS/lease
+  preparation, `start_intent` before `AuthorizeStart`, the grant-timed watchdog,
+  terminal facts (never before durable content), conservative reconciliation
+  (unknown ⇒ `uncertain`, never replayed) and generation-bound stop proofs.
+- **`internal/resource`** owns `.cron/<task_id>/{draft,revisions}`: controlled
+  initialization (markers), the draft revision fence, fenced immutable
+  publication (SHA-256 manifest over the copied bytes), pinned execution
+  validation and the write guard shared by REST, Office and the `xizhi_*` file
+  tools. Every bash sandbox mounts `.cron` read-only.
+- **Task sessions** live in the physically separate `scheduled_*` table group
+  (`internal/store/mysql` `Tables`/`SessionStore`, `ForSource`). They are
+  read-only through `/api/v1/scheduled-sessions...`; ordinary endpoints 404 on
+  scheduled IDs and vice versa.
+- **Breaking config:** `scheduled_tasks.enabled: true` now fails load with a
+  migration error; deploy the Scheduler and configure `internal_rpc` instead.
+  Legacy occurrences are marked `legacy_interactive` (migration 027) and the
+  data-only migration 030 quiesces the old scheduler with a task execution hold.
+  See `docs/scheduled-tasks.md` for deploy/migrate/rollback.
+
 ## Common commands
 
 All backend commands run from the repository root.

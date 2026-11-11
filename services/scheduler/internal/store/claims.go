@@ -149,9 +149,15 @@ func (s *Store) ListHeldOccurrences(ctx context.Context, limit int) ([]model.Sch
 	if limit <= 0 {
 		limit = 100
 	}
-	query := `SELECT ` + scheduledRunColumns + ` FROM scheduled_task_runs r
-		JOIN scheduled_tasks t ON t.task_id = r.task_id AND t.execution_hold_occurrence_id = r.occurrence_id
-		ORDER BY r.scheduled_for ASC, r.id ASC LIMIT ?`
+	// The IN-subselect avoids ambiguous column names in the JOIN's projection
+	// while keeping the outer scan on the canonical column list.
+	query := `SELECT ` + scheduledRunColumns + ` FROM scheduled_task_runs
+		WHERE occurrence_id IN (
+			SELECT r.occurrence_id FROM scheduled_task_runs r
+			JOIN scheduled_tasks t ON t.task_id = r.task_id
+			  AND t.execution_hold_occurrence_id = r.occurrence_id
+		)
+		ORDER BY scheduled_for ASC, id ASC LIMIT ?`
 	var runs []model.ScheduledTaskRun
 	if err := s.db.SelectContext(ctx, &runs, query, limit); err != nil {
 		return nil, err

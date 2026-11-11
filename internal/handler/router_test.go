@@ -38,6 +38,12 @@ func stubRouteDeps() RouteDeps {
 		ScheduledTaskUpdate:         noop,
 		ScheduledTaskDelete:         noop,
 		ScheduledTaskRuns:           noop,
+		ScheduledResourceGet:        noop,
+		ScheduledResourcePublish:    noop,
+		ScheduledSessionList:        noop,
+		ScheduledSessionGet:         noop,
+		ScheduledSessionMessages:    noop,
+		ScheduledSessionDelete:      noop,
 		SessionUpdateTitle:          noop,
 		WorkspaceList:               noop,
 		WorkspaceUpload:             noop,
@@ -75,11 +81,16 @@ func routeSet(r *gin.Engine) []string {
 var expectedAPIRoutes = []string{
 	"DELETE /api/v1/me/llm-token",
 	"DELETE /api/v1/scheduled-tasks/:task_id",
+	"DELETE /api/v1/scheduled-sessions/:session_id",
 	"DELETE /api/v1/sessions/:session_id",
 	"GET /api/v1/me/llm-token",
 	"GET /api/v1/scheduled-tasks",
 	"GET /api/v1/scheduled-tasks/:task_id",
 	"GET /api/v1/scheduled-tasks/:task_id/runs",
+	"GET /api/v1/scheduled-tasks/:task_id/resources",
+	"GET /api/v1/scheduled-sessions",
+	"GET /api/v1/scheduled-sessions/:session_id",
+	"GET /api/v1/scheduled-sessions/:session_id/messages",
 	"GET /api/v1/sessions",
 	"GET /api/v1/sessions/:session_id",
 	"GET /api/v1/sessions/:session_id/attachments/:attachment_id/content",
@@ -98,6 +109,7 @@ var expectedAPIRoutes = []string{
 	"PATCH /api/v1/sessions/:session_id",
 	"POST /api/v1/attachments",
 	"POST /api/v1/scheduled-tasks",
+	"POST /api/v1/scheduled-tasks/:task_id/resources/publish",
 	"POST /api/v1/auth/login",
 	"POST /api/v1/sessions",
 	"POST /api/v1/sessions/:session_id/attachments",
@@ -119,6 +131,7 @@ var expectedAgentRoutes = []string{
 	"POST /api/v1/sessions/:session_id/messages",
 	"POST /api/v1/sessions/:session_id/turns/:run_id/cancel",
 	"GET /api/v1/sessions/:session_id/turns/:run_id/events",
+	"POST /api/v1/scheduled-sessions/:session_id/runs/:run_id/cancel",
 }
 
 // TestRegisterAPIRoutes_ExactRouteSet asserts the api partition registers
@@ -168,7 +181,8 @@ func TestRegisterRoutes_AllRoleIsUnion(t *testing.T) {
 		"GET /api/v1/mcp/tools",
 		"POST /api/v1/sessions/:session_id/messages",
 		"POST /api/v1/sessions/:session_id/turns/:run_id/cancel",
-		"GET /api/v1/sessions/:session_id/turns/:run_id/events")
+		"GET /api/v1/sessions/:session_id/turns/:run_id/events",
+		"POST /api/v1/scheduled-sessions/:session_id/runs/:run_id/cancel")
 	sort.Strings(want)
 
 	got := routeSet(r)

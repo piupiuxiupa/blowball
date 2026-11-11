@@ -22,6 +22,7 @@ func setupCredentialTestStore(t *testing.T) (*Store, func()) {
 
 	store, err := New(dsn)
 	require.NoError(t, err)
+	lockTestSchema(t, store)
 
 	cleanup := func() {
 		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS user_llm_credentials")

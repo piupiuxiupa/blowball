@@ -273,6 +273,17 @@ func TestDefaultAuthorizerCoversEveryMethod(t *testing.T) {
 	}
 }
 
+func TestDefaultAuthorizerRuntimeCalls(t *testing.T) {
+	auth := DefaultAuthorizer()
+	assert.True(t, auth.Allowed(MethodGetOccurrence, IdentityAPI), "the API role enriches task-session details")
+	assert.True(t, auth.Allowed(MethodGetOccurrence, IdentityAgent), "the Runtime reads authoritative occurrences")
+	assert.True(t, auth.Allowed(MethodAuthorizeStart, IdentityAgent), "the agent/all Runtime crosses the start fence")
+	assert.True(t, auth.Allowed(MethodGetStartGrant, IdentityAgent))
+	assert.True(t, auth.Allowed(MethodSubmitScheduledRun, IdentityScheduler))
+	assert.False(t, auth.Allowed(MethodAuthorizeStart, IdentityAPI), "the api role never starts executions")
+	assert.False(t, auth.Allowed(MethodSubmitScheduledRun, IdentityAPI))
+}
+
 func TestStatusCodesRoundTripThroughGeneratedService(t *testing.T) {
 	pki := newTestPKI(t)
 	lis := startTLSServer(t, pki.files(t, "blowball-test-server", true), func(srv *grpc.Server) {

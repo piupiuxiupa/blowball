@@ -117,6 +117,8 @@ message Occurrence {
   string last_error = 15;
   uint64 resource_revision = 16;
   string manifest_hash = 17;
+  google.protobuf.Timestamp update_time = 18;
+  google.protobuf.Timestamp create_time = 19;
 }
 
 // StartGrant is the unique, idempotent authorization bound to one receipt
@@ -256,6 +258,18 @@ message GetStartGrantResponse {
   StartGrant grant = 1;
 }
 
+// GetResourceReferences answers the main service's maintenance check: a
+// published revision may be cleaned up only when no live task binding and no
+// retained occurrence references it.
+message GetResourceReferencesRequest {
+  string task_id = 1;
+  uint64 resource_revision = 2;
+}
+
+message GetResourceReferencesResponse {
+  bool referenced = 1;
+}
+
 // ValidateTaskActorAndConfig asks the main service to re-validate the owner,
 // model catalog entry and (when present) the resource binding. The reply
 // carries the actual resolved model so occurrence snapshots can show the real
@@ -330,6 +344,7 @@ service SchedulerService {
   rpc GetOccurrence(GetOccurrenceRequest) returns (GetOccurrenceResponse);
   rpc AuthorizeStart(AuthorizeStartRequest) returns (AuthorizeStartResponse);
   rpc GetStartGrant(GetStartGrantRequest) returns (GetStartGrantResponse);
+  rpc GetResourceReferences(GetResourceReferencesRequest) returns (GetResourceReferencesResponse);
 }
 
 // SchedulerControlService is implemented by the main service. It never calls

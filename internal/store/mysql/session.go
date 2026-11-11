@@ -326,6 +326,20 @@ SELECT id, user_id, session_id, filename, mime, size, message_id, create_time, ?
 	return nil
 }
 
+// SessionContentExists checks whether a session row still exists in the table
+// group named by its explicit source. It is used only to annotate historical
+// occurrences with "content deleted"; it never infers a source by fallback.
+func (s *Store) SessionContentExists(ctx context.Context, source model.SessionSource, sessionID string) (bool, error) {
+	if !source.Valid() {
+		return false, fmt.Errorf("mysql.SessionContentExists: invalid source %q", source)
+	}
+	sess, err := s.ForSource(source).GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	return sess != nil, nil
+}
+
 // ── interactive-source compatibility wrappers ──────────────────────────────
 //
 // The raw *Store keeps its pre-split method surface bound to the interactive

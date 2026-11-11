@@ -97,8 +97,8 @@ func TestMarketBinds_NilDependencyZeroMounts(t *testing.T) {
 func TestBuildBwrapArgs_MarketBindsAppended(t *testing.T) {
 	sandbox := defaultSandbox()
 	cfg := config.ExecutorToolConfig{}
-	base := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", sandbox, cfg)
-	withMarket := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", sandbox, cfg,
+	base := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", "/ws/.cron", sandbox, cfg)
+	withMarket := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", "/ws/.cron", sandbox, cfg,
 		MarketBind{Host: "/market/uid-1/skill-a", Target: "/skills/market/skill-a"},
 		MarketBind{Host: "/market/uid-1/skill-b", Target: "/skills/market/skill-b"},
 	)
@@ -106,7 +106,7 @@ func TestBuildBwrapArgs_MarketBindsAppended(t *testing.T) {
 	// No binds passed (variadic omitted) == legacy call shape == the same arg
 	// multiset (the trailing --setenv block iterates a map, so two builds may
 	// legitimately differ in env ordering; positions are pinned below).
-	noBinds := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", sandbox, cfg)
+	noBinds := buildBwrapArgs("/ws", "/ws/tmp", "/skills/global", "/data/tools", "/ws/.cron", sandbox, cfg)
 	sortedCopy := func(in []string) []string {
 		out := append([]string{}, in...)
 		slices.Sort(out)

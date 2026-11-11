@@ -7,8 +7,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,7 +23,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
+	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
+	scheduledruntimev1 "github.com/lush/blowball/api/gen/go/scheduledruntime/v1"
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/artifact"
 	"github.com/lush/blowball/internal/config"
@@ -30,9 +38,14 @@ import (
 	"github.com/lush/blowball/internal/mcpmarket"
 	"github.com/lush/blowball/internal/memory"
 	"github.com/lush/blowball/internal/middleware"
+	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/modelselect"
 	"github.com/lush/blowball/internal/pkg/logger"
+	"github.com/lush/blowball/internal/resource"
+	"github.com/lush/blowball/internal/rpcx"
 	"github.com/lush/blowball/internal/run"
-	"github.com/lush/blowball/internal/scheduler"
+	"github.com/lush/blowball/internal/scheduledcontrol"
+	"github.com/lush/blowball/internal/scheduledruntime"
 	"github.com/lush/blowball/internal/service"
 	"github.com/lush/blowball/internal/skillmarket"
 	"github.com/lush/blowball/internal/storage"
@@ -43,6 +56,7 @@ import (
 	"github.com/lush/blowball/internal/tool/executor"
 	"github.com/lush/blowball/internal/tool/luban"
 	"github.com/lush/blowball/internal/tool/mcpclient"
+	"github.com/lush/blowball/internal/tool/scheduledtask"
 	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/lush/blowball/internal/tool/webfetch"
 	"github.com/lush/blowball/internal/tool/xizhi"
@@ -111,6 +125,9 @@ func serve(configPath, dataRoot, role string) error {
 			log.Warn("redis close failed", zap.Error(cerr))
 		}
 	}()
+	if rt.schedulerConn != nil {
+		defer func() { _ = rt.schedulerConn.Close() }()
+	}
 
 	// 2. Shared session service. Store-only, so it carries no agent-layer
 	// dependency; both the api CRUD handlers and the agent streaming handler use it.
@@ -132,6 +149,33 @@ func serve(configPath, dataRoot, role string) error {
 	engine := newEngine()
 	handler.RegisterHealthz(engine)
 
+	// Internal mTLS gRPC listener (extract-scheduler-service). The api partition
+	// serves the SchedulerControlService, the agent partition serves the
+	// ScheduledRuntimeService, and the combined role serves both on one
+	// listener. The Scheduler calls these with its own service identity.
+	var internalSrv *grpc.Server
+	var internalLis net.Listener
+	if rt.cfg.InternalRPC.Enabled {
+		tlsCfg, terr := rpcx.ServerTLS(rt.cfg.InternalRPC.TLS.ToRPCX())
+		if terr != nil {
+			return fmt.Errorf("internal rpc server tls: %w", terr)
+		}
+		internalSrv = grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(tlsCfg)),
+			grpc.UnaryInterceptor(rpcx.UnaryServerInterceptor(rpcx.ServerOptions{RequireDeadline: true})),
+		)
+		if role != "agent" {
+			schedulerv1.RegisterSchedulerControlServiceServer(internalSrv, rt.controlSvc)
+		}
+		healthSrv := health.NewServer()
+		healthpb.RegisterHealthServer(internalSrv, healthSrv)
+		healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+		internalLis, terr = net.Listen("tcp", rt.cfg.InternalRPC.Listen)
+		if terr != nil {
+			return fmt.Errorf("internal rpc listen %s: %w", rt.cfg.InternalRPC.Listen, terr)
+		}
+	}
+
 	// 4. Register routes by role. wireAPI/wireAgent each construct only the
 	// handlers their partition needs, so the api role never instantiates the
 	// orchestrator, OpenAI client, tool registry, or MCP manager.
@@ -143,7 +187,7 @@ func serve(configPath, dataRoot, role string) error {
 	switch role {
 	case "all":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
-		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc, internalSrv)
 		mcpMgr = mgr
 		rawFlusher = fl
 		runReg = reg
@@ -153,13 +197,23 @@ func serve(configPath, dataRoot, role string) error {
 	case "api":
 		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
 	case "agent":
-		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc)
+		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc, internalSrv)
 		mcpMgr = mgr
 		rawFlusher = fl
 		runReg = reg
 		memSvc = mem
 		queueStop = stopQueue
 		handler.RegisterAgentRoutes(engine, agentDeps)
+	}
+	if internalSrv != nil {
+		go func() {
+			if serr := internalSrv.Serve(internalLis); serr != nil && !errors.Is(serr, grpc.ErrServerStopped) {
+				log.Fatal("internal rpc server failed", zap.Error(serr))
+			}
+		}()
+		log.Info("internal rpc listening",
+			zap.String("role", role),
+			zap.String("addr", rt.cfg.InternalRPC.Listen))
 	}
 	if mcpMgr != nil {
 		defer func() {
@@ -221,6 +275,20 @@ func serve(configPath, dataRoot, role string) error {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("server shutdown error", zap.Error(err))
+	}
+	if internalSrv != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+		stopped := make(chan struct{})
+		go func() {
+			internalSrv.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-stopCtx.Done():
+			internalSrv.Stop()
+		}
+		stopCancel()
 	}
 	log.Info("server stopped", zap.String("role", role))
 
@@ -289,6 +357,16 @@ type appRuntime struct {
 	// for the MCP tools endpoint merge, the agent role for the mcp_* tools,
 	// the prompt advertisement, and manager connections.
 	mcpMarket *mcpmarket.Client
+	// Standalone-scheduler integration (extract-scheduler-service). The
+	// client is nil when internal_rpc is disabled; the resource guard then
+	// fails closed for managed-path writes while ordinary workspace behavior
+	// is unchanged.
+	schedulerConn     *grpc.ClientConn
+	schedulerClient   schedulerv1.SchedulerServiceClient
+	resourceSvc       *resource.Service
+	resourceGuard     *resource.Guard
+	scheduledSessions *service.ScheduledSessions
+	controlSvc        *scheduledcontrol.Service
 }
 
 // setupRuntime performs the shared bootstrap that runs for every role: load
@@ -393,6 +471,48 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	}
 	rt.fsStore = fsStore
 
+	// Standalone Scheduler client (extract-scheduler-service). A Scheduler that
+	// is temporarily offline must not block normal startup: the gRPC client is
+	// lazy and per-call failures surface as UNAVAILABLE (HTTP 503) with no
+	// local fallback. A TLS material/config error is fatal.
+	if cfg.InternalRPC.Enabled {
+		conn, derr := rpcx.Dial(rpcx.DialOptions{
+			Target:  cfg.InternalRPC.SchedulerEndpoint,
+			TLS:     cfg.InternalRPC.SchedulerTLS.ToRPCX(),
+			Timeout: cfg.InternalRPC.Timeout,
+		})
+		if derr != nil {
+			log.Fatal("scheduler rpc client init failed", zap.Error(derr))
+		}
+		rt.schedulerConn = conn
+		rt.schedulerClient = schedulerv1.NewSchedulerServiceClient(conn)
+	}
+	var owner resource.TaskOwner = unavailableTaskOwner{}
+	if rt.schedulerClient != nil {
+		owner = resource.NewSchedulerTaskOwner(rt.schedulerClient)
+	}
+	resLimits := resource.Limits{
+		MaxFiles:        cfg.ScheduledResources.MaxFiles,
+		MaxTotalBytes:   cfg.ScheduledResources.MaxTotalBytes,
+		MaxFileBytes:    cfg.ScheduledResources.MaxFileBytes,
+		MaxContextFiles: cfg.ScheduledResources.MaxContextFiles,
+		MaxContextBytes: cfg.ScheduledResources.MaxContextBytes,
+	}
+	rt.resourceSvc = resource.New(rt.mysqlStore, owner, fsStore.UserWorkspace, resLimits)
+	rt.resourceGuard = resource.NewGuard(rt.resourceSvc)
+	rt.controlSvc = scheduledcontrol.New(rt.mysqlStore, rt.resourceSvc, modelselect.NewConfig(cfg), resLimits)
+	rt.scheduledSessions = service.NewScheduledSessions(rt.mysqlStore.ForSource(model.SessionSourceScheduled), rt.redisStore).
+		WithDeletionGuard(func(ctx context.Context, sessionID string) (string, error) {
+			rec, gerr := rt.mysqlStore.GetScheduledExecutionBySession(ctx, sessionID)
+			if gerr != nil {
+				return "", gerr
+			}
+			if rec != nil && rec.MayBeRunning() {
+				return rec.Status + ":" + rec.Reason, nil
+			}
+			return "", nil
+		})
+
 	// Shared POSIX filesystem backend startup health check (see the
 	// workspace-shared-storage spec). When storage.workspace.backend == "shared",
 	// {data-dir}/data MUST be the operator-mounted shared FS (MinIO-backed
@@ -468,6 +588,37 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	return rt, nil
 }
 
+// runCanceller adapts the shared run Manager to the scheduled runtime's
+// cancellation port: in-process registry first, then the cross-replica flag.
+type runCanceller struct{ mgr *run.Manager }
+
+func (c runCanceller) RequestCancel(ctx context.Context, runID string) error {
+	if c.mgr.Registry != nil && c.mgr.Registry.Cancel(runID) {
+		return nil
+	}
+	return c.mgr.Store.SetCancelFlag(ctx, runID)
+}
+
+// runObserver adapts the shared run Manager to the runtime liveness port.
+type runObserver struct{ mgr *run.Manager }
+
+func (o runObserver) Alive(ctx context.Context, runID string) (bool, error) {
+	return o.mgr.Store.Alive(ctx, runID)
+}
+
+func (o runObserver) InProcess(runID string) bool {
+	_, ok := o.mgr.Registry.Get(runID)
+	return ok
+}
+
+// unavailableTaskOwner fails closed when no Scheduler is configured: managed
+// `.cron` writes cannot be authorized without the authoritative task owner.
+type unavailableTaskOwner struct{}
+
+func (unavailableTaskOwner) OwnsTask(context.Context, string, string) (bool, error) {
+	return false, fmt.Errorf("scheduler is not configured")
+}
+
 // sandboxMountTargets returns the in-sandbox target paths of the given extra
 // mounts for the startup audit log. It lives here (rather than on the config
 // type) to keep the parsed MountSpec export minimal.
@@ -535,12 +686,23 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		ServerURL:         cfg.OnlyOffice.ServerURL,
 		InternalBackend:   cfg.OnlyOffice.InternalBackend,
 		VersionServiceURL: cfg.OnlyOffice.VersionServiceURL,
-	})
+	}).WithResourceGuard(rt.resourceGuard)
 	skillHandler := handler.NewSkillHandler(rt.fsStore, rt.market)
 	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
 	llmTokenHandler := handler.NewLLMTokenHandler(service.NewLLMTokenService(rt.mysqlStore))
-	scheduledTaskHandler := handler.NewScheduledTaskHandler(service.NewScheduledTaskService(
-		rt.mysqlStore, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit()))
+	var taskRPC handler.ScheduledTaskRPC = scheduledcontrol.UnavailableScheduledTaskRPC{}
+	var occurrenceLookup handler.ScheduledOccurrenceLookup
+	if rt.schedulerClient != nil {
+		adapter := scheduledcontrol.NewSchedulerManagementClient(rt.schedulerClient)
+		taskRPC = adapter
+		occurrenceLookup = adapter
+	}
+	scheduledTaskHandler := handler.NewScheduledTaskHandler(taskRPC, cfg.DefaultModelName()).
+		WithContentExistence(func(ctx context.Context, source, sessionID string) (bool, error) {
+			return rt.mysqlStore.SessionContentExists(ctx, model.SessionSource(source), sessionID)
+		})
+	scheduledSessionHandler := handler.NewScheduledSessionHandler(rt.scheduledSessions, occurrenceLookup, cfg.DefaultModelName())
+	resourceHandler := handler.NewScheduledResourceHandler(rt.resourceSvc)
 	artifactHandler := handler.NewArtifactHandler(newArtifactService(rt))
 	attachmentHandler := handler.NewAttachmentHandler(rt.mysqlStore, sessSvc, rt.fsStore)
 
@@ -565,6 +727,12 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 		ScheduledTaskUpdate:              scheduledTaskHandler.Update,
 		ScheduledTaskDelete:              scheduledTaskHandler.Delete,
 		ScheduledTaskRuns:                scheduledTaskHandler.Runs,
+		ScheduledResourceGet:             resourceHandler.Get,
+		ScheduledResourcePublish:         resourceHandler.Publish,
+		ScheduledSessionList:             scheduledSessionHandler.List,
+		ScheduledSessionGet:              scheduledSessionHandler.Get,
+		ScheduledSessionMessages:         scheduledSessionHandler.Messages,
+		ScheduledSessionDelete:           scheduledSessionHandler.Delete,
 		SessionUpdateTitle:               sessionHandler.UpdateTitle,
 		WorkspaceList:                    workspaceHandler.List,
 		WorkspaceUpload:                  workspaceHandler.Upload,
@@ -596,7 +764,7 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 // populated with only the agent-route handlers (SendMessage, MCPTools) plus
 // the auth middleware, the MCP manager so serveRun can defer its Close, and
 // the raw-capture flusher so serveRun can drain it on shutdown.
-func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry, *memory.Service, func()) {
+func wireAgent(rt *appRuntime, sessSvc *service.SessionService, internalSrv *grpc.Server) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry, *memory.Service, func()) {
 	cfg := rt.cfg
 	dataDir := rt.dataDir
 	fsStore := rt.fsStore
@@ -714,7 +882,7 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		}
 		visionClient = vc
 	}
-	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi, visionClient)
+	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi, visionClient, rt.resourceGuard)
 
 	// Title generation runs on its own resolved model (openai.title_model or
 	// the default catalog entry) over the shared resolver-wrapped client, so
@@ -772,6 +940,19 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		log.Fatal("orchestrator init failed", zap.Error(err))
 	}
 	orch.WithMCPMarket(rt.mcpMarket)
+	orch.SetResourceGuard(rt.resourceGuard)
+	if rt.schedulerClient != nil {
+		management := scheduledcontrol.NewSchedulerManagementClient(rt.schedulerClient)
+		taskTools := scheduledtask.NewTools(management, rt.resourceSvc, cfg.DefaultModelName())
+		if rerr := scheduledtask.RegisterAll(reg, taskTools); rerr != nil {
+			log.Fatal("register scheduled task tools failed", zap.Error(rerr))
+		}
+		orch.EnableScheduledTaskTools([]string{
+			scheduledtask.NameCreate, scheduledtask.NameList, scheduledtask.NameGet,
+			scheduledtask.NameUpdate, scheduledtask.NamePause, scheduledtask.NameResume,
+			scheduledtask.NameDelete, scheduledtask.NameResourcesGet, scheduledtask.NameResourcesPublish,
+		})
+	}
 
 	orchAdapter := handler.NewOrchestratorAdapter(orch)
 
@@ -788,23 +969,36 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 	turnRunHandler := handler.NewTurnRunHandler(runMgr)
 	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn, rt.mcpMarket)
 
-	// Optional scheduled-agent runtime. Only agent/all reaches this builder, so
-	// the api role stays CRUD-only and a combined role starts exactly one
-	// scheduler sharing the same turn executor and run registry.
-	var scheduledRuntime *scheduler.Scheduler
-	if cfg.ScheduledTasks.Enabled {
-		scheduledRuntime = scheduler.New(scheduler.Dependencies{
-			Store: rt.mysqlStore, Turns: streamHandler.TurnExecutor(), Sessions: sessSvc,
-			Tokens: service.NewExecutionTokenIssuer(cfg.JWT.Secret, cfg.ScheduledTasks.MaxRunDurationValue()+2*time.Minute),
-			Runs:   runMgr, ModelSelection: handler.NewModelSelectionConfig(cfg),
-			Config: scheduler.Config{
-				PollInterval: cfg.ScheduledTasks.PollIntervalValue(), LeaseDuration: 30 * time.Second,
-				MaxRunDuration: cfg.ScheduledTasks.MaxRunDurationValue(), MaxConcurrent: cfg.ScheduledTasks.MaxConcurrentValue(),
-				ScanBatch: 100, MaxAttempts: 3, RetryBackoff: time.Second,
+	// Standalone-scheduler Runtime (extract-scheduler-service): the agent/all
+	// role accepts scheduled executions over the internal RPC and drives them
+	// through the SAME turn executor and run registry as interactive chat. The
+	// Scheduler process is never embedded; when it is unconfigured this block
+	// is inert.
+	var scheduledRuntimeStop func(context.Context) error
+	if rt.schedulerClient != nil && internalSrv != nil {
+		poll, lease, concurrent, attempts, scan := cfg.ScheduledRuntime.Values()
+		runtimeV2, rerr := scheduledruntime.New(scheduledruntime.Dependencies{
+			Store:       rt.mysqlStore,
+			Occurrences: scheduledruntime.NewSchedulerClient(rt.schedulerClient),
+			Users:       rt.mysqlStore,
+			Turns:       streamHandler.TurnExecutor(),
+			Canceller:   runCanceller{mgr: runMgr},
+			Observer:    runObserver{mgr: runMgr},
+			Resources:   rt.resourceSvc,
+			Tokens:      service.NewExecutionTokenIssuer(cfg.JWT.Secret, time.Hour),
+			Selection:   handler.NewModelSelectionConfig(cfg),
+			Config: scheduledruntime.Config{
+				PollInterval: poll, LeaseDuration: lease, MaxConcurrent: concurrent,
+				MaxPrepareAttempts: attempts, ScanBatch: scan, DefaultRunDuration: 10 * time.Minute,
 			},
 		})
-		scheduledRuntime.Start()
-		log.Info("scheduled agent task runtime started", zap.String("role", rt.role))
+		if rerr != nil {
+			log.Fatal("scheduled runtime init failed", zap.Error(rerr))
+		}
+		runtimeV2.Start()
+		scheduledruntimev1.RegisterScheduledRuntimeServiceServer(internalSrv, scheduledruntime.NewService(runtimeV2))
+		scheduledRuntimeStop = runtimeV2.Shutdown
+		log.Info("scheduled execution runtime started", zap.String("role", rt.role))
 	}
 
 	// Session message queue (session-message-queue, messages.queue): default
@@ -822,10 +1016,10 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService) (handler.RouteDe
 		// Gate new interactive/background turns FIRST so no new turn can cross
 		// a startup fence while shutdown drains existing work.
 		streamHandler.StopNewTurns()
-		if scheduledRuntime != nil {
+		if scheduledRuntimeStop != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
-			if err := scheduledRuntime.Shutdown(ctx); err != nil {
-				log.Warn("scheduler shutdown wait timed out; proceeding", zap.Error(err))
+			if err := scheduledRuntimeStop(ctx); err != nil {
+				log.Warn("scheduled runtime shutdown wait timed out; proceeding", zap.Error(err))
 			}
 			cancel()
 		}

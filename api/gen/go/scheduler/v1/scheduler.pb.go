@@ -521,6 +521,8 @@ type Occurrence struct {
 	LastError        string                 `protobuf:"bytes,15,opt,name=last_error,json=lastError,proto3" json:"last_error,omitempty"`
 	ResourceRevision uint64                 `protobuf:"varint,16,opt,name=resource_revision,json=resourceRevision,proto3" json:"resource_revision,omitempty"`
 	ManifestHash     string                 `protobuf:"bytes,17,opt,name=manifest_hash,json=manifestHash,proto3" json:"manifest_hash,omitempty"`
+	UpdateTime       *timestamppb.Timestamp `protobuf:"bytes,18,opt,name=update_time,json=updateTime,proto3" json:"update_time,omitempty"`
+	CreateTime       *timestamppb.Timestamp `protobuf:"bytes,19,opt,name=create_time,json=createTime,proto3" json:"create_time,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -672,6 +674,20 @@ func (x *Occurrence) GetManifestHash() string {
 		return x.ManifestHash
 	}
 	return ""
+}
+
+func (x *Occurrence) GetUpdateTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdateTime
+	}
+	return nil
+}
+
+func (x *Occurrence) GetCreateTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreateTime
+	}
+	return nil
 }
 
 // StartGrant is the unique, idempotent authorization bound to one receipt
@@ -1889,6 +1905,105 @@ func (x *GetStartGrantResponse) GetGrant() *StartGrant {
 	return nil
 }
 
+// GetResourceReferences answers the main service's maintenance check: a
+// published revision may be cleaned up only when no live task binding and no
+// retained occurrence references it.
+type GetResourceReferencesRequest struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	TaskId           string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	ResourceRevision uint64                 `protobuf:"varint,2,opt,name=resource_revision,json=resourceRevision,proto3" json:"resource_revision,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *GetResourceReferencesRequest) Reset() {
+	*x = GetResourceReferencesRequest{}
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetResourceReferencesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetResourceReferencesRequest) ProtoMessage() {}
+
+func (x *GetResourceReferencesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetResourceReferencesRequest.ProtoReflect.Descriptor instead.
+func (*GetResourceReferencesRequest) Descriptor() ([]byte, []int) {
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *GetResourceReferencesRequest) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *GetResourceReferencesRequest) GetResourceRevision() uint64 {
+	if x != nil {
+		return x.ResourceRevision
+	}
+	return 0
+}
+
+type GetResourceReferencesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Referenced    bool                   `protobuf:"varint,1,opt,name=referenced,proto3" json:"referenced,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetResourceReferencesResponse) Reset() {
+	*x = GetResourceReferencesResponse{}
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetResourceReferencesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetResourceReferencesResponse) ProtoMessage() {}
+
+func (x *GetResourceReferencesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetResourceReferencesResponse.ProtoReflect.Descriptor instead.
+func (*GetResourceReferencesResponse) Descriptor() ([]byte, []int) {
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *GetResourceReferencesResponse) GetReferenced() bool {
+	if x != nil {
+		return x.Referenced
+	}
+	return false
+}
+
 // ValidateTaskActorAndConfig asks the main service to re-validate the owner,
 // model catalog entry and (when present) the resource binding. The reply
 // carries the actual resolved model so occurrence snapshots can show the real
@@ -1904,7 +2019,7 @@ type ValidateTaskActorAndConfigRequest struct {
 
 func (x *ValidateTaskActorAndConfigRequest) Reset() {
 	*x = ValidateTaskActorAndConfigRequest{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[26]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1916,7 +2031,7 @@ func (x *ValidateTaskActorAndConfigRequest) String() string {
 func (*ValidateTaskActorAndConfigRequest) ProtoMessage() {}
 
 func (x *ValidateTaskActorAndConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[26]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1929,7 +2044,7 @@ func (x *ValidateTaskActorAndConfigRequest) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use ValidateTaskActorAndConfigRequest.ProtoReflect.Descriptor instead.
 func (*ValidateTaskActorAndConfigRequest) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{26}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ValidateTaskActorAndConfigRequest) GetActor() *Actor {
@@ -1963,7 +2078,7 @@ type ValidateTaskActorAndConfigResponse struct {
 
 func (x *ValidateTaskActorAndConfigResponse) Reset() {
 	*x = ValidateTaskActorAndConfigResponse{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[27]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1975,7 +2090,7 @@ func (x *ValidateTaskActorAndConfigResponse) String() string {
 func (*ValidateTaskActorAndConfigResponse) ProtoMessage() {}
 
 func (x *ValidateTaskActorAndConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[27]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1988,7 +2103,7 @@ func (x *ValidateTaskActorAndConfigResponse) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use ValidateTaskActorAndConfigResponse.ProtoReflect.Descriptor instead.
 func (*ValidateTaskActorAndConfigResponse) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{27}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ValidateTaskActorAndConfigResponse) GetResolvedModel() string {
@@ -2017,7 +2132,7 @@ type ValidateResourceBindingRequest struct {
 
 func (x *ValidateResourceBindingRequest) Reset() {
 	*x = ValidateResourceBindingRequest{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[28]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2029,7 +2144,7 @@ func (x *ValidateResourceBindingRequest) String() string {
 func (*ValidateResourceBindingRequest) ProtoMessage() {}
 
 func (x *ValidateResourceBindingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[28]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2042,7 +2157,7 @@ func (x *ValidateResourceBindingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateResourceBindingRequest.ProtoReflect.Descriptor instead.
 func (*ValidateResourceBindingRequest) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{28}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ValidateResourceBindingRequest) GetActor() *Actor {
@@ -2081,7 +2196,7 @@ type ValidateResourceBindingResponse struct {
 
 func (x *ValidateResourceBindingResponse) Reset() {
 	*x = ValidateResourceBindingResponse{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[29]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2093,7 +2208,7 @@ func (x *ValidateResourceBindingResponse) String() string {
 func (*ValidateResourceBindingResponse) ProtoMessage() {}
 
 func (x *ValidateResourceBindingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[29]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2106,7 +2221,7 @@ func (x *ValidateResourceBindingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateResourceBindingResponse.ProtoReflect.Descriptor instead.
 func (*ValidateResourceBindingResponse) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{29}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{31}
 }
 
 type GetResourceVersionRequest struct {
@@ -2120,7 +2235,7 @@ type GetResourceVersionRequest struct {
 
 func (x *GetResourceVersionRequest) Reset() {
 	*x = GetResourceVersionRequest{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[30]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2132,7 +2247,7 @@ func (x *GetResourceVersionRequest) String() string {
 func (*GetResourceVersionRequest) ProtoMessage() {}
 
 func (x *GetResourceVersionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[30]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2145,7 +2260,7 @@ func (x *GetResourceVersionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResourceVersionRequest.ProtoReflect.Descriptor instead.
 func (*GetResourceVersionRequest) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{30}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GetResourceVersionRequest) GetActor() *Actor {
@@ -2178,7 +2293,7 @@ type GetResourceVersionResponse struct {
 
 func (x *GetResourceVersionResponse) Reset() {
 	*x = GetResourceVersionResponse{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[31]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2190,7 +2305,7 @@ func (x *GetResourceVersionResponse) String() string {
 func (*GetResourceVersionResponse) ProtoMessage() {}
 
 func (x *GetResourceVersionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[31]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2203,7 +2318,7 @@ func (x *GetResourceVersionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResourceVersionResponse.ProtoReflect.Descriptor instead.
 func (*GetResourceVersionResponse) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{31}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *GetResourceVersionResponse) GetVersion() *ResourceVersion {
@@ -2223,7 +2338,7 @@ type GetResourceDraftRequest struct {
 
 func (x *GetResourceDraftRequest) Reset() {
 	*x = GetResourceDraftRequest{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[32]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2235,7 +2350,7 @@ func (x *GetResourceDraftRequest) String() string {
 func (*GetResourceDraftRequest) ProtoMessage() {}
 
 func (x *GetResourceDraftRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[32]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2248,7 +2363,7 @@ func (x *GetResourceDraftRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResourceDraftRequest.ProtoReflect.Descriptor instead.
 func (*GetResourceDraftRequest) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{32}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GetResourceDraftRequest) GetActor() *Actor {
@@ -2276,7 +2391,7 @@ type GetResourceDraftResponse struct {
 
 func (x *GetResourceDraftResponse) Reset() {
 	*x = GetResourceDraftResponse{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[33]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2288,7 +2403,7 @@ func (x *GetResourceDraftResponse) String() string {
 func (*GetResourceDraftResponse) ProtoMessage() {}
 
 func (x *GetResourceDraftResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[33]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2301,7 +2416,7 @@ func (x *GetResourceDraftResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResourceDraftResponse.ProtoReflect.Descriptor instead.
 func (*GetResourceDraftResponse) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{33}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *GetResourceDraftResponse) GetDraftRevision() uint64 {
@@ -2341,7 +2456,7 @@ type PublishResourceRequest struct {
 
 func (x *PublishResourceRequest) Reset() {
 	*x = PublishResourceRequest{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[34]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2353,7 +2468,7 @@ func (x *PublishResourceRequest) String() string {
 func (*PublishResourceRequest) ProtoMessage() {}
 
 func (x *PublishResourceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[34]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2366,7 +2481,7 @@ func (x *PublishResourceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishResourceRequest.ProtoReflect.Descriptor instead.
 func (*PublishResourceRequest) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{34}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *PublishResourceRequest) GetActor() *Actor {
@@ -2409,7 +2524,7 @@ type PublishResourceResponse struct {
 
 func (x *PublishResourceResponse) Reset() {
 	*x = PublishResourceResponse{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[35]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2421,7 +2536,7 @@ func (x *PublishResourceResponse) String() string {
 func (*PublishResourceResponse) ProtoMessage() {}
 
 func (x *PublishResourceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[35]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2434,7 +2549,7 @@ func (x *PublishResourceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishResourceResponse.ProtoReflect.Descriptor instead.
 func (*PublishResourceResponse) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{35}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *PublishResourceResponse) GetResourceRevision() uint64 {
@@ -2501,7 +2616,7 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\vupdate_time\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"updateTime\x12\x18\n" +
-	"\adeleted\x18\v \x01(\bR\adeleted\"\xaf\x05\n" +
+	"\adeleted\x18\v \x01(\bR\adeleted\"\xa9\x06\n" +
 	"\n" +
 	"Occurrence\x12#\n" +
 	"\roccurrence_id\x18\x01 \x01(\tR\foccurrenceId\x12\x17\n" +
@@ -2525,7 +2640,11 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\n" +
 	"last_error\x18\x0f \x01(\tR\tlastError\x12+\n" +
 	"\x11resource_revision\x18\x10 \x01(\x04R\x10resourceRevision\x12#\n" +
-	"\rmanifest_hash\x18\x11 \x01(\tR\fmanifestHash\"\xfa\x01\n" +
+	"\rmanifest_hash\x18\x11 \x01(\tR\fmanifestHash\x12;\n" +
+	"\vupdate_time\x18\x12 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"updateTime\x12;\n" +
+	"\vcreate_time\x18\x13 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"createTime\"\xfa\x01\n" +
 	"\n" +
 	"StartGrant\x12#\n" +
 	"\roccurrence_id\x18\x01 \x01(\tR\foccurrenceId\x12\x1e\n" +
@@ -2614,7 +2733,14 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\roccurrence_id\x18\x01 \x01(\tR\foccurrenceId\x12-\n" +
 	"\x12receipt_generation\x18\x02 \x01(\x04R\x11receiptGeneration\"P\n" +
 	"\x15GetStartGrantResponse\x127\n" +
-	"\x05grant\x18\x01 \x01(\v2!.blowball.scheduler.v1.StartGrantR\x05grant\"\xab\x01\n" +
+	"\x05grant\x18\x01 \x01(\v2!.blowball.scheduler.v1.StartGrantR\x05grant\"d\n" +
+	"\x1cGetResourceReferencesRequest\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12+\n" +
+	"\x11resource_revision\x18\x02 \x01(\x04R\x10resourceRevision\"?\n" +
+	"\x1dGetResourceReferencesResponse\x12\x1e\n" +
+	"\n" +
+	"referenced\x18\x01 \x01(\bR\n" +
+	"referenced\"\xab\x01\n" +
 	"!ValidateTaskActorAndConfigRequest\x122\n" +
 	"\x05actor\x18\x01 \x01(\v2\x1c.blowball.scheduler.v1.ActorR\x05actor\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x129\n" +
@@ -2662,7 +2788,7 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\fScheduleType\x12\x1d\n" +
 	"\x19SCHEDULE_TYPE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10SCHEDULE_TYPE_AT\x10\x01\x12\x16\n" +
-	"\x12SCHEDULE_TYPE_CRON\x10\x022\xae\a\n" +
+	"\x12SCHEDULE_TYPE_CRON\x10\x022\xb3\b\n" +
 	"\x10SchedulerService\x12a\n" +
 	"\n" +
 	"CreateTask\x12(.blowball.scheduler.v1.CreateTaskRequest\x1a).blowball.scheduler.v1.CreateTaskResponse\x12X\n" +
@@ -2675,7 +2801,8 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x0fListOccurrences\x12-.blowball.scheduler.v1.ListOccurrencesRequest\x1a..blowball.scheduler.v1.ListOccurrencesResponse\x12j\n" +
 	"\rGetOccurrence\x12+.blowball.scheduler.v1.GetOccurrenceRequest\x1a,.blowball.scheduler.v1.GetOccurrenceResponse\x12m\n" +
 	"\x0eAuthorizeStart\x12,.blowball.scheduler.v1.AuthorizeStartRequest\x1a-.blowball.scheduler.v1.AuthorizeStartResponse\x12j\n" +
-	"\rGetStartGrant\x12+.blowball.scheduler.v1.GetStartGrantRequest\x1a,.blowball.scheduler.v1.GetStartGrantResponse2\x9a\x05\n" +
+	"\rGetStartGrant\x12+.blowball.scheduler.v1.GetStartGrantRequest\x1a,.blowball.scheduler.v1.GetStartGrantResponse\x12\x82\x01\n" +
+	"\x15GetResourceReferences\x123.blowball.scheduler.v1.GetResourceReferencesRequest\x1a4.blowball.scheduler.v1.GetResourceReferencesResponse2\x9a\x05\n" +
 	"\x17SchedulerControlService\x12\x91\x01\n" +
 	"\x1aValidateTaskActorAndConfig\x128.blowball.scheduler.v1.ValidateTaskActorAndConfigRequest\x1a9.blowball.scheduler.v1.ValidateTaskActorAndConfigResponse\x12\x88\x01\n" +
 	"\x17ValidateResourceBinding\x125.blowball.scheduler.v1.ValidateResourceBindingRequest\x1a6.blowball.scheduler.v1.ValidateResourceBindingResponse\x12y\n" +
@@ -2696,7 +2823,7 @@ func file_scheduler_v1_scheduler_proto_rawDescGZIP() []byte {
 }
 
 var file_scheduler_v1_scheduler_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
+var file_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_scheduler_v1_scheduler_proto_goTypes = []any{
 	(SessionSource)(0),                         // 0: blowball.scheduler.v1.SessionSource
 	(ScheduleType)(0),                          // 1: blowball.scheduler.v1.ScheduleType
@@ -2726,91 +2853,97 @@ var file_scheduler_v1_scheduler_proto_goTypes = []any{
 	(*AuthorizeStartResponse)(nil),             // 25: blowball.scheduler.v1.AuthorizeStartResponse
 	(*GetStartGrantRequest)(nil),               // 26: blowball.scheduler.v1.GetStartGrantRequest
 	(*GetStartGrantResponse)(nil),              // 27: blowball.scheduler.v1.GetStartGrantResponse
-	(*ValidateTaskActorAndConfigRequest)(nil),  // 28: blowball.scheduler.v1.ValidateTaskActorAndConfigRequest
-	(*ValidateTaskActorAndConfigResponse)(nil), // 29: blowball.scheduler.v1.ValidateTaskActorAndConfigResponse
-	(*ValidateResourceBindingRequest)(nil),     // 30: blowball.scheduler.v1.ValidateResourceBindingRequest
-	(*ValidateResourceBindingResponse)(nil),    // 31: blowball.scheduler.v1.ValidateResourceBindingResponse
-	(*GetResourceVersionRequest)(nil),          // 32: blowball.scheduler.v1.GetResourceVersionRequest
-	(*GetResourceVersionResponse)(nil),         // 33: blowball.scheduler.v1.GetResourceVersionResponse
-	(*GetResourceDraftRequest)(nil),            // 34: blowball.scheduler.v1.GetResourceDraftRequest
-	(*GetResourceDraftResponse)(nil),           // 35: blowball.scheduler.v1.GetResourceDraftResponse
-	(*PublishResourceRequest)(nil),             // 36: blowball.scheduler.v1.PublishResourceRequest
-	(*PublishResourceResponse)(nil),            // 37: blowball.scheduler.v1.PublishResourceResponse
-	(*timestamppb.Timestamp)(nil),              // 38: google.protobuf.Timestamp
+	(*GetResourceReferencesRequest)(nil),       // 28: blowball.scheduler.v1.GetResourceReferencesRequest
+	(*GetResourceReferencesResponse)(nil),      // 29: blowball.scheduler.v1.GetResourceReferencesResponse
+	(*ValidateTaskActorAndConfigRequest)(nil),  // 30: blowball.scheduler.v1.ValidateTaskActorAndConfigRequest
+	(*ValidateTaskActorAndConfigResponse)(nil), // 31: blowball.scheduler.v1.ValidateTaskActorAndConfigResponse
+	(*ValidateResourceBindingRequest)(nil),     // 32: blowball.scheduler.v1.ValidateResourceBindingRequest
+	(*ValidateResourceBindingResponse)(nil),    // 33: blowball.scheduler.v1.ValidateResourceBindingResponse
+	(*GetResourceVersionRequest)(nil),          // 34: blowball.scheduler.v1.GetResourceVersionRequest
+	(*GetResourceVersionResponse)(nil),         // 35: blowball.scheduler.v1.GetResourceVersionResponse
+	(*GetResourceDraftRequest)(nil),            // 36: blowball.scheduler.v1.GetResourceDraftRequest
+	(*GetResourceDraftResponse)(nil),           // 37: blowball.scheduler.v1.GetResourceDraftResponse
+	(*PublishResourceRequest)(nil),             // 38: blowball.scheduler.v1.PublishResourceRequest
+	(*PublishResourceResponse)(nil),            // 39: blowball.scheduler.v1.PublishResourceResponse
+	(*timestamppb.Timestamp)(nil),              // 40: google.protobuf.Timestamp
 }
 var file_scheduler_v1_scheduler_proto_depIdxs = []int32{
 	1,  // 0: blowball.scheduler.v1.Schedule.type:type_name -> blowball.scheduler.v1.ScheduleType
 	3,  // 1: blowball.scheduler.v1.TaskConfig.schedule:type_name -> blowball.scheduler.v1.Schedule
 	4,  // 2: blowball.scheduler.v1.Task.config:type_name -> blowball.scheduler.v1.TaskConfig
-	38, // 3: blowball.scheduler.v1.Task.next_run_at:type_name -> google.protobuf.Timestamp
-	38, // 4: blowball.scheduler.v1.Task.create_time:type_name -> google.protobuf.Timestamp
-	38, // 5: blowball.scheduler.v1.Task.update_time:type_name -> google.protobuf.Timestamp
-	38, // 6: blowball.scheduler.v1.Occurrence.scheduled_for:type_name -> google.protobuf.Timestamp
+	40, // 3: blowball.scheduler.v1.Task.next_run_at:type_name -> google.protobuf.Timestamp
+	40, // 4: blowball.scheduler.v1.Task.create_time:type_name -> google.protobuf.Timestamp
+	40, // 5: blowball.scheduler.v1.Task.update_time:type_name -> google.protobuf.Timestamp
+	40, // 6: blowball.scheduler.v1.Occurrence.scheduled_for:type_name -> google.protobuf.Timestamp
 	0,  // 7: blowball.scheduler.v1.Occurrence.session_source:type_name -> blowball.scheduler.v1.SessionSource
-	38, // 8: blowball.scheduler.v1.Occurrence.started_at:type_name -> google.protobuf.Timestamp
-	38, // 9: blowball.scheduler.v1.Occurrence.finished_at:type_name -> google.protobuf.Timestamp
-	38, // 10: blowball.scheduler.v1.StartGrant.started_at:type_name -> google.protobuf.Timestamp
-	38, // 11: blowball.scheduler.v1.StartGrant.deadline:type_name -> google.protobuf.Timestamp
-	38, // 12: blowball.scheduler.v1.ResourceVersion.create_time:type_name -> google.protobuf.Timestamp
-	8,  // 13: blowball.scheduler.v1.ResourceVersion.files:type_name -> blowball.scheduler.v1.ResourceFile
-	2,  // 14: blowball.scheduler.v1.CreateTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	4,  // 15: blowball.scheduler.v1.CreateTaskRequest.config:type_name -> blowball.scheduler.v1.TaskConfig
-	5,  // 16: blowball.scheduler.v1.CreateTaskResponse.task:type_name -> blowball.scheduler.v1.Task
-	2,  // 17: blowball.scheduler.v1.GetTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	5,  // 18: blowball.scheduler.v1.GetTaskResponse.task:type_name -> blowball.scheduler.v1.Task
-	2,  // 19: blowball.scheduler.v1.ListTasksRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	5,  // 20: blowball.scheduler.v1.ListTasksResponse.tasks:type_name -> blowball.scheduler.v1.Task
-	2,  // 21: blowball.scheduler.v1.UpdateTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	4,  // 22: blowball.scheduler.v1.UpdateTaskRequest.config:type_name -> blowball.scheduler.v1.TaskConfig
-	5,  // 23: blowball.scheduler.v1.UpdateTaskResponse.task:type_name -> blowball.scheduler.v1.Task
-	2,  // 24: blowball.scheduler.v1.DeleteTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	5,  // 25: blowball.scheduler.v1.DeleteTaskResponse.task:type_name -> blowball.scheduler.v1.Task
-	2,  // 26: blowball.scheduler.v1.ListOccurrencesRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	6,  // 27: blowball.scheduler.v1.ListOccurrencesResponse.occurrences:type_name -> blowball.scheduler.v1.Occurrence
-	6,  // 28: blowball.scheduler.v1.GetOccurrenceResponse.occurrence:type_name -> blowball.scheduler.v1.Occurrence
-	7,  // 29: blowball.scheduler.v1.AuthorizeStartResponse.grant:type_name -> blowball.scheduler.v1.StartGrant
-	7,  // 30: blowball.scheduler.v1.GetStartGrantResponse.grant:type_name -> blowball.scheduler.v1.StartGrant
-	2,  // 31: blowball.scheduler.v1.ValidateTaskActorAndConfigRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	4,  // 32: blowball.scheduler.v1.ValidateTaskActorAndConfigRequest.config:type_name -> blowball.scheduler.v1.TaskConfig
-	2,  // 33: blowball.scheduler.v1.ValidateResourceBindingRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	2,  // 34: blowball.scheduler.v1.GetResourceVersionRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	9,  // 35: blowball.scheduler.v1.GetResourceVersionResponse.version:type_name -> blowball.scheduler.v1.ResourceVersion
-	2,  // 36: blowball.scheduler.v1.GetResourceDraftRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	8,  // 37: blowball.scheduler.v1.GetResourceDraftResponse.files:type_name -> blowball.scheduler.v1.ResourceFile
-	2,  // 38: blowball.scheduler.v1.PublishResourceRequest.actor:type_name -> blowball.scheduler.v1.Actor
-	10, // 39: blowball.scheduler.v1.SchedulerService.CreateTask:input_type -> blowball.scheduler.v1.CreateTaskRequest
-	12, // 40: blowball.scheduler.v1.SchedulerService.GetTask:input_type -> blowball.scheduler.v1.GetTaskRequest
-	14, // 41: blowball.scheduler.v1.SchedulerService.ListTasks:input_type -> blowball.scheduler.v1.ListTasksRequest
-	16, // 42: blowball.scheduler.v1.SchedulerService.UpdateTask:input_type -> blowball.scheduler.v1.UpdateTaskRequest
-	18, // 43: blowball.scheduler.v1.SchedulerService.DeleteTask:input_type -> blowball.scheduler.v1.DeleteTaskRequest
-	20, // 44: blowball.scheduler.v1.SchedulerService.ListOccurrences:input_type -> blowball.scheduler.v1.ListOccurrencesRequest
-	22, // 45: blowball.scheduler.v1.SchedulerService.GetOccurrence:input_type -> blowball.scheduler.v1.GetOccurrenceRequest
-	24, // 46: blowball.scheduler.v1.SchedulerService.AuthorizeStart:input_type -> blowball.scheduler.v1.AuthorizeStartRequest
-	26, // 47: blowball.scheduler.v1.SchedulerService.GetStartGrant:input_type -> blowball.scheduler.v1.GetStartGrantRequest
-	28, // 48: blowball.scheduler.v1.SchedulerControlService.ValidateTaskActorAndConfig:input_type -> blowball.scheduler.v1.ValidateTaskActorAndConfigRequest
-	30, // 49: blowball.scheduler.v1.SchedulerControlService.ValidateResourceBinding:input_type -> blowball.scheduler.v1.ValidateResourceBindingRequest
-	32, // 50: blowball.scheduler.v1.SchedulerControlService.GetResourceVersion:input_type -> blowball.scheduler.v1.GetResourceVersionRequest
-	34, // 51: blowball.scheduler.v1.SchedulerControlService.GetResourceDraft:input_type -> blowball.scheduler.v1.GetResourceDraftRequest
-	36, // 52: blowball.scheduler.v1.SchedulerControlService.PublishResource:input_type -> blowball.scheduler.v1.PublishResourceRequest
-	11, // 53: blowball.scheduler.v1.SchedulerService.CreateTask:output_type -> blowball.scheduler.v1.CreateTaskResponse
-	13, // 54: blowball.scheduler.v1.SchedulerService.GetTask:output_type -> blowball.scheduler.v1.GetTaskResponse
-	15, // 55: blowball.scheduler.v1.SchedulerService.ListTasks:output_type -> blowball.scheduler.v1.ListTasksResponse
-	17, // 56: blowball.scheduler.v1.SchedulerService.UpdateTask:output_type -> blowball.scheduler.v1.UpdateTaskResponse
-	19, // 57: blowball.scheduler.v1.SchedulerService.DeleteTask:output_type -> blowball.scheduler.v1.DeleteTaskResponse
-	21, // 58: blowball.scheduler.v1.SchedulerService.ListOccurrences:output_type -> blowball.scheduler.v1.ListOccurrencesResponse
-	23, // 59: blowball.scheduler.v1.SchedulerService.GetOccurrence:output_type -> blowball.scheduler.v1.GetOccurrenceResponse
-	25, // 60: blowball.scheduler.v1.SchedulerService.AuthorizeStart:output_type -> blowball.scheduler.v1.AuthorizeStartResponse
-	27, // 61: blowball.scheduler.v1.SchedulerService.GetStartGrant:output_type -> blowball.scheduler.v1.GetStartGrantResponse
-	29, // 62: blowball.scheduler.v1.SchedulerControlService.ValidateTaskActorAndConfig:output_type -> blowball.scheduler.v1.ValidateTaskActorAndConfigResponse
-	31, // 63: blowball.scheduler.v1.SchedulerControlService.ValidateResourceBinding:output_type -> blowball.scheduler.v1.ValidateResourceBindingResponse
-	33, // 64: blowball.scheduler.v1.SchedulerControlService.GetResourceVersion:output_type -> blowball.scheduler.v1.GetResourceVersionResponse
-	35, // 65: blowball.scheduler.v1.SchedulerControlService.GetResourceDraft:output_type -> blowball.scheduler.v1.GetResourceDraftResponse
-	37, // 66: blowball.scheduler.v1.SchedulerControlService.PublishResource:output_type -> blowball.scheduler.v1.PublishResourceResponse
-	53, // [53:67] is the sub-list for method output_type
-	39, // [39:53] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	40, // 8: blowball.scheduler.v1.Occurrence.started_at:type_name -> google.protobuf.Timestamp
+	40, // 9: blowball.scheduler.v1.Occurrence.finished_at:type_name -> google.protobuf.Timestamp
+	40, // 10: blowball.scheduler.v1.Occurrence.update_time:type_name -> google.protobuf.Timestamp
+	40, // 11: blowball.scheduler.v1.Occurrence.create_time:type_name -> google.protobuf.Timestamp
+	40, // 12: blowball.scheduler.v1.StartGrant.started_at:type_name -> google.protobuf.Timestamp
+	40, // 13: blowball.scheduler.v1.StartGrant.deadline:type_name -> google.protobuf.Timestamp
+	40, // 14: blowball.scheduler.v1.ResourceVersion.create_time:type_name -> google.protobuf.Timestamp
+	8,  // 15: blowball.scheduler.v1.ResourceVersion.files:type_name -> blowball.scheduler.v1.ResourceFile
+	2,  // 16: blowball.scheduler.v1.CreateTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	4,  // 17: blowball.scheduler.v1.CreateTaskRequest.config:type_name -> blowball.scheduler.v1.TaskConfig
+	5,  // 18: blowball.scheduler.v1.CreateTaskResponse.task:type_name -> blowball.scheduler.v1.Task
+	2,  // 19: blowball.scheduler.v1.GetTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	5,  // 20: blowball.scheduler.v1.GetTaskResponse.task:type_name -> blowball.scheduler.v1.Task
+	2,  // 21: blowball.scheduler.v1.ListTasksRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	5,  // 22: blowball.scheduler.v1.ListTasksResponse.tasks:type_name -> blowball.scheduler.v1.Task
+	2,  // 23: blowball.scheduler.v1.UpdateTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	4,  // 24: blowball.scheduler.v1.UpdateTaskRequest.config:type_name -> blowball.scheduler.v1.TaskConfig
+	5,  // 25: blowball.scheduler.v1.UpdateTaskResponse.task:type_name -> blowball.scheduler.v1.Task
+	2,  // 26: blowball.scheduler.v1.DeleteTaskRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	5,  // 27: blowball.scheduler.v1.DeleteTaskResponse.task:type_name -> blowball.scheduler.v1.Task
+	2,  // 28: blowball.scheduler.v1.ListOccurrencesRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	6,  // 29: blowball.scheduler.v1.ListOccurrencesResponse.occurrences:type_name -> blowball.scheduler.v1.Occurrence
+	6,  // 30: blowball.scheduler.v1.GetOccurrenceResponse.occurrence:type_name -> blowball.scheduler.v1.Occurrence
+	7,  // 31: blowball.scheduler.v1.AuthorizeStartResponse.grant:type_name -> blowball.scheduler.v1.StartGrant
+	7,  // 32: blowball.scheduler.v1.GetStartGrantResponse.grant:type_name -> blowball.scheduler.v1.StartGrant
+	2,  // 33: blowball.scheduler.v1.ValidateTaskActorAndConfigRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	4,  // 34: blowball.scheduler.v1.ValidateTaskActorAndConfigRequest.config:type_name -> blowball.scheduler.v1.TaskConfig
+	2,  // 35: blowball.scheduler.v1.ValidateResourceBindingRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	2,  // 36: blowball.scheduler.v1.GetResourceVersionRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	9,  // 37: blowball.scheduler.v1.GetResourceVersionResponse.version:type_name -> blowball.scheduler.v1.ResourceVersion
+	2,  // 38: blowball.scheduler.v1.GetResourceDraftRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	8,  // 39: blowball.scheduler.v1.GetResourceDraftResponse.files:type_name -> blowball.scheduler.v1.ResourceFile
+	2,  // 40: blowball.scheduler.v1.PublishResourceRequest.actor:type_name -> blowball.scheduler.v1.Actor
+	10, // 41: blowball.scheduler.v1.SchedulerService.CreateTask:input_type -> blowball.scheduler.v1.CreateTaskRequest
+	12, // 42: blowball.scheduler.v1.SchedulerService.GetTask:input_type -> blowball.scheduler.v1.GetTaskRequest
+	14, // 43: blowball.scheduler.v1.SchedulerService.ListTasks:input_type -> blowball.scheduler.v1.ListTasksRequest
+	16, // 44: blowball.scheduler.v1.SchedulerService.UpdateTask:input_type -> blowball.scheduler.v1.UpdateTaskRequest
+	18, // 45: blowball.scheduler.v1.SchedulerService.DeleteTask:input_type -> blowball.scheduler.v1.DeleteTaskRequest
+	20, // 46: blowball.scheduler.v1.SchedulerService.ListOccurrences:input_type -> blowball.scheduler.v1.ListOccurrencesRequest
+	22, // 47: blowball.scheduler.v1.SchedulerService.GetOccurrence:input_type -> blowball.scheduler.v1.GetOccurrenceRequest
+	24, // 48: blowball.scheduler.v1.SchedulerService.AuthorizeStart:input_type -> blowball.scheduler.v1.AuthorizeStartRequest
+	26, // 49: blowball.scheduler.v1.SchedulerService.GetStartGrant:input_type -> blowball.scheduler.v1.GetStartGrantRequest
+	28, // 50: blowball.scheduler.v1.SchedulerService.GetResourceReferences:input_type -> blowball.scheduler.v1.GetResourceReferencesRequest
+	30, // 51: blowball.scheduler.v1.SchedulerControlService.ValidateTaskActorAndConfig:input_type -> blowball.scheduler.v1.ValidateTaskActorAndConfigRequest
+	32, // 52: blowball.scheduler.v1.SchedulerControlService.ValidateResourceBinding:input_type -> blowball.scheduler.v1.ValidateResourceBindingRequest
+	34, // 53: blowball.scheduler.v1.SchedulerControlService.GetResourceVersion:input_type -> blowball.scheduler.v1.GetResourceVersionRequest
+	36, // 54: blowball.scheduler.v1.SchedulerControlService.GetResourceDraft:input_type -> blowball.scheduler.v1.GetResourceDraftRequest
+	38, // 55: blowball.scheduler.v1.SchedulerControlService.PublishResource:input_type -> blowball.scheduler.v1.PublishResourceRequest
+	11, // 56: blowball.scheduler.v1.SchedulerService.CreateTask:output_type -> blowball.scheduler.v1.CreateTaskResponse
+	13, // 57: blowball.scheduler.v1.SchedulerService.GetTask:output_type -> blowball.scheduler.v1.GetTaskResponse
+	15, // 58: blowball.scheduler.v1.SchedulerService.ListTasks:output_type -> blowball.scheduler.v1.ListTasksResponse
+	17, // 59: blowball.scheduler.v1.SchedulerService.UpdateTask:output_type -> blowball.scheduler.v1.UpdateTaskResponse
+	19, // 60: blowball.scheduler.v1.SchedulerService.DeleteTask:output_type -> blowball.scheduler.v1.DeleteTaskResponse
+	21, // 61: blowball.scheduler.v1.SchedulerService.ListOccurrences:output_type -> blowball.scheduler.v1.ListOccurrencesResponse
+	23, // 62: blowball.scheduler.v1.SchedulerService.GetOccurrence:output_type -> blowball.scheduler.v1.GetOccurrenceResponse
+	25, // 63: blowball.scheduler.v1.SchedulerService.AuthorizeStart:output_type -> blowball.scheduler.v1.AuthorizeStartResponse
+	27, // 64: blowball.scheduler.v1.SchedulerService.GetStartGrant:output_type -> blowball.scheduler.v1.GetStartGrantResponse
+	29, // 65: blowball.scheduler.v1.SchedulerService.GetResourceReferences:output_type -> blowball.scheduler.v1.GetResourceReferencesResponse
+	31, // 66: blowball.scheduler.v1.SchedulerControlService.ValidateTaskActorAndConfig:output_type -> blowball.scheduler.v1.ValidateTaskActorAndConfigResponse
+	33, // 67: blowball.scheduler.v1.SchedulerControlService.ValidateResourceBinding:output_type -> blowball.scheduler.v1.ValidateResourceBindingResponse
+	35, // 68: blowball.scheduler.v1.SchedulerControlService.GetResourceVersion:output_type -> blowball.scheduler.v1.GetResourceVersionResponse
+	37, // 69: blowball.scheduler.v1.SchedulerControlService.GetResourceDraft:output_type -> blowball.scheduler.v1.GetResourceDraftResponse
+	39, // 70: blowball.scheduler.v1.SchedulerControlService.PublishResource:output_type -> blowball.scheduler.v1.PublishResourceResponse
+	56, // [56:71] is the sub-list for method output_type
+	41, // [41:56] is the sub-list for method input_type
+	41, // [41:41] is the sub-list for extension type_name
+	41, // [41:41] is the sub-list for extension extendee
+	0,  // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_scheduler_v1_scheduler_proto_init() }
@@ -2824,7 +2957,7 @@ func file_scheduler_v1_scheduler_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_scheduler_v1_scheduler_proto_rawDesc), len(file_scheduler_v1_scheduler_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   36,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

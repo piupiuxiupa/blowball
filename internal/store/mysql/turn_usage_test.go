@@ -23,6 +23,7 @@ func setupTurnUsageTestStore(t *testing.T) (*Store, func()) {
 
 	store, err := New(dsn)
 	require.NoError(t, err)
+	lockTestSchema(t, store)
 
 	ddl := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (

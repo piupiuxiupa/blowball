@@ -153,6 +153,16 @@ func (s *ScheduledSessions) List(ctx context.Context, userID, taskID string, off
 	return out, nil
 }
 
+// SessionExists reports whether a scheduled session row still exists (the
+// history "content deleted" annotation). It does not disclose owner details.
+func (s *ScheduledSessions) SessionExists(ctx context.Context, sessionID string) (bool, error) {
+	sess, err := s.store.GetScheduledSessionByID(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	return sess != nil, nil
+}
+
 // Messages returns one cursor page of a scheduled session's history after an
 // owner/source check. A foreign or ordinary session ID reads as not found.
 func (s *ScheduledSessions) Messages(ctx context.Context, userID, sessionID, cursorStr string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {

@@ -7,7 +7,16 @@ import (
 
 	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/internal/tool/skill"
 )
+
+// PathGuard enforces the managed `.cron` write rules for the file tools. It is
+// implemented by internal/resource.Guard; the interface lives here so xizhi
+// stays free of resource/store dependencies. A nil guard preserves the
+// pre-resource behavior (tests, deployments without the guard wired).
+type PathGuard interface {
+	CheckWrite(ctx context.Context, userID, relPath, kind string) error
+}
 
 // Registered tool names. These are the strings agents reference in their
 // config `tools:` lists and what the registry indexes.
@@ -324,7 +333,17 @@ type viewImageArgs struct {
 // registration. vision is the production VisionClient for xizhi_view_image
 // (nil disables that one tool — callers that have not wired vision pass nil;
 // enabling view_image in cfg while passing nil is a wiring bug and panics).
-func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig, vision VisionClient) {
+func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig, vision VisionClient, guards ...PathGuard) {
+	var guard PathGuard
+	if len(guards) > 0 {
+		guard = guards[0]
+	}
+	checkWrite := func(ctx context.Context, relPath, kind string) error {
+		if guard == nil {
+			return nil
+		}
+		return guard.CheckWrite(ctx, skill.UserIDFromContext(ctx), relPath, kind)
+	}
 	var tools []*tool.ToolSpec
 
 	// The original three file tools are always registered for backward
@@ -367,6 +386,9 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig,
 			default:
 				return nil, fmt.Errorf("xizhi_write_file: invalid mode %q (must be \"write\" or \"append\")", a.Mode)
 			}
+			if err := checkWrite(ctx, a.Path, "write"); err != nil {
+				return nil, err
+			}
 			return WriteFile(workspaceRoot, a.Path, a.Content, a.Mode == "append")
 		},
 	})
@@ -382,6 +404,9 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig,
 			var a modifyArgs
 			if err := json.Unmarshal(args, &a); err != nil {
 				return nil, fmt.Errorf("xizhi_modify_file: parse args: %w", err)
+			}
+			if err := checkWrite(ctx, a.Path, "modify"); err != nil {
+				return nil, err
 			}
 			return ModifyFile(workspaceRoot, a.Path, a.OldContent, a.NewContent)
 		},
@@ -497,6 +522,9 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig,
 				var a deleteArgs
 				if err := json.Unmarshal(args, &a); err != nil {
 					return nil, fmt.Errorf("xizhi_delete: parse args: %w", err)
+				}
+				if err := checkWrite(ctx, a.Path, "delete"); err != nil {
+					return nil, err
 				}
 				return DeletePath(workspaceRoot, a.Path)
 			},

@@ -63,6 +63,10 @@ type orchestratorFactory struct {
 	userMCP      config.UserMCPConfig // per-user MCP tool timeouts/enabled flag
 	mcpMarket    *mcpmarket.Client    // optional MCP-market client (mcp-market capability; nil = off)
 	snapshots    SubAgentSnapshotStore
+	resourceGuard xizhi.PathGuard // optional `.cron` write guard
+	// scheduledTaskTools are the Scheduler-backed management tool names made
+	// visible to every agent when the standalone Scheduler is configured.
+	scheduledTaskTools []string
 }
 
 // Build implements AgentFactory.
@@ -198,6 +202,7 @@ func unionToolNames(groups ...[]string) []string {
 func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config.AgentConfig, subagentLimits *prompt.SubagentDispatchLimits, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
+	fullToolNames = append(fullToolNames, f.scheduledTaskTools...)
 	fullToolNames = append(fullToolNames, mcpToolNames...)
 
 	allowed := make(map[string]struct{}, len(fullToolNames))
@@ -218,7 +223,7 @@ func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config
 		}
 		vision = vc
 	}
-	xizhi.RegisterAll(reg, workspaceRoot, f.cfg.Tools.Xizhi, vision)
+	xizhi.RegisterAll(reg, workspaceRoot, f.cfg.Tools.Xizhi, vision, f.resourceGuard)
 
 	for _, spec := range f.baseRegistry.List() {
 		// Skip Xizhi tools — they were re-registered above with the right
@@ -444,6 +449,25 @@ type Orchestrator struct {
 	// handed to Handle, not by this function. Phase 9's handler can call this
 	// closure to compute workspaceRoot from a user_id before invoking Handle.
 	workspaceRootForUser WorkspaceRootForUser
+}
+
+// SetResourceGuard attaches the managed `.cron` write guard to the production
+// factory. It must be called at wiring time before any turn starts; a custom
+// test factory is unaffected (the guard is only consumed by the production
+// agent registry builder).
+func (o *Orchestrator) SetResourceGuard(g xizhi.PathGuard) {
+	if f, ok := o.factory.(*orchestratorFactory); ok {
+		f.resourceGuard = g
+	}
+}
+
+// EnableScheduledTaskTools makes the Scheduler-backed management tools visible
+// to every agent of a turn. It must be called at wiring time, after the tools
+// are registered in the base registry.
+func (o *Orchestrator) EnableScheduledTaskTools(names []string) {
+	if f, ok := o.factory.(*orchestratorFactory); ok {
+		f.scheduledTaskTools = names
+	}
 }
 
 // HandleWithBudget installs the optional per-turn request estimator alongside

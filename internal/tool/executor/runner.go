@@ -54,7 +54,18 @@ func (t *Tools) run(ctx context.Context, toolName string, cfg config.ExecutorToo
 		return nil, fmt.Errorf("executor: create workspace .pip: %w", err)
 	}
 
-	bwrapArgs := buildBwrapArgs(workspaceRoot, workspaceTmp, t.globalSkillsDir, t.toolsDir, t.cfg.Sandbox, cfg, t.marketBinds(ctx, skill.UserIDFromContext(ctx))...)
+	// The `.cron` namespace is mounted read-only in every sandbox. A user with
+	// no resources yet still sees an empty read-only `.cron`, never a writable
+	// one they could create from bash.
+	cronReadOnlyDir := filepath.Join(workspaceRoot, ".cron")
+	if info, err := os.Stat(cronReadOnlyDir); err != nil || !info.IsDir() {
+		cronReadOnlyDir = filepath.Join(workspaceRoot, ".blowball", "empty-cron")
+		if err := os.MkdirAll(cronReadOnlyDir, 0o755); err != nil {
+			return nil, fmt.Errorf("executor: create empty cron mount: %w", err)
+		}
+	}
+
+	bwrapArgs := buildBwrapArgs(workspaceRoot, workspaceTmp, t.globalSkillsDir, t.toolsDir, cronReadOnlyDir, t.cfg.Sandbox, cfg, t.marketBinds(ctx, skill.UserIDFromContext(ctx))...)
 	bwrapArgs = append(bwrapArgs, sandboxArgs...)
 
 	if toolName == ToolBash {

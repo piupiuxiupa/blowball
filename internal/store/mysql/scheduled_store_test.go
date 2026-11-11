@@ -39,6 +39,7 @@ func setupScheduledStore(t *testing.T) (*Store, *SessionStore, func()) {
 	}
 	store, err := New(dsn)
 	require.NoError(t, err)
+	lockTestSchema(t, store)
 	ctx := context.Background()
 
 	if _, err := store.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=0"); err != nil {

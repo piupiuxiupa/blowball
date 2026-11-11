@@ -46,15 +46,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SchedulerService_CreateTask_FullMethodName      = "/blowball.scheduler.v1.SchedulerService/CreateTask"
-	SchedulerService_GetTask_FullMethodName         = "/blowball.scheduler.v1.SchedulerService/GetTask"
-	SchedulerService_ListTasks_FullMethodName       = "/blowball.scheduler.v1.SchedulerService/ListTasks"
-	SchedulerService_UpdateTask_FullMethodName      = "/blowball.scheduler.v1.SchedulerService/UpdateTask"
-	SchedulerService_DeleteTask_FullMethodName      = "/blowball.scheduler.v1.SchedulerService/DeleteTask"
-	SchedulerService_ListOccurrences_FullMethodName = "/blowball.scheduler.v1.SchedulerService/ListOccurrences"
-	SchedulerService_GetOccurrence_FullMethodName   = "/blowball.scheduler.v1.SchedulerService/GetOccurrence"
-	SchedulerService_AuthorizeStart_FullMethodName  = "/blowball.scheduler.v1.SchedulerService/AuthorizeStart"
-	SchedulerService_GetStartGrant_FullMethodName   = "/blowball.scheduler.v1.SchedulerService/GetStartGrant"
+	SchedulerService_CreateTask_FullMethodName            = "/blowball.scheduler.v1.SchedulerService/CreateTask"
+	SchedulerService_GetTask_FullMethodName               = "/blowball.scheduler.v1.SchedulerService/GetTask"
+	SchedulerService_ListTasks_FullMethodName             = "/blowball.scheduler.v1.SchedulerService/ListTasks"
+	SchedulerService_UpdateTask_FullMethodName            = "/blowball.scheduler.v1.SchedulerService/UpdateTask"
+	SchedulerService_DeleteTask_FullMethodName            = "/blowball.scheduler.v1.SchedulerService/DeleteTask"
+	SchedulerService_ListOccurrences_FullMethodName       = "/blowball.scheduler.v1.SchedulerService/ListOccurrences"
+	SchedulerService_GetOccurrence_FullMethodName         = "/blowball.scheduler.v1.SchedulerService/GetOccurrence"
+	SchedulerService_AuthorizeStart_FullMethodName        = "/blowball.scheduler.v1.SchedulerService/AuthorizeStart"
+	SchedulerService_GetStartGrant_FullMethodName         = "/blowball.scheduler.v1.SchedulerService/GetStartGrant"
+	SchedulerService_GetResourceReferences_FullMethodName = "/blowball.scheduler.v1.SchedulerService/GetResourceReferences"
 )
 
 // SchedulerServiceClient is the client API for SchedulerService service.
@@ -72,6 +73,7 @@ type SchedulerServiceClient interface {
 	GetOccurrence(ctx context.Context, in *GetOccurrenceRequest, opts ...grpc.CallOption) (*GetOccurrenceResponse, error)
 	AuthorizeStart(ctx context.Context, in *AuthorizeStartRequest, opts ...grpc.CallOption) (*AuthorizeStartResponse, error)
 	GetStartGrant(ctx context.Context, in *GetStartGrantRequest, opts ...grpc.CallOption) (*GetStartGrantResponse, error)
+	GetResourceReferences(ctx context.Context, in *GetResourceReferencesRequest, opts ...grpc.CallOption) (*GetResourceReferencesResponse, error)
 }
 
 type schedulerServiceClient struct {
@@ -172,6 +174,16 @@ func (c *schedulerServiceClient) GetStartGrant(ctx context.Context, in *GetStart
 	return out, nil
 }
 
+func (c *schedulerServiceClient) GetResourceReferences(ctx context.Context, in *GetResourceReferencesRequest, opts ...grpc.CallOption) (*GetResourceReferencesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetResourceReferencesResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_GetResourceReferences_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SchedulerServiceServer is the server API for SchedulerService service.
 // All implementations must embed UnimplementedSchedulerServiceServer
 // for forward compatibility.
@@ -187,6 +199,7 @@ type SchedulerServiceServer interface {
 	GetOccurrence(context.Context, *GetOccurrenceRequest) (*GetOccurrenceResponse, error)
 	AuthorizeStart(context.Context, *AuthorizeStartRequest) (*AuthorizeStartResponse, error)
 	GetStartGrant(context.Context, *GetStartGrantRequest) (*GetStartGrantResponse, error)
+	GetResourceReferences(context.Context, *GetResourceReferencesRequest) (*GetResourceReferencesResponse, error)
 	mustEmbedUnimplementedSchedulerServiceServer()
 }
 
@@ -223,6 +236,9 @@ func (UnimplementedSchedulerServiceServer) AuthorizeStart(context.Context, *Auth
 }
 func (UnimplementedSchedulerServiceServer) GetStartGrant(context.Context, *GetStartGrantRequest) (*GetStartGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStartGrant not implemented")
+}
+func (UnimplementedSchedulerServiceServer) GetResourceReferences(context.Context, *GetResourceReferencesRequest) (*GetResourceReferencesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetResourceReferences not implemented")
 }
 func (UnimplementedSchedulerServiceServer) mustEmbedUnimplementedSchedulerServiceServer() {}
 func (UnimplementedSchedulerServiceServer) testEmbeddedByValue()                          {}
@@ -407,6 +423,24 @@ func _SchedulerService_GetStartGrant_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SchedulerService_GetResourceReferences_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetResourceReferencesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).GetResourceReferences(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_GetResourceReferences_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).GetResourceReferences(ctx, req.(*GetResourceReferencesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SchedulerService_ServiceDesc is the grpc.ServiceDesc for SchedulerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -449,6 +483,10 @@ var SchedulerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetStartGrant",
 			Handler:    _SchedulerService_GetStartGrant_Handler,
+		},
+		{
+			MethodName: "GetResourceReferences",
+			Handler:    _SchedulerService_GetResourceReferences_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

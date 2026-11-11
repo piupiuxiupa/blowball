@@ -70,7 +70,7 @@ const toolsBinPath = sandboxHome + "/.local/bin"
 // fixed invariants. The load-bearing invariants (/workspace, $HOME,
 // $HOME/.local/bin, the global skills target, --chdir /workspace, PYTHONPATH)
 // are unchanged and not configurable.
-func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir string, sandbox config.ExecutorSandboxConfig, cfg config.ExecutorToolConfig, marketBinds ...MarketBind) []string {
+func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir, cronReadOnlyDir string, sandbox config.ExecutorSandboxConfig, cfg config.ExecutorToolConfig, marketBinds ...MarketBind) []string {
 	args := []string{
 		"--unshare-user",
 		"--unshare-ipc",
@@ -82,6 +82,13 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir strin
 		"--dev", "/dev",
 		"--bind", workspaceTmp, "/tmp",
 		"--bind", workspaceRoot, "/workspace",
+		// `.cron` is a managed resource namespace: every bash sandbox — normal
+		// chat and scheduled tasks alike — sees it read-only, so scripts cannot
+		// bypass the controlled draft/publish entry points. When the user has
+		// no `.cron` yet the caller passes an empty read-only directory, so the
+		// in-sandbox namespace exists but cannot be used to create a writable
+		// `.cron` that would later evade protection.
+		"--ro-bind", cronReadOnlyDir, "/workspace/.cron",
 		"--ro-bind", globalSkillsDir, "/skills/global",
 		// D2: establish the writable synthetic home as a tmpfs BEFORE binding the
 		// operator tools under it, so the mountpoint exists when the ro-bind lands.

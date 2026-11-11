@@ -93,6 +93,18 @@ type RouteDeps struct {
 	ScheduledTaskDelete gin.HandlerFunc
 	ScheduledTaskRuns   gin.HandlerFunc
 
+	// Scheduled task resource metadata/publish (extract-scheduler-service;
+	// scheduled-task-resources capability; api partition).
+	ScheduledResourceGet     gin.HandlerFunc
+	ScheduledResourcePublish gin.HandlerFunc
+
+	// Task-conversation history (read-only; api partition). There is no
+	// send-message or manual re-run handler by design.
+	ScheduledSessionList     gin.HandlerFunc
+	ScheduledSessionGet      gin.HandlerFunc
+	ScheduledSessionMessages gin.HandlerFunc
+	ScheduledSessionDelete   gin.HandlerFunc
+
 	// SessionUpdateTitle handles PATCH /api/v1/sessions/:session_id. Required.
 	SessionUpdateTitle gin.HandlerFunc
 
@@ -295,6 +307,20 @@ func RegisterAPIRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.DELETE("/scheduled-tasks/:task_id", deps.ScheduledTaskDelete)
 	authed.GET("/scheduled-tasks/:task_id/runs", deps.ScheduledTaskRuns)
 
+	// Task resource metadata and fenced publication (scheduled-task-resources).
+	// These live on the api partition and reuse the main service's resource
+	// business; the Scheduler owns only the task/reference binding.
+	authed.GET("/scheduled-tasks/:task_id/resources", deps.ScheduledResourceGet)
+	authed.POST("/scheduled-tasks/:task_id/resources/publish", deps.ScheduledResourcePublish)
+
+	// Task-session history (read-only): list/detail/messages/delete. The
+	// ordinary session routes above never see these IDs (404) and these
+	// routes never see ordinary IDs.
+	authed.GET("/scheduled-sessions", deps.ScheduledSessionList)
+	authed.GET("/scheduled-sessions/:session_id", deps.ScheduledSessionGet)
+	authed.GET("/scheduled-sessions/:session_id/messages", deps.ScheduledSessionMessages)
+	authed.DELETE("/scheduled-sessions/:session_id", deps.ScheduledSessionDelete)
+
 	// Attachment content read (add-image-attachments): browser-native
 	// elements (<img>) cannot send the Authorization header, so this one
 	// session route opts into the query-token middleware — the same
@@ -383,6 +409,10 @@ func RegisterAgentRoutes(r *gin.Engine, deps RouteDeps) {
 	authed.POST("/sessions/:session_id/messages", deps.SendMessage)
 	authed.POST("/sessions/:session_id/turns/:run_id/cancel", deps.TurnCancel)
 	authed.GET("/sessions/:session_id/turns/:run_id/events", deps.TurnEvents)
+	// Task-run explicit cancel (scheduled-task-sessions): the same run
+	// registry/Redis cancel machinery, addressed through the scheduled-session
+	// route shape. No send-message route exists for task sessions.
+	authed.POST("/scheduled-sessions/:session_id/runs/:run_id/cancel", deps.TurnCancel)
 	authed.GET("/mcp/tools", deps.MCPTools)
 }
 

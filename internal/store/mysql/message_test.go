@@ -37,6 +37,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 
 	store, err := New(dsn)
 	require.NoError(t, err)
+	lockTestSchema(t, store)
 
 	// Start from a clean fixture: CREATE TABLE IF NOT EXISTS would otherwise
 	// keep a stale/simplified schema created by another test helper.
@@ -426,6 +427,7 @@ func setupTestStoreWithSubAgentTables(t *testing.T) (*Store, func()) {
 	}
 	store, err := New(testDSN())
 	require.NoError(t, err)
+	lockTestSchema(t, store)
 
 	cleanup := func() {
 		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS messages")

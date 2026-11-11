@@ -14,29 +14,34 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/lush/blowball/internal/rpcx"
 )
 
 // Config is the root configuration tree mirroring config.yaml.
 type Config struct {
-	Server         ServerConfig         `yaml:"server"`
-	OpenAI         OpenAIConfig         `yaml:"openai"`
-	MySQL          MySQLConfig          `yaml:"mysql"`
-	Redis          RedisConfig          `yaml:"redis"`
-	Auth           AuthConfig           `yaml:"auth"`
-	JWT            JWTConfig            `yaml:"jwt"`
-	Agents         AgentsConfig         `yaml:"agents"`
-	Tools          ToolsConfig          `yaml:"tools"`
-	MCP            MCPConfig            `yaml:"mcp"`
-	Landlock       LandlockConfig       `yaml:"landlock"`
-	Logging        LoggingConfig        `yaml:"logging"`
-	OnlyOffice     OnlyOfficeConfig     `yaml:"onlyoffice"`
-	Artifact       ArtifactConfig       `yaml:"artifact"`
-	Storage        StorageConfig        `yaml:"storage"`
-	Messages       MessagesConfig       `yaml:"messages"`
-	ScheduledTasks ScheduledTasksConfig `yaml:"scheduled_tasks"`
-	Memory         MemoryConfig         `yaml:"memory"`
-	SkillMarket    SkillMarketConfig    `yaml:"skill_market"`
-	MCPMarket      MCPMarketConfig      `yaml:"mcp_market"`
+	Server             ServerConfig             `yaml:"server"`
+	OpenAI             OpenAIConfig             `yaml:"openai"`
+	MySQL              MySQLConfig              `yaml:"mysql"`
+	Redis              RedisConfig              `yaml:"redis"`
+	Auth               AuthConfig               `yaml:"auth"`
+	JWT                JWTConfig                `yaml:"jwt"`
+	Agents             AgentsConfig             `yaml:"agents"`
+	Tools              ToolsConfig              `yaml:"tools"`
+	MCP                MCPConfig                `yaml:"mcp"`
+	Landlock           LandlockConfig           `yaml:"landlock"`
+	Logging            LoggingConfig            `yaml:"logging"`
+	OnlyOffice         OnlyOfficeConfig         `yaml:"onlyoffice"`
+	Artifact           ArtifactConfig           `yaml:"artifact"`
+	Storage            StorageConfig            `yaml:"storage"`
+	Messages           MessagesConfig           `yaml:"messages"`
+	ScheduledTasks     ScheduledTasksConfig     `yaml:"scheduled_tasks"`
+	ScheduledResources ScheduledResourcesConfig `yaml:"scheduled_resources"`
+	InternalRPC        InternalRPCConfig        `yaml:"internal_rpc"`
+	ScheduledRuntime   ScheduledRuntimeConfig   `yaml:"scheduled_runtime"`
+	Memory             MemoryConfig             `yaml:"memory"`
+	SkillMarket        SkillMarketConfig        `yaml:"skill_market"`
+	MCPMarket          MCPMarketConfig          `yaml:"mcp_market"`
 }
 
 // WorkspaceBackendLocal is the default workspace storage backend: per-user
@@ -626,6 +631,179 @@ func (a *ArtifactConfig) applyDefaults() {
 func (a ArtifactConfig) validate() error {
 	if a.MaxSnapshotBytes < 0 {
 		return fmt.Errorf("artifact.max_snapshot_bytes must be >= 0")
+	}
+	return nil
+}
+
+// Defaults for `.cron` resource publication and pinned execution context.
+const (
+	DefaultScheduledResourceMaxFiles        = 1000
+	DefaultScheduledResourceMaxTotalBytes   = 100 << 20 // 100 MiB
+	DefaultScheduledResourceMaxFileBytes    = 100 << 20 // 100 MiB
+	DefaultScheduledResourceMaxContextFiles = 100
+	DefaultScheduledResourceMaxContextBytes = 4000
+)
+
+// InternalRPCConfig configures the main service's mutual-TLS internal gRPC
+// listener and its Scheduler client. It is disabled by default: scheduling
+// requires an explicitly deployed Scheduler (the embedded scheduler is gone).
+type InternalRPCConfig struct {
+	Enabled           bool           `yaml:"enabled"`
+	Listen            string         `yaml:"listen"`
+	Timeout           time.Duration  `yaml:"timeout"`
+	TLS               TLSFilesConfig `yaml:"tls"`
+	SchedulerEndpoint string         `yaml:"scheduler_endpoint"`
+	SchedulerTLS      TLSFilesConfig `yaml:"scheduler_tls"`
+}
+
+// TLSFilesConfig is the shared mTLS file set. ServerName pins the expected
+// server certificate identity on the client side.
+type TLSFilesConfig struct {
+	CertFile   string `yaml:"cert_file"`
+	KeyFile    string `yaml:"key_file"`
+	CAFile     string `yaml:"ca_file"`
+	ServerName string `yaml:"server_name"`
+}
+
+// ToRPCX converts the config file set to the shared transport type.
+func (t TLSFilesConfig) ToRPCX() rpcx.TLSFiles {
+	return rpcx.TLSFiles{CertFile: t.CertFile, KeyFile: t.KeyFile, CAFile: t.CAFile, ServerName: t.ServerName}
+}
+
+func (t TLSFilesConfig) applyDefaults() TLSFilesConfig {
+	if t.ServerName == "" {
+		t.ServerName = "blowball-scheduler"
+	}
+	return t
+}
+
+func (r *InternalRPCConfig) applyDefaults() {
+	if r.Listen == "" {
+		r.Listen = ":9092"
+	}
+	if r.Timeout <= 0 {
+		r.Timeout = 5 * time.Second
+	}
+	r.SchedulerTLS = r.SchedulerTLS.applyDefaults()
+}
+
+// Validate rejects an incomplete enabled configuration. Disabled/omitted keeps
+// zero behavior change (scheduled HTTP endpoints return 503, tools are not
+// registered).
+func (r InternalRPCConfig) Validate() error {
+	if !r.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(r.Listen) == "" {
+		return fmt.Errorf("internal_rpc.listen is required when internal_rpc.enabled is true")
+	}
+	if err := requireTLSFiles("internal_rpc.tls", r.TLS); err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.SchedulerEndpoint) == "" {
+		return fmt.Errorf("internal_rpc.scheduler_endpoint is required when internal_rpc.enabled is true")
+	}
+	if err := requireTLSFiles("internal_rpc.scheduler_tls", r.SchedulerTLS); err != nil {
+		return err
+	}
+	return nil
+}
+
+func requireTLSFiles(name string, files TLSFilesConfig) error {
+	if files.CertFile == "" || files.KeyFile == "" || files.CAFile == "" {
+		return fmt.Errorf("%s cert_file, key_file and ca_file are required (mutual TLS)", name)
+	}
+	return nil
+}
+
+// ScheduledRuntimeConfig bounds the main service's scheduled execution
+// admission. It is a concurrency guard, not a CPU/memory partition; ordinary
+// chat keeps its own admission policy.
+type ScheduledRuntimeConfig struct {
+	PollInterval       *time.Duration `yaml:"poll_interval"`
+	LeaseDuration      *time.Duration `yaml:"lease_duration"`
+	MaxConcurrent      *int           `yaml:"max_concurrent"`
+	MaxPrepareAttempts *int           `yaml:"max_prepare_attempts"`
+	ScanBatch          *int           `yaml:"scan_batch"`
+}
+
+// Values applies the documented defaults (5s/30s/4/3/50) and returns them.
+func (c ScheduledRuntimeConfig) Values() (poll, lease time.Duration, concurrent, attempts, scan int) {
+	pickD := func(v *time.Duration, def time.Duration) time.Duration {
+		if v != nil {
+			return *v
+		}
+		return def
+	}
+	pickI := func(v *int, def int) int {
+		if v != nil {
+			return *v
+		}
+		return def
+	}
+	return pickD(c.PollInterval, 5*time.Second), pickD(c.LeaseDuration, 30*time.Second),
+		pickI(c.MaxConcurrent, 4), pickI(c.MaxPrepareAttempts, 3), pickI(c.ScanBatch, 50)
+}
+
+func (c ScheduledRuntimeConfig) validate() error {
+	poll, lease, concurrent, attempts, scan := c.Values()
+	for name, v := range map[string]time.Duration{"scheduled_runtime.poll_interval": poll, "scheduled_runtime.lease_duration": lease} {
+		if v <= 0 {
+			return fmt.Errorf("%s must be positive", name)
+		}
+	}
+	for name, v := range map[string]int{"scheduled_runtime.max_concurrent": concurrent, "scheduled_runtime.max_prepare_attempts": attempts, "scheduled_runtime.scan_batch": scan} {
+		if v <= 0 {
+			return fmt.Errorf("%s must be positive", name)
+		}
+	}
+	return nil
+}
+
+// ScheduledResourcesConfig bounds the `.cron` draft publication and the
+// bounded resource context injected into a scheduled turn. Publication limits
+// are positive; the context caps keep the runtime-only prefix small.
+type ScheduledResourcesConfig struct {
+	MaxFiles        int   `yaml:"max_files"`
+	MaxTotalBytes   int64 `yaml:"max_total_bytes"`
+	MaxFileBytes    int64 `yaml:"max_file_bytes"`
+	MaxContextFiles int   `yaml:"max_context_files"`
+	MaxContextBytes int   `yaml:"max_context_bytes"`
+}
+
+func (s *ScheduledResourcesConfig) applyDefaults() {
+	if s.MaxFiles == 0 {
+		s.MaxFiles = DefaultScheduledResourceMaxFiles
+	}
+	if s.MaxTotalBytes == 0 {
+		s.MaxTotalBytes = DefaultScheduledResourceMaxTotalBytes
+	}
+	if s.MaxFileBytes == 0 {
+		s.MaxFileBytes = DefaultScheduledResourceMaxFileBytes
+	}
+	if s.MaxContextFiles == 0 {
+		s.MaxContextFiles = DefaultScheduledResourceMaxContextFiles
+	}
+	if s.MaxContextBytes == 0 {
+		s.MaxContextBytes = DefaultScheduledResourceMaxContextBytes
+	}
+}
+
+func (s ScheduledResourcesConfig) validate() error {
+	if s.MaxFiles < 0 {
+		return fmt.Errorf("scheduled_resources.max_files must be positive")
+	}
+	if s.MaxTotalBytes < 0 {
+		return fmt.Errorf("scheduled_resources.max_total_bytes must be positive")
+	}
+	if s.MaxFileBytes < 0 {
+		return fmt.Errorf("scheduled_resources.max_file_bytes must be positive")
+	}
+	if s.MaxContextFiles < 0 {
+		return fmt.Errorf("scheduled_resources.max_context_files must be positive")
+	}
+	if s.MaxContextBytes < 0 {
+		return fmt.Errorf("scheduled_resources.max_context_bytes must be positive")
 	}
 	return nil
 }
@@ -1840,6 +2018,8 @@ func Load(path string) (*Config, error) {
 	cfg.Logging.applyDefaults()
 	cfg.OnlyOffice.applyDefaults()
 	cfg.Artifact.applyDefaults()
+	cfg.ScheduledResources.applyDefaults()
+	cfg.InternalRPC.applyDefaults()
 	cfg.Server.applyDefaults()
 	cfg.Storage.Workspace.applyDefaults()
 	cfg.Landlock.applyDefaults()
@@ -1865,6 +2045,9 @@ func Load(path string) (*Config, error) {
 
 // validate enforces required fields after loading.
 func (c *Config) validate() error {
+	if c.ScheduledTasks.Enabled {
+		return fmt.Errorf("config validation error: scheduled_tasks.enabled is no longer supported (extract-scheduler-service): the embedded scheduler was removed; deploy the standalone Scheduler (services/scheduler), configure internal_rpc.scheduler_endpoint, and remove the legacy scheduled_tasks block")
+	}
 	if strings.TrimSpace(c.JWT.Secret) == "" {
 		return fmt.Errorf("config validation error: jwt.secret must be non-empty")
 	}
@@ -1893,6 +2076,15 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.Artifact.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.ScheduledResources.validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.InternalRPC.Validate(); err != nil {
+		return fmt.Errorf("config validation error: %w", err)
+	}
+	if err := c.ScheduledRuntime.validate(); err != nil {
 		return fmt.Errorf("config validation error: %w", err)
 	}
 	if err := c.MCP.validate(); err != nil {

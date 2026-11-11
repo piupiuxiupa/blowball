@@ -1,0 +1,25 @@
+[Unit]
+Description=blowball standalone scheduler
+Documentation=file:/usr/local/share/doc/blowball/scheduled-tasks.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blowball
+Group=blowball
+# The Scheduler needs its own config (MySQL + mTLS + main-service endpoints).
+# Execution stays off until scheduler.execution_enabled is set to true.
+ExecStart=/usr/local/bin/scheduler -f /etc/blowball/scheduler.yaml -d /var/lib/blowball
+Restart=on-failure
+RestartSec=5s
+# The process needs the MySQL port, the main-service internal gRPC ports and
+# the Scheduler listener. It never mounts the user workspace.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/blowball/logs
+
+[Install]
+WantedBy=multi-user.target

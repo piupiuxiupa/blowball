@@ -93,6 +93,10 @@ func (f *fakeStore) GetOccurrence(_ context.Context, occurrenceID string) (*mode
 	return nil, nil
 }
 
+func (f *fakeStore) ResourceReferences(context.Context, string, uint64) (bool, error) {
+	return false, nil
+}
+
 type fakeValidator struct {
 	err    error
 	model  string

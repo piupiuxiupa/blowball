@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"strings"
@@ -26,6 +27,7 @@ func setupStore(t *testing.T) (*Store, func()) {
 	}
 	st, err := New(dsn)
 	require.NoError(t, err)
+	lockSchedulerTestSchema(t, st)
 	ctx := context.Background()
 	for _, tbl := range []string{"scheduled_task_runs", "scheduled_tasks"} {
 		_, _ = st.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+tbl)
@@ -38,6 +40,24 @@ func setupStore(t *testing.T) (*Store, func()) {
 		_ = st.Close()
 	}
 	return st, cleanup
+}
+
+const schedulerTestSchemaLock = "blowball_test_store_schema"
+
+func lockSchedulerTestSchema(t *testing.T, st *Store) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := st.db.Connx(ctx)
+	require.NoError(t, err)
+	var acquired sql.NullInt64
+	require.NoError(t, conn.GetContext(ctx, &acquired, "SELECT GET_LOCK(?, 60)", schedulerTestSchemaLock))
+	require.True(t, acquired.Valid && acquired.Int64 == 1, "could not acquire the MySQL test schema lock")
+	t.Cleanup(func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(releaseCtx, "SELECT RELEASE_LOCK(?)", schedulerTestSchemaLock)
+		_ = conn.Close()
+	})
 }
 
 func execSQLFile(t *testing.T, st *Store, path string) {

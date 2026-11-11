@@ -9,9 +9,9 @@
 
 - [x] 2.1 编写增量 migration：任务资源引用/历史来源/只读 execution hold 字段、scheduled_sessions、消息/工具/标题/用量/压缩/子 Agent/附件及需要的归档表、资源版本元数据和 execution receipts；验证 FK、索引及唯一 occurrence/run 约束。
 - [x] 2.2 先写普通/任务 repository 隔离与幂等建会话测试，再实现固定来源的存储适配；拒绝创建普通占位 session，禁止客户端表名和跨表 fallback。
-- [ ] 2.3 适配任务 round 双表事务、send-time 和 finalization；测试新数据无 chunk 行、工具顺序和终态 receipt 不先于最终内容，不复活 ingest queue。
+- [x] 2.3 适配任务 round 双表事务、send-time 和 finalization；测试新数据无 chunk 行、工具顺序和终态 receipt 不先于最终内容，不复活 ingest queue。
 - [x] 2.4 适配标题、用量、压缩标志/锚点/工具统计、子 Agent instances/transcripts 和附件；测试所有任务写入只落 scheduled 表。
-- [ ] 2.5 适配读取前 owner/source 校验、缓存回填、任务删除及用户删除归档；验证 stale cache、跨用户 404、运行中删除 409 和普通数据不受影响。
+- [x] 2.5 适配读取前 owner/source 校验、缓存回填、任务删除及用户删除归档；验证 stale cache、跨用户 404、运行中删除 409 和普通数据不受影响。
 
 ## 3. 主服务任务执行入口
 
@@ -34,42 +34,42 @@
 
 ## 5. `.cron` 资源与写保护
 
-- [ ] 5.1 先写 namespace owner、未受管理目录冲突、草稿与发布区规则测试，再实现 .cron/<task_id> 的受控初始化/解析；不覆盖现有用户文件。
-- [ ] 5.2 实现 draft revision 与跨 API 节点写入/发布围栏，接入文本写入、上传、创建、删除和 rename；测试并发编辑、失效围栏和受保护祖先/移动目标。
-- [ ] 5.3 实现受控 staging、普通文件校验、排序 manifest、实际字节 SHA-256、容量上限、原子发布与幂等 publication 元数据；测试 crash/重试/超限不产生可绑定半成品。
-- [ ] 5.4 实现资源 get/publish/validate RPC 与 Task 资源引用 CAS 绑定；测试空资源任务、disabled 准备流程、跨用户绑定和发布成功但配置更新失败。
-- [ ] 5.5 适配文件工具和 Office 写回的管理路径保护；测试 symlink/路径竞态、发布版本直接覆盖、任务根删除和 `.cron` 之外现有文件行为。
-- [ ] 5.6 在所有 bash 中增加 .cron 只读视图，处理尚未初始化的命名空间；测试 argv/挂载不改变既有技能/env/network/其他 workspace，并在 Linux 用真实 bwrap 验证旁路写入失败。
-- [ ] 5.7 实现执行前 pinned manifest/内容校验及最小资源上下文；测试不读 draft/latest、不自动执行附件、不改 Task.prompt 原文及预算估算。
-- [ ] 5.8 实现受控 staging/未引用版本维护及保留引用检查；测试 Task/session 删除和 active Run 不清理被引用资源，多节点发布/执行沿用共享 workspace。
+- [x] 5.1 先写 namespace owner、未受管理目录冲突、草稿与发布区规则测试，再实现 .cron/<task_id> 的受控初始化/解析；不覆盖现有用户文件。
+- [x] 5.2 实现 draft revision 与跨 API 节点写入/发布围栏，接入文本写入、上传、创建、删除和 rename；测试并发编辑、失效围栏和受保护祖先/移动目标。
+- [x] 5.3 实现受控 staging、普通文件校验、排序 manifest、实际字节 SHA-256、容量上限、原子发布与幂等 publication 元数据；测试 crash/重试/超限不产生可绑定半成品。
+- [x] 5.4 实现资源 get/publish/validate RPC 与 Task 资源引用 CAS 绑定；测试空资源任务、disabled 准备流程、跨用户绑定和发布成功但配置更新失败。
+- [x] 5.5 适配文件工具和 Office 写回的管理路径保护；测试 symlink/路径竞态、发布版本直接覆盖、任务根删除和 `.cron` 之外现有文件行为。
+- [x] 5.6 在所有 bash 中增加 .cron 只读视图，处理尚未初始化的命名空间；测试 argv/挂载不改变既有技能/env/network/其他 workspace，并在 Linux 用真实 bwrap 验证旁路写入失败。
+- [x] 5.7 实现执行前 pinned manifest/内容校验及最小资源上下文；测试不读 draft/latest、不自动执行附件、不改 Task.prompt 原文及预算估算。
+- [x] 5.8 实现受控 staging/未引用版本维护及保留引用检查；测试 Task/session 删除和 active Run 不清理被引用资源，多节点发布/执行沿用共享 workspace。
 
 ## 6. HTTP、工具及历史合同
 
-- [ ] 6.1 将现有任务 handler 改为 Scheduler RPC 适配，保留字段和成功状态码；测试 Scheduler 不可用返回 503、无本地 fallback，普通聊天不受影响。
-- [ ] 6.2 添加 scheduled-sessions 列表、详情、消息分页、删除及 Agent 角色 Run cancel 路由；测试独立列表、跨用户 404、普通接口拒绝 scheduled ID 和不存在自由对话入口。
-- [ ] 6.3 扩展 Task/Occurrence DTO，返回 expected revision、resource 引用、历史快照、实际模型、session_source 及只读阻塞原因；测试历史编辑只修改当前 Task且不能清除 execution hold。
-- [ ] 6.4 添加资源元数据/发布 HTTP 接口，复用主服务资源业务及 owner/revision 校验；测试 request ID 幂等与冲突错误。
-- [ ] 6.5 注册 scheduled_task 管理及 resource get/publish 工具，使用可信执行上下文和相同业务；测试伪造 user、跨用户 task、HTTP/工具校验一致、未配置/离线行为。
-- [ ] 6.6 更新 api/openapi.yaml，完整描述路径、角色、分页、来源、配置/快照、revision、400/401/403/404/409/503 及不再允许 existing 的迁移说明。
+- [x] 6.1 将现有任务 handler 改为 Scheduler RPC 适配，保留字段和成功状态码；测试 Scheduler 不可用返回 503、无本地 fallback，普通聊天不受影响。
+- [x] 6.2 添加 scheduled-sessions 列表、详情、消息分页、删除及 Agent 角色 Run cancel 路由；测试独立列表、跨用户 404、普通接口拒绝 scheduled ID 和不存在自由对话入口。
+- [x] 6.3 扩展 Task/Occurrence DTO，返回 expected revision、resource 引用、历史快照、实际模型、session_source 及只读阻塞原因；测试历史编辑只修改当前 Task且不能清除 execution hold。
+- [x] 6.4 添加资源元数据/发布 HTTP 接口，复用主服务资源业务及 owner/revision 校验；测试 request ID 幂等与冲突错误。
+- [x] 6.5 注册 scheduled_task 管理及 resource get/publish 工具，使用可信执行上下文和相同业务；测试伪造 user、跨用户 task、HTTP/工具校验一致、未配置/离线行为。
+- [x] 6.6 更新 api/openapi.yaml，完整描述路径、角色、分页、来源、配置/快照、revision、400/401/403/404/409/503 及不再允许 existing 的迁移说明。
 
 ## 7. 配置、角色与部署
 
-- [ ] 7.1 从 all/agent wiring 移除调度构造和循环，按角色注册内部 RPC；测试 all 零内嵌 Scheduler、API 无 LLM 依赖、普通 HTTP 路由/端口回归。
-- [ ] 7.2 添加独立 Scheduler 配置和主服务 RPC endpoint/TLS 配置示例；正值校验默认 5s/4/10m，明确旧 enabled 配置迁移；示例秘密使用环境变量。
-- [ ] 7.3 添加 Runtime scheduled admission 上限、receipt/授权/发布可观测性和就绪检查；验证不是普通聊天 CPU/内存配额承诺，RPC 依赖故障不错误宣告执行成功。
-- [ ] 7.4 增加独立 build/run/deploy 目标及服务身份/数据库写权限边界，延续现有共享存储健康检查；构建产物不得进入 Git。
+- [x] 7.1 从 all/agent wiring 移除调度构造和循环，按角色注册内部 RPC；测试 all 零内嵌 Scheduler、API 无 LLM 依赖、普通 HTTP 路由/端口回归。
+- [x] 7.2 添加独立 Scheduler 配置和主服务 RPC endpoint/TLS 配置示例；正值校验默认 5s/4/10m，明确旧 enabled 配置迁移；示例秘密使用环境变量。
+- [x] 7.3 添加 Runtime scheduled admission 上限、receipt/授权/发布可观测性和就绪检查；验证不是普通聊天 CPU/内存配额承诺，RPC 依赖故障不错误宣告执行成功。
+- [x] 7.4 增加独立 build/run/deploy 目标及服务身份/数据库写权限边界，延续现有共享存储健康检查；构建产物不得进入 Git。
 
 ## 8. 遗留任务与历史迁移
 
-- [ ] 8.1 编写只增加字段/表的迁移和演练，遗留 history 显式标记 legacy_interactive；测试旧普通会话不搬表、不隐藏、不创建 scheduled 副本。
-- [ ] 8.2 停旧循环并排空/保守处理旧 non-terminal，无法证明停止时建立 Task hold；迁移 new 策略的未来触发，暂停 existing 并要求显式确认；测试不重播槽位、改变旧上下文或与未停旧 worker 重叠。
-- [ ] 8.3 实现按明确来源读取旧任务历史和内容已删除标记；测试没有跨表猜测，Task 软删除后仍可从专属历史入口读取保存事实。
-- [ ] 8.4 更新 docs/scheduled-tasks.md、配置/部署说明及回滚步骤；验证回滚只关闭新调度、保留新表/资源/读服务，不启动旧内嵌实例或重放未知 Run。
+- [x] 8.1 编写只增加字段/表的迁移和演练，遗留 history 显式标记 legacy_interactive；测试旧普通会话不搬表、不隐藏、不创建 scheduled 副本。
+- [x] 8.2 停旧循环并排空/保守处理旧 non-terminal，无法证明停止时建立 Task hold；迁移 new 策略的未来触发，暂停 existing 并要求显式确认；测试不重播槽位、改变旧上下文或与未停旧 worker 重叠。
+- [x] 8.3 实现按明确来源读取旧任务历史和内容已删除标记；测试没有跨表猜测，Task 软删除后仍可从专属历史入口读取保存事实。
+- [x] 8.4 更新 docs/scheduled-tasks.md、配置/部署说明及回滚步骤；验证回滚只关闭新调度、保留新表/资源/读服务，不启动旧内嵌实例或重放未知 Run。
 
 ## 9. 故障矩阵与验收
 
-- [ ] 9.1 增加跨进程集成测试：多 Scheduler/Runtime 接收、响应丢失、start grant 竞争、各持久化点崩溃、Redis/Scheduler/RPC 不可用和迟到 worker；覆盖跨 occurrence 的未知执行 hold，断言停止证明前不启动后续任务且无自动重放不确定 Agent。
-- [ ] 9.2 增加任务表组全链路测试：工具/子 Agent、压缩、取消/超时、缓存 miss、终态/删除归档，断言普通表零新任务数据及 canonical 状态不串存储。
-- [ ] 9.3 增加跨 API/Agent 的资源并发/故障与权限测试，覆盖保护祖先、真实 Linux bwrap、共享 workspace、固定版本和凭证泄露检查。
-- [ ] 9.4 运行 OpenSpec strict 校验、OpenAPI/生成产物检查、go vet、构建与 make test；记录 Linux/外部依赖测试前置条件，不以跳过冒充通过。
-- [ ] 9.5 每个完成的自包含阶段先运行对应测试再创建 scoped Conventional Commit；最终核对仅提交源代码、测试、文档与配置示例，不提交 bin、秘密、日志或运行数据。
+- [x] 9.1 增加跨进程集成测试：多 Scheduler/Runtime 接收、响应丢失、start grant 竞争、各持久化点崩溃、Redis/Scheduler/RPC 不可用和迟到 worker；覆盖跨 occurrence 的未知执行 hold，断言停止证明前不启动后续任务且无自动重放不确定 Agent。
+- [x] 9.2 增加任务表组全链路测试：工具/子 Agent、压缩、取消/超时、缓存 miss、终态/删除归档，断言普通表零新任务数据及 canonical 状态不串存储。
+- [x] 9.3 增加跨 API/Agent 的资源并发/故障与权限测试，覆盖保护祖先、真实 Linux bwrap、共享 workspace、固定版本和凭证泄露检查。
+- [x] 9.4 运行 OpenSpec strict 校验、OpenAPI/生成产物检查、go vet、构建与 make test；记录 Linux/外部依赖测试前置条件，不以跳过冒充通过。
+- [x] 9.5 每个完成的自包含阶段先运行对应测试再创建 scoped Conventional Commit；最终核对仅提交源代码、测试、文档与配置示例，不提交 bin、秘密、日志或运行数据。

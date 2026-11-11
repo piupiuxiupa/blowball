@@ -27,6 +27,7 @@ import (
 	"github.com/lush/blowball/internal/pkg/jwt"
 	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/pkg/trace"
+	"github.com/lush/blowball/internal/resource"
 	"github.com/lush/blowball/internal/store/fs"
 	"github.com/lush/blowball/internal/tool/xizhi"
 )
@@ -43,6 +44,7 @@ type WorkspaceHandler struct {
 	fsSvc          *fs.Store
 	maxUploadBytes int64
 	oo             OnlyOfficeSettings
+	resourceGuard  *resource.Guard
 }
 
 // OnlyOfficeSettings is the server-side OnlyOffice integration config injected
@@ -83,6 +85,49 @@ func (o OnlyOfficeSettings) versionConfigured() bool {
 // office editing (the editor endpoints then return 503).
 func NewWorkspaceHandler(fsSvc *fs.Store, maxUploadBytes int64, oo OnlyOfficeSettings) *WorkspaceHandler {
 	return &WorkspaceHandler{fsSvc: fsSvc, maxUploadBytes: maxUploadBytes, oo: oo}
+}
+
+// WithResourceGuard registers the `.cron` managed-namespace write guard. Nil
+// keeps the pre-resource behavior for tests that do not exercise it.
+func (h *WorkspaceHandler) WithResourceGuard(g *resource.Guard) *WorkspaceHandler {
+	h.resourceGuard = g
+	return h
+}
+
+// guardWrite enforces the resource write rules and writes the HTTP error body
+// when denied. It returns false when the caller must stop.
+func (h *WorkspaceHandler) guardWrite(c *gin.Context, ctx context.Context, userID, rel, kind string) bool {
+	if h.resourceGuard == nil {
+		return true
+	}
+	if err := h.resourceGuard.CheckWrite(ctx, userID, rel, kind); err != nil {
+		writeResourceError(c, err)
+		return false
+	}
+	return true
+}
+
+func writeResourceError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, resource.ErrReadOnly):
+		c.JSON(http.StatusForbidden, errorBody("RESOURCE_READ_ONLY", "cron resource path is read-only"))
+	case errors.Is(err, resource.ErrNotFound):
+		c.JSON(http.StatusNotFound, errorBody("NOT_FOUND", "cron resource not found"))
+	case errors.Is(err, resource.ErrNamespaceConflict):
+		c.JSON(http.StatusConflict, errorBody("RESOURCE_NAMESPACE_CONFLICT", "cron resource namespace conflict"))
+	case errors.Is(err, resource.ErrUnavailable):
+		c.JSON(http.StatusServiceUnavailable, errorBody("RESOURCE_UNAVAILABLE", "scheduled task service unavailable"))
+	case errors.Is(err, resource.ErrDraftConflict):
+		c.JSON(http.StatusConflict, errorBody("REVISION_CONFLICT", "cron resource draft changed; retry"))
+	case errors.Is(err, resource.ErrLimit):
+		c.JSON(http.StatusRequestEntityTooLarge, errorBody("RESOURCE_LIMIT", "cron resource limit exceeded"))
+	case errors.Is(err, resource.ErrInvalidPath):
+		c.JSON(http.StatusBadRequest, errorBody("INVALID_PATH", "invalid cron resource path"))
+	case errors.Is(err, resource.ErrInvalidRequest):
+		c.JSON(http.StatusBadRequest, errorBody("INVALID_REQUEST", err.Error()))
+	default:
+		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "cron resource operation failed"))
+	}
 }
 
 // fileEntry is one element of the GET /api/v1/workspace/files response array.
@@ -440,6 +485,10 @@ func (h *WorkspaceHandler) Upload(c *gin.Context) {
 		writeForbidden(c, "path outside workspace")
 		return
 	}
+	relTarget := path.Join(relDir, filepath.Base(fileHeader.Filename))
+	if !h.guardWrite(c, ctx, userID, relTarget, resource.WriteCreate) {
+		return
+	}
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		logWS(ctx, "workspace.upload.mkdir", dstDir, err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create destination dir failed"))
@@ -694,6 +743,10 @@ func (h *WorkspaceHandler) WriteContent(c *gin.Context) {
 		return
 	}
 
+	if !h.guardWrite(c, ctx, userID, rel, resource.WriteModify) {
+		return
+	}
+
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		logWS(ctx, "workspace.writecontent.mkdir", filepath.Dir(abs), err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create destination dir failed"))
@@ -774,6 +827,10 @@ func (h *WorkspaceHandler) Create(c *gin.Context) {
 	}
 	if req.Type != "file" && req.Type != "directory" {
 		c.JSON(http.StatusBadRequest, errorBody("BAD_REQUEST", `type must be "file" or "directory"`))
+		return
+	}
+
+	if !h.guardWrite(c, ctx, userID, rel, resource.WriteCreate) {
 		return
 	}
 
@@ -926,6 +983,12 @@ func (h *WorkspaceHandler) Rename(c *gin.Context) {
 
 	// Ensure the destination parent directory exists so moves into new
 	// subdirectories succeed.
+	if !h.guardWrite(c, ctx, userID, strings.TrimPrefix(c.Param("path"), "/"), resource.WriteRenameSource) {
+		return
+	}
+	if !h.guardWrite(c, ctx, userID, relPath(wsRoot, dstAbs), resource.WriteRenameTarget) {
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(dstAbs), 0o755); err != nil {
 		logWS(ctx, "workspace.rename.mkdir", filepath.Dir(dstAbs), err)
 		c.JSON(http.StatusInternalServerError, errorBody("INTERNAL", "create destination directory failed"))
@@ -966,6 +1029,10 @@ func (h *WorkspaceHandler) Delete(c *gin.Context) {
 	abs, err := xizhi.ValidatePathAllowReserved(wsRoot, strings.TrimPrefix(rel, "/"))
 	if err != nil {
 		writeForbidden(c, "path outside workspace")
+		return
+	}
+
+	if !h.guardWrite(c, ctx, userID, strings.TrimPrefix(rel, "/"), resource.WriteDelete) {
 		return
 	}
 
@@ -1227,6 +1294,14 @@ func (h *WorkspaceHandler) OnlyOfficeCallback(c *gin.Context) {
 		logWS(ctx, "workspace.onlyoffice_callback.host_rejected", body.URL, errOnlyOfficeHostNotAllowed)
 		writeOnlyOfficeError(c, 1)
 		return
+	}
+
+	if h.resourceGuard != nil {
+		if err := h.resourceGuard.CheckWrite(ctx, userID, rel, resource.WriteModify); err != nil {
+			logWS(ctx, "workspace.onlyoffice_callback.resource_guard", rel, err)
+			writeOnlyOfficeError(c, 1)
+			return
+		}
 	}
 
 	if err := h.onlyOfficePersist(ctx, abs, body.URL); err != nil {

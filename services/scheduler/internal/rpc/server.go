@@ -8,10 +8,12 @@ import (
 	"errors"
 	"time"
 
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
 	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/rpcx"
 	"github.com/lush/blowball/internal/schedule"
 	"github.com/lush/blowball/services/scheduler/internal/scheduler"
@@ -173,8 +175,19 @@ func (s *Server) AuthorizeStart(ctx context.Context, req *schedulerv1.AuthorizeS
 	grant, err := s.sched.AuthorizeStart(ctx, req.GetOccurrenceId(), req.GetRunId(), req.GetSessionId(),
 		int(req.GetAttempt()), req.GetReceiptGeneration(), req.GetRuntimeWorkerGeneration())
 	if err != nil {
+		logger.FromContext(ctx).Warn("scheduled start authorization rejected",
+			zap.String("op", "scheduler.authorize_start"),
+			zap.String("occurrence_id", req.GetOccurrenceId()),
+			zap.Uint64("receipt_generation", req.GetReceiptGeneration()),
+			zap.Error(err))
 		return nil, rpcErr(err)
 	}
+	logger.FromContext(ctx).Info("scheduled start granted",
+		zap.String("op", "scheduler.authorize_start"),
+		zap.String("occurrence_id", grant.OccurrenceID),
+		zap.String("run_id", grant.RunID),
+		zap.Uint64("generation", grant.Generation),
+		zap.Time("deadline", grant.Deadline))
 	return &schedulerv1.AuthorizeStartResponse{Grant: grantProto(grant)}, nil
 }
 
@@ -185,6 +198,18 @@ func (s *Server) GetStartGrant(ctx context.Context, req *schedulerv1.GetStartGra
 		return nil, rpcErr(err)
 	}
 	return &schedulerv1.GetStartGrantResponse{Grant: grantProto(grant)}, nil
+}
+
+// GetResourceReferences answers the main service's cleanup reference check.
+func (s *Server) GetResourceReferences(ctx context.Context, req *schedulerv1.GetResourceReferencesRequest) (*schedulerv1.GetResourceReferencesResponse, error) {
+	if req.GetTaskId() == "" || req.GetResourceRevision() == 0 {
+		return nil, rpcx.ToStatus(rpcx.Errorf(rpcx.CodeInvalidArgument, "task_id and resource_revision are required"))
+	}
+	referenced, err := s.tasks.ResourceReferenced(ctx, req.GetTaskId(), req.GetResourceRevision())
+	if err != nil {
+		return nil, rpcErr(err)
+	}
+	return &schedulerv1.GetResourceReferencesResponse{Referenced: referenced}, nil
 }
 
 func actorOf(actor *schedulerv1.Actor) (string, error) {
@@ -248,6 +273,7 @@ func occurrenceProto(r *model.ScheduledTaskRun) *schedulerv1.Occurrence {
 		SessionSource: sessionSourceProto(r.SessionSource), Status: r.Status, Reason: r.Reason,
 		AttemptCount: uint32(r.AttemptCount), StartedAt: tsPtr(r.StartedAt), FinishedAt: tsPtr(r.FinishedAt),
 		LastError: r.LastError, ResourceRevision: r.ResourceRevision, ManifestHash: r.ManifestHash,
+		UpdateTime: timestamppb.New(r.UpdateTime), CreateTime: timestamppb.New(r.CreateTime),
 	}
 }
 

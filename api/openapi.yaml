@@ -1352,6 +1352,13 @@ components:
         enabled:
           type: boolean
           default: true
+        resource_revision:
+          type: integer
+          format: int64
+          description: Optional published resource revision; requires manifest_hash.
+        manifest_hash:
+          type: string
+          description: SHA-256 manifest digest of the bound resource revision.
     ScheduledTaskPatch:
       type: object
       description: |
@@ -1370,6 +1377,16 @@ components:
           type: string
           enum: [none, low, medium, high, xhigh, max]
         enabled: {type: boolean}
+        resource_revision:
+          type: integer
+          format: int64
+          description: Bind a published revision (0 clears the binding; requires manifest_hash consistency).
+        manifest_hash:
+          type: string
+        expected_revision:
+          type: integer
+          format: int64
+          description: Optimistic concurrency; a stale value returns 409 REVISION_CONFLICT.
     ScheduledTask:
       type: object
       required: [task_id, name, prompt, schedule, session, enabled, revision, create_time, update_time]
@@ -1389,7 +1406,19 @@ components:
         revision: {type: integer, format: int64}
         paused_reason:
           type: string
-          enum: [TASK_PAUSED, USER_UNAVAILABLE, SESSION_UNAVAILABLE, TASK_DELETED]
+          enum: [TASK_PAUSED, USER_UNAVAILABLE, SESSION_UNAVAILABLE, TASK_DELETED, SESSION_POLICY_MIGRATION_REQUIRED]
+        resource_revision:
+          type: integer
+          format: int64
+          description: Currently bound published resource revision; 0 = no resources.
+        manifest_hash:
+          type: string
+        execution_hold_occurrence_id:
+          type: string
+          description: Server-owned read-only hold; while set no occurrence may start.
+        blocked_reason:
+          type: string
+          description: Server-owned read-only reason while the execution hold is set.
         create_time: {type: string, format: date-time, description: UTC timestamp.}
         update_time: {type: string, format: date-time, description: UTC timestamp.}
     ScheduledTaskListResponse:
@@ -1417,13 +1446,34 @@ components:
         session_id: {type: string}
         session_mode:
           type: string
-          enum: [new, existing]
+          enum: [new]
+          description: Always new; session.mode=existing is retired.
+        session_source:
+          type: string
+          enum: [scheduled, legacy_interactive]
+          description: Authoritative conversation storage provenance.
+        snapshot:
+          type: object
+          additionalProperties: true
+          description: Immutable historical configuration snapshot for this occurrence.
+        resource_revision:
+          type: integer
+          format: int64
+          description: Pinned published resource revision (0 = none).
+        manifest_hash:
+          type: string
+        actual_model:
+          type: string
+          description: The model this occurrence actually resolved to (deployment default included).
+        content_deleted:
+          type: boolean
+          description: True when the task-session content has been deleted; the occurrence fact remains.
         status:
           type: string
           enum: [pending, preparing, launching, running, succeeded, error, skipped, cancelled, interrupted]
         reason:
           type: string
-          enum: [TASK_OVERLAP, SESSION_BUSY, USER_UNAVAILABLE, SESSION_UNAVAILABLE, TASK_TIMEOUT, TASK_PAUSED, TASK_DELETED, ADMISSION_UNAVAILABLE, START_REJECTED, RESULT_UNKNOWN]
+          enum: [TASK_OVERLAP, TASK_EXECUTION_UNCERTAIN, SESSION_BUSY, USER_UNAVAILABLE, SESSION_UNAVAILABLE, TASK_TIMEOUT, TASK_PAUSED, TASK_DELETED, ADMISSION_UNAVAILABLE, START_REJECTED, RESULT_UNKNOWN, RESULT_PERSIST_FAILED, SESSION_POLICY_MIGRATION_REQUIRED]
         attempt_count: {type: integer, description: Persistent safe-not-started claim count.}
         next_attempt_at: {type: string, format: date-time, description: UTC retry eligibility time.}
         started_at: {type: string, format: date-time, description: UTC startup-fence crossing time.}
@@ -1478,6 +1528,92 @@ components:
           schema: {$ref: '#/components/schemas/Error'}
 security:
   - BearerAuth: []
+    ScheduledResourceFile:
+      type: object
+      required: [path, size]
+      properties:
+        path: {type: string, description: Workspace-relative slash-separated path.}
+        size: {type: integer, format: int64}
+        sha256: {type: string, description: Present in published version manifests.}
+    ScheduledResourceVersion:
+      type: object
+      required: [resource_revision, manifest_hash, file_count, total_bytes, create_time]
+      properties:
+        resource_revision: {type: integer, format: int64}
+        manifest_hash: {type: string}
+        file_count: {type: integer}
+        total_bytes: {type: integer, format: int64}
+        create_time: {type: string, format: date-time}
+    ScheduledResourceGetResponse:
+      type: object
+      required: [task_id, draft_revision, files, versions]
+      properties:
+        task_id: {type: string}
+        draft_revision:
+          type: integer
+          format: int64
+          description: CAS fence; pass it back to publish for optimistic concurrency.
+        files:
+          type: array
+          items: {$ref: '#/components/schemas/ScheduledResourceFile'}
+        versions:
+          type: array
+          items: {$ref: '#/components/schemas/ScheduledResourceVersion'}
+    ScheduledResourcePublishRequest:
+      type: object
+      required: [request_id]
+      properties:
+        expected_draft_revision:
+          type: integer
+          format: int64
+          description: Optional; a stale value fails with 409 REVISION_CONFLICT.
+        request_id:
+          type: string
+          maxLength: 64
+          description: Publication idempotency key; replaying it returns the same revision.
+    ScheduledResourcePublishResponse:
+      type: object
+      required: [resource_revision, manifest_hash, file_count, total_bytes]
+      properties:
+        resource_revision: {type: integer, format: int64}
+        manifest_hash: {type: string}
+        file_count: {type: integer}
+        total_bytes: {type: integer, format: int64}
+    ScheduledSession:
+      type: object
+      required: [session_id, title, task_id, occurrence_id, run_id, session_source, create_time, update_time]
+      properties:
+        session_id: {type: string}
+        title: {type: string}
+        task_id: {type: string}
+        occurrence_id: {type: string}
+        run_id: {type: string}
+        context_compacted: {type: boolean}
+        session_source: {type: string, enum: [scheduled]}
+        create_time: {type: string, format: date-time}
+        update_time: {type: string, format: date-time}
+    ScheduledSessionDetail:
+      allOf:
+        - $ref: '#/components/schemas/ScheduledSession'
+        - type: object
+          properties:
+            snapshot:
+              type: object
+              additionalProperties: true
+              description: Immutable historical configuration captured for this occurrence.
+            actual_model:
+              type: string
+              description: The model this occurrence actually executed with.
+    ScheduledSessionListResponse:
+      type: object
+      required: [sessions, limit, offset]
+      properties:
+        sessions:
+          type: array
+          items: {$ref: '#/components/schemas/ScheduledSession'}
+        limit: {type: integer}
+        offset: {type: integer}
+
 paths:
   /healthz:
     get:
@@ -3293,3 +3429,227 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
+
+  /api/v1/scheduled-tasks/{task_id}/resources:
+    parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [scheduled-resources]
+      summary: Read the task's `.cron` draft and published version metadata
+      description: |
+        Owner-only. Draft files are editable; published revisions are immutable.
+        `.cron` is a managed namespace: only authorized draft paths are writable
+        through the ordinary workspace endpoints, and bash sees it read-only.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Draft revision, draft files and version list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledResourceGetResponse'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Missing task or another user's task (NOT_FOUND).
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '503':
+          description: Scheduler unavailable (RESOURCE_UNAVAILABLE); no filesystem fallback.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  /api/v1/scheduled-tasks/{task_id}/resources/publish:
+    parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      tags: [scheduled-resources]
+      summary: Publish the draft as an immutable resource revision
+      description: |
+        Copies the draft into a protected staging tree, computes the manifest
+        from the actual copied bytes, checks the draft fence and atomically
+        publishes. A concurrent draft edit or stale expected_revision returns
+        409; a repeated request_id returns the same revision.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScheduledResourcePublishRequest'}
+      responses:
+        '200':
+          description: Published (or idempotently replayed) revision.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledResourcePublishResponse'}
+        '400':
+          description: INVALID_JSON, INVALID_REQUEST, INVALID_PATH, or RESOURCE_NAMESPACE_CONFLICT.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Missing task or another user's task.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '409':
+          description: REVISION_CONFLICT — the draft changed or expected_draft_revision is stale.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '413':
+          description: RESOURCE_LIMIT — file count / total bytes / single-file cap exceeded.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '503':
+          description: Scheduler unavailable.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  /api/v1/scheduled-sessions:
+    get:
+      tags: [scheduled-sessions]
+      summary: List the user's task execution sessions
+      description: |
+        Independent from the ordinary session list: task sessions never appear
+        there and ordinary sessions never appear here. Newest first.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: task_id
+          in: query
+          schema: {type: string}
+          description: Optional task filter.
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - name: offset
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Owner-scoped page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledSessionListResponse'}
+        '400':
+          description: INVALID_PAGINATION.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/scheduled-sessions/{session_id}:
+    parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [scheduled-sessions]
+      summary: Read one task execution session
+      description: |
+        Owner-only. Includes the immutable historical snapshot and the actual
+        model when the Scheduler is reachable; a Scheduler outage degrades to
+        the session row without the snapshot. The current editable task
+        configuration is read through the task GET endpoint.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Session detail.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduledSessionDetail'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Missing, deleted, ordinary, or another user's session (NOT_FOUND).
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    delete:
+      tags: [scheduled-sessions]
+      summary: Delete one stopped task execution session
+      description: |
+        Archives the scheduled conversation rows and clears the session cache.
+        It never deletes the task, its occurrence facts, or `.cron` resources.
+        A running or uncertain execution returns 409 until a stop proof exists.
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Session deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Missing or another user's session.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '409':
+          description: EXECUTION_STOP_NOT_PROVEN — cancel and obtain a stop proof first.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  /api/v1/scheduled-sessions/{session_id}/messages:
+    parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [scheduled-sessions]
+      summary: Read a task session's message history
+      description: |
+        Same cursor/order/subagent_content contract as the ordinary session
+        history read, scoped to the scheduled table group. There is no
+        send-message endpoint for task sessions.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page_token
+          in: query
+          schema: {type: string}
+        - name: page_size
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 5000, default: 50}
+        - name: order
+          in: query
+          schema: {type: string, enum: [asc, desc], default: asc}
+        - name: subagent_content
+          in: query
+          schema: {type: string, enum: [full, placeholder], default: full}
+      responses:
+        '200':
+          description: One message page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionMessagesResponse'}
+        '400':
+          description: INVALID_SUBAGENT_CONTENT or bad query parameters.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Missing, ordinary, or another user's session.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  /api/v1/scheduled-sessions/{session_id}/runs/{run_id}/cancel:
+    parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema: {type: string}
+      - name: run_id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      tags: [scheduled-sessions]
+      summary: Explicitly cancel a task Run (agent role)
+      description: |
+        Uses the same in-process registry / cross-replica cancel flag as the
+        ordinary turn cancel endpoint. A successful response is NOT a stop
+        proof; the terminal fact follows the normal turn finalization path.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Cancel requested (or the run was already terminal).
+          content:
+            application/json:
+              schema: {type: object, properties: {run_id: {type: string}, status: {type: string}}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Run not found for this session/user.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}

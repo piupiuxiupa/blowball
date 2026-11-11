@@ -24,6 +24,7 @@ func setupArchiveTestStore(t *testing.T) (*Store, func()) {
 
 	store, err := New(dsn)
 	require.NoError(t, err)
+	lockTestSchema(t, store)
 
 	// Start from a clean fixture: CREATE TABLE IF NOT EXISTS would otherwise
 	// keep a stale schema left by an earlier failed run.

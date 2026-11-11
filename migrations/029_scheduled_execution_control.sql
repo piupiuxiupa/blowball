@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS `scheduled_execution_receipts` (
     `reason`                  VARCHAR(64)  NOT NULL DEFAULT '',
     `last_error`              TEXT         NULL,
     `runtime_attempts`        INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Bounded pre-start preparation retries owned by the Runtime',
-    `worker_generation`       VARCHAR(64)  NOT NULL DEFAULT '' COMMENT 'Runtime worker generation holding the lease',
+    `worker_generation`       VARCHAR(96)  NOT NULL DEFAULT '' COMMENT 'Runtime worker generation holding the lease',
     `lease_until`             DATETIME(3)  NULL,
     `accepted_at`             DATETIME(3)  NOT NULL,
     `start_intent_at`         DATETIME(3)  NULL,

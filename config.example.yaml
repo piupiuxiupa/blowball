@@ -201,11 +201,59 @@ messages:
 # migrations/026_scheduled_agent_tasks.sql manually before enabling.
 # Rollback: set enabled: false and restart agent processes in order; retain
 # the tables/history and do not replay consumed slots.
+# LEGACY EMBEDDED SCHEDULER (removed by extract-scheduler-service).
+# `scheduled_tasks.enabled: true` now fails config load with a migration error:
+# the main service never embeds a scheduler. Deploy the standalone Scheduler
+# (services/scheduler) and configure `internal_rpc` below instead. The block
+# remains parseable when disabled for staged migrations; its limits moved to
+# the Scheduler's own config.
 scheduled_tasks:
   enabled: false
-  # poll_interval: 5s       # positive; bounded 100-record scans
-  # max_concurrent: 4       # positive; per Agent process, not a chat resource partition
-  # max_run_duration: 10m   # positive; starts at the startup fence, partial output is preserved
+  # poll_interval: 5s
+  # max_concurrent: 4
+  # max_run_duration: 10m
+
+# Internal mutual-TLS gRPC between this main service and the standalone
+# Scheduler. Disabled by default: task HTTP endpoints then return 503 (no local
+# fallback), the scheduled-task agent tools are not registered, and `.cron`
+# resource writes fail closed. Enabling it requires the Scheduler process and
+# certificates issued for the service identities (CommonName):
+# blowball-main / blowball-api / blowball-agent on this side, blowball-scheduler
+# on the Scheduler side.
+internal_rpc:
+  enabled: false
+  listen: ":9092"                  # main-service internal listener (control and/or runtime)
+  timeout: 5s
+  tls:
+    cert_file: "${MAIN_RPC_TLS_CERT:/etc/blowball/tls/main.crt}"
+    key_file: "${MAIN_RPC_TLS_KEY:/etc/blowball/tls/main.key}"
+    ca_file: "${MAIN_RPC_TLS_CA:/etc/blowball/tls/ca.crt}"
+  scheduler_endpoint: "${SCHEDULER_RPC_ENDPOINT:127.0.0.1:9091}"
+  scheduler_tls:
+    cert_file: "${MAIN_CLIENT_TLS_CERT:/etc/blowball/tls/main-client.crt}"
+    key_file: "${MAIN_CLIENT_TLS_KEY:/etc/blowball/tls/main-client.key}"
+    ca_file: "${MAIN_CLIENT_TLS_CA:/etc/blowball/tls/ca.crt}"
+    server_name: "${SCHEDULER_RPC_SERVER_NAME:blowball-scheduler}"
+
+# Scheduled-execution admission on this main-service instance (agent/all).
+# A concurrency guard, not a CPU/memory partition; ordinary chat admission and
+# queue policy are unchanged.
+scheduled_runtime:
+  poll_interval: 5s
+  lease_duration: 30s
+  max_concurrent: 4
+  max_prepare_attempts: 3
+  scan_batch: 50
+
+# `.cron/<task_id>` resource publication and the pinned execution context.
+# Publication limits are enforced server-side; the context caps bound the
+# runtime-only prompt prefix (file contents are never inlined).
+scheduled_resources:
+  max_files: 1000
+  max_total_bytes: 104857600   # 100 MiB
+  max_file_bytes: 104857600    # 100 MiB
+  max_context_files: 100
+  max_context_bytes: 4000
 
 # Cross-session long-term memory backed by an external OpenViking server
 # (cross-session-memory capability; auto-only v1: recall at turn start,

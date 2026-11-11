@@ -177,6 +177,7 @@ func (r *Runtime) cycle(ctx context.Context) {
 		logWarn(ctx, "scheduled receipt scan failed", err)
 		return
 	}
+	logger.FromContext(ctx).Debug("scheduled runtime cycle", zap.Int("claimable", len(receipts)), zap.Int("sem", len(r.sem)))
 	for _, rec := range receipts {
 		if ctx.Err() != nil {
 			return

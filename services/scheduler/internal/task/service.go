@@ -63,6 +63,7 @@ type Store interface {
 	DeleteTask(ctx context.Context, userID, taskID string, now time.Time) (bool, error)
 	ListOccurrences(ctx context.Context, userID, taskID string, limit, offset int) ([]model.ScheduledTaskRun, error)
 	GetOccurrence(ctx context.Context, occurrenceID string) (*model.ScheduledTaskRun, error)
+	ResourceReferences(ctx context.Context, taskID string, revision uint64) (bool, error)
 }
 
 // CreateInput is the owner-facing create request.
@@ -311,6 +312,12 @@ func (s *Service) GetOccurrence(ctx context.Context, occurrenceID string) (*mode
 		return nil, ErrNotFound
 	}
 	return run, nil
+}
+
+// ResourceReferenced reports whether a published revision is still pinned by
+// the live task or any retained occurrence.
+func (s *Service) ResourceReferenced(ctx context.Context, taskID string, revision uint64) (bool, error) {
+	return s.store.ResourceReferences(ctx, taskID, revision)
 }
 
 func (s *Service) validateWithControl(ctx context.Context, actor, taskID string, cfg ValidateConfig) (string, string, error) {

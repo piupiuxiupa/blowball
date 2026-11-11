@@ -22,10 +22,11 @@ const (
 	MethodUpdateTask = "/blowball.scheduler.v1.SchedulerService/UpdateTask"
 	MethodDeleteTask = "/blowball.scheduler.v1.SchedulerService/DeleteTask"
 
-	MethodListOccurrences = "/blowball.scheduler.v1.SchedulerService/ListOccurrences"
-	MethodGetOccurrence   = "/blowball.scheduler.v1.SchedulerService/GetOccurrence"
-	MethodAuthorizeStart  = "/blowball.scheduler.v1.SchedulerService/AuthorizeStart"
-	MethodGetStartGrant   = "/blowball.scheduler.v1.SchedulerService/GetStartGrant"
+	MethodListOccurrences       = "/blowball.scheduler.v1.SchedulerService/ListOccurrences"
+	MethodGetOccurrence         = "/blowball.scheduler.v1.SchedulerService/GetOccurrence"
+	MethodAuthorizeStart        = "/blowball.scheduler.v1.SchedulerService/AuthorizeStart"
+	MethodGetStartGrant         = "/blowball.scheduler.v1.SchedulerService/GetStartGrant"
+	MethodGetResourceReferences = "/blowball.scheduler.v1.SchedulerService/GetResourceReferences"
 
 	MethodValidateTaskActorAndConfig = "/blowball.scheduler.v1.SchedulerControlService/ValidateTaskActorAndConfig"
 	MethodValidateResourceBinding    = "/blowball.scheduler.v1.SchedulerControlService/ValidateResourceBinding"
@@ -62,9 +63,12 @@ func DefaultAuthorizer() MethodAuthorizer {
 		MethodDeleteTask: main,
 
 		MethodListOccurrences: main,
-		MethodGetOccurrence:   []string{IdentityScheduler, IdentityMain},
-		MethodAuthorizeStart:  []string{IdentityScheduler, IdentityMain},
-		MethodGetStartGrant:   []string{IdentityScheduler, IdentityMain},
+		// The occurrence read and the start fence are called by the Runtime
+		// (agent/all) and by the API role's scheduled-session detail lookup.
+		MethodGetOccurrence:         []string{IdentityScheduler, IdentityAPI, IdentityAgent, IdentityMain},
+		MethodAuthorizeStart:        []string{IdentityScheduler, IdentityAgent, IdentityMain},
+		MethodGetStartGrant:         []string{IdentityScheduler, IdentityAgent, IdentityMain},
+		MethodGetResourceReferences: schedulerAndMain,
 
 		MethodValidateTaskActorAndConfig: schedulerAndMain,
 		MethodValidateResourceBinding:    schedulerAndMain,

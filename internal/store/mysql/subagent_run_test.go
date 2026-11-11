@@ -18,6 +18,7 @@ func setupSubAgentRunStore(t *testing.T) (*Store, func()) {
 	}
 	store, err := New(testDSN())
 	require.NoError(t, err)
+	lockTestSchema(t, store)
 	cleanup := func() {
 		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS subagent_runs")
 		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS subagent_instances")

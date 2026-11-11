@@ -59,7 +59,7 @@ ALTER TABLE `scheduled_task_runs`
     ADD COLUMN `grant_deadline` DATETIME(3) NULL
         COMMENT 'Fixed execution deadline computed at grant time'
         AFTER `grant_started_at`,
-    ADD COLUMN `runtime_worker_generation` VARCHAR(64) NOT NULL DEFAULT ''
+    ADD COLUMN `runtime_worker_generation` VARCHAR(96) NOT NULL DEFAULT ''
         COMMENT 'Runtime worker generation bound to the grant for fencing'
         AFTER `grant_deadline`,
     ADD COLUMN `receipt_generation` BIGINT UNSIGNED NOT NULL DEFAULT 0
