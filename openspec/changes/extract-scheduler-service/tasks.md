@@ -15,13 +15,13 @@
 
 ## 3. 主服务任务执行入口
 
-- [ ] 3.1 先写稳定身份重复接收、fingerprint 冲突、并发 RPC 和接收响应丢失测试，再实现 receipt+scheduled session 的事务幂等接收。
-- [ ] 3.2 实现 Runtime 对权威 occurrence、owner active、模型和资源引用的校验；仅在本地身份链路解析/签发执行凭证，测试秘密不进入 RPC、数据库、日志或工具。
-- [ ] 3.3 复用现有 turn 入口并注入已校验的 scheduled 存储上下文；测试状态/预算 cache-only、压缩及子 Agent 持久化不串表。
-- [ ] 3.4 实现 receipt worker CAS/lease、start_intent、后台 fail-closed admission 和 Scheduler start grant 调用；测试 stale generation、授权响应丢失、暂停竞争与第一项副作用前的拒绝。
-- [ ] 3.5 实现从 grant 计时的 Runtime watchdog、显式取消和终态事务；测试 Scheduler 离线时超时仍保存部分内容及 TASK_TIMEOUT。
-- [ ] 3.6 实现权威 GetScheduledExecution、停止证明和保守 receipt 恢复；测试 accepted/preparing 的安全恢复、start_intent 后不重放、uncertain 不伪装已停止、迟到 worker/终态不能覆盖新状态。
-- [ ] 3.7 适配记忆所需的任务身份/历史读取并保持现有开关、授权和策略；测试 cache-only 状态/资源元数据不被当作用户原文，以及普通会话记忆回归。
+- [x] 3.1 先写稳定身份重复接收、fingerprint 冲突、并发 RPC 和接收响应丢失测试，再实现 receipt+scheduled session 的事务幂等接收。
+- [x] 3.2 实现 Runtime 对权威 occurrence、owner active、模型和资源引用的校验；仅在本地身份链路解析/签发执行凭证，测试秘密不进入 RPC、数据库、日志或工具。
+- [x] 3.3 复用现有 turn 入口并注入已校验的 scheduled 存储上下文；测试状态/预算 cache-only、压缩及子 Agent 持久化不串表。
+- [x] 3.4 实现 receipt worker CAS/lease、start_intent、后台 fail-closed admission 和 Scheduler start grant 调用；测试 stale generation、授权响应丢失、暂停竞争与第一项副作用前的拒绝。
+- [x] 3.5 实现从 grant 计时的 Runtime watchdog、显式取消和终态事务；测试 Scheduler 离线时超时仍保存部分内容及 TASK_TIMEOUT。
+- [x] 3.6 实现权威 GetScheduledExecution、停止证明和保守 receipt 恢复；测试 accepted/preparing 的安全恢复、start_intent 后不重放、uncertain 不伪装已停止、迟到 worker/终态不能覆盖新状态。
+- [x] 3.7 适配记忆所需的任务身份/历史读取并保持现有开关、授权和策略；测试 cache-only 状态/资源元数据不被当作用户原文，以及普通会话记忆回归。
 
 ## 4. 独立 Scheduler 服务
 

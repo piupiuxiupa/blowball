@@ -23,9 +23,9 @@ type Tables struct {
 	Attachments        string
 
 	// Archive mirrors used by DeleteSession.
-	SessionsDeleted  string
-	MessagesDeleted  string
-	TitlesDeleted    string
+	SessionsDeleted    string
+	MessagesDeleted    string
+	TitlesDeleted      string
 	AttachmentsDeleted string
 
 	// Scheduled marks the physically separate task-session group. It changes

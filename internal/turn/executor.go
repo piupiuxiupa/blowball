@@ -159,9 +159,13 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	// renders this row as text placeholders instead. A missing file degrades
 	// to the placeholder (ERROR log) — the turn must not die because a file
 	// vanished underneath the registry.
-	current := agent.Message{Role: "user", Content: content}
+	llmContent := content
+	if req.LLMContextPrefix != "" {
+		llmContent = req.LLMContextPrefix + "\n\n" + content
+	}
+	current := agent.Message{Role: "user", Content: llmContent}
 	if len(req.Attachments) > 0 {
-		current.Images, current.Content = e.loadCurrentTurnImages(ctx, userID, sessionID, content, req.Attachments)
+		current.Images, current.Content = e.loadCurrentTurnImages(ctx, userID, sessionID, llmContent, req.Attachments)
 	}
 	messages := append(agentMsgs, current)
 
@@ -484,9 +488,11 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	// post-flush suffix is persisted — the deterministic client_msg_ids would
 	// collapse the rows in MySQL, but the Redis msgs:{sid} read cache has no
 	// such dedup, so the suffix split keeps the cache list exact.
-	persistTurnEvents := func(events []stream.StreamEvent, usage map[string]any, interrupted bool) {
+	persistTurnEvents := func(events []stream.StreamEvent, usage map[string]any, interrupted bool) (durable bool) {
+		durable = true
 		defer func() {
 			if r := recover(); r != nil {
+				durable = false
 				logger.FromContext(saveCtx).Error("panic saving event stream",
 					zap.String("op", "handler.send_message"),
 					zap.Any("recover", r))
@@ -562,6 +568,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 				break
 			}
 			if lastErr != nil {
+				durable = false
 				logger.FromContext(saveCtx).Error("turn-end message persist budget exhausted; batch not durable",
 					zap.String("op", "handler.send_message"),
 					zap.String("session_id", sessionID),
@@ -581,6 +588,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 					zap.Error(err))
 			}
 		}
+		return durable
 	}
 
 	go func() {
@@ -637,7 +645,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 		// is durable, making generating:false a reliable "history complete"
 		// signal for clients — and, for the queue, the guarantee the pumped
 		// next turn's history recovery relies on.
-		persistTurnEvents(events, usage, err != nil)
+		durable := persistTurnEvents(events, usage, err != nil)
 
 		// (Drain-before-release D5 is retired with the ingest queue: the
 		// terminal batch above is a synchronous transactional MySQL write —
@@ -662,7 +670,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 		if req.OnTerminal != nil {
 			req.OnTerminal(saveCtx, TerminalResult{
 				RunID: tid, SessionID: sessionID, UserID: userID, Status: turnStatus,
-				Events: events, Usage: usage, Err: err,
+				MessagesDurable: durable, Events: events, Usage: usage, Err: err,
 			})
 		}
 		stopHeartbeat()

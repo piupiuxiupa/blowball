@@ -35,6 +35,12 @@ const (
 	ScheduledReasonAdmission          = "ADMISSION_UNAVAILABLE"
 	ScheduledReasonStartRejected      = "START_REJECTED"
 	ScheduledReasonResultUnknown      = "RESULT_UNKNOWN"
+	ScheduledReasonPersistFailed      = "RESULT_PERSIST_FAILED"
+	ScheduledReasonCancelledByUser    = "CANCELLED_BY_USER"
+	ScheduledReasonExecutionStopped   = "EXECUTION_STOPPED"
+	// ScheduledSessionPolicyMigrationReason pauses a legacy session.mode=existing
+	// task until its owner explicitly moves it to per-occurrence sessions.
+	ScheduledSessionPolicyMigrationReason = "SESSION_POLICY_MIGRATION_REQUIRED"
 )
 
 // ScheduledRunTerminal reports whether no further execution or recovery is

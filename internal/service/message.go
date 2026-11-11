@@ -33,7 +33,8 @@ func NewMessageService(deps SessionDeps, save func(ctx context.Context, userID s
 // AppendMessage is a thin wrapper over SessionService.SaveMessage so callers
 // that work purely with the MessageService still have a typed append entry
 // point. The orchestration logic lives in SessionService.SaveMessage.
-func (s *MessageService) AppendMessage(ctx context.Context, userID string, msg model.Message) error {	if s.saveMessage == nil {
+func (s *MessageService) AppendMessage(ctx context.Context, userID string, msg model.Message) error {
+	if s.saveMessage == nil {
 		return fmt.Errorf("message.append: save hook not configured")
 	}
 	return s.saveMessage(ctx, userID, msg)

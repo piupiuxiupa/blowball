@@ -57,6 +57,12 @@ type Request struct {
 	// Scheduled turns require the scheduled services in Dependencies; there is
 	// no fallback to the ordinary tables when they are missing.
 	Source model.SessionSource
+	// LLMContextPrefix is optional runtime-only context prepended to the
+	// CURRENT turn's user message for the model. It is never persisted, never
+	// included in titles or memory capture, and never part of the stored
+	// Task.prompt. Scheduled execution uses it for the pinned resource
+	// manifest pointer.
+	LLMContextPrefix string
 
 	// BeforeStart is the background startup fence. It runs after read-only
 	// preamble work and before title generation or the first execution write.
@@ -79,9 +85,14 @@ type TerminalResult struct {
 	SessionID string
 	UserID    string
 	Status    string
-	Events    []stream.StreamEvent
-	Usage     map[string]any
-	Err       error
+	// MessagesDurable reports whether the terminal message/tool batch (and the
+	// user row it may carry) was written successfully within the bounded retry
+	// budget. Scheduled execution owners use it to refuse a terminal receipt
+	// that would claim completion without durable content.
+	MessagesDurable bool
+	Events          []stream.StreamEvent
+	Usage           map[string]any
+	Err             error
 }
 
 // Started is a running turn's completion surface; no SSE subscriber is needed.

@@ -45,11 +45,13 @@ func TestForSource_ScheduledSwapsEveryPersistenceService(t *testing.T) {
 	schedMessages := service.NewMessageService(deps, nil)
 	schedCompaction := service.NewCompactionService(deps, nil, "", 0)
 	interactiveSessions := service.NewSessionService(deps)
+	snapshots := &fakeSnapshotStore{}
 
 	e := &Executor{
 		sessSvc: interactiveSessions,
 		scheduled: &ScheduledServices{
 			Sessions: schedSessions, Messages: schedMessages, Compaction: schedCompaction,
+			Snapshots: snapshots,
 		},
 	}
 
@@ -59,7 +61,14 @@ func TestForSource_ScheduledSwapsEveryPersistenceService(t *testing.T) {
 	assert.Same(t, schedSessions, clone.sessSvc)
 	assert.Same(t, schedMessages, clone.msgSvc)
 	assert.Same(t, schedCompaction, clone.compSvc)
+	assert.Same(t, snapshots, clone.snapshots)
 	assert.Same(t, interactiveSessions, e.sessSvc, "the original executor is unchanged")
+}
+
+type fakeSnapshotStore struct{}
+
+func (f *fakeSnapshotStore) AppendSubAgentRun(context.Context, model.SubAgentInstance, model.SubAgentRun) error {
+	return nil
 }
 
 func TestForSource_UnknownSourceRejected(t *testing.T) {

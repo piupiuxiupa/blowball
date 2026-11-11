@@ -14,9 +14,9 @@
 --                           side effects; an unknown outcome is never replayed.
 --   * running             — the unique start grant was received and the turn
 --                           has begun; started_at is the grant's logical start.
---   * terminal            — the final message/tool batch is durable and the
---                           receipt records the terminal status in the SAME
---                           local decision path (never before the content).
+--   * terminal            — one of succeeded/error/cancelled/interrupted/
+--                           skipped; the final message/tool batch is durable
+--                           before this fact is written.
 --   * uncertain           — the execution may still be running (lost worker,
 --                           crashed process, unreachable evidence). It remains
 --                           capacity-accounted and blocks the task until a
@@ -49,9 +49,10 @@ CREATE TABLE IF NOT EXISTS `scheduled_execution_receipts` (
     `attempt_count`           INT UNSIGNED NOT NULL COMMENT 'Scheduler attempt counter at acceptance',
     `config_fingerprint`      CHAR(64)     NOT NULL COMMENT 'Non-secret configuration fingerprint; identity, not credentials',
     `receipt_generation`      BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Execution identity generation; a new grant requires a new generation',
-    `status`                  VARCHAR(16)  NOT NULL COMMENT 'accepted|preparing|start_intent|running|terminal|uncertain',
+    `status`                  VARCHAR(16)  NOT NULL COMMENT 'accepted|preparing|start_intent|running|succeeded|error|cancelled|interrupted|skipped|uncertain',
     `reason`                  VARCHAR(64)  NOT NULL DEFAULT '',
     `last_error`              TEXT         NULL,
+    `runtime_attempts`        INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Bounded pre-start preparation retries owned by the Runtime',
     `worker_generation`       VARCHAR(64)  NOT NULL DEFAULT '' COMMENT 'Runtime worker generation holding the lease',
     `lease_until`             DATETIME(3)  NULL,
     `accepted_at`             DATETIME(3)  NOT NULL,
