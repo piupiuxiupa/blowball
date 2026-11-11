@@ -62,6 +62,9 @@ ALTER TABLE `scheduled_task_runs`
     ADD COLUMN `runtime_worker_generation` VARCHAR(64) NOT NULL DEFAULT ''
         COMMENT 'Runtime worker generation bound to the grant for fencing'
         AFTER `grant_deadline`,
+    ADD COLUMN `receipt_generation` BIGINT UNSIGNED NOT NULL DEFAULT 0
+        COMMENT 'Runtime execution receipt generation accepted for this occurrence; 0 = not accepted'
+        AFTER `runtime_worker_generation`,
     ADD COLUMN `terminal_receipt_generation` BIGINT UNSIGNED NOT NULL DEFAULT 0
         COMMENT 'Receipt generation whose verified terminal fact projected this occurrence'
         AFTER `finished_at`,

@@ -25,12 +25,12 @@
 
 ## 4. 独立 Scheduler 服务
 
-- [ ] 4.1 创建 services/scheduler 的独立入口/配置/任务业务/专属 Store 和 gRPC server；保持根 module，测试依赖图不含 Agent、全量主服务 Store、LLM、MCP 或 workspace/executor。
-- [ ] 4.2 将任务 CRUD、纯时间规则及 immutable snapshot 管理移入 Scheduler；测试原输入/模型/at/cron/timezone、权限、状态码和可选 expected_revision。
-- [ ] 4.3 迁移物化、lease/claim、三次有界重试和任务不重叠逻辑；测试多副本唯一槽位、漏 cron 合并、已消费 at 不重放及事务回滚。
-- [ ] 4.4 实现 AuthorizeStart/GetStartGrant：有效 claim/attempt、任务启停、唯一 receipt generation、started_at/deadline 和同身份幂等授权；测试 pause/delete 与启动事务排序。
-- [ ] 4.5 使用 Runtime RPC 提交及对账，不传进程内 BeforeStart/OnTerminal；测试接收/授权/终态响应丢失、权威状态不可达时无盲目重跑。
-- [ ] 4.6 实现重启对账、持久化 task-level execution hold、停止证明匹配/CAS 清除、容量和停机释放；测试 uncertain/hold 计入容量、后续槽位不重叠、用户恢复不能绕过 hold、Scheduler 停机不取消已 accepted 工作。
+- [x] 4.1 创建 services/scheduler 的独立入口/配置/任务业务/专属 Store 和 gRPC server；保持根 module，测试依赖图不含 Agent、全量主服务 Store、LLM、MCP 或 workspace/executor。
+- [x] 4.2 将任务 CRUD、纯时间规则及 immutable snapshot 管理移入 Scheduler；测试原输入/模型/at/cron/timezone、权限、状态码和可选 expected_revision。
+- [x] 4.3 迁移物化、lease/claim、三次有界重试和任务不重叠逻辑；测试多副本唯一槽位、漏 cron 合并、已消费 at 不重放及事务回滚。
+- [x] 4.4 实现 AuthorizeStart/GetStartGrant：有效 claim/attempt、任务启停、唯一 receipt generation、started_at/deadline 和同身份幂等授权；测试 pause/delete 与启动事务排序。
+- [x] 4.5 使用 Runtime RPC 提交及对账，不传进程内 BeforeStart/OnTerminal；测试接收/授权/终态响应丢失、权威状态不可达时无盲目重跑。
+- [x] 4.6 实现重启对账、持久化 task-level execution hold、停止证明匹配/CAS 清除、容量和停机释放；测试 uncertain/hold 计入容量、后续槽位不重叠、用户恢复不能绕过 hold、Scheduler 停机不取消已 accepted 工作。
 
 ## 5. `.cron` 资源与写保护
 

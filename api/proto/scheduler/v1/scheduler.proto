@@ -170,7 +170,7 @@ message GetTaskResponse {
 message ListTasksRequest {
   Actor actor = 1;
   int32 limit = 2;
-  string cursor = 3;
+  int32 offset = 3;
 }
 
 message ListTasksResponse {
@@ -207,7 +207,7 @@ message ListOccurrencesRequest {
   Actor actor = 1;
   string task_id = 2;
   int32 limit = 3;
-  string cursor = 4;
+  int32 offset = 4;
 }
 
 message ListOccurrencesResponse {

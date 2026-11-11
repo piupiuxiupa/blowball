@@ -1,0 +1,59 @@
+# Standalone blowball Scheduler configuration (extract-scheduler-service).
+#
+# The Scheduler owns `scheduled_tasks` / `scheduled_task_runs` only. It talks to
+# the main service over mutual-TLS gRPC: the API control endpoint validates
+# owner/model/resource bindings, the Agent runtime endpoint accepts and reports
+# executions. Values expand ${VAR} / ${VAR:default} from the environment.
+
+logging:
+  level: info
+  format: console
+  output: [console, file]
+  file:
+    max_size_mb: 64
+    max_backups: 5
+    max_age_days: 14
+
+# The Scheduler requires its own DSN with write access limited to the two
+# scheduler-owned tables (see docs/scheduled-tasks.md). Keep the password in
+# the environment; never commit a literal secret.
+mysql:
+  dsn: "${SCHEDULER_MYSQL_DSN:blowball:change-me@tcp(127.0.0.1:3306)/blowball?parseTime=true&loc=UTC}"
+
+# The Scheduler's own mTLS listener. Only the main-service client identities
+# (blowball-api / blowball-agent / blowball-main) may call its methods.
+rpc:
+  listen: ":9091"
+  timeout: 5s
+  tls:
+    cert_file: "${SCHEDULER_TLS_CERT:/etc/blowball/tls/scheduler.crt}"
+    key_file: "${SCHEDULER_TLS_KEY:/etc/blowball/tls/scheduler.key}"
+    ca_file: "${SCHEDULER_TLS_CA:/etc/blowball/tls/ca.crt}"
+
+# Main-service endpoints. Point both at the same address when the main service
+# runs the combined `all` role. The client certificate must carry the
+# `blowball-scheduler` identity (CommonName) and the CA must trust the main
+# service's server certificate.
+main_service:
+  api_endpoint: "${MAIN_API_RPC_ENDPOINT:127.0.0.1:9092}"
+  agent_endpoint: "${MAIN_AGENT_RPC_ENDPOINT:127.0.0.1:9092}"
+  timeout: 5s
+  tls:
+    cert_file: "${SCHEDULER_CLIENT_TLS_CERT:/etc/blowball/tls/scheduler-client.crt}"
+    key_file: "${SCHEDULER_CLIENT_TLS_KEY:/etc/blowball/tls/scheduler-client.key}"
+    ca_file: "${SCHEDULER_CLIENT_TLS_CA:/etc/blowball/tls/ca.crt}"
+    server_name: "${MAIN_RPC_SERVER_NAME:blowball-main}"
+
+# Execution is OFF by default. Task management/history remain available while
+# disabled. Every bound must be positive; an explicitly non-positive value
+# fails startup instead of silently disabling safety limits.
+scheduler:
+  execution_enabled: false
+  poll_interval: 5s
+  max_concurrent: 4
+  max_run_duration: 10m
+  lease_duration: 30s
+  max_attempts: 3
+  retry_backoff: 1s
+  scan_batch: 100
+  max_input_tokens: 5000

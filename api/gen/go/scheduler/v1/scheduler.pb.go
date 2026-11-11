@@ -1111,7 +1111,7 @@ type ListTasksRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Actor         *Actor                 `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
 	Limit         int32                  `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
-	Cursor        string                 `protobuf:"bytes,3,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	Offset        int32                  `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1160,11 +1160,11 @@ func (x *ListTasksRequest) GetLimit() int32 {
 	return 0
 }
 
-func (x *ListTasksRequest) GetCursor() string {
+func (x *ListTasksRequest) GetOffset() int32 {
 	if x != nil {
-		return x.Cursor
+		return x.Offset
 	}
-	return ""
+	return 0
 }
 
 type ListTasksResponse struct {
@@ -1444,7 +1444,7 @@ type ListOccurrencesRequest struct {
 	Actor         *Actor                 `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
 	TaskId        string                 `protobuf:"bytes,2,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Limit         int32                  `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
-	Cursor        string                 `protobuf:"bytes,4,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	Offset        int32                  `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1500,11 +1500,11 @@ func (x *ListOccurrencesRequest) GetLimit() int32 {
 	return 0
 }
 
-func (x *ListOccurrencesRequest) GetCursor() string {
+func (x *ListOccurrencesRequest) GetOffset() int32 {
 	if x != nil {
-		return x.Cursor
+		return x.Offset
 	}
-	return ""
+	return 0
 }
 
 type ListOccurrencesResponse struct {
@@ -2566,7 +2566,7 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x10ListTasksRequest\x122\n" +
 	"\x05actor\x18\x01 \x01(\v2\x1c.blowball.scheduler.v1.ActorR\x05actor\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
-	"\x06cursor\x18\x03 \x01(\tR\x06cursor\"g\n" +
+	"\x06offset\x18\x03 \x01(\x05R\x06offset\"g\n" +
 	"\x11ListTasksResponse\x121\n" +
 	"\x05tasks\x18\x01 \x03(\v2\x1b.blowball.scheduler.v1.TaskR\x05tasks\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
@@ -2588,7 +2588,7 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x05actor\x18\x01 \x01(\v2\x1c.blowball.scheduler.v1.ActorR\x05actor\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\x05R\x05limit\x12\x16\n" +
-	"\x06cursor\x18\x04 \x01(\tR\x06cursor\"\x7f\n" +
+	"\x06offset\x18\x04 \x01(\x05R\x06offset\"\x7f\n" +
 	"\x17ListOccurrencesResponse\x12C\n" +
 	"\voccurrences\x18\x01 \x03(\v2!.blowball.scheduler.v1.OccurrenceR\voccurrences\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
