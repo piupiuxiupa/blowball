@@ -11,31 +11,31 @@ import (
 	"github.com/lush/blowball/internal/model"
 )
 
-const insertSubAgentInstanceSQL = `
-INSERT INTO subagent_instances
+func insertSubAgentInstanceSQL(t Tables) string {
+	return `INSERT INTO ` + t.SubAgentInstances + `
     (session_id, agent_instance_id, parent_instance_id, depth, name, system_prompt, tools_json, latest_run_id)
 VALUES
-    (:session_id, :agent_instance_id, :parent_instance_id, :depth, :name, :system_prompt, :tools_json, :latest_run_id)
-`
+    (:session_id, :agent_instance_id, :parent_instance_id, :depth, :name, :system_prompt, :tools_json, :latest_run_id)`
+}
 
-const updateSubAgentInstanceSQL = `
-UPDATE subagent_instances
+func updateSubAgentInstanceSQL(t Tables) string {
+	return `UPDATE ` + t.SubAgentInstances + `
 SET parent_instance_id = :parent_instance_id,
     depth = :depth,
     name = :name,
     system_prompt = :system_prompt,
     tools_json = :tools_json
-WHERE session_id = :session_id AND agent_instance_id = :agent_instance_id
-`
+WHERE session_id = :session_id AND agent_instance_id = :agent_instance_id`
+}
 
-const advanceSubAgentLatestSQL = `
-UPDATE subagent_instances
+func advanceSubAgentLatestSQL(t Tables) string {
+	return `UPDATE ` + t.SubAgentInstances + `
 SET latest_run_id = ?
-WHERE session_id = ? AND agent_instance_id = ?
-`
+WHERE session_id = ? AND agent_instance_id = ?`
+}
 
-const upsertSubAgentRunSQL = `
-INSERT INTO subagent_runs
+func upsertSubAgentRunSQL(t Tables) string {
+	return `INSERT INTO ` + t.SubAgentRuns + `
     (session_id, agent_instance_id, run_id, previous_run_id, run_no,
      parent_instance_id, depth, name, tools_json, status, snapshot_kind,
      resume_eligible, base_message_count, message_count, context_message_count,
@@ -62,76 +62,76 @@ ON DUPLICATE KEY UPDATE
     context_bytes = VALUES(context_bytes),
     messages_json = VALUES(messages_json),
     started_at = VALUES(started_at),
-    finished_at = VALUES(finished_at)
-`
+    finished_at = VALUES(finished_at)`
+}
 
-const getSubAgentInstanceSQL = `
-SELECT id, session_id, agent_instance_id,
+func getSubAgentInstanceSQL(t Tables) string {
+	return `SELECT id, session_id, agent_instance_id,
        COALESCE(parent_instance_id, '') AS parent_instance_id,
        depth, name, system_prompt,
        COALESCE(tools_json, JSON_ARRAY()) AS tools_json,
        COALESCE(latest_run_id, '') AS latest_run_id,
        create_time, update_time
-FROM subagent_instances
+FROM ` + t.SubAgentInstances + `
 WHERE session_id = ? AND agent_instance_id = ?
-FOR UPDATE
-`
+FOR UPDATE`
+}
 
-const listSubAgentRunsSQL = `
-SELECT id, session_id, agent_instance_id, run_id,
+func listSubAgentRunsSQL(t Tables) string {
+	return `SELECT id, session_id, agent_instance_id, run_id,
        COALESCE(previous_run_id, '') AS previous_run_id,
        run_no, COALESCE(parent_instance_id, '') AS parent_instance_id,
        depth, name, COALESCE(tools_json, JSON_ARRAY()) AS tools_json,
        status, snapshot_kind, resume_eligible, base_message_count,
        message_count, context_message_count, context_bytes, messages_json,
        started_at, finished_at, create_time, update_time
-FROM subagent_runs
+FROM ` + t.SubAgentRuns + `
 WHERE session_id = ? AND agent_instance_id = ?
-ORDER BY run_no ASC, id ASC
-`
+ORDER BY run_no ASC, id ASC`
+}
 
-const listSubAgentChildRunsSQL = `
-SELECT id, session_id, agent_instance_id, run_id,
+func listSubAgentChildRunsSQL(t Tables) string {
+	return `SELECT id, session_id, agent_instance_id, run_id,
        COALESCE(previous_run_id, '') AS previous_run_id,
        run_no, COALESCE(parent_instance_id, '') AS parent_instance_id,
        depth, name, status, started_at, finished_at, create_time, update_time
-FROM subagent_runs
+FROM ` + t.SubAgentRuns + `
 WHERE session_id = ? AND parent_instance_id = ?
-ORDER BY run_no ASC, id ASC
-`
+ORDER BY run_no ASC, id ASC`
+}
 
-const getSubAgentRunSQL = `
-SELECT id, session_id, agent_instance_id, run_id,
+func getSubAgentRunSQL(t Tables) string {
+	return `SELECT id, session_id, agent_instance_id, run_id,
        COALESCE(previous_run_id, '') AS previous_run_id,
        run_no, COALESCE(parent_instance_id, '') AS parent_instance_id,
        depth, name, COALESCE(tools_json, JSON_ARRAY()) AS tools_json,
        status, snapshot_kind, resume_eligible, base_message_count,
        message_count, context_message_count, context_bytes, messages_json,
        started_at, finished_at, create_time, update_time
-FROM subagent_runs
-WHERE session_id = ? AND agent_instance_id = ? AND run_id = ?
-`
+FROM ` + t.SubAgentRuns + `
+WHERE session_id = ? AND agent_instance_id = ? AND run_id = ?`
+}
 
-const getSubAgentRunIdentitySQL = `
-SELECT agent_instance_id, run_no FROM subagent_runs
+func getSubAgentRunIdentitySQL(t Tables) string {
+	return `SELECT agent_instance_id, run_no FROM ` + t.SubAgentRuns + `
 WHERE session_id = ? AND run_id = ?
-FOR UPDATE
-`
+FOR UPDATE`
+}
 
 // GetSubAgentInstance returns stable metadata for the exact session-scoped
 // instance. ok=false covers both missing and cross-session targets.
-func (s *Store) GetSubAgentInstance(ctx context.Context, sessionID, instanceID string) (model.SubAgentInstance, bool, error) {
-	logQuery(ctx, "subagent_instance.get", getSubAgentInstanceSQL, sessionID, instanceID)
-	return scanSubAgentInstance(s.db, ctx, sessionID, instanceID)
+func (s *SessionStore) GetSubAgentInstance(ctx context.Context, sessionID, instanceID string) (model.SubAgentInstance, bool, error) {
+	logQuery(ctx, "subagent_instance.get", getSubAgentInstanceSQL(s.tables), sessionID, instanceID)
+	return scanSubAgentInstance(s.db, ctx, s.tables, sessionID, instanceID)
 }
 
 // ListSubAgentRuns returns all terminal run rows for one instance in execution
-// order. An empty non-nil slice means the instance exists but has no rows (or
-// is missing; callers that need to distinguish should load the instance).
-func (s *Store) ListSubAgentRuns(ctx context.Context, sessionID, instanceID string) ([]model.SubAgentRun, error) {
-	logQuery(ctx, "subagent_run.list", listSubAgentRunsSQL, sessionID, instanceID)
+// order.
+func (s *SessionStore) ListSubAgentRuns(ctx context.Context, sessionID, instanceID string) ([]model.SubAgentRun, error) {
+	query := listSubAgentRunsSQL(s.tables)
+	logQuery(ctx, "subagent_run.list", query, sessionID, instanceID)
 	var runs []model.SubAgentRun
-	if err := s.db.SelectContext(ctx, &runs, listSubAgentRunsSQL, sessionID, instanceID); err != nil {
+	if err := s.db.SelectContext(ctx, &runs, query, sessionID, instanceID); err != nil {
 		return nil, fmt.Errorf("list sub-agent runs: %w", err)
 	}
 	if runs == nil {
@@ -141,14 +141,12 @@ func (s *Store) ListSubAgentRuns(ctx context.Context, sessionID, instanceID stri
 }
 
 // ListSubAgentChildRuns returns the terminal child runs spawned by one
-// instance, ordered by run number. It is an identity projection: message
-// payloads (messages_json) and tool snapshots stay unloaded because callers
-// only resolve child instance links. The query is always scoped by session AND
-// parent instance so a run id can never match across sessions.
-func (s *Store) ListSubAgentChildRuns(ctx context.Context, sessionID, parentInstanceID string) ([]model.SubAgentRun, error) {
-	logQuery(ctx, "subagent_run.list_children", listSubAgentChildRunsSQL, sessionID, parentInstanceID)
+// instance, ordered by run number.
+func (s *SessionStore) ListSubAgentChildRuns(ctx context.Context, sessionID, parentInstanceID string) ([]model.SubAgentRun, error) {
+	query := listSubAgentChildRunsSQL(s.tables)
+	logQuery(ctx, "subagent_run.list_children", query, sessionID, parentInstanceID)
 	var runs []model.SubAgentRun
-	if err := s.db.SelectContext(ctx, &runs, listSubAgentChildRunsSQL, sessionID, parentInstanceID); err != nil {
+	if err := s.db.SelectContext(ctx, &runs, query, sessionID, parentInstanceID); err != nil {
 		return nil, fmt.Errorf("list sub-agent child runs: %w", err)
 	}
 	if runs == nil {
@@ -159,10 +157,11 @@ func (s *Store) ListSubAgentChildRuns(ctx context.Context, sessionID, parentInst
 
 // GetSubAgentRun returns one terminal delta scoped by session, instance and
 // run identity.
-func (s *Store) GetSubAgentRun(ctx context.Context, sessionID, instanceID, runID string) (model.SubAgentRun, bool, error) {
-	logQuery(ctx, "subagent_run.get", getSubAgentRunSQL, sessionID, instanceID, runID)
+func (s *SessionStore) GetSubAgentRun(ctx context.Context, sessionID, instanceID, runID string) (model.SubAgentRun, bool, error) {
+	query := getSubAgentRunSQL(s.tables)
+	logQuery(ctx, "subagent_run.get", query, sessionID, instanceID, runID)
 	var run model.SubAgentRun
-	if err := s.db.GetContext(ctx, &run, getSubAgentRunSQL, sessionID, instanceID, runID); err != nil {
+	if err := s.db.GetContext(ctx, &run, query, sessionID, instanceID, runID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.SubAgentRun{}, false, nil
 		}
@@ -172,9 +171,8 @@ func (s *Store) GetSubAgentRun(ctx context.Context, sessionID, instanceID, runID
 }
 
 // GetSubAgentHistory returns the stable instance metadata and its full ordered
-// run chain. It intentionally does not decode MessagesJSON: the agent package
-// owns the chat-message type and validates delta semantics before resume.
-func (s *Store) GetSubAgentHistory(ctx context.Context, sessionID, instanceID string) (model.SubAgentHistory, bool, error) {
+// run chain.
+func (s *SessionStore) GetSubAgentHistory(ctx context.Context, sessionID, instanceID string) (model.SubAgentHistory, bool, error) {
 	instance, ok, err := s.GetSubAgentInstance(ctx, sessionID, instanceID)
 	if err != nil || !ok {
 		return model.SubAgentHistory{}, false, err
@@ -187,11 +185,8 @@ func (s *Store) GetSubAgentHistory(ctx context.Context, sessionID, instanceID st
 }
 
 // AppendSubAgentRun transactionally upserts one terminal run and advances the
-// instance's latest-run pointer. The run's PreviousRunID is the predecessor
-// observed when dispatch began; if another writer has advanced the chain, this
-// append rolls back and returns ErrSubAgentChainConflict. A retry reuses the
-// same RunID and may overwrite that row when it is still the chain head.
-func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentInstance, run model.SubAgentRun) error {
+// instance's latest-run pointer.
+func (s *SessionStore) AppendSubAgentRun(ctx context.Context, instance model.SubAgentInstance, run model.SubAgentRun) error {
 	if instance.SessionID == "" || instance.AgentInstanceID == "" || run.RunID == "" {
 		return fmt.Errorf("append sub-agent run: session, instance and run identities are required")
 	}
@@ -205,7 +200,7 @@ func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentIn
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	current, ok, err := scanSubAgentInstance(tx, ctx, instance.SessionID, instance.AgentInstanceID)
+	current, ok, err := scanSubAgentInstance(tx, ctx, s.tables, instance.SessionID, instance.AgentInstanceID)
 	if err != nil {
 		return err
 	}
@@ -218,8 +213,8 @@ func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentIn
 		}
 		params := subAgentInstanceParams(instance)
 		params["latest_run_id"] = nil
-		logQuery(ctx, "subagent_instance.insert", insertSubAgentInstanceSQL)
-		if _, err := tx.NamedExecContext(ctx, insertSubAgentInstanceSQL, params); err != nil {
+		logQuery(ctx, "subagent_instance.insert", insertSubAgentInstanceSQL(s.tables))
+		if _, err := tx.NamedExecContext(ctx, insertSubAgentInstanceSQL(s.tables), params); err != nil {
 			return fmt.Errorf("append sub-agent run: insert instance: %w", err)
 		}
 	} else {
@@ -231,7 +226,7 @@ func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentIn
 				AgentInstanceID string `db:"agent_instance_id"`
 				RunNo           int    `db:"run_no"`
 			}
-			err = tx.GetContext(ctx, &predecessor, getSubAgentRunIdentitySQL, run.SessionID, run.PreviousRunID)
+			err = tx.GetContext(ctx, &predecessor, getSubAgentRunIdentitySQL(s.tables), run.SessionID, run.PreviousRunID)
 			if errors.Is(err, sql.ErrNoRows) || (err == nil && predecessor.AgentInstanceID != run.AgentInstanceID) {
 				return model.ErrSubAgentChainConflict
 			}
@@ -243,8 +238,8 @@ func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentIn
 			}
 		}
 		params := subAgentInstanceParams(instance)
-		logQuery(ctx, "subagent_instance.update", updateSubAgentInstanceSQL)
-		if _, err := tx.NamedExecContext(ctx, updateSubAgentInstanceSQL, params); err != nil {
+		logQuery(ctx, "subagent_instance.update", updateSubAgentInstanceSQL(s.tables))
+		if _, err := tx.NamedExecContext(ctx, updateSubAgentInstanceSQL(s.tables), params); err != nil {
 			return fmt.Errorf("append sub-agent run: update instance: %w", err)
 		}
 	}
@@ -253,7 +248,7 @@ func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentIn
 		AgentInstanceID string `db:"agent_instance_id"`
 		RunNo           int    `db:"run_no"`
 	}
-	err = tx.GetContext(ctx, &identity, getSubAgentRunIdentitySQL, run.SessionID, run.RunID)
+	err = tx.GetContext(ctx, &identity, getSubAgentRunIdentitySQL(s.tables), run.SessionID, run.RunID)
 	switch {
 	case err == nil:
 		if identity.AgentInstanceID != run.AgentInstanceID || identity.RunNo != run.RunNo {
@@ -265,11 +260,11 @@ func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentIn
 		return fmt.Errorf("append sub-agent run: lock existing run: %w", err)
 	}
 
-	logQuery(ctx, "subagent_run.append", upsertSubAgentRunSQL)
-	if _, err := tx.NamedExecContext(ctx, upsertSubAgentRunSQL, subAgentRunParams(run)); err != nil {
+	logQuery(ctx, "subagent_run.append", upsertSubAgentRunSQL(s.tables))
+	if _, err := tx.NamedExecContext(ctx, upsertSubAgentRunSQL(s.tables), subAgentRunParams(run)); err != nil {
 		return fmt.Errorf("append sub-agent run: upsert: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, advanceSubAgentLatestSQL, run.RunID, instance.SessionID, instance.AgentInstanceID); err != nil {
+	if _, err := tx.ExecContext(ctx, advanceSubAgentLatestSQL(s.tables), run.RunID, instance.SessionID, instance.AgentInstanceID); err != nil {
 		return fmt.Errorf("append sub-agent run: advance latest: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -278,9 +273,9 @@ func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentIn
 	return nil
 }
 
-func scanSubAgentInstance(q sqlx.QueryerContext, ctx context.Context, sessionID, instanceID string) (model.SubAgentInstance, bool, error) {
+func scanSubAgentInstance(q sqlx.QueryerContext, ctx context.Context, tables Tables, sessionID, instanceID string) (model.SubAgentInstance, bool, error) {
 	var instance model.SubAgentInstance
-	if err := sqlx.GetContext(ctx, q, &instance, getSubAgentInstanceSQL, sessionID, instanceID); err != nil {
+	if err := sqlx.GetContext(ctx, q, &instance, getSubAgentInstanceSQL(tables), sessionID, instanceID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.SubAgentInstance{}, false, nil
 		}
@@ -331,4 +326,36 @@ func nilIfEmptyJSON(b []byte) any {
 		return nil
 	}
 	return b
+}
+
+// ── interactive-source compatibility wrappers ──────────────────────────────
+
+// GetSubAgentInstance reads the interactive instance table.
+func (s *Store) GetSubAgentInstance(ctx context.Context, sessionID, instanceID string) (model.SubAgentInstance, bool, error) {
+	return s.ForSource(model.SessionSourceInteractive).GetSubAgentInstance(ctx, sessionID, instanceID)
+}
+
+// ListSubAgentRuns reads the interactive run table.
+func (s *Store) ListSubAgentRuns(ctx context.Context, sessionID, instanceID string) ([]model.SubAgentRun, error) {
+	return s.ForSource(model.SessionSourceInteractive).ListSubAgentRuns(ctx, sessionID, instanceID)
+}
+
+// ListSubAgentChildRuns reads the interactive child-run table.
+func (s *Store) ListSubAgentChildRuns(ctx context.Context, sessionID, parentInstanceID string) ([]model.SubAgentRun, error) {
+	return s.ForSource(model.SessionSourceInteractive).ListSubAgentChildRuns(ctx, sessionID, parentInstanceID)
+}
+
+// GetSubAgentRun reads one interactive run.
+func (s *Store) GetSubAgentRun(ctx context.Context, sessionID, instanceID, runID string) (model.SubAgentRun, bool, error) {
+	return s.ForSource(model.SessionSourceInteractive).GetSubAgentRun(ctx, sessionID, instanceID, runID)
+}
+
+// GetSubAgentHistory reads the interactive instance/run chain.
+func (s *Store) GetSubAgentHistory(ctx context.Context, sessionID, instanceID string) (model.SubAgentHistory, bool, error) {
+	return s.ForSource(model.SessionSourceInteractive).GetSubAgentHistory(ctx, sessionID, instanceID)
+}
+
+// AppendSubAgentRun writes the interactive instance/run tables.
+func (s *Store) AppendSubAgentRun(ctx context.Context, instance model.SubAgentInstance, run model.SubAgentRun) error {
+	return s.ForSource(model.SessionSourceInteractive).AppendSubAgentRun(ctx, instance, run)
 }

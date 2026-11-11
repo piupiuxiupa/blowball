@@ -25,6 +25,12 @@ func setupArchiveTestStore(t *testing.T) (*Store, func()) {
 	store, err := New(dsn)
 	require.NoError(t, err)
 
+	// Start from a clean fixture: CREATE TABLE IF NOT EXISTS would otherwise
+	// keep a stale schema left by an earlier failed run.
+	for _, tbl := range []string{"attachments_deleted", "attachments", "messages_deleted", "titles_deleted", "sessions_deleted", "messages", "titles", "sessions"} {
+		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+tbl)
+	}
+
 	ddl := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id  CHAR(36)  NOT NULL,
@@ -53,6 +59,7 @@ func setupArchiveTestStore(t *testing.T) (*Store, func()) {
 			role        VARCHAR(16)  NULL,
 			event_type  VARCHAR(16)  NOT NULL DEFAULT 'token',
 			content     MEDIUMTEXT   NOT NULL,
+			attachments_json MEDIUMTEXT NULL,
 			trace_id    CHAR(36)     NOT NULL,
 			update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
@@ -87,8 +94,34 @@ func setupArchiveTestStore(t *testing.T) (*Store, func()) {
 			role        VARCHAR(16)  NULL,
 			event_type  VARCHAR(16)  NOT NULL,
 			content     MEDIUMTEXT   NOT NULL,
+			attachments_json MEDIUMTEXT NULL,
 			trace_id    CHAR(36)     NOT NULL,
 			update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			deleted_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			deletion_id CHAR(36)     NOT NULL,
+			PRIMARY KEY (id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS attachments (
+			id          CHAR(36)     NOT NULL,
+			user_id     CHAR(36)     NOT NULL,
+			session_id  CHAR(36)     NULL,
+			filename    VARCHAR(255) NOT NULL,
+			mime        VARCHAR(64)  NOT NULL,
+			size        BIGINT       NOT NULL,
+			message_id  BIGINT       NULL,
+			create_time TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+			PRIMARY KEY (id),
+			CONSTRAINT fk_attachments_session FOREIGN KEY (session_id) REFERENCES sessions (session_id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS attachments_deleted (
+			id          CHAR(36)     NOT NULL,
+			user_id     CHAR(36)     NOT NULL,
+			session_id  CHAR(36)     NULL,
+			filename    VARCHAR(255) NOT NULL,
+			mime        VARCHAR(64)  NOT NULL,
+			size        BIGINT       NOT NULL,
+			message_id  BIGINT       NULL,
+			create_time TIMESTAMP(3) NOT NULL,
 			deleted_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			deletion_id CHAR(36)     NOT NULL,
 			PRIMARY KEY (id)
@@ -101,7 +134,7 @@ func setupArchiveTestStore(t *testing.T) (*Store, func()) {
 
 	cleanup := func() {
 		ctx := context.Background()
-		for _, tbl := range []string{"messages_deleted", "titles_deleted", "sessions_deleted", "messages", "titles", "sessions"} {
+		for _, tbl := range []string{"attachments_deleted", "attachments", "messages_deleted", "titles_deleted", "sessions_deleted", "messages", "titles", "sessions"} {
 			_, _ = store.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+tbl)
 		}
 		_ = store.Close()

@@ -53,6 +53,10 @@ type Request struct {
 	ContextCompacted bool
 	MetaCreatedAt    time.Time
 	FromQueue        bool
+	// Source selects the conversation table group. Empty means interactive.
+	// Scheduled turns require the scheduled services in Dependencies; there is
+	// no fallback to the ordinary tables when they are missing.
+	Source model.SessionSource
 
 	// BeforeStart is the background startup fence. It runs after read-only
 	// preamble work and before title generation or the first execution write.
@@ -124,6 +128,22 @@ type Dependencies struct {
 	Artifacts     *artifact.Service
 	RuntimeStatus RuntimeStatusStore
 	Shutdown      *ShutdownGate
+	// Scheduled carries the scheduled-source services. Nil keeps the
+	// interactive-only behavior; a scheduled request then fails closed.
+	Scheduled *ScheduledServices
+}
+
+// ScheduledServices is the scheduled-source view of the turn's persistence
+// services. Every field is bound to the scheduled table group; a scheduled
+// turn never falls back to the interactive services.
+type ScheduledServices struct {
+	Sessions   *service.SessionService
+	Messages   *service.MessageService
+	Titles     *service.TitleService
+	Compaction *service.CompactionService
+	// Snapshots is the scheduled sub-agent transcript store injected into the
+	// orchestrator per turn (agent.WithSubAgentSnapshotStore).
+	Snapshots agent.SubAgentSnapshotStore
 }
 
 // Executor owns the transport-independent turn lifecycle.
@@ -141,6 +161,8 @@ type Executor struct {
 	newHub        func() *stream.Hub
 	shutdown      *ShutdownGate
 	queuePump     func(string)
+	scheduled     *ScheduledServices
+	snapshots     agent.SubAgentSnapshotStore
 }
 
 func NewExecutor(deps Dependencies) *Executor {
@@ -155,6 +177,32 @@ func NewExecutor(deps Dependencies) *Executor {
 		runtimeStatus: deps.RuntimeStatus,
 		newHub:        func() *stream.Hub { return stream.NewHub(stream.DefaultHubBufferSize) },
 		shutdown:      gate,
+		scheduled:     deps.Scheduled,
+	}
+}
+
+// forSource returns the executor view whose persistence services are bound to
+// the requested source. The interactive view is the executor itself; the
+// scheduled view requires explicitly configured scheduled services and fails
+// closed otherwise (never a silent interactive fallback).
+func (e *Executor) forSource(source model.SessionSource) (*Executor, error) {
+	switch source.Normalized() {
+	case model.SessionSourceInteractive, model.SessionSourceLegacyInteractive:
+		return e, nil
+	case model.SessionSourceScheduled:
+		s := e.scheduled
+		if s == nil || s.Sessions == nil || s.Messages == nil || s.Compaction == nil {
+			return nil, fmt.Errorf("turn: scheduled services are not configured")
+		}
+		clone := *e
+		clone.sessSvc = s.Sessions
+		clone.msgSvc = s.Messages
+		clone.titleSvc = s.Titles
+		clone.compSvc = s.Compaction
+		clone.snapshots = s.Snapshots
+		return &clone, nil
+	default:
+		return nil, fmt.Errorf("turn: unknown session source %q", source)
 	}
 }
 

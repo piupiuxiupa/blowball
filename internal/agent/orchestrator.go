@@ -143,7 +143,11 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 		spec.Turn = override
 		return NewSubAgent(spec, f.client)
 	}
-	coordinator := newSpawnCoordinator(subCfg, factory, f.snapshots, nil)
+	snapshots := f.snapshots
+	if override := SubAgentSnapshotStoreFromContext(ctx); override != nil {
+		snapshots = override
+	}
+	coordinator := newSpawnCoordinator(subCfg, factory, snapshots, nil)
 	coordinator.rootRegistry = spawnScope
 	coordinator.rootToolNames = unionToolNames(rootCfg.Tools, subCfg.Tools)
 	confucius, err := NewConfucius(rootCfg, f.client, rootReg, coordinator, override)

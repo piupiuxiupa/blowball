@@ -30,9 +30,11 @@ FROM attachments
 WHERE id = ? AND user_id = ? AND session_id = ?
 `
 
-// InsertAttachment registers a in the attachments table.
-func (s *Store) InsertAttachment(ctx context.Context, a model.Attachment) error {
-	logQuery(ctx, "attachment.insert", insertAttachmentSQL, a.ID)
+// InsertAttachment registers a in this view's attachment table.
+func (s *SessionStore) InsertAttachment(ctx context.Context, a model.Attachment) error {
+	query := `INSERT INTO ` + s.tables.Attachments + ` (id, user_id, session_id, filename, mime, size)
+VALUES (:id, :user_id, :session_id, :filename, :mime, :size)`
+	logQuery(ctx, "attachment.insert", query, a.ID)
 	params := map[string]any{
 		"id":         a.ID,
 		"user_id":    a.UserID,
@@ -41,20 +43,27 @@ func (s *Store) InsertAttachment(ctx context.Context, a model.Attachment) error 
 		"mime":       a.MIME,
 		"size":       a.Size,
 	}
-	if _, err := sqlx.NamedExecContext(ctx, s.db, insertAttachmentSQL, params); err != nil {
+	if _, err := sqlx.NamedExecContext(ctx, s.db, query, params); err != nil {
 		return fmt.Errorf("mysql.InsertAttachment: %w", err)
 	}
 	return nil
 }
 
+// InsertAttachment registers an attachment on the interactive table.
+func (s *Store) InsertAttachment(ctx context.Context, a model.Attachment) error {
+	return s.ForSource(model.SessionSourceInteractive).InsertAttachment(ctx, a)
+}
+
 // GetAttachment returns the attachment row for the (id, userID, sessionID)
-// ownership triple, or (nil, nil) when no such row exists — the store-wide
-// not-found convention. Callers treat a nil row as 404; the triple match
-// never leaks whether the id exists under another user/session.
-func (s *Store) GetAttachment(ctx context.Context, id, userID, sessionID string) (*model.Attachment, error) {
-	logQuery(ctx, "attachment.get", getAttachmentSQL, id, userID, sessionID)
+// ownership triple from this view's table group, or (nil, nil) when no such
+// row exists.
+func (s *SessionStore) GetAttachment(ctx context.Context, id, userID, sessionID string) (*model.Attachment, error) {
+	query := `SELECT id, user_id, session_id, filename, mime, size, message_id, create_time
+FROM ` + s.tables.Attachments + `
+WHERE id = ? AND user_id = ? AND session_id = ?`
+	logQuery(ctx, "attachment.get", query, id, userID, sessionID)
 	var a model.Attachment
-	err := s.db.GetContext(ctx, &a, getAttachmentSQL, id, userID, sessionID)
+	err := s.db.GetContext(ctx, &a, query, id, userID, sessionID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -62,6 +71,11 @@ func (s *Store) GetAttachment(ctx context.Context, id, userID, sessionID string)
 		return nil, fmt.Errorf("mysql.GetAttachment: %w", err)
 	}
 	return &a, nil
+}
+
+// GetAttachment reads an interactive attachment.
+func (s *Store) GetAttachment(ctx context.Context, id, userID, sessionID string) (*model.Attachment, error) {
+	return s.ForSource(model.SessionSourceInteractive).GetAttachment(ctx, id, userID, sessionID)
 }
 
 // getAttachmentByUserSQL resolves the (id + user) ownership pair used by the

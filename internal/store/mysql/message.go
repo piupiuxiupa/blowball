@@ -11,52 +11,38 @@ import (
 	"github.com/lush/blowball/internal/pkg/cursor"
 )
 
-// appendMessageSQL inserts a new message row. id is AUTO_INCREMENT and is
-// returned to the caller via AppendMessage. msg_index is supplied by the
-// service layer which tracks the per-turn counter. The INSERT is IGNOREd on a
-// duplicate client_msg_id (UNIQUE index uk_messages_client_msg_id) so a
-// redelivered write-behind record collapses to the existing row — the
-// write-behind queue guarantees at-least-once delivery, the UNIQUE key plus
-// IGNORE makes it effectively exactly-once.
-const appendMessageSQL = `
-INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, tool_call_id, role, event_type, status, content, attachments_json, reasoning_content, trace_id, client_msg_id, run_id, agent_instance_id)
-VALUES (:session_id, :msg_time, :agent, :msg_index, :round_no, :role, :event_type, :status, :content, :attachments_json, :reasoning_content, :trace_id, :client_msg_id, :run_id, :agent_instance_id)
-`
+// appendMessageColumns is the column list shared by the single-row and batch
+// inserts. The table name is injected from the fixed Tables value.
+const appendMessageColumns = `(session_id, msg_time, agent, msg_index, tool_call_id, role, event_type, status, content, attachments_json, reasoning_content, trace_id, client_msg_id, run_id, agent_instance_id)`
 
-// appendMessagesSQL inserts multiple message rows in a single statement. The
-// VALUES clause is expanded at runtime by AppendMessages. INSERT IGNORE for
-// the same idempotency reason as appendMessageSQL.
-const appendMessagesSQL = `
-INSERT IGNORE INTO messages (session_id, msg_time, agent, msg_index, tool_call_id, role, event_type, status, content, attachments_json, reasoning_content, trace_id, client_msg_id, run_id, agent_instance_id)
-VALUES %s
-`
+const appendMessageValues = `(:session_id, :msg_time, :agent, :msg_index, :round_no, :role, :event_type, :status, :content, :attachments_json, :reasoning_content, :trace_id, :client_msg_id, :run_id, :agent_instance_id)`
+
+func appendMessageSQL(t Tables) string {
+	return `INSERT IGNORE INTO ` + t.Messages + ` ` + appendMessageColumns + ` VALUES ` + appendMessageValues
+}
+
+func appendMessagesSQL(t Tables) string {
+	return `INSERT IGNORE INTO ` + t.Messages + ` ` + appendMessageColumns + ` VALUES %s`
+}
 
 // listMessagesSQL returns every message for sessionID in (msg_time, msg_index)
-// order. The covering index idx_messages_session_time makes the leading
-// msg_time sort efficient; msg_index resolves ties within a single batch.
-// client_msg_id, run_id and agent_instance_id are COALESCEd to the empty
-// string: legacy rows written before their migrations carry NULL, and sqlx cannot scan NULL into
-// the model's plain string fields (nilIfEmpty performs the inverse
-// empty→NULL mapping on write, so the round trip is stable).
-const listMessagesSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
-FROM messages msg
-INNER JOIN 
+// order. NULL-tolerance columns are COALESCEd so the plain model string fields
+// scan cleanly.
+func listMessagesSQL(t Tables) string {
+	return `SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+FROM ` + t.Messages + ` msg
+INNER JOIN
 (
-	SELECT id FROM messages
+	SELECT id FROM ` + t.Messages + `
 	WHERE session_id = ?
 	ORDER BY msg_time ASC, msg_index ASC
 ) AS sub ON msg.id = sub.id
-ORDER BY msg.msg_time ASC, msg.msg_index ASC, msg.id ASC
-`
+ORDER BY msg.msg_time ASC, msg.msg_index ASC, msg.id ASC`
+}
 
 // nilIfEmpty maps an absent client_msg_id (legacy rows / callers that predate
-// the idempotency key) onto SQL NULL. Binding the empty string instead would
-// violate uk_messages_client_msg_id the moment two such rows coexist, because
-// the empty string is a single colliding value while NULL repeats freely.
-// run_id and agent_instance_id share the mapping for the plain NULL-tolerance
-// reason (migrations 014/016): a non-sub-agent row is NULL, not a colliding
-// empty string.
+// the idempotency key) onto SQL NULL. run_id and agent_instance_id share the
+// mapping for the plain NULL-tolerance reason.
 func nilIfEmpty(s string) any {
 	if s == "" {
 		return nil
@@ -64,12 +50,11 @@ func nilIfEmpty(s string) any {
 	return s
 }
 
-// AppendMessage inserts m into the messages table and returns the
-// auto-incremented id assigned by MySQL. A row with the same client_msg_id is
-// silently ignored (see appendMessageSQL), in which case the returned id is
-// that of the pre-existing row's statement outcome and must not be relied on.
-func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, error) {
-	logQuery(ctx, "message.append", appendMessageSQL)
+// AppendMessage inserts m into this view's message table and returns the
+// auto-incremented id. INSERT IGNORE collapses a redelivered client_msg_id.
+func (s *SessionStore) AppendMessage(ctx context.Context, m model.Message) (int64, error) {
+	query := appendMessageSQL(s.tables)
+	logQuery(ctx, "message.append", query)
 
 	params := map[string]any{
 		"session_id":        m.SessionID,
@@ -89,28 +74,21 @@ func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, erro
 		"agent_instance_id": nilIfEmpty(m.AgentInstanceID),
 	}
 
-	res, err := sqlx.NamedExecContext(ctx, s.db, appendMessageSQL, params)
+	res, err := sqlx.NamedExecContext(ctx, s.db, query, params)
 	if err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
+	return res.LastInsertId()
 }
 
-// AppendMessages inserts msgs in a single multi-value INSERT and returns the
-// auto-incremented ids assigned by MySQL, in the same order as msgs. Rows
-// whose client_msg_id already exists are ignored (see appendMessagesSQL), so
-// under redelivery the id sequence is not meaningful — no caller consumes it.
-func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error) {
-	return appendMessages(ctx, s.db, msgs)
+// AppendMessages inserts msgs in a single multi-value INSERT.
+func (s *SessionStore) AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error) {
+	return appendMessages(ctx, s.db, s.tables, msgs)
 }
 
-// appendMessages is the ExtContext core of AppendMessages so the round-batch
-// transaction (AppendFinalBatch) reuses the exact same insert.
-func appendMessages(ctx context.Context, q sqlx.ExtContext, msgs []model.Message) ([]int64, error) {
+// appendMessages is the ExtContext core shared with the round-batch
+// transaction.
+func appendMessages(ctx context.Context, q sqlx.ExtContext, tables Tables, msgs []model.Message) ([]int64, error) {
 	if len(msgs) == 0 {
 		return []int64{}, nil
 	}
@@ -138,7 +116,7 @@ func appendMessages(ctx context.Context, q sqlx.ExtContext, msgs []model.Message
 		)
 	}
 
-	query := fmt.Sprintf(appendMessagesSQL, strings.Join(placeholders, ", "))
+	query := fmt.Sprintf(appendMessagesSQL(tables), strings.Join(placeholders, ", "))
 	logQuery(ctx, "message.append_batch", query)
 
 	res, err := q.ExecContext(ctx, query, args...)
@@ -162,59 +140,37 @@ func appendMessages(ctx context.Context, q sqlx.ExtContext, msgs []model.Message
 	return ids, nil
 }
 
-// listMessagesPagedAscSQL returns messages after the cursor ordered by
-// (msg_time, msg_index, id) ascending. The id tie-breaker makes the cursor
-// stable when two rows share the same msg_time and msg_index.
-const listMessagesPagedAscSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
-FROM messages msg
-INNER JOIN 
+func listMessagesPagedAscSQL(t Tables) string {
+	return `SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+FROM ` + t.Messages + ` msg
+INNER JOIN
 (
-	SELECT id FROM messages
+	SELECT id FROM ` + t.Messages + `
 	WHERE session_id = ?
 		AND (msg_time, msg_index, id) > (?, ?, ?)
 	ORDER BY msg_time ASC, msg_index ASC, id ASC
 	LIMIT ?
-) AS sub ON msg.id = sub.id
-`
+) AS sub ON msg.id = sub.id`
+}
 
-// listMessagesPagedDescSQL returns messages before the cursor ordered by
-// (msg_time, msg_index, id) descending. The STRAIGHT_JOIN forces the
-// materialized subselect to drive the join so its ORDER BY survives as the
-// output order — a plain INNER JOIN lets the optimizer flip the join (reading
-// the outer table first) and silently lose the descending order on MySQL 9.x.
-const listMessagesPagedDescSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+func listMessagesPagedDescSQL(t Tables) string {
+	return `SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM
 (
-	SELECT id FROM messages
+	SELECT id FROM ` + t.Messages + `
 	WHERE session_id = ?
 		AND (msg_time, msg_index, id) > (?, ?, ?)
 	ORDER BY msg_time DESC, msg_index DESC, id DESC
 	LIMIT ?
-) AS sub STRAIGHT_JOIN messages msg ON msg.id = sub.id
-`
+) AS sub STRAIGHT_JOIN ` + t.Messages + ` msg ON msg.id = sub.id`
+}
 
 // subagentPlaceholderFilter restricts a message listing to the placeholder
-// sub-agent view (unique-subagent-message-placeholders capability, applied
-// inside the inner subselect so filtering happens BEFORE pagination):
-//   - rows with no dynamic instance identity stay visible (main-agent output,
-//     user messages, and pre-dynamic-subagent legacy rows);
-//   - for rows carrying a dynamic instance identity only the lifecycle markers
-//     (agent_start / agent_end / agent_error) stay visible as placeholders —
-//     token / reasoning / tool_call / tool_result payload rows are omitted;
-//   - the parent's spawn_subagent tool_result row (which duplicates the
-//     sub-agent's final output) is omitted by matching its JSON-serialized
-//     tool_call_id against subagent_runs.run_id — the parent tool_call row
-//     itself stays visible.
-//
-// The EXISTS leg correlates on messages.session_id so the parent-result
-// omission never crosses sessions, and legacy `legacy:<instance>` run ids
-// cannot collide with real parent tool_call ids. The JSON_VALID guard keeps
-// plain-text legacy tool_result rows (pre-JSON content shapes) visible — and
-// the whole read from erroring — instead of failing the query in
-// JSON_EXTRACT.
-const subagentPlaceholderFilter = `
+// sub-agent view, applied inside the inner subselect so filtering happens
+// BEFORE pagination. The correlated EXISTS reads the same source's sub-agent
+// run table, so a scheduled session never consults ordinary rows.
+func subagentPlaceholderFilter(t Tables) string {
+	return `
 		AND (
 			agent_instance_id IS NULL
 			OR tool_call_id IS NOT NULL
@@ -225,51 +181,48 @@ const subagentPlaceholderFilter = `
 			AND agent_instance_id IS NULL
 			AND JSON_VALID(messages.content)
 			AND EXISTS (
-				SELECT 1 FROM subagent_runs sr
+				SELECT 1 FROM ` + t.SubAgentRuns + ` sr
 				WHERE sr.session_id = messages.session_id
 					AND sr.run_id = JSON_UNQUOTE(JSON_EXTRACT(messages.content, '$.tool_call_id'))
 			)
-		)
-`
+		)`
+}
 
-// listMessagesPagedPlaceholderAscSQL is the placeholder-view twin of
-// listMessagesPagedAscSQL.
-const listMessagesPagedPlaceholderAscSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
-FROM messages msg
+func listMessagesPagedPlaceholderAscSQL(t Tables) string {
+	return `SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+FROM ` + t.Messages + ` msg
 INNER JOIN
 (
-	SELECT id FROM messages
+	SELECT id FROM ` + t.Messages + `
 	WHERE session_id = ?
 		AND (msg_time, msg_index, id) > (?, ?, ?)
-` + subagentPlaceholderFilter + `
+` + subagentPlaceholderFilter(t) + `
 	ORDER BY msg_time ASC, msg_index ASC, id ASC
 	LIMIT ?
-) AS sub ON msg.id = sub.id
-`
+) AS sub ON msg.id = sub.id`
+}
 
-// listMessagesPagedPlaceholderDescSQL is the placeholder-view twin of
-// listMessagesPagedDescSQL.
-const listMessagesPagedPlaceholderDescSQL = `
-SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
+func listMessagesPagedPlaceholderDescSQL(t Tables) string {
+	return `SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM
 (
-	SELECT id FROM messages
+	SELECT id FROM ` + t.Messages + `
 	WHERE session_id = ?
 		AND (msg_time, msg_index, id) > (?, ?, ?)
-` + subagentPlaceholderFilter + `
+` + subagentPlaceholderFilter(t) + `
 	ORDER BY msg_time DESC, msg_index DESC, id DESC
 	LIMIT ?
-) AS sub STRAIGHT_JOIN messages msg ON msg.id = sub.id
-`
+) AS sub STRAIGHT_JOIN ` + t.Messages + ` msg ON msg.id = sub.id`
+}
 
 // ListMessages returns every message for sessionID in (msg_time, msg_index)
 // order, or an empty (non-nil) slice when the session has no messages.
-func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Message, error) {
-	logQuery(ctx, "message.list", listMessagesSQL, sessionID)
+func (s *SessionStore) ListMessages(ctx context.Context, sessionID string) ([]model.Message, error) {
+	query := listMessagesSQL(s.tables)
+	logQuery(ctx, "message.list", query, sessionID)
 
 	var messages []model.Message
-	if err := s.db.SelectContext(ctx, &messages, listMessagesSQL, sessionID); err != nil {
+	if err := s.db.SelectContext(ctx, &messages, query, sessionID); err != nil {
 		return nil, err
 	}
 	hydrateAttachments(messages)
@@ -277,8 +230,7 @@ func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Mes
 }
 
 // hydrateAttachments fills each row's Attachments slice from its
-// attachments_json payload (add-image-attachments). A NULL/empty/malformed
-// payload leaves the slice nil — the pre-change rendering semantics.
+// attachments_json payload. A NULL/empty/malformed payload leaves it nil.
 func hydrateAttachments(msgs []model.Message) {
 	for i := range msgs {
 		msgs[i].Attachments = model.UnmarshalAttachmentRefs(msgs[i].AttachmentsJSON)
@@ -287,15 +239,8 @@ func hydrateAttachments(msgs []model.Message) {
 
 // ListMessagesPaged returns a page of messages for sessionID ordered by
 // (msg_time, msg_index, id). order must be "asc" or "desc"; any other value
-// defaults to "asc". pageSize is clamped to [1, 5000]. An empty cursor requests
-// the first page. The returned nextCursor is empty when no further pages exist.
-// subagentContent selects the sub-agent history view: model.SubagentContentFull
-// (or any unknown value — the handler validates the query param before calling)
-// is the legacy unfiltered view; model.SubagentContentPlaceholder applies the
-// placeholder filter before pagination (see subagentPlaceholderFilter). The
-// cursor semantics are unchanged: the next cursor is built from the last
-// RETURNED row of the filtered page.
-func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
+// defaults to "asc". pageSize is clamped to [1, 5000].
+func (s *SessionStore) ListMessagesPaged(ctx context.Context, sessionID, cursorStr string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
 	if pageSize < 1 {
 		pageSize = 1
 	}
@@ -311,13 +256,13 @@ func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr stri
 	var query string
 	switch {
 	case subagentContent == model.SubagentContentPlaceholder && order == "desc":
-		query = listMessagesPagedPlaceholderDescSQL
+		query = listMessagesPagedPlaceholderDescSQL(s.tables)
 	case subagentContent == model.SubagentContentPlaceholder:
-		query = listMessagesPagedPlaceholderAscSQL
+		query = listMessagesPagedPlaceholderAscSQL(s.tables)
 	case order == "desc":
-		query = listMessagesPagedDescSQL
+		query = listMessagesPagedDescSQL(s.tables)
 	default:
-		query = listMessagesPagedAscSQL
+		query = listMessagesPagedAscSQL(s.tables)
 	}
 
 	logQuery(ctx, "message.list_paged", query, sessionID, cur.MsgTime, cur.MsgIndex, cur.ID, pageSize)
@@ -333,14 +278,31 @@ func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr stri
 	}
 
 	last := messages[len(messages)-1]
-	nextCur := cursor.Cursor{
-		MsgTime:  last.MsgTime,
-		MsgIndex: last.MsgIndex,
-		ID:       last.ID,
-	}
-	nextToken, err := cursor.Encode(nextCur)
+	nextToken, err := cursor.Encode(cursor.Cursor{MsgTime: last.MsgTime, MsgIndex: last.MsgIndex, ID: last.ID})
 	if err != nil {
 		return nil, "", fmt.Errorf("message.list_paged: encode next cursor: %w", err)
 	}
 	return messages, nextToken, nil
+}
+
+// ── interactive-source compatibility wrappers ──────────────────────────────
+
+// AppendMessage inserts into the interactive messages table.
+func (s *Store) AppendMessage(ctx context.Context, m model.Message) (int64, error) {
+	return s.ForSource(model.SessionSourceInteractive).AppendMessage(ctx, m)
+}
+
+// AppendMessages inserts into the interactive messages table.
+func (s *Store) AppendMessages(ctx context.Context, msgs []model.Message) ([]int64, error) {
+	return s.ForSource(model.SessionSourceInteractive).AppendMessages(ctx, msgs)
+}
+
+// ListMessages reads the interactive messages table.
+func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]model.Message, error) {
+	return s.ForSource(model.SessionSourceInteractive).ListMessages(ctx, sessionID)
+}
+
+// ListMessagesPaged reads a page from the interactive messages table.
+func (s *Store) ListMessagesPaged(ctx context.Context, sessionID, cursorStr string, pageSize int, order, subagentContent string) ([]model.Message, string, error) {
+	return s.ForSource(model.SessionSourceInteractive).ListMessagesPaged(ctx, sessionID, cursorStr, pageSize, order, subagentContent)
 }

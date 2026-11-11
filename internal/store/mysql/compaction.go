@@ -9,11 +9,8 @@ import (
 	"github.com/lush/blowball/internal/model"
 )
 
-// insertCompactionSQL appends one compaction record. The table is append-only
-// with latest-wins stitching: the record's id participates in the
-// (session_id, id) ordering that LatestCompaction reads back.
-const insertCompactionSQL = `
-INSERT INTO context_compactions (
+func insertCompactionSQL(t Tables) string {
+	return `INSERT INTO ` + t.ContextCompactions + ` (
     session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
     boundary_msg_time, boundary_msg_index, boundary_msg_id,
     anchor_json, anchor_truncated,
@@ -31,26 +28,11 @@ INSERT INTO context_compactions (
     NULLIF(:post_compaction_tokens, 0), NULLIF(:retained_tail_messages, 0),
     NULLIF(:summary_strategy, ''), NULLIF(:tool_summary_count, 0),
     NULLIF(:tool_activity_count, 0), NULLIF(:tool_activity_json, '')
-)
-`
-
-// InsertCompaction persists one completed compaction record. It is a
-// write-only path (the not-found-returns-(nil,nil) convention does not apply).
-// Callers order their writes record-first, then Redis, then the session flag
-// (see the context-compaction spec's crash-consistency write order).
-func (s *Store) InsertCompaction(ctx context.Context, rec model.ContextCompaction) error {
-	logQuery(ctx, "compaction.insert", insertCompactionSQL)
-	if _, err := s.db.NamedExecContext(ctx, insertCompactionSQL, rec); err != nil {
-		return err
-	}
-	return nil
+)`
 }
 
-// latestCompactionSQL returns the newest compaction record for a session. The
-// AUTO_INCREMENT id is a strict insert-order proxy, so ORDER BY id DESC LIMIT 1
-// is the latest-wins stitch source.
-const latestCompactionSQL = `
-SELECT id, session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
+func latestCompactionSQL(t Tables) string {
+	return `SELECT id, session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
        boundary_msg_time, boundary_msg_index, boundary_msg_id,
        anchor_json, anchor_truncated,
        shadowed_tokens, summary_model, summary_prompt_tokens, summary_completion_tokens,
@@ -58,16 +40,14 @@ SELECT id, session_id, user_id, trace_id, trigger_kind, trigger_tokens, content,
        post_compaction_tokens, retained_tail_messages, summary_strategy,
        tool_summary_count, tool_activity_count, tool_activity_json,
        create_time
-FROM context_compactions
+FROM ` + t.ContextCompactions + `
 WHERE session_id = ?
 ORDER BY id DESC
-LIMIT 1
-`
+LIMIT 1`
+}
 
 // compactionRecordRow keeps every post-013 observation column nullable at the
-// scan boundary. Existing records predate migration 023, and NULLIF writes use
-// NULL for absent observations; scanning those directly into Go strings/ints
-// would make the latest authoritative record unreadable.
+// scan boundary.
 type compactionRecordRow struct {
 	ID                      int64          `db:"id"`
 	SessionID               string         `db:"session_id"`
@@ -130,13 +110,22 @@ func (r compactionRecordRow) model() model.ContextCompaction {
 	}
 }
 
+// InsertCompaction persists one completed compaction record.
+func (s *SessionStore) InsertCompaction(ctx context.Context, rec model.ContextCompaction) error {
+	query := insertCompactionSQL(s.tables)
+	logQuery(ctx, "compaction.insert", query)
+	_, err := s.db.NamedExecContext(ctx, query, rec)
+	return err
+}
+
 // LatestCompaction returns the newest compaction record for sessionID, or
 // (nil, nil) when the session has never been compacted.
-func (s *Store) LatestCompaction(ctx context.Context, sessionID string) (*model.ContextCompaction, error) {
-	logQuery(ctx, "compaction.latest", latestCompactionSQL, sessionID)
+func (s *SessionStore) LatestCompaction(ctx context.Context, sessionID string) (*model.ContextCompaction, error) {
+	query := latestCompactionSQL(s.tables)
+	logQuery(ctx, "compaction.latest", query, sessionID)
 
 	var row compactionRecordRow
-	err := s.db.GetContext(ctx, &row, latestCompactionSQL, sessionID)
+	err := s.db.GetContext(ctx, &row, query, sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -148,43 +137,23 @@ func (s *Store) LatestCompaction(ctx context.Context, sessionID string) (*model.
 	return &rec, nil
 }
 
-// updateSessionCompactedSQL sets the stitching gate. Idempotent by
-// construction; the flag is never reset to 0 anywhere.
-const updateSessionCompactedSQL = `
-UPDATE sessions SET context_compacted = 1 WHERE session_id = ?
-`
-
-// UpdateSessionCompacted marks the session as compacted. It is the LAST step
-// of the compaction write order (record insert → Redis cache → this flag) so
-// a crash mid-sequence leaves at worst a harmless orphan record with the flag
-// still 0, never a flagged session with no recoverable record.
-func (s *Store) UpdateSessionCompacted(ctx context.Context, sessionID string) error {
-	logQuery(ctx, "compaction.update_session_flag", updateSessionCompactedSQL, sessionID)
-	_, err := s.db.ExecContext(ctx, updateSessionCompactedSQL, sessionID)
+// UpdateSessionCompacted marks the source's session row as compacted. It is
+// the LAST step of the compaction write order.
+func (s *SessionStore) UpdateSessionCompacted(ctx context.Context, sessionID string) error {
+	query := `UPDATE ` + s.tables.Sessions + ` SET context_compacted = 1 WHERE session_id = ?`
+	logQuery(ctx, "compaction.update_session_flag", query, sessionID)
+	_, err := s.db.ExecContext(ctx, query, sessionID)
 	return err
 }
 
-// latestContextTokensSQL returns the most recent turn's end-of-turn context
-// size for the turn-start preventive compaction check. Ordered by id DESC (the
-// insert order of turn_usage rows), not by created_at, so same-millisecond
-// turns still resolve deterministically.
-const latestContextTokensSQL = `
-SELECT context_tokens
-FROM turn_usage
-WHERE session_id = ?
-ORDER BY id DESC
-LIMIT 1
-`
-
 // LatestContextTokens returns the newest turn_usage.context_tokens value for
-// sessionID, or (0, nil) when the session has no recorded turns (new session,
-// or rows written before migration 013) — zero never triggers compaction, so
-// the first turn of a session is naturally exempt.
-func (s *Store) LatestContextTokens(ctx context.Context, sessionID string) (int, error) {
-	logQuery(ctx, "compaction.latest_context_tokens", latestContextTokensSQL, sessionID)
+// sessionID, or (0, nil) when the session has no recorded turns.
+func (s *SessionStore) LatestContextTokens(ctx context.Context, sessionID string) (int, error) {
+	query := `SELECT context_tokens FROM ` + s.tables.TurnUsage + ` WHERE session_id = ? ORDER BY id DESC LIMIT 1`
+	logQuery(ctx, "compaction.latest_context_tokens", query, sessionID)
 
 	var tokens int
-	err := s.db.GetContext(ctx, &tokens, latestContextTokensSQL, sessionID)
+	err := s.db.GetContext(ctx, &tokens, query, sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -192,4 +161,26 @@ func (s *Store) LatestContextTokens(ctx context.Context, sessionID string) (int,
 		return 0, err
 	}
 	return tokens, nil
+}
+
+// ── interactive-source compatibility wrappers ──────────────────────────────
+
+// InsertCompaction writes the interactive context_compactions table.
+func (s *Store) InsertCompaction(ctx context.Context, rec model.ContextCompaction) error {
+	return s.ForSource(model.SessionSourceInteractive).InsertCompaction(ctx, rec)
+}
+
+// LatestCompaction reads the interactive context_compactions table.
+func (s *Store) LatestCompaction(ctx context.Context, sessionID string) (*model.ContextCompaction, error) {
+	return s.ForSource(model.SessionSourceInteractive).LatestCompaction(ctx, sessionID)
+}
+
+// UpdateSessionCompacted marks an interactive session compacted.
+func (s *Store) UpdateSessionCompacted(ctx context.Context, sessionID string) error {
+	return s.ForSource(model.SessionSourceInteractive).UpdateSessionCompacted(ctx, sessionID)
+}
+
+// LatestContextTokens reads the interactive turn_usage table.
+func (s *Store) LatestContextTokens(ctx context.Context, sessionID string) (int, error) {
+	return s.ForSource(model.SessionSourceInteractive).LatestContextTokens(ctx, sessionID)
 }

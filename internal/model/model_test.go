@@ -18,6 +18,7 @@ var expectedDBTags = map[string][]string{
 	"Session": {
 		"session_id", "user_id", "trace_id",
 		"update_time", "create_time", "context_compacted",
+		"task_id", "occurrence_id", "run_id", "-",
 	},
 	"Title": {
 		"session_id", "title", "trace_id", "is_manual",

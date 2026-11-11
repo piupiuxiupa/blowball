@@ -7,10 +7,10 @@
 
 ## 2. 数据迁移与物理隔离
 
-- [ ] 2.1 编写增量 migration：任务资源引用/历史来源/只读 execution hold 字段、scheduled_sessions、消息/工具/标题/用量/压缩/子 Agent/附件及需要的归档表、资源版本元数据和 execution receipts；验证 FK、索引及唯一 occurrence/run 约束。
-- [ ] 2.2 先写普通/任务 repository 隔离与幂等建会话测试，再实现固定来源的存储适配；拒绝创建普通占位 session，禁止客户端表名和跨表 fallback。
+- [x] 2.1 编写增量 migration：任务资源引用/历史来源/只读 execution hold 字段、scheduled_sessions、消息/工具/标题/用量/压缩/子 Agent/附件及需要的归档表、资源版本元数据和 execution receipts；验证 FK、索引及唯一 occurrence/run 约束。
+- [x] 2.2 先写普通/任务 repository 隔离与幂等建会话测试，再实现固定来源的存储适配；拒绝创建普通占位 session，禁止客户端表名和跨表 fallback。
 - [ ] 2.3 适配任务 round 双表事务、send-time 和 finalization；测试新数据无 chunk 行、工具顺序和终态 receipt 不先于最终内容，不复活 ingest queue。
-- [ ] 2.4 适配标题、用量、压缩标志/锚点/工具统计、子 Agent instances/transcripts 和附件；测试所有任务写入只落 scheduled 表。
+- [x] 2.4 适配标题、用量、压缩标志/锚点/工具统计、子 Agent instances/transcripts 和附件；测试所有任务写入只落 scheduled 表。
 - [ ] 2.5 适配读取前 owner/source 校验、缓存回填、任务删除及用户删除归档；验证 stale cache、跨用户 404、运行中删除 409 和普通数据不受影响。
 
 ## 3. 主服务任务执行入口

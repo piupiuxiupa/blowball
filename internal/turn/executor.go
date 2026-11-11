@@ -48,6 +48,15 @@ import (
 // happens here — after the claim, satisfying the send-time persistence
 // invariants — so every entry path produces the identical turn.
 func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
+	// Source selection is FIRST and fail-closed: a scheduled turn must have
+	// the scheduled persistence services, and no later code path may fall back
+	// to the ordinary tables.
+	srcExec, err := e.forSource(req.Source)
+	if err != nil {
+		return nil, err
+	}
+	e = srcExec
+
 	sessionID, userID, tid := req.SessionID, req.UserID, req.RunID
 	ctx = agent.WithSessionID(ctx, sessionID)
 	ctx = agent.WithRuntimeStatusStore(ctx, e.runtimeStatus)
@@ -386,6 +395,12 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	turnCtx, turnCancel := context.WithCancel(context.Background())
 	turnCtx = skillmarket.WithToken(agent.WithUserID(agent.WithSessionID(trace.WithContext(turnCtx, tid), sessionID), agent.UserIDFromContext(ctx)), req.RawToken)
 	turnCtx = agent.WithRuntimeStatusStore(turnCtx, e.runtimeStatus)
+	// Sub-agent transcript persistence follows the SAME source as the turn.
+	// A scheduled turn injects a scheduled-bound snapshot store; the
+	// orchestrator's process-wide default is never consulted for it.
+	if e.snapshots != nil {
+		turnCtx = agent.WithSubAgentSnapshotStore(turnCtx, e.snapshots)
+	}
 	regRun := e.runs.Registry.Register(tid, turnCancel)
 
 	workspaceRoot := filepath.Join(e.dataDir, userID, "workspace")

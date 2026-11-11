@@ -20,7 +20,7 @@ func testDSN() string {
 }
 
 func TestListMessagesSQL_HasStableOuterOrder(t *testing.T) {
-	normalized := strings.Join(strings.Fields(listMessagesSQL), " ")
+	normalized := strings.Join(strings.Fields(listMessagesSQL(interactiveTables)), " ")
 	assert.Contains(t, normalized,
 		"ORDER BY msg.msg_time ASC, msg.msg_index ASC, msg.id ASC",
 		"derived-table ordering is not guaranteed to survive the outer join")
@@ -37,6 +37,12 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 
 	store, err := New(dsn)
 	require.NoError(t, err)
+
+	// Start from a clean fixture: CREATE TABLE IF NOT EXISTS would otherwise
+	// keep a stale/simplified schema created by another test helper.
+	for _, tbl := range []string{"messages", "tool_calls"} {
+		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+tbl)
+	}
 
 	cleanup := func() {
 		_, _ = store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS messages")
@@ -429,6 +435,9 @@ func setupTestStoreWithSubAgentTables(t *testing.T) (*Store, func()) {
 	}
 
 	ctx := context.Background()
+	for _, tbl := range []string{"messages", "subagent_runs", "subagent_instances"} {
+		_, _ = store.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+tbl)
+	}
 	_, err = store.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS messages (
 			id          BIGINT       NOT NULL AUTO_INCREMENT,
@@ -436,9 +445,13 @@ func setupTestStoreWithSubAgentTables(t *testing.T) (*Store, func()) {
 			msg_time    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 			agent       VARCHAR(32)  NOT NULL,
 			msg_index   INT          NOT NULL,
+			tool_call_id VARCHAR(64) NULL,
 			role        VARCHAR(16)  NULL,
 			event_type  VARCHAR(16)  NOT NULL DEFAULT 'token',
+			status      VARCHAR(16)  NULL,
 			content     MEDIUMTEXT   NOT NULL,
+			attachments_json MEDIUMTEXT NULL,
+			reasoning_content MEDIUMTEXT NULL,
 			trace_id    CHAR(36)     NOT NULL,
 			client_msg_id CHAR(36)   NULL,
 			run_id      CHAR(64)     NULL,
