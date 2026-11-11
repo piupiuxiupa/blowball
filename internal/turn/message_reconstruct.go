@@ -85,6 +85,7 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 			if msg.Role == model.RoleAssistant && msg.EventType == model.EventTypeMessage {
 				state.flush(&out, &lastRow)
 				state.beginFinal(msg.Content, msg.ReasoningContent, i)
+				state.turnTraceID = msg.TraceID
 				continue
 			}
 			if msg.Role != model.RoleUser {
@@ -127,15 +128,18 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 			// result both come from the canonical tool_calls row; the
 			// placeholder's own position is the ordering anchor.
 			if msg.ToolCallID != "" {
-				if state.tokensPending() && state.textTraceSet && msg.TraceID != state.textTraceID {
-					// Text from another turn (for example, the exchange before a
-					// send-time recall pair) is already complete; only same-turn
-					// narration joins the following tool unit.
+				if (state.turnTraceID != "" && msg.TraceID != "" && msg.TraceID != state.turnTraceID) ||
+					(state.tokensPending() && state.textTraceSet && msg.TraceID != state.textTraceID) {
+					// A preceding turn is complete even without narration. Its
+					// final/tool unit must not absorb a new turn's recall pair.
 					state.flush(&out, &lastRow)
 				}
 				c, ok := callsByID[msg.TraceID+""+msg.ToolCallID]
 				if !ok || (c.Result == "" && c.Status != model.ToolCallStatusCompleted) {
 					continue // unpaired/pending: skipped like the legacy path
+				}
+				if state.turnTraceID == "" {
+					state.turnTraceID = msg.TraceID
 				}
 				state.toolCalls = append(state.toolCalls, toolCallEntry{
 					call: agent.ToolCall{
@@ -182,6 +186,9 @@ func MessagesToAgentMessagesIndexed(prior []model.Message, calls []model.ToolCal
 			if call.ID == "" {
 				continue
 			}
+			if state.turnTraceID == "" {
+				state.turnTraceID = msg.TraceID
+			}
 			state.toolCalls = append(state.toolCalls, toolCallEntry{call: call, row: i})
 
 		case model.EventTypeToolResult:
@@ -226,6 +233,7 @@ type reconstructState struct {
 	// stays buffered until the round's adjacent placeholders are known so a
 	// narrated response reconstructs as one assistant message.
 	final         *assistantFragment
+	turnTraceID   string
 	textTraceID   string
 	textTraceSet  bool
 	afterResult   bool
@@ -344,6 +352,7 @@ func (s *reconstructState) noteTextTrace(traceID string) {
 }
 
 func (s *reconstructState) flush(out *[]agent.Message, lastRow *[]int) {
+	s.turnTraceID = ""
 	prefix, hasPrefix, multipleRuns := s.assistantPrefix()
 	if hasPrefix {
 		s.flushToolCallsWithPrefix(out, lastRow, prefix)

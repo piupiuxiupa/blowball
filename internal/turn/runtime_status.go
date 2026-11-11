@@ -78,7 +78,9 @@ func replayRuntimeStatus(
 
 		hasBefore := status.BeforeClientMsgID != ""
 		hasAfter := status.AfterToolCallID != ""
-		if hasBefore == hasAfter {
+		if hasBefore == hasAfter ||
+			(status.Kind == agent.RuntimeStatusCurrent && !hasBefore) ||
+			(status.Kind == agent.RuntimeStatusToolBudget && !hasAfter) {
 			return nil, false
 		}
 		if hasBefore {
@@ -90,24 +92,56 @@ func replayRuntimeStatus(
 
 	out := make([]agent.Message, 0, len(messages)+len(statuses))
 	inserted := 0
+	var lastInsertedSeq int64
+	pending := make(map[string]struct{})
 	for i, message := range messages {
+		// Track the declared calls, not individual result completion. A user
+		// status is only legal after every result in this unit has arrived.
+		if message.Role == "assistant" {
+			if len(pending) > 0 {
+				return nil, false
+			}
+			for _, call := range message.ToolCalls {
+				if _, exists := pending[call.ID]; exists || call.ID == "" {
+					return nil, false
+				}
+				pending[call.ID] = struct{}{}
+			}
+		} else if message.Role == "tool" {
+			if _, exists := pending[message.ToolCallID]; !exists {
+				return nil, false
+			}
+			delete(pending, message.ToolCallID)
+		} else if len(pending) > 0 {
+			return nil, false
+		}
+
 		rowIndex := lastRow[i]
 		if rowIndex >= 0 && rowIndex < len(rows) {
 			clientMsgID := rows[rowIndex].ClientMsgID
 			for _, status := range before[clientMsgID] {
+				if message.Role != "user" || message.RuntimeStatus != "" ||
+					rows[rowIndex].Role != model.RoleUser || status.Seq <= lastInsertedSeq {
+					return nil, false
+				}
 				out = append(out, runtimeStatusMessage(status))
 				inserted++
+				lastInsertedSeq = status.Seq
 			}
 		}
 		out = append(out, message)
 		if message.Role == "tool" {
 			for _, status := range after[message.ToolCallID] {
+				if len(pending) > 0 || status.Seq <= lastInsertedSeq {
+					return nil, false
+				}
 				out = append(out, runtimeStatusMessage(status))
 				inserted++
+				lastInsertedSeq = status.Seq
 			}
 		}
 	}
-	if inserted != len(statuses) {
+	if len(pending) > 0 || inserted != len(statuses) {
 		return nil, false
 	}
 	return out, true

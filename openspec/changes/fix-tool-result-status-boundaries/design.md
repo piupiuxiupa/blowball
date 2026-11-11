@@ -1,6 +1,6 @@
 ## Context
 
-本变更仅以生产提交 `9b18297e82732e095f479978c184448cd4b3ee58` 为实施基线；当前主工作区的后续提交和调度器服务改动不属于本变更。提案阶段只写 OpenSpec 文档，业务代码尚未修复。
+本变更仅以生产提交 `9b18297e82732e095f479978c184448cd4b3ee58` 为实施基线；当前主工作区的后续提交和调度器服务改动不属于本变更。实施只修改 canonical 重建与 runtime status 回放两个业务文件，并补充相关回归测试；并行调度与持久化格式保持不变。
 
 生产路径分为三层：
 
@@ -40,7 +40,7 @@
 
 ### 1. 在 canonical 重建入口维护单元的 turn 边界
 
-选择在重建状态中保留当前 assistant/tool 单元已知的来源 TraceID，包括其关联的 assistant 终稿与工具占位行。新的 placeholder 属于另一已知 TraceID 时，先关闭上一单元，再构建新的单元；即使上一单元没有 token/reasoning，也不能漏掉这一边界。
+选择在重建状态的 `turnTraceID` 中保留当前 assistant/tool 单元已知的来源 TraceID，包括其关联的 assistant 终稿与工具占位行。新的 placeholder 属于另一已知 TraceID 时，先关闭上一单元，再构建新的单元；即使上一单元没有 token/reasoning，也不能漏掉这一边界。
 
 已有 assistant final-row、真实 user-row 和遗留 tool-result 后新 call 的 round 边界仍然生效。同一 TraceID、同一 assistant round 内的多个 placeholder 仍积累为一个 assistant tool_calls 数组及其全部结果，不能因为每个 placeholder 已取到 canonical result、`afterResult` 为 true 就拆组。
 
@@ -63,7 +63,7 @@
 - 状态 kind 与锚点类型一致，保留现有非空字段、唯一 status ID、单调 Seq 及全部条目命中校验。
 - 合并后的状态出现顺序仍对应原日志顺序，使用真实 Seq；合法序号有间隔时继续从最大 Seq 续接，不用条数推断。
 
-只返回完整、校验成功的 candidate。任一失败返回 replay 无效信号，让现有 `replaySessionRuntimeStatus` 负责 WARN 和 best-effort 清理；不把失败变成 turn error，不返回部分状态，不重锚定或移动旧状态。状态日志为空时继续使用既有 canonical 历史，不对它做排序或修复。
+实现复用回放时的单次遍历，以 pending call ID 集合检查连续、完整的工具结果，并以最后已插入的 Seq 校验回放顺序与恰好一次命中，不增加全局排序/修复层。只返回完整、校验成功的 candidate。任一失败返回 replay 无效信号，让现有 `replaySessionRuntimeStatus` 负责 WARN 和 best-effort 清理；不把失败变成 turn error，不返回部分状态，不重锚定或移动旧状态。状态日志为空时继续使用既有 canonical 历史，不对它做排序或修复。
 
 **Alternatives considered:**
 
@@ -97,4 +97,19 @@
 ## Open Questions
 
 - 无阻塞提案的问题。生产样例中上一 turn 为何没有后续 assistant 文本，仅凭请求体无法区分取消、错误、崩溃或其他结束路径；修复不依赖该原因，测试覆盖工具尾部恢复。
-- 具体状态字段和辅助函数命名在实施时选择最小、符合生产基线现有风格的方案；不引入通用重建框架。
+- 缺失 TraceID 且没有既有 assistant-final/user 边界的遗留占位行不能可靠区分 round 身份；实施维持原分组规则，以非法 status 日志整体降级处理，不迁移或虚构旧数据边界。
+
+## Verification
+
+2026-11-11 在本生产基线工作树验证：
+
+- 五个已知跨 turn 边界变体及组合 replay 回归在原实现下失败，重建修复后通过；相同 round 并行、同 turn 多 round、缺失 TraceID 的兼容性对照保持通过。
+- 十四个非法协议/锚点用例和 cache cleanup 失败回归在原 replay 下失败，校验修复后通过；合法并行组的原字节、Seq 10/20/30、原请求前缀及 canonical 输入不变。
+- `go test ./internal/agent -run '^TestRuntimeStatus_ParallelBudgetWaitsForCompleteGroup$' -count=10` 通过，覆盖 root/SubAgent、逆序完成、唯一预算、call-order 锚点及 SSE/子 agent transcript 排除。
+- `go test ./internal/turn -run '^TestRuntimeStatusReplay_OpenAIWireToolTailBoundary$' -count=1` 通过：真实 SDK 请求发送到本地假上游，原错误工具块返回 400，修复后的前缀和完整请求均成功，SDK raw messages 保留旧请求前缀。
+- `go test -race ./internal/agent ./internal/turn ./internal/handler` 通过。
+- `make test`（`go test -race ./...`）通过，包含已有持久化、记忆、标题、cache epoch 和 compaction 集成回归。
+- `make lint`（`go vet ./...`）、`openspec validate fix-tool-result-status-boundaries --strict --no-interactive` 和 diff whitespace 校验通过。
+- 最终独立只读复核未发现已确认的问题；无法从缺失身份的遗留行推断真实 round 的限制按既定兼容性规则处理。
+
+需要监听本地端口的测试经批准在沙箱外执行；验证未调用生产上游或使用生产凭据。原始生产日志及测试运行产物不进入提交。
