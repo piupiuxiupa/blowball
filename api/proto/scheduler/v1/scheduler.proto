@@ -1,0 +1,343 @@
+// scheduler/v1 defines the versioned internal contract between the standalone
+// Scheduler service and the blowball main service (API/Agent roles).
+//
+// Ownership:
+//   - SchedulerService is implemented by the Scheduler process. It owns task
+//     definitions, time rules, occurrence materialization, claims/leases,
+//     start authorization and the scheduling status projection.
+//   - SchedulerControlService is implemented by the main service (API/all).
+//     It owns task-resource versions and the authoritative model/owner
+//     validation. Scheduler calls it before persisting a task configuration.
+//   - Occurrence history (ListOccurrences/GetOccurrence) is scheduler-owned;
+//     task-session content and resource bytes are main-service owned.
+//
+// Security invariants for every message in this file:
+//   - No user login JWT, LLM token, API key, password or credential of any
+//     kind is represented as a field. Secrets stay in the main service's
+//     in-memory execution identity chain.
+//   - Actor is trusted only because the transport requires mutual TLS plus a
+//     per-method service identity. The calling main service derives Actor from
+//     its own authenticated request context; an external client cannot inject
+//     it (and no field here is trusted from an end user).
+//   - All RPCs carry a deadline enforced by the server interceptor.
+//
+// Error contract: transport-level failures surface as gRPC status codes;
+// domain error codes travel in the status message as "CODE: detail" and are
+// mapped back to HTTP by the main service (see internal/rpcx).
+syntax = "proto3";
+
+package blowball.scheduler.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/lush/blowball/api/gen/go/scheduler/v1;schedulerv1";
+
+// SessionSource distinguishes the physical storage a task occurrence's
+// conversation lives in. legacy_interactive marks occurrences created before
+// the scheduled-session split; their content stays in the ordinary sessions
+// table and is never copied.
+enum SessionSource {
+  SESSION_SOURCE_UNSPECIFIED = 0;
+  SESSION_SOURCE_SCHEDULED = 1;
+  SESSION_SOURCE_LEGACY_INTERACTIVE = 2;
+}
+
+enum ScheduleType {
+  SCHEDULE_TYPE_UNSPECIFIED = 0;
+  SCHEDULE_TYPE_AT = 1;
+  SCHEDULE_TYPE_CRON = 2;
+}
+
+// Actor is the trusted owner identity. It is populated by the calling main
+// service from its authenticated context, never from a client-supplied body.
+message Actor {
+  string user_id = 1;
+}
+
+// Schedule mirrors the pure at/cron rule. run_at is RFC3339Nano and populated
+// only for SCHEDULE_TYPE_AT; cron_expression is a standard five-field
+// expression; timezone is an explicit IANA location.
+message Schedule {
+  ScheduleType type = 1;
+  string run_at = 2;
+  string cron_expression = 3;
+  string timezone = 4;
+}
+
+// TaskConfig is the non-secret, user-editable task configuration. The main
+// command is prompt; resources are optional and referenced only through an
+// immutable published revision (resource_revision + manifest_hash). A zero
+// resource_revision means "no resources".
+message TaskConfig {
+  string name = 1;
+  string prompt = 2;
+  Schedule schedule = 3;
+  string model = 4;
+  string reasoning_effort = 5;
+  bool enabled = 6;
+  uint64 resource_revision = 7;
+  string manifest_hash = 8;
+}
+
+// Task is the current, editable task definition. execution_hold_occurrence_id
+// and blocked_reason are server-owned read-only state: no client may clear
+// them through UpdateTask.
+message Task {
+  string task_id = 1;
+  string user_id = 2;
+  TaskConfig config = 3;
+  int64 revision = 4;
+  google.protobuf.Timestamp next_run_at = 5;
+  string paused_reason = 6;
+  string execution_hold_occurrence_id = 7;
+  string blocked_reason = 8;
+  google.protobuf.Timestamp create_time = 9;
+  google.protobuf.Timestamp update_time = 10;
+  bool deleted = 11;
+}
+
+// Occurrence is one materialized trigger with its immutable configuration
+// snapshot. session_source selects the authoritative conversation table group.
+// run_id/session_id are stable and pre-allocated before any Runtime call.
+message Occurrence {
+  string occurrence_id = 1;
+  string task_id = 2;
+  string user_id = 3;
+  int64 task_revision = 4;
+  string snapshot_json = 5;
+  google.protobuf.Timestamp scheduled_for = 6;
+  string run_id = 7;
+  string session_id = 8;
+  SessionSource session_source = 9;
+  string status = 10;
+  string reason = 11;
+  uint32 attempt_count = 12;
+  google.protobuf.Timestamp started_at = 13;
+  google.protobuf.Timestamp finished_at = 14;
+  string last_error = 15;
+  uint64 resource_revision = 16;
+  string manifest_hash = 17;
+}
+
+// StartGrant is the unique, idempotent authorization bound to one receipt
+// generation. deadline is fixed at grant creation and is authoritative for the
+// Runtime watchdog even when the Scheduler is offline.
+message StartGrant {
+  string occurrence_id = 1;
+  uint64 generation = 2;
+  string run_id = 3;
+  string session_id = 4;
+  google.protobuf.Timestamp started_at = 5;
+  google.protobuf.Timestamp deadline = 6;
+}
+
+// ResourceFile describes one published draft file in the immutable manifest.
+message ResourceFile {
+  string path = 1;
+  uint64 size = 2;
+  string sha256 = 3;
+}
+
+// ResourceVersion is the main-service-owned immutable publication metadata.
+message ResourceVersion {
+  string task_id = 1;
+  uint64 resource_revision = 2;
+  string manifest_hash = 3;
+  uint32 file_count = 4;
+  uint64 total_bytes = 5;
+  google.protobuf.Timestamp create_time = 6;
+  repeated ResourceFile files = 7;
+}
+
+message CreateTaskRequest {
+  Actor actor = 1;
+  TaskConfig config = 2;
+}
+
+message CreateTaskResponse {
+  Task task = 1;
+}
+
+message GetTaskRequest {
+  Actor actor = 1;
+  string task_id = 2;
+}
+
+message GetTaskResponse {
+  Task task = 1;
+}
+
+message ListTasksRequest {
+  Actor actor = 1;
+  int32 limit = 2;
+  string cursor = 3;
+}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+  string next_cursor = 2;
+}
+
+// UpdateTaskRequest uses expected_revision for optimistic concurrency. Zero
+// keeps the legacy transactional update path (compatibility for old clients);
+// a non-zero value must equal the current revision or the RPC fails with
+// FAILED_PRECONDITION (HTTP 409).
+message UpdateTaskRequest {
+  Actor actor = 1;
+  string task_id = 2;
+  TaskConfig config = 3;
+  int64 expected_revision = 4;
+}
+
+message UpdateTaskResponse {
+  Task task = 1;
+}
+
+message DeleteTaskRequest {
+  Actor actor = 1;
+  string task_id = 2;
+  int64 expected_revision = 3;
+}
+
+message DeleteTaskResponse {
+  Task task = 1;
+}
+
+message ListOccurrencesRequest {
+  Actor actor = 1;
+  string task_id = 2;
+  int32 limit = 3;
+  string cursor = 4;
+}
+
+message ListOccurrencesResponse {
+  repeated Occurrence occurrences = 1;
+  string next_cursor = 2;
+}
+
+// GetOccurrence is an internal read used by the Runtime to re-validate the
+// authoritative snapshot; it carries no Actor because it exposes exactly the
+// occurrence the Runtime was asked to execute and requires the scheduler
+// service identity.
+message GetOccurrenceRequest {
+  string occurrence_id = 1;
+}
+
+message GetOccurrenceResponse {
+  Occurrence occurrence = 1;
+}
+
+// AuthorizeStart asks the Scheduler to cross the logical startup fence. The
+// Scheduler atomically checks task enabled/not-deleted, claim/lease/attempt
+// validity, and receipt generation, then persists (or returns the existing)
+// unique grant. The same identity is idempotent; a fenced worker is rejected.
+message AuthorizeStartRequest {
+  string occurrence_id = 1;
+  string run_id = 2;
+  string session_id = 3;
+  uint32 attempt = 4;
+  uint64 receipt_generation = 5;
+  // claim_fence_id is the Scheduler-issued lease fence identifier — a
+  // non-secret concurrency control value, never a user credential.
+  string claim_fence_id = 6;
+  string runtime_worker_generation = 7;
+}
+
+message AuthorizeStartResponse {
+  StartGrant grant = 1;
+}
+
+message GetStartGrantRequest {
+  string occurrence_id = 1;
+  uint64 receipt_generation = 2;
+}
+
+message GetStartGrantResponse {
+  StartGrant grant = 1;
+}
+
+// ValidateTaskActorAndConfig asks the main service to re-validate the owner,
+// model catalog entry and (when present) the resource binding. The reply
+// carries the actual resolved model so occurrence snapshots can show the real
+// model even when the task left model empty (deployment default).
+message ValidateTaskActorAndConfigRequest {
+  Actor actor = 1;
+  string task_id = 2;
+  TaskConfig config = 3;
+}
+
+message ValidateTaskActorAndConfigResponse {
+  string resolved_model = 1;
+  string resolved_reasoning_effort = 2;
+}
+
+message ValidateResourceBindingRequest {
+  Actor actor = 1;
+  string task_id = 2;
+  uint64 resource_revision = 3;
+  string manifest_hash = 4;
+}
+
+message ValidateResourceBindingResponse {}
+
+message GetResourceVersionRequest {
+  Actor actor = 1;
+  string task_id = 2;
+  uint64 resource_revision = 3;
+}
+
+message GetResourceVersionResponse {
+  ResourceVersion version = 1;
+}
+
+message GetResourceDraftRequest {
+  Actor actor = 1;
+  string task_id = 2;
+}
+
+message GetResourceDraftResponse {
+  uint64 draft_revision = 1;
+  repeated ResourceFile files = 2;
+  string draft_root = 3;
+}
+
+// PublishResource materializes the task's draft into a protected immutable
+// revision. request_id is the idempotency key: replaying the same request
+// returns the same revision/hash, never a second publication of the same
+// identity. expected_draft_revision fences concurrent draft edits.
+message PublishResourceRequest {
+  Actor actor = 1;
+  string task_id = 2;
+  uint64 expected_draft_revision = 3;
+  string request_id = 4;
+}
+
+message PublishResourceResponse {
+  uint64 resource_revision = 1;
+  string manifest_hash = 2;
+  uint32 file_count = 3;
+  uint64 total_bytes = 4;
+}
+
+// SchedulerService is implemented by the standalone Scheduler process.
+service SchedulerService {
+  rpc CreateTask(CreateTaskRequest) returns (CreateTaskResponse);
+  rpc GetTask(GetTaskRequest) returns (GetTaskResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc UpdateTask(UpdateTaskRequest) returns (UpdateTaskResponse);
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteTaskResponse);
+  rpc ListOccurrences(ListOccurrencesRequest) returns (ListOccurrencesResponse);
+  rpc GetOccurrence(GetOccurrenceRequest) returns (GetOccurrenceResponse);
+  rpc AuthorizeStart(AuthorizeStartRequest) returns (AuthorizeStartResponse);
+  rpc GetStartGrant(GetStartGrantRequest) returns (GetStartGrantResponse);
+}
+
+// SchedulerControlService is implemented by the main service. It never calls
+// the LLM and never executes an agent.
+service SchedulerControlService {
+  rpc ValidateTaskActorAndConfig(ValidateTaskActorAndConfigRequest) returns (ValidateTaskActorAndConfigResponse);
+  rpc ValidateResourceBinding(ValidateResourceBindingRequest) returns (ValidateResourceBindingResponse);
+  rpc GetResourceVersion(GetResourceVersionRequest) returns (GetResourceVersionResponse);
+  rpc GetResourceDraft(GetResourceDraftRequest) returns (GetResourceDraftResponse);
+  rpc PublishResource(PublishResourceRequest) returns (PublishResourceResponse);
+}

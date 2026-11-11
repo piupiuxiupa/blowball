@@ -1,0 +1,113 @@
+// scheduledruntime/v1 defines the versioned internal contract for scheduled
+// execution on the Agent (or all) role. The Scheduler owns time rules and
+// start authorization; the Runtime owns durable execution facts.
+//
+// Security invariants:
+//   - No user login JWT, LLM token, API key or other credential appears in any
+//     message. The Runtime resolves per-user LLM credentials locally and mints
+//     a bounded execution identity in memory, exactly like interactive turns.
+//   - The submit body is NOT an execution authorization: the Runtime fetches
+//     the authoritative occurrence from the Scheduler and re-validates owner,
+//     fingerprint, model and resource binding before creating anything.
+//   - Mutual TLS + per-method service identity + deadlines are enforced by the
+//     shared RPC middleware.
+syntax = "proto3";
+
+package blowball.scheduledruntime.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/lush/blowball/api/gen/go/scheduledruntime/v1;scheduledruntimev1";
+
+// SubmitScheduledRun is the idempotent acceptance call. It carries only the
+// stable identity established by the Scheduler (occurrence/task/run/session),
+// the durable attempt counter and the non-secret configuration fingerprint.
+// Repeating the same identity + fingerprint returns the existing receipt;
+// a different fingerprint is rejected without creating a second execution.
+message SubmitScheduledRunRequest {
+  string occurrence_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+  uint32 attempt = 5;
+  string config_fingerprint = 6;
+}
+
+message SubmitScheduledRunResponse {
+  string occurrence_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+  uint64 receipt_generation = 5;
+  string status = 6;
+  google.protobuf.Timestamp accepted_at = 7;
+  bool already_accepted = 8;
+}
+
+// ExecutionStopProof is a positive, generation-bound statement that the
+// previously started work has terminated and cannot write again. Heartbeat
+// loss, an unreachable RPC, an expired lease/deadline or "cancel sent" are NOT
+// stop proofs and never populate this message.
+message ExecutionStopProof {
+  bool present = 1;
+  string occurrence_id = 2;
+  string run_id = 3;
+  uint64 generation = 4;
+  google.protobuf.Timestamp proven_at = 5;
+  string kind = 6;
+}
+
+// ScheduledExecution is the authoritative Runtime-side execution fact.
+// status: accepted | preparing | start_intent | running | terminal | uncertain.
+// uncertain means the execution may still be running; it is never reported as
+// stopped and never automatically replayed.
+message ScheduledExecution {
+  string occurrence_id = 1;
+  string task_id = 2;
+  string user_id = 3;
+  string run_id = 4;
+  string session_id = 5;
+  uint64 receipt_generation = 6;
+  string status = 7;
+  string reason = 8;
+  string last_error = 9;
+  google.protobuf.Timestamp accepted_at = 10;
+  google.protobuf.Timestamp start_intent_at = 11;
+  google.protobuf.Timestamp started_at = 12;
+  google.protobuf.Timestamp finished_at = 13;
+  string config_fingerprint = 14;
+  uint64 grant_generation = 15;
+  google.protobuf.Timestamp grant_deadline = 16;
+  bool terminal = 17;
+  bool started = 18;
+  bool uncertain = 19;
+  ExecutionStopProof stop_proof = 20;
+}
+
+message GetScheduledExecutionRequest {
+  string occurrence_id = 1;
+}
+
+message GetScheduledExecutionResponse {
+  ScheduledExecution execution = 1;
+}
+
+// CancelScheduledRun asks the owning Runtime to cancel one run. A successful
+// response only means the cancel request was accepted; it is not a stop proof.
+message CancelScheduledRunRequest {
+  string occurrence_id = 1;
+  string run_id = 2;
+  string reason = 3;
+}
+
+message CancelScheduledRunResponse {
+  bool accepted = 1;
+  string status = 2;
+}
+
+// ScheduledRuntimeService is implemented by the Agent (or all) role.
+service ScheduledRuntimeService {
+  rpc SubmitScheduledRun(SubmitScheduledRunRequest) returns (SubmitScheduledRunResponse);
+  rpc GetScheduledExecution(GetScheduledExecutionRequest) returns (GetScheduledExecutionResponse);
+  rpc CancelScheduledRun(CancelScheduledRunRequest) returns (CancelScheduledRunResponse);
+}

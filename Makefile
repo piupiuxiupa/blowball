@@ -1,7 +1,12 @@
-.PHONY: build run run-api run-agent test migrate lint seed clean
+.PHONY: build run run-api run-agent test migrate lint seed clean proto
 
 build:
 	go build -o bin/blowball ./cmd/blowball/
+
+# Regenerate the versioned internal gRPC/protobuf bindings (api/gen/go).
+# protoc must be installed; the plugins are locked in go.mod tool directives.
+proto:
+	./scripts/gen-proto.sh
 
 # run == --role all: the pre-split monolith (full route set on server.port).
 run: build

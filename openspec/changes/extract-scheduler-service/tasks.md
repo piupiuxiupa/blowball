@@ -1,9 +1,9 @@
 ## 1. 审阅与传输契约
 
-- [ ] 1.1 审阅本提案的工程默认值：单 Go module、主服务持有任务会话、资源发布版本、start_intent 后保守恢复及 execution hold、任务会话只读；确认后再开始应用代码。
-- [ ] 1.2 在 api/proto 下定义 scheduler/v1 与 scheduledruntime/v1 的管理、actor/模型校验、资源、历史、接收/查询/取消和 start grant RPC；明确 ID、source、revision、fingerprint、deadline 与错误码，不包含用户凭证。
-- [ ] 1.3 添加兼容 Go 1.26 的锁定 gRPC/protobuf 依赖及可重复生成目标；生成客户端，测试字段往返、版本兼容和敏感字段排除。
-- [ ] 1.4 先写 mTLS/每方法服务身份、伪造 actor、deadline 和 peer 不可用测试，再实现公共 RPC 中间件及客户端连接复用。
+- [x] 1.1 审阅本提案的工程默认值：单 Go module、主服务持有任务会话、资源发布版本、start_intent 后保守恢复及 execution hold、任务会话只读；确认后再开始应用代码。
+- [x] 1.2 在 api/proto 下定义 scheduler/v1 与 scheduledruntime/v1 的管理、actor/模型校验、资源、历史、接收/查询/取消和 start grant RPC；明确 ID、source、revision、fingerprint、deadline 与错误码，不包含用户凭证。
+- [x] 1.3 添加兼容 Go 1.26 的锁定 gRPC/protobuf 依赖及可重复生成目标；生成客户端，测试字段往返、版本兼容和敏感字段排除。
+- [x] 1.4 先写 mTLS/每方法服务身份、伪造 actor、deadline 和 peer 不可用测试，再实现公共 RPC 中间件及客户端连接复用。
 
 ## 2. 数据迁移与物理隔离
 
