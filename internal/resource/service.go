@@ -76,6 +76,9 @@ func New(store Store, tasks TaskOwner, workspace func(userID string) string, lim
 // Limits returns the effective publication/context limits.
 func (s *Service) Limits() Limits { return s.limits }
 
+// WorkspaceRoot resolves the user's workspace root (server-side only).
+func (s *Service) WorkspaceRoot(userID string) string { return s.workspace(userID) }
+
 // EnsureDraft verifies ownership and performs controlled namespace/draft
 // initialization.
 func (s *Service) EnsureDraft(ctx context.Context, userID, taskID string) (Layout, error) {

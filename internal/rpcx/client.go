@@ -52,9 +52,3 @@ func Dial(opts DialOptions) (*grpc.ClientConn, error) {
 	dialOpts = append(dialOpts, opts.Extra...)
 	return grpc.NewClient(target, dialOpts...)
 }
-
-// DialBare is a test/support helper for an already-authenticated in-memory
-// listener (bufconn). Production callers use Dial.
-func DialBare(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	return grpc.NewClient(target, opts...)
-}

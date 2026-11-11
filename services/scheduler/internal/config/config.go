@@ -126,6 +126,11 @@ func (c *Config) applyDefaults() {
 	if c.MainService.Timeout <= 0 {
 		c.MainService.Timeout = rpcx.DefaultTimeout
 	}
+	// The Scheduler dials the main service as a CLIENT; the main server's
+	// certificate identity is blowball-main when unset.
+	if c.MainService.TLS.ServerName == "" {
+		c.MainService.TLS.ServerName = "blowball-main"
+	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"
 	}

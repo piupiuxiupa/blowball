@@ -4,19 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/lush/blowball/internal/model"
 )
-
-// terminalStatuses is the occurrence projection's terminal set.
-var terminalStatuses = []any{
-	model.ScheduledRunSucceeded, model.ScheduledRunError, model.ScheduledRunSkipped,
-	model.ScheduledRunCancelled, model.ScheduledRunInterrupted,
-}
 
 const terminalStatusPredicate = `status NOT IN ('succeeded','error','skipped','cancelled','interrupted')`
 
@@ -303,15 +296,3 @@ func (s *Store) CountActiveOccurrences(ctx context.Context) (int, error) {
 	err := s.db.GetContext(ctx, &n, `SELECT COUNT(*) FROM scheduled_task_runs WHERE `+terminalStatusPredicate)
 	return n, err
 }
-
-func terminalReason(status string) string {
-	switch status {
-	case model.ScheduledRunInterrupted:
-		return model.ScheduledReasonResultUnknown
-	default:
-		return ""
-	}
-}
-
-var _ = fmt.Sprintf
-var _ = terminalStatuses

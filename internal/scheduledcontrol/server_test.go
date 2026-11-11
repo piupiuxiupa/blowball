@@ -55,7 +55,7 @@ func controlFixture(t *testing.T) (*Service, *fakeUsers, *fakeResources) {
 	svc := New(users, res, modelselect.Config{
 		Catalog: []config.ModelCatalogEntry{{Name: "model-a", MaxContextTokens: 100000, MaxCompletionTokens: 8000}},
 		Default: "model-a", DefaultEffort: "none",
-	}, resource.DefaultLimits())
+	})
 	return svc, users, res
 }
 

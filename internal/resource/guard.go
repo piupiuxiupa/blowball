@@ -3,7 +3,9 @@ package resource
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -72,8 +74,40 @@ func (g *Guard) CheckWrite(ctx context.Context, userID, relPath, kind string) er
 	default:
 		return fmt.Errorf("%w: unknown write operation", ErrReadOnly)
 	}
+	// Reject a symlink anywhere between draft/ and the target: the lexical
+	// rules above cannot stop a draft symlink that points into revisions/.
+	if err := g.rejectSymlinkComponents(userID, taskID, clean); err != nil {
+		return err
+	}
 	if err := g.svc.BumpDraft(ctx, userID, taskID); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (g *Guard) rejectSymlinkComponents(userID, taskID, clean string) error {
+	layout, err := NewLayout(g.svc.WorkspaceRoot(userID), taskID)
+	if err != nil {
+		return fmt.Errorf("%w: invalid managed path", ErrInvalidPath)
+	}
+	prefix := CronDirName + "/" + taskID + "/" + DraftDir + "/"
+	rest := strings.TrimPrefix(clean, prefix)
+	if rest == clean || rest == "" {
+		return nil
+	}
+	current := layout.DraftRoot()
+	for _, segment := range strings.Split(rest, "/") {
+		current = filepath.Join(current, segment)
+		info, statErr := os.Lstat(current)
+		if os.IsNotExist(statErr) {
+			return nil // the remaining components will be created by the write
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: symlinked draft component", ErrReadOnly)
+		}
 	}
 	return nil
 }

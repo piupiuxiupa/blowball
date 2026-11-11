@@ -41,8 +41,8 @@ type Service struct {
 }
 
 // New wires the control service.
-func New(users UserLookup, resources ResourceService, selection modelselect.Config, limits resource.Limits) *Service {
-	return &Service{users: users, resources: resources, selection: selection, limits: limits}
+func New(users UserLookup, resources ResourceService, selection modelselect.Config) *Service {
+	return &Service{users: users, resources: resources, selection: selection}
 }
 
 // ValidateTaskActorAndConfig re-validates the owner, model/effort and resource
@@ -94,7 +94,7 @@ func (s *Service) GetResourceVersion(ctx context.Context, req *schedulerv1.GetRe
 	if err != nil {
 		return nil, resourceErr(err)
 	}
-	return &schedulerv1.GetResourceVersionResponse{Version: versionProto(actor, v)}, nil
+	return &schedulerv1.GetResourceVersionResponse{Version: versionProto(v)}, nil
 }
 
 // GetResourceDraft returns the editable draft revision and file list.
@@ -162,7 +162,7 @@ func (s *Service) requireActiveActor(ctx context.Context, actor *schedulerv1.Act
 	return user.UserID, nil
 }
 
-func versionProto(userID string, v *resource.VersionInfo) *schedulerv1.ResourceVersion {
+func versionProto(v *resource.VersionInfo) *schedulerv1.ResourceVersion {
 	out := &schedulerv1.ResourceVersion{
 		TaskId: v.TaskID, ResourceRevision: v.Revision, ManifestHash: v.ManifestHash,
 		FileCount: uint32(v.FileCount), TotalBytes: uint64(v.TotalBytes),
@@ -170,7 +170,6 @@ func versionProto(userID string, v *resource.VersionInfo) *schedulerv1.ResourceV
 	for _, f := range v.Files {
 		out.Files = append(out.Files, &schedulerv1.ResourceFile{Path: f.Path, Size: uint64(f.Size), Sha256: f.SHA256})
 	}
-	_ = userID
 	return out
 }
 

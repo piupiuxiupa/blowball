@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -454,5 +453,3 @@ func TestDeleteTaskCancelsUnstartedKeepsStarted(t *testing.T) {
 }
 
 func strPtr(v string) *string { return &v }
-
-var _ = fmt.Sprintf

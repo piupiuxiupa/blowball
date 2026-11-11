@@ -28,8 +28,8 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
 	scheduledruntimev1 "github.com/lush/blowball/api/gen/go/scheduledruntime/v1"
+	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
 	"github.com/lush/blowball/internal/agent"
 	"github.com/lush/blowball/internal/artifact"
 	"github.com/lush/blowball/internal/config"
@@ -500,14 +500,17 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	}
 	rt.resourceSvc = resource.New(rt.mysqlStore, owner, fsStore.UserWorkspace, resLimits)
 	rt.resourceGuard = resource.NewGuard(rt.resourceSvc)
-	rt.controlSvc = scheduledcontrol.New(rt.mysqlStore, rt.resourceSvc, modelselect.NewConfig(cfg), resLimits)
+	rt.controlSvc = scheduledcontrol.New(rt.mysqlStore, rt.resourceSvc, modelselect.NewConfig(cfg))
 	rt.scheduledSessions = service.NewScheduledSessions(rt.mysqlStore.ForSource(model.SessionSourceScheduled), rt.redisStore).
 		WithDeletionGuard(func(ctx context.Context, sessionID string) (string, error) {
 			rec, gerr := rt.mysqlStore.GetScheduledExecutionBySession(ctx, sessionID)
 			if gerr != nil {
 				return "", gerr
 			}
-			if rec != nil && rec.MayBeRunning() {
+			// Any non-terminal execution fact means a stop proof is still
+			// missing (accepted/preparing may start any moment; start_intent/
+			// running/uncertain may be side-effecting).
+			if rec != nil && !rec.Terminal() {
 				return rec.Status + ":" + rec.Reason, nil
 			}
 			return "", nil

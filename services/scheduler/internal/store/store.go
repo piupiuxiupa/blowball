@@ -14,7 +14,6 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/schedule"
 	"github.com/lush/blowball/internal/scheduledcontract"
 )
 
@@ -328,13 +327,4 @@ func (s *Store) ResourceReferences(ctx context.Context, taskID string, revision 
 		return false, err
 	}
 	return n > 0, nil
-}
-
-// nextCronAfter advances a cron rule strictly after now.
-func nextCronAfter(rule schedule.Rule, now time.Time) (*time.Time, error) {
-	next, err := schedule.Next(rule, now)
-	if err != nil {
-		return nil, err
-	}
-	return &next, nil
 }

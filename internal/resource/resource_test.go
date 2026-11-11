@@ -351,11 +351,19 @@ func TestGuardRules(t *testing.T) {
 	// A path that cleans across the namespace stays protected.
 	assert.ErrorIs(t, guard.CheckWrite(ctx, "user-1", CronDirName+"/"+taskID+"/draft/../revisions/x", WriteModify), ErrReadOnly)
 
+	// A symlink inside draft pointing at a published revision is rejected: the
+	// lexical path is allowed but the real write would escape the draft.
+	layout, err := svc.EnsureDraft(ctx, "user-1", taskID)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.RevisionRoot(1), 0o755))
+	require.NoError(t, os.Symlink(layout.RevisionRoot(1), filepath.Join(layout.DraftRoot(), "escape")))
+	assert.ErrorIs(t, guard.CheckWrite(ctx, "user-1", CronDirName+"/"+taskID+"/draft/escape/x", WriteCreate), ErrReadOnly)
+
 	// Unknown task: not found. Cross-user: the fake owner denies.
 	owner.owned["other"] = false
 	assert.ErrorIs(t, guard.CheckWrite(ctx, "user-1", CronDirName+"/"+uuid.NewString()+"/draft/x", WriteCreate), ErrNotFound)
 	owner.err = errors.New("scheduler down")
-	err := guard.CheckWrite(ctx, "user-1", CronDirName+"/"+taskID+"/draft/x", WriteCreate)
+	err = guard.CheckWrite(ctx, "user-1", CronDirName+"/"+taskID+"/draft/x", WriteCreate)
 	assert.ErrorIs(t, err, ErrUnavailable)
 }
 

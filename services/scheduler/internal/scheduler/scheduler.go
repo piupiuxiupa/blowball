@@ -314,8 +314,24 @@ func (s *Scheduler) handleSubmitFailure(ctx context.Context, run *model.Schedule
 		return // accepted after all; reconciliation tracks it
 	}
 	if !ambiguous(cause) {
+		status, reason := model.ScheduledRunError, model.ScheduledReasonStartRejected
+		if de, ok := rpcx.AsError(cause); ok {
+			switch de.Code {
+			case rpcx.CodeUserUnavailable:
+				reason = model.ScheduledReasonUserUnavailable
+			case rpcx.CodeSessionPolicy:
+				status, reason = model.ScheduledRunSkipped, model.ScheduledSessionPolicyMigrationReason
+			case rpcx.CodeSessionBusy:
+				status, reason = model.ScheduledRunSkipped, model.ScheduledReasonSessionBusy
+			}
+		}
 		_, _ = s.store.FinishBeforeStart(ctx, run.OccurrenceID, run.ClaimToken,
-			model.ScheduledRunError, model.ScheduledReasonStartRejected, cause.Error(), s.now().UTC())
+			status, reason, cause.Error(), s.now().UTC())
+		if reason == model.ScheduledReasonUserUnavailable {
+			if perr := s.store.PauseTask(ctx, run.TaskID, reason, s.now().UTC()); perr != nil {
+				s.warn(ctx, "pause unavailable-owner task failed", perr)
+			}
+		}
 		return
 	}
 	// The runtime is unreachable and no receipt was found. Requeue within the
