@@ -77,11 +77,11 @@ The user approved the seven fixes in the preceding review. Use the current clean
 
 **Files:** `internal/store/mysql/message.go`, `message_test.go`.
 **Interface:** Both placeholder page helpers and `subagentPlaceholderFilter` must use the same fixed inner-table alias for either physical table group.
-- [ ] Add scheduled placeholder ascending/descending readback regressions, including an empty page and full-view/ordinary controls.
-- [ ] Observe the unknown `messages.content` qualifier failure on MySQL.
-- [ ] Give both inner page sources the fixed alias required by the filter.
-- [ ] Run the focused message tests on the dedicated MySQL test database.
-- [ ] Commit `fix(mysql): alias scheduled placeholder pagination sources`.
+- [x] Add scheduled placeholder ascending/descending readback regressions, including an empty page and full-view/ordinary controls.
+- [x] Observe the unknown `messages.content` qualifier failure on MySQL.
+- [x] Give both inner page sources the fixed alias required by the filter.
+- [x] Run the focused message tests on the dedicated MySQL test database.
+- [x] Commit `fix(mysql): alias scheduled placeholder pagination sources`.
 
 ### Task 6: Complete scheduled sub-agent run timestamps
 

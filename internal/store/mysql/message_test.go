@@ -689,7 +689,11 @@ func TestListMessagesPaged_SourceBoundPlaceholderAlias(t *testing.T) {
 					slices.Reverse(want)
 				}
 				assert.Equal(t, want, indices)
-				assert.Empty(t, nextCursor)
+				if len(msgs) == 0 {
+					assert.Empty(t, nextCursor)
+				} else {
+					assert.NotEmpty(t, nextCursor)
+				}
 			})
 		}
 	}
