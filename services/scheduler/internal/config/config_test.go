@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lush/blowball/internal/pkg/logger"
 	"github.com/lush/blowball/internal/rpcx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,6 +47,15 @@ func TestLoadSchedulerConfigExample(t *testing.T) {
 	cfg, err := Load("../../config.example.yaml")
 	require.NoError(t, err)
 	assert.Equal(t, rpcx.SecurityModeMTLS, cfg.RPC.SecurityMode)
+	_, err = logger.InitForRole(cfg.Logging, t.TempDir(), "scheduler")
+	require.NoError(t, err, "the shipped Scheduler example must initialize its logger")
+}
+
+func TestDefaultSchedulerLoggingInitializes(t *testing.T) {
+	cfg, err := Load(writeConfig(t, plaintextConfig))
+	require.NoError(t, err)
+	_, err = logger.InitForRole(cfg.Logging, t.TempDir(), "scheduler")
+	require.NoError(t, err)
 }
 
 func TestLoadPlaintextCredentialsValidation(t *testing.T) {

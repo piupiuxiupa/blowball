@@ -96,7 +96,7 @@
 
 ## 7. 全量验收与规格收尾
 
-- [ ] 7.1 运行 `make test`，确认完整 `go test -race ./...` 通过；记录集成测试是否实际运行，不把 SKIP 描述为通过。
-- [ ] 7.2 运行 `make lint`，确认 `go vet ./...` 无问题；不提交 `make build`/`make build-scheduler` 的 `bin/` 产物。
-- [ ] 7.3 运行 `openspec validate optional-internal-rpc-security --strict` 和 `git diff --check`，逐项核对两份 delta 的场景覆盖、配置字段/接口名一致性和实际实现；最终提交仅包含本次相关源代码、测试、文档与任务状态。
-- [ ] 7.4 用户要求同步/归档时先确认前置规格已经同步，再处理本变更；不覆盖或丢失原 actor/执行归属、角色隔离、无本地 fallback 场景，不在用户未要求时自动归档任一变更。
+- [x] 7.1 运行 `make test`，确认完整 `go test -race ./...` 通过；记录集成测试是否实际运行，不把 SKIP 描述为通过。
+- [x] 7.2 运行 `make lint`，确认 `go vet ./...` 无问题；不提交 `make build`/`make build-scheduler` 的 `bin/` 产物。
+- [x] 7.3 运行 `openspec validate optional-internal-rpc-security --strict` 和 `git diff --check`，逐项核对两份 delta 的场景覆盖、配置字段/接口名一致性和实际实现；最终提交仅包含本次相关源代码、测试、文档与任务状态。
+- [x] 7.4 用户要求同步/归档时先确认前置规格已经同步，再处理本变更；不覆盖或丢失原 actor/执行归属、角色隔离、无本地 fallback 场景，不在用户未要求时自动归档任一变更。

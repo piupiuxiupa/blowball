@@ -62,6 +62,8 @@ Token 首期由部署方生成，建议使用至少 32 个随机字节并编码�
 
 配置层使用共享的 `RPCPeerTokens` YAML 映射解码器，只检查映射/字符串形状并返回不含输入值的错误；避免 YAML 库在错误类型诊断中回显截断的 Token。运行层仍接收 `map[string]string`，模式和身份/Token 值校验继续由 `rpcx` 负责，不改全局 YAML 解析或其他配置字段。
 
+CLI 验收还校正了 Scheduler 既有默认/示例中的无效日志 sink `console` 为 `stdout`；日志格式仍为 `console`，不修改 logger 支持的 sink 或其他服务策略。该修正避免按新示例启动时在建立 RPC 前失败。
+
 ### D3. 配置保持原有结构
 
 | 所属配置 | 新字段 | 用途 |

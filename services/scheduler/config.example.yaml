@@ -8,7 +8,7 @@
 logging:
   level: info
   format: console
-  output: [console, file]
+  output: [stdout, file]
   file:
     max_size_mb: 64
     max_backups: 5

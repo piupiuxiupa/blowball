@@ -144,7 +144,7 @@ func (c *Config) applyDefaults() {
 		c.Logging.Format = "console"
 	}
 	if len(c.Logging.Output) == 0 {
-		c.Logging.Output = []string{"console"}
+		c.Logging.Output = []string{"stdout"}
 	}
 }
 
