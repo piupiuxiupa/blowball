@@ -47,11 +47,11 @@ The user approved the seven fixes in the preceding review. Use the current clean
 
 **Files:** `services/scheduler/internal/scheduler/scheduler.go`, `scheduler_test.go`.
 **Interface:** Keep existing store methods; call `SetHold` before `MarkInterruptedFromReceipt`, returning before projection if the hold write fails.
-- [ ] Add tests observing hold presence before interrupted projection and injecting a failed hold write followed by a successful retry.
-- [ ] Observe the unsafe ordering/terminalization failures.
-- [ ] Reorder the two operations without changing grants, stop-proof clearing or RPC interfaces.
-- [ ] Run `go test -race ./services/scheduler/internal/scheduler`.
-- [ ] Commit `fix(scheduler): persist execution hold before interrupted projection`.
+- [x] Add tests observing hold presence before interrupted projection and injecting a failed hold write followed by a successful retry.
+- [x] Observe the unsafe ordering/terminalization failures.
+- [x] Reorder the two operations without changing grants, stop-proof clearing or RPC interfaces.
+- [x] Run `go test -race ./services/scheduler/internal/scheduler`.
+- [x] Commit `fix(scheduler): persist execution hold before interrupted projection`.
 
 ### Task 3: Persist startup rejection status and reason
 

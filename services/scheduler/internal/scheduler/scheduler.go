@@ -425,11 +425,14 @@ func (s *Scheduler) reconcile(ctx context.Context) error {
 }
 
 func (s *Scheduler) markUnknown(ctx context.Context, run *model.ScheduledTaskRun, reason string) {
-	if _, err := s.store.MarkInterruptedFromReceipt(ctx, run.OccurrenceID, run.ReceiptGeneration, reason, s.now().UTC()); err != nil {
-		s.warn(ctx, "scheduled interrupted projection failed", err)
-	}
+	// Keep the occurrence active until its durable task hold blocks later
+	// slots. A failed hold write must remain eligible for reconciliation.
 	if err := s.store.SetHold(ctx, run.TaskID, run.OccurrenceID, model.ScheduledReasonResultUnknown, s.now().UTC()); err != nil {
 		s.warn(ctx, "scheduled execution hold persist failed", err)
+		return
+	}
+	if _, err := s.store.MarkInterruptedFromReceipt(ctx, run.OccurrenceID, run.ReceiptGeneration, reason, s.now().UTC()); err != nil {
+		s.warn(ctx, "scheduled interrupted projection failed", err)
 	}
 }
 

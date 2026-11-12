@@ -22,9 +22,11 @@ type fakeStore struct {
 	claimOK   bool
 	launchOK  bool
 
-	recoverable []model.ScheduledTaskRun
-	held        []model.ScheduledTaskRun
-	exhausted   []model.ScheduledTaskRun
+	recoverable  []model.ScheduledTaskRun
+	held         []model.ScheduledTaskRun
+	exhausted    []model.ScheduledTaskRun
+	holdErr      error
+	reconcileOps []string
 
 	receiptGens  []uint64
 	retries      []string
@@ -105,6 +107,7 @@ func (f *fakeStore) MarkRunningFromReceipt(_ context.Context, occurrenceID strin
 
 func (f *fakeStore) MarkInterruptedFromReceipt(_ context.Context, occurrenceID string, _ uint64, _ string, _ time.Time) (bool, error) {
 	f.mu.Lock()
+	f.reconcileOps = append(f.reconcileOps, "interrupted")
 	f.interrupted = append(f.interrupted, occurrenceID)
 	f.mu.Unlock()
 	return true, nil
@@ -120,8 +123,12 @@ func (f *fakeStore) ListExhaustedRuns(context.Context, int, int) ([]model.Schedu
 
 func (f *fakeStore) SetHold(_ context.Context, _, occurrenceID, _ string, _ time.Time) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconcileOps = append(f.reconcileOps, "hold")
+	if f.holdErr != nil {
+		return f.holdErr
+	}
 	f.holds = append(f.holds, occurrenceID)
-	f.mu.Unlock()
 	return nil
 }
 
@@ -261,6 +268,39 @@ func TestReconcileUncertainSetsHoldAndNeverReplays(t *testing.T) {
 	assert.Equal(t, []string{"occ-1"}, st.interrupted)
 	assert.Equal(t, []string{"occ-1"}, st.holds)
 	assert.Empty(t, st.retries)
+	assert.Empty(t, rt.submits)
+}
+
+func TestReconcileUncertainRecordsHoldBeforeProjection(t *testing.T) {
+	s, st, rt, run := runFixture(t)
+	run.GrantGeneration = 3
+	run.Status = model.ScheduledRunRunning
+	rt.fact = &ExecutionFact{Status: model.ScheduledReceiptUncertain, Uncertain: true, ReceiptGeneration: 3}
+	st.recoverable = []model.ScheduledTaskRun{*run}
+
+	require.NoError(t, s.reconcile(t.Context()))
+	assert.Equal(t, []string{"hold", "interrupted"}, st.reconcileOps,
+		"the active occurrence cannot be released before its task hold is durable")
+}
+
+func TestReconcileUncertainHoldFailurePreservesRetry(t *testing.T) {
+	s, st, rt, run := runFixture(t)
+	run.GrantGeneration = 3
+	run.Status = model.ScheduledRunRunning
+	rt.fact = &ExecutionFact{Status: model.ScheduledReceiptUncertain, Uncertain: true, ReceiptGeneration: 3}
+	st.recoverable = []model.ScheduledTaskRun{*run}
+	st.holdErr = errors.New("hold persistence unavailable")
+
+	require.NoError(t, s.reconcile(t.Context()))
+	assert.Empty(t, st.interrupted, "a failed hold write must keep the occurrence active and recoverable")
+	assert.Empty(t, st.holds)
+	assert.Empty(t, rt.submits)
+
+	st.holdErr = nil
+	require.NoError(t, s.reconcile(t.Context()))
+	assert.Equal(t, []string{"occ-1"}, st.holds)
+	assert.Equal(t, []string{"occ-1"}, st.interrupted)
+	assert.Equal(t, []string{"hold", "hold", "interrupted"}, st.reconcileOps)
 	assert.Empty(t, rt.submits)
 }
 
