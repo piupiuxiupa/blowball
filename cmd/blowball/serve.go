@@ -24,7 +24,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
@@ -67,6 +66,26 @@ import (
 // The spec defaults to 24h; if the deployment wants a different value it can be surfaced
 // through config later without touching this constant.
 const RedisCacheTTL = 24 * time.Hour
+
+func internalRPCOptions(cfg config.InternalRPCConfig) (rpcx.ServerOptions, rpcx.DialOptions) {
+	if !cfg.Enabled {
+		return rpcx.ServerOptions{}, rpcx.DialOptions{}
+	}
+	return rpcx.ServerOptions{
+		SecurityMode: cfg.SecurityMode, TLS: cfg.TLS.ToRPCX(), PeerTokens: cfg.PeerTokens, RequireDeadline: true,
+	}, rpcx.DialOptions{
+		Target: cfg.SchedulerEndpoint, SecurityMode: cfg.SecurityMode, TLS: cfg.SchedulerTLS.ToRPCX(),
+		ClientToken: cfg.ClientToken, Timeout: cfg.Timeout,
+	}
+}
+
+func logInternalRPCSecurity(log *zap.Logger, cfg config.InternalRPCConfig) {
+	if cfg.Enabled && cfg.SecurityMode == rpcx.SecurityModePlaintextToken {
+		log.Warn("internal rpc plaintext mode enabled: traffic is unencrypted and server identity is not verified",
+			zap.String("security_mode", string(cfg.SecurityMode)), zap.String("listen", cfg.Listen),
+			zap.String("scheduler_endpoint", cfg.SchedulerEndpoint))
+	}
+}
 
 // MaxUploadBytes caps a single multipart upload at 50 MiB. Larger uploads are rejected with 413 before they reach disk.
 const MaxUploadBytes = 50 << 20
@@ -150,21 +169,19 @@ func serve(configPath, dataRoot, role string) error {
 	engine := newEngine()
 	handler.RegisterHealthz(engine)
 
-	// Internal mTLS gRPC listener (extract-scheduler-service). The api partition
+	// Authenticated internal gRPC listener (extract-scheduler-service). The api partition
 	// serves the SchedulerControlService, the agent partition serves the
 	// ScheduledRuntimeService, and the combined role serves both on one
 	// listener. The Scheduler calls these with its own service identity.
 	var internalSrv *grpc.Server
 	var internalLis net.Listener
 	if rt.cfg.InternalRPC.Enabled {
-		tlsCfg, terr := rpcx.ServerTLS(rt.cfg.InternalRPC.TLS.ToRPCX())
+		serverOpts, _ := internalRPCOptions(rt.cfg.InternalRPC)
+		var terr error
+		internalSrv, terr = rpcx.NewServer(serverOpts)
 		if terr != nil {
-			return fmt.Errorf("internal rpc server tls: %w", terr)
+			return fmt.Errorf("internal rpc server security: %w", terr)
 		}
-		internalSrv = grpc.NewServer(
-			grpc.Creds(credentials.NewTLS(tlsCfg)),
-			grpc.UnaryInterceptor(rpcx.UnaryServerInterceptor(rpcx.ServerOptions{RequireDeadline: true})),
-		)
 		if role != "agent" {
 			schedulerv1.RegisterSchedulerControlServiceServer(internalSrv, rt.controlSvc)
 		}
@@ -175,6 +192,7 @@ func serve(configPath, dataRoot, role string) error {
 		if terr != nil {
 			return fmt.Errorf("internal rpc listen %s: %w", rt.cfg.InternalRPC.Listen, terr)
 		}
+		logInternalRPCSecurity(log, rt.cfg.InternalRPC)
 	}
 
 	// 4. Register routes by role. wireAPI/wireAgent each construct only the
@@ -477,11 +495,8 @@ func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
 	// lazy and per-call failures surface as UNAVAILABLE (HTTP 503) with no
 	// local fallback. A TLS material/config error is fatal.
 	if cfg.InternalRPC.Enabled {
-		conn, derr := rpcx.Dial(rpcx.DialOptions{
-			Target:  cfg.InternalRPC.SchedulerEndpoint,
-			TLS:     cfg.InternalRPC.SchedulerTLS.ToRPCX(),
-			Timeout: cfg.InternalRPC.Timeout,
-		})
+		_, clientOpts := internalRPCOptions(cfg.InternalRPC)
+		conn, derr := rpcx.Dial(clientOpts)
 		if derr != nil {
 			log.Fatal("scheduler rpc client init failed", zap.Error(derr))
 		}

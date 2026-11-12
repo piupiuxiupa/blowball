@@ -17,7 +17,6 @@ import (
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
@@ -37,6 +36,23 @@ func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "scheduler: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func schedulerRPCOptions(cfg config.Config, endpoint string) (rpcx.ServerOptions, rpcx.DialOptions) {
+	return rpcx.ServerOptions{
+		SecurityMode: cfg.RPC.SecurityMode, TLS: cfg.RPC.TLS, PeerTokens: cfg.RPC.PeerTokens, RequireDeadline: true,
+	}, rpcx.DialOptions{
+		Target: endpoint, SecurityMode: cfg.RPC.SecurityMode, TLS: cfg.MainService.TLS,
+		ClientToken: cfg.MainService.ClientToken, Timeout: cfg.MainService.Timeout,
+	}
+}
+
+func logSchedulerRPCSecurity(log *zap.Logger, cfg config.Config) {
+	if cfg.RPC.SecurityMode == rpcx.SecurityModePlaintextToken {
+		log.Warn("internal rpc plaintext mode enabled: traffic is unencrypted and server identity is not verified",
+			zap.String("security_mode", string(cfg.RPC.SecurityMode)), zap.String("listen", cfg.RPC.Listen),
+			zap.String("api_endpoint", cfg.MainService.APIEndpoint), zap.String("agent_endpoint", cfg.MainService.AgentEndpoint))
 	}
 }
 
@@ -80,18 +96,16 @@ func run() error {
 	}
 	defer st.Close()
 
-	apiConn, err := rpcx.Dial(rpcx.DialOptions{
-		Target: cfg.MainService.APIEndpoint, TLS: cfg.MainService.TLS, Timeout: cfg.MainService.Timeout,
-	})
+	_, apiOpts := schedulerRPCOptions(*cfg, cfg.MainService.APIEndpoint)
+	apiConn, err := rpcx.Dial(apiOpts)
 	if err != nil {
 		return fmt.Errorf("scheduler: dial main api rpc: %w", err)
 	}
 	defer apiConn.Close()
 	agentConn := apiConn
 	if cfg.MainService.AgentEndpoint != cfg.MainService.APIEndpoint {
-		agentConn, err = rpcx.Dial(rpcx.DialOptions{
-			Target: cfg.MainService.AgentEndpoint, TLS: cfg.MainService.TLS, Timeout: cfg.MainService.Timeout,
-		})
+		_, agentOpts := schedulerRPCOptions(*cfg, cfg.MainService.AgentEndpoint)
+		agentConn, err = rpcx.Dial(agentOpts)
 		if err != nil {
 			return fmt.Errorf("scheduler: dial main agent rpc: %w", err)
 		}
@@ -109,14 +123,11 @@ func run() error {
 		RetryBackoff: backoff, ExecutionEnabled: enabled,
 	})
 
-	serverTLS, err := rpcx.ServerTLS(cfg.RPC.TLS)
+	serverOpts, _ := schedulerRPCOptions(*cfg, cfg.MainService.APIEndpoint)
+	grpcServer, err := rpcx.NewServer(serverOpts)
 	if err != nil {
-		return fmt.Errorf("scheduler: server tls: %w", err)
+		return fmt.Errorf("scheduler: server security: %w", err)
 	}
-	grpcServer := grpc.NewServer(
-		grpc.Creds(credentials.NewTLS(serverTLS)),
-		grpc.UnaryInterceptor(rpcx.UnaryServerInterceptor(rpcx.ServerOptions{RequireDeadline: true})),
-	)
 	schedulerv1.RegisterSchedulerServiceServer(grpcServer, rpc.NewServer(tasks, sched))
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
@@ -126,6 +137,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("scheduler: listen %s: %w", cfg.RPC.Listen, err)
 	}
+	logSchedulerRPCSecurity(log, *cfg)
 	serveErr := make(chan error, 1)
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {

@@ -75,12 +75,12 @@
 
 **Interfaces:** 消费第 3 组的 `NewServer`/`Dial` 与第 4 组的配置字段；只把模式和入站/出站凭证传给公共层，继续注册现有 Scheduler、control、runtime 和 health 服务。
 
-- [ ] 5.1 先写两入口接线测试：主服务监听/到 Scheduler 的连接、Scheduler 监听/到不同 API/Agent endpoint 的连接使用同一模式和正确凭证；主服务关闭 RPC 不创建实例，Scheduler 关闭执行仍认证。日志观察器验证明文 WARN 有风险/地址且无 Token，mTLS 无错误明文告警。
-- [ ] 5.2 运行 `go test ./cmd/blowball ./services/scheduler/cmd/scheduler -count=1`，确认新接线/告警用例预期失败，不以真实 MySQL/Redis 连接错误代替行为证明。
-- [ ] 5.3 新增 `TestScheduledRPCSecurityLifecycle`，在专用 `MYSQL_TEST_DSN` 测试库中为 `mtls`/`plaintext_token` 各建立真正的 gRPC 连接与现有业务适配器：创建/读取任务、提交/接收执行、权威 occurrence/启动授权和幂等提交；断言越权/归属校验未绕过，业务记录与 fake turn 请求无凭证标记。不能只使用当前进程内直接调用证明传输模式正确。
-- [ ] 5.4 用公共工厂替换两个入口的重复 mTLS 接线，传递进程级模式和正确 Token，添加不含秘密的明文启动 WARN；不复制认证策略，不改 HTTP、业务或调度逻辑。
-- [ ] 5.5 重跑入口测试，并在明确的独立测试库中执行 `go test ./services/scheduler -run TestScheduledRPCSecurityLifecycle -count=1 -v`；确认两模式均实际运行且通过，因 `MYSQL_TEST_DSN` 未设置的 SKIP 不算验收。
-- [ ] 5.6 仅提交本组源文件和测试，使用 `feat(scheduler): wire optional authenticated rpc modes`。
+- [x] 5.1 先写两入口接线测试：主服务监听/到 Scheduler 的连接、Scheduler 监听/到不同 API/Agent endpoint 的连接使用同一模式和正确凭证；主服务关闭 RPC 不创建实例，Scheduler 关闭执行仍认证。日志观察器验证明文 WARN 有风险/地址且无 Token，mTLS 无错误明文告警。
+- [x] 5.2 运行 `go test ./cmd/blowball ./services/scheduler/cmd/scheduler -count=1`，确认新接线/告警用例预期失败，不以真实 MySQL/Redis 连接错误代替行为证明。
+- [x] 5.3 新增 `TestScheduledRPCSecurityLifecycle`，在专用 `MYSQL_TEST_DSN` 测试库中为 `mtls`/`plaintext_token` 各建立真正的 gRPC 连接与现有业务适配器：创建/读取任务、提交/接收执行、权威 occurrence/启动授权和幂等提交；断言越权/归属校验未绕过，业务记录与 fake turn 请求无凭证标记。不能只使用当前进程内直接调用证明传输模式正确。
+- [x] 5.4 用公共工厂替换两个入口的重复 mTLS 接线，传递进程级模式和正确 Token，添加不含秘密的明文启动 WARN；不复制认证策略，不改 HTTP、业务或调度逻辑。
+- [x] 5.5 重跑入口测试，并在明确的独立测试库中执行 `go test -tags=integration ./services/scheduler -run TestScheduledRPCSecurityLifecycle -count=1 -v`；确认两模式均实际运行且通过，因 `MYSQL_TEST_DSN` 未设置的 SKIP 不算验收。
+- [x] 5.6 仅提交本组源文件和测试，使用 `feat(scheduler): wire optional authenticated rpc modes`。
 
 ## 6. 配置示例、内网证书与凭证边界
 
