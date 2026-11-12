@@ -61,6 +61,14 @@ func TestInternalRPCSecurityModes(t *testing.T) {
 	assert.False(t, cfg.InternalRPC.Enabled)
 }
 
+func TestInternalRPCConfigExample(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-example-config-test-only")
+	t.Setenv("JWT_SECRET", "jwt-example-config-test-only")
+	cfg, err := Load("../../config.example.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, rpcx.SecurityModeMTLS, cfg.InternalRPC.SecurityMode)
+}
+
 func TestInternalRPCPlaintextValidation(t *testing.T) {
 	t.Setenv("RPC_CONFIG_UNSET_TEST_TOKEN", "")
 	tests := []struct {

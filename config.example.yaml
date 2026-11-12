@@ -213,15 +213,16 @@ scheduled_tasks:
   # max_concurrent: 4
   # max_run_duration: 10m
 
-# Internal mutual-TLS gRPC between this main service and the standalone
+# Authenticated internal gRPC between this main service and the standalone
 # Scheduler. Disabled by default: task HTTP endpoints then return 503 (no local
 # fallback), the scheduled-task agent tools are not registered, and `.cron`
-# resource writes fail closed. Enabling it requires the Scheduler process and
-# certificates issued for the service identities (CommonName):
+# resource writes fail closed. mTLS is the default and recommended for internal
+# production networks. It requires certificates with service identities (CN):
 # blowball-main / blowball-api / blowball-agent on this side, blowball-scheduler
 # on the Scheduler side.
 internal_rpc:
   enabled: false
+  security_mode: mtls               # omitted = mtls; plaintext_token is explicit, never automatic
   listen: ":9092"                  # main-service internal listener (control and/or runtime)
   timeout: 5s
   tls:
@@ -234,6 +235,13 @@ internal_rpc:
     key_file: "${MAIN_CLIENT_TLS_KEY:/etc/blowball/tls/main-client.key}"
     ca_file: "${MAIN_CLIENT_TLS_CA:/etc/blowball/tls/ca.crt}"
     server_name: "${SCHEDULER_RPC_SERVER_NAME:blowball-scheduler}"
+  # Controlled plaintext development only: set security_mode: plaintext_token,
+  # use a loopback/isolated listener, and configure distinct service tokens.
+  # TLS files are then unused. There is no anonymous mode or TLS-error fallback.
+  # peer_tokens:
+  #   blowball-scheduler: "${SCHEDULER_RPC_TOKEN}"
+  # client_token: "${MAIN_RPC_TOKEN}"
+  # Never forward these token variables to executor/MCP environments.
 
 # Scheduled-execution admission on this main-service instance (agent/all).
 # A concurrency guard, not a CPU/memory partition; ordinary chat admission and

@@ -88,11 +88,11 @@
 
 **Interfaces:** 对外只说明第 4 组配置字段和第 5 组启动行为；复用现有 env 过滤测试接口，不增加自动签发/分发服务。
 
-- [ ] 6.1 先添加 `TestDefaultExecutorEnvExcludesRPCTokens`，设置示例 `MAIN_RPC_TOKEN`/`SCHEDULER_RPC_TOKEN` 并验证默认环境过滤不包含它们；运行 `go test ./internal/tool/executor -run TestDefaultExecutorEnvExcludesRPCTokens -count=1`，不通过时先调查默认策略，不扩大白名单来“修复”。
-- [ ] 6.2 更新默认 mTLS 示例和完整的回环明文片段；只使用 `${ENV_VAR}` 秘密占位符，解释 Token 角色映射、明文风险、双方协调切换、禁止向 executor/MCP 环境转交 Token、旧二进制回滚前恢复 mTLS。
-- [ ] 6.3 补齐内部 CA 的开发签发/验证命令、CN/SAN/ServerName/EKU 区分、证书用途复用条件、只读挂载和缺 `scheduler-client.crt` 排查；在临时目录验证命令/证书与配置映射，不把开发材料当作生产 CA，也不提交任何私钥或证书产物。
-- [ ] 6.4 验证示例能通过对应模式的配置校验，运行 `go test ./internal/tool/executor ./internal/config ./services/scheduler/internal/config -count=1`，检查文档无真实凭证或生成的证书/私钥产物。
-- [ ] 6.5 仅提交本组文档、示例与环境回归测试，使用 `docs(scheduler): document rpc security and internal tls setup`。
+- [x] 6.1 先添加 `TestDefaultExecutorEnvExcludesRPCTokens`，设置示例 `MAIN_RPC_TOKEN`/`SCHEDULER_RPC_TOKEN` 并验证默认环境过滤不包含它们；运行 `go test ./internal/tool/executor -run TestDefaultExecutorEnvExcludesRPCTokens -count=1`，不通过时先调查默认策略，不扩大白名单来“修复”。
+- [x] 6.2 更新默认 mTLS 示例和完整的回环明文片段；只使用 `${ENV_VAR}` 秘密占位符，解释 Token 角色映射、明文风险、双方协调切换、禁止向 executor/MCP 环境转交 Token、旧二进制回滚前恢复 mTLS。
+- [x] 6.3 补齐内部 CA 的开发签发/验证命令、CN/SAN/ServerName/EKU 区分、证书用途复用条件、只读挂载和缺 `scheduler-client.crt` 排查；在临时目录验证命令/证书与配置映射，不把开发材料当作生产 CA，也不提交任何私钥或证书产物。
+- [x] 6.4 验证示例能通过对应模式的配置校验，运行 `go test ./internal/tool/executor ./internal/config ./services/scheduler/internal/config -count=1`，检查文档无真实凭证或生成的证书/私钥产物。
+- [x] 6.5 仅提交本组文档、示例与环境回归测试，使用 `docs(scheduler): document rpc security and internal tls setup`。
 
 ## 7. 全量验收与规格收尾
 

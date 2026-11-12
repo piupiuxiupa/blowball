@@ -99,6 +99,7 @@ Main service (`config.yaml`):
 ```yaml
 internal_rpc:
   enabled: true
+  security_mode: mtls
   listen: ":9092"
   timeout: 5s
   tls: {cert_file: /etc/blowball/tls/main.crt, key_file: ..., ca_file: ...}
@@ -130,6 +131,157 @@ Internal service identities are certificate CommonNames: `blowball-scheduler`
 on the Scheduler side and `blowball-main` / `blowball-api` / `blowball-agent` on
 the main side. Per-method allowlists and deadline enforcement are in
 `internal/rpcx`; external clients cannot forge an actor.
+
+### Explicit RPC security modes
+
+`internal_rpc.security_mode` (main service) and `rpc.security_mode` (Scheduler)
+select one profile for the process's internal listener and outgoing connections.
+Omitting the field keeps `mtls`; `plaintext_token` must be explicit. Unknown
+profiles fail startup. There is no anonymous mode, protocol negotiation, automatic
+certificate generation, or fallback when TLS material/handshakes fail.
+
+With `mtls`, existing `tls`, `scheduler_tls`, and `main_service.tls` paths and
+CA/hostname validation remain mandatory. With `plaintext_token`, TLS files are
+not loaded, but both sides require service tokens. The receiving `peer_tokens`
+map binds each distinct token to one of the existing service identities;
+outgoing `client_token` is sent in authentication metadata. Claimed identity
+headers cannot override the binding, and method/actor/model/resource/start
+authorization still applies. Health RPCs require authentication but not a
+deadline; public HTTP `/healthz` is unchanged.
+
+Plaintext is only recommended for controlled development or isolated testing.
+It exposes tokens and request/response data to anyone who can observe the link,
+and does not verify the destination server's identity. An internal production
+network is not a reason to drop mTLS. Each plaintext process logs a risk WARN
+without logging credentials.
+
+### Controlled plaintext example
+
+Generate two different tokens in the operator environment (do not print, commit,
+persist in task data, or pass them to an Agent):
+
+```sh
+export MAIN_RPC_TOKEN="$(openssl rand -base64 32)"
+export SCHEDULER_RPC_TOKEN="$(openssl rand -base64 32)"
+```
+
+Main service (`all` role; merge this block into its normal configuration):
+
+```yaml
+internal_rpc:
+  enabled: true
+  security_mode: plaintext_token
+  listen: "127.0.0.1:9092"
+  timeout: 5s
+  scheduler_endpoint: "127.0.0.1:9091"
+  peer_tokens:
+    blowball-scheduler: "${SCHEDULER_RPC_TOKEN}"
+  client_token: "${MAIN_RPC_TOKEN}"
+```
+
+Scheduler (merge with its MySQL/logging/scheduler configuration):
+
+```yaml
+rpc:
+  security_mode: plaintext_token
+  listen: "127.0.0.1:9091"
+  timeout: 5s
+  peer_tokens:
+    blowball-main: "${MAIN_RPC_TOKEN}"
+main_service:
+  api_endpoint: "127.0.0.1:9092"
+  agent_endpoint: "127.0.0.1:9092"
+  timeout: 5s
+  client_token: "${SCHEDULER_RPC_TOKEN}"
+```
+
+If API and Agent roles are split, bind their actual identities to separate
+tokens at receiving listeners. Empty, duplicate-across-identities, unknown-role,
+whitespace/control-character or non-ASCII token configuration is rejected.
+The mode must match at both ends. Replace tokens by coordinating Secret/config
+updates and restarting; there is no hot rotation. Do not add RPC token variables
+to `executor.allowed_env_patterns`, executor `env`, or MCP service environments.
+Default bash environment filtering does not forward the example token names.
+
+### Internal mTLS certificates and mounting
+
+A private CA is sufficient; no public certificate purchase is required. The
+**client certificate CN** carries the application service identity. The
+**server certificate SAN** must match the caller's `server_name`; Go hostname
+verification does not use legacy CN. Client leaves need `clientAuth`; server
+leaves need `serverAuth`. A development role certificate can contain both EKUs
+and be reused for its incoming/outgoing connections; production may keep
+separate client/server keys.
+
+The following OpenSSL 1.1.1+/3.x commands create short-lived development material.
+They are not a production CA lifecycle or an application startup action:
+
+```sh
+umask 077
+tls_dir="$(mktemp -d)"
+cd "$tls_dir"
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 30 \
+  -keyout ca.key -out ca.crt -subj "/CN=blowball-development-ca" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+for identity in blowball-main blowball-scheduler; do
+  openssl req -new -newkey rsa:3072 -sha256 -nodes \
+    -keyout "$identity.key" -out "$identity.csr" -subj "/CN=$identity"
+  cat > "$identity.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth,serverAuth
+subjectAltName=DNS:$identity
+EOF
+  openssl x509 -req -sha256 -days 30 -in "$identity.csr" \
+    -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -out "$identity.crt" -extfile "$identity.ext"
+done
+
+openssl verify -CAfile ca.crt -purpose sslserver \
+  -verify_hostname blowball-main blowball-main.crt
+openssl verify -CAfile ca.crt -purpose sslserver \
+  -verify_hostname blowball-scheduler blowball-scheduler.crt
+openssl verify -CAfile ca.crt -purpose sslclient \
+  blowball-main.crt blowball-scheduler.crt
+```
+
+For combined `all` deployment, mount only the appropriate role's certificate,
+key and `ca.crt` into each process, read-only:
+
+| Configuration | Development file under `/etc/blowball/tls/` |
+| --- | --- |
+| Main `internal_rpc.tls` | `blowball-main.crt`, `blowball-main.key`, `ca.crt` |
+| Main `internal_rpc.scheduler_tls` | same main files; `server_name: blowball-scheduler` |
+| Scheduler `rpc.tls` | `blowball-scheduler.crt`, `blowball-scheduler.key`, `ca.crt` |
+| Scheduler `main_service.tls` | same Scheduler files; `server_name: blowball-main` |
+
+The CA private key **must not** be mounted into either runtime or committed.
+Do not mount the whole development directory: it contains `ca.key`. Restrict
+service-key ownership/read permissions to the runtime user; use individual
+read-only file mounts or an operator-provided runtime-only certificate directory.
+CA trust must cover the counterpart's issuing CA.
+
+For `open /etc/blowball/tls/scheduler-client.crt: no such file or directory`,
+check paths **inside the VM/container**, not only on the host:
+
+```sh
+ls -l /etc/blowball/tls/ca.crt /etc/blowball/tls/scheduler-client.crt \
+  /etc/blowball/tls/scheduler-client.key
+```
+
+Mount the issued client pair at those paths or point
+`main_service.tls.cert_file`/`key_file` (or `SCHEDULER_CLIENT_TLS_CERT`/
+`SCHEDULER_CLIENT_TLS_KEY`) at the actual Scheduler role files. Verify CN, EKU,
+CA and server SAN before restarting. Choosing mTLS still requires valid files;
+do not disable CA/hostname checks or silently switch to plaintext to hide an
+incomplete TLS deployment.
+
+Before rolling back to an older binary, coordinate both sides back to `mtls`
+with valid certificate configuration, remove unused Token configuration/Secrets,
+then roll back. Older binaries do not support the plaintext profile. No task or
+execution data migration is needed.
 
 ## Execution lifecycle
 

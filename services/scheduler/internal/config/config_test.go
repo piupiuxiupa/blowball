@@ -41,6 +41,13 @@ func TestLoadRPCSecurityModes(t *testing.T) {
 	assert.False(t, enabled)
 }
 
+func TestLoadSchedulerConfigExample(t *testing.T) {
+	t.Setenv("SCHEDULER_MYSQL_DSN", "test:test@tcp(127.0.0.1:3306)/example")
+	cfg, err := Load("../../config.example.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, rpcx.SecurityModeMTLS, cfg.RPC.SecurityMode)
+}
+
 func TestLoadPlaintextCredentialsValidation(t *testing.T) {
 	t.Setenv("RPC_CONFIG_UNSET_TEST_TOKEN", "")
 	tests := []struct {

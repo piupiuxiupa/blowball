@@ -3,7 +3,23 @@ package executor
 import (
 	"os"
 	"testing"
+
+	"github.com/lush/blowball/internal/config"
 )
+
+func TestDefaultExecutorEnvExcludesRPCTokens(t *testing.T) {
+	t.Setenv("MAIN_RPC_TOKEN", "main_rpc_test_credential")
+	t.Setenv("SCHEDULER_RPC_TOKEN", "scheduler_rpc_test_credential")
+	got := filterEnv(config.DefaultExecutorToolConfig().AllowedEnvPatterns)
+	for name, value := range got {
+		if name == "MAIN_RPC_TOKEN" || name == "SCHEDULER_RPC_TOKEN" {
+			t.Errorf("RPC credential variable forwarded: %s", name)
+		}
+		if value == "main_rpc_test_credential" || value == "scheduler_rpc_test_credential" {
+			t.Errorf("RPC credential value forwarded at %s", name)
+		}
+	}
+}
 
 func TestFilterEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
