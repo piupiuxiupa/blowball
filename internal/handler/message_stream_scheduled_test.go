@@ -50,6 +50,22 @@ func (s *scheduledOrchestrator) Handle(ctx context.Context, workspaceRoot, skill
 	return s.stubOrchestrator.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub, hooks, override)
 }
 
+type scheduledTitleClient struct {
+	key   string
+	calls chan string
+}
+
+func (c *scheduledTitleClient) StreamChat(_ context.Context, _ agent.LLMRequest, _ func(string) error, _ func(string) error) (agent.LLMResponse, error) {
+	c.calls <- c.key
+	return agent.LLMResponse{Content: "scheduled title"}, nil
+}
+
+type scheduledTitleTokenStore struct{}
+
+func (*scheduledTitleTokenStore) UserLLMToken(_ context.Context, userID string) (string, error) {
+	return "user-token-" + userID, nil
+}
+
 func TestMessageStreamScheduledServicesReachExecutor(t *testing.T) {
 	ordinary := &handlerFakeMySQL{}
 	ordinaryDeps := sessionDeps(ordinary, &handlerFakeRedis{}, newHandlerFakeFS())
@@ -63,10 +79,19 @@ func TestMessageStreamScheduledServicesReachExecutor(t *testing.T) {
 	scheduledDeps := sessionDeps(scheduled, &handlerFakeRedis{}, newHandlerFakeFS())
 	scheduledSessions := service.NewSessionService(scheduledDeps)
 	snapshots := &scheduledSnapshotStore{}
+	titleCalls := make(chan string, 1)
+	titleCfg := config.OpenAIConfig{TitleModel: "test-model"}
+	titleClient := agent.NewClientResolver(
+		&scheduledTitleClient{key: "global-token", calls: titleCalls},
+		titleCfg, nil, &scheduledTitleTokenStore{},
+	)
+	titleClient.SetClientFactory(func(cfg config.OpenAIConfig, _ agent.RawCaptureSink) agent.LLMClient {
+		return &scheduledTitleClient{key: cfg.APIKey, calls: titleCalls}
+	})
 	scheduledServices := &turnexec.ScheduledServices{
 		Sessions:   scheduledSessions,
 		Messages:   service.NewMessageService(scheduledDeps, scheduledSessions.SaveMessage),
-		Titles:     service.NewTitleService(nil, scheduled, config.OpenAIConfig{}),
+		Titles:     service.NewTitleService(titleClient, scheduled, titleCfg),
 		Compaction: service.NewCompactionService(scheduledDeps, nil, "test-model", 0),
 		Snapshots:  snapshots,
 	}
@@ -80,7 +105,7 @@ func TestMessageStreamScheduledServicesReachExecutor(t *testing.T) {
 	req := backgroundRequest(t, "scheduled-source-run")
 	req.Source = model.SessionSourceScheduled
 	req.LLMContextPrefix = "pinned resource pointer"
-	submission := h.TurnExecutor().Submit(agent.WithUserID(t.Context(), req.UserID), req)
+	submission := h.TurnExecutor().Submit(t.Context(), req)
 	require.Equal(t, turnexec.SubmitStarted, submission.Outcome, submission.Err)
 
 	select {
@@ -88,6 +113,12 @@ func TestMessageStreamScheduledServicesReachExecutor(t *testing.T) {
 		require.NoError(t, result.Err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("scheduled turn blocked without a subscriber")
+	}
+	select {
+	case key := <-titleCalls:
+		assert.Equal(t, "user-token-"+req.UserID, key, "headless titles must use the task owner's credential")
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduled title did not call its client")
 	}
 
 	batches, _ := scheduled.finalBatchSnapshots()

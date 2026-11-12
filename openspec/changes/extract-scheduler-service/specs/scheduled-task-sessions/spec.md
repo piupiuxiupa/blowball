@@ -38,6 +38,11 @@ Runtime SHALL 复用现有 turn 引擎，以服务端验证的会话来源选择
 - **THEN** 共用 turn 入口同时使用 scheduled sessions/messages/titles/compaction/sub-agent snapshots 服务
 - **AND** 没有配置该表组时继续 fail-closed，不回退普通服务
 
+#### Scenario: Headless title generation preserves owner credentials
+- **WHEN** Runtime 使用没有 HTTP 用户身份的后台 context 提交任务，且 owner 已配置专属 LLM token
+- **THEN** 共用 turn 入口在标题及模型调用之前从已验证的 Request.UserID 绑定用户上下文
+- **AND** 标题与主 turn 按同一 owner 解析凭证，不因后台入口绕过用户 token 使用全局凭证
+
 ### Requirement: Preserve canonical runtime behavior
 
 任务会话 SHALL 遵守现行 round 终稿事务、工具顺序、子 Agent 分流、压缩锚点和用户原文规则，不复活全局 chunk 入库队列。current_status/tool_budget SHALL 继续只存在于 active transcript 和独立 runtime cache；SHALL NOT 写入任何 MySQL/消息缓存、SSE、标题、真实用户序号或子 Agent transcript。任务的跨会话记忆 SHALL 继承现有开关、授权和读写策略，不因分表另行改变。

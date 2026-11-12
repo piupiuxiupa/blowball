@@ -58,6 +58,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	e = srcExec
 
 	sessionID, userID, tid := req.SessionID, req.UserID, req.RunID
+	ctx = agent.WithUserID(ctx, userID)
 	ctx = agent.WithSessionID(ctx, sessionID)
 	ctx = agent.WithRuntimeStatusStore(ctx, e.runtimeStatus)
 
