@@ -155,6 +155,8 @@ func (h *MessageStreamHandler) WaitForStartupPumps(timeout time.Duration) bool {
 // config-resolved user-input token cap (cfg.Messages.MaxInputTokensLimit();
 // non-positive skips the check — pass 0 in tests that don't care). The agent
 // role (and the all role) constructs this; the api role does not.
+// Optional scheduled services bind the headless scheduled entry point to its
+// separate table group; omitting them keeps scheduled requests fail-closed.
 func NewMessageStreamHandler(
 	sessSvc *service.SessionService,
 	msgSvc *service.MessageService,
@@ -166,7 +168,12 @@ func NewMessageStreamHandler(
 	runs *run.Manager,
 	selection ModelSelectionConfig,
 	maxInputTokens int,
+	scheduled ...*turnexec.ScheduledServices,
 ) *MessageStreamHandler {
+	var scheduledServices *turnexec.ScheduledServices
+	if len(scheduled) > 0 {
+		scheduledServices = scheduled[0]
+	}
 	gate := turnexec.NewShutdownGate()
 	h := &MessageStreamHandler{
 		sessSvc:        sessSvc,
@@ -185,6 +192,7 @@ func NewMessageStreamHandler(
 		Sessions: sessSvc, Messages: msgSvc, Titles: titleSvc,
 		Compaction: compSvc, Memory: memSvc, Orchestrator: orch,
 		DataDir: dataDir, Runs: runs, Shutdown: gate,
+		Scheduled: scheduledServices,
 	})
 	h.turns.SetQueuePump(h.pumpQueuedNext)
 	h.writeRunEvents = writeRunEventStream

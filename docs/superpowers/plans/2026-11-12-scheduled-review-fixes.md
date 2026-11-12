@@ -37,11 +37,11 @@ The user approved the seven fixes in the preceding review. Use the current clean
 
 **Files:** `cmd/blowball/serve.go`, its focused tests, `internal/handler/message_stream.go`, its focused tests.
 **Interface:** `newScheduledTurnServices(rt *appRuntime, llmClient agent.LLMClient, titleCfg config.OpenAIConfig, defaultMaxContext int) *turn.ScheduledServices`; allow the stream-handler constructor to receive optional scheduled services without changing existing callers.
-- [ ] Add regressions for a complete scheduled service bundle and a scheduled turn reaching source-bound services through the stream handler.
-- [ ] Observe the missing wiring failure, retaining the existing no-services fail-closed test.
-- [ ] Construct the scheduled MySQL view, sessions/messages/titles/compaction/snapshots and pass it to `Dependencies.Scheduled`.
-- [ ] Run `go test ./cmd/blowball ./internal/handler ./internal/turn`.
-- [ ] Commit `fix(turn): wire scheduled persistence into production executor`.
+- [x] Add regressions for a complete scheduled service bundle and a scheduled turn reaching source-bound services through the stream handler.
+- [x] Observe the missing wiring failure, retaining the existing no-services fail-closed test.
+- [x] Construct the scheduled MySQL view, sessions/messages/titles/compaction/snapshots and pass it to `Dependencies.Scheduled`.
+- [x] Run `go test ./cmd/blowball ./internal/handler ./internal/turn`.
+- [x] Commit `fix(turn): wire scheduled persistence into production executor`.
 
 ### Task 2: Preserve the hold safety boundary
 

@@ -60,6 +60,7 @@ import (
 	"github.com/lush/blowball/internal/tool/skill"
 	"github.com/lush/blowball/internal/tool/webfetch"
 	"github.com/lush/blowball/internal/tool/xizhi"
+	"github.com/lush/blowball/internal/turn"
 )
 
 // RedisCacheTTL is the expiration applied to every session-level cache write.
@@ -760,6 +761,21 @@ func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps 
 	}
 }
 
+// newScheduledTurnServices binds every persistence surface of a scheduled turn
+// to the same table group while retaining the shared cache, filesystem and LLM.
+func newScheduledTurnServices(rt *appRuntime, llmClient agent.LLMClient, titleCfg config.OpenAIConfig, defaultMaxContext int) *turn.ScheduledServices {
+	scheduledStore := rt.mysqlStore.ForSource(model.SessionSourceScheduled)
+	deps := service.SessionDeps{MySQL: scheduledStore, Redis: rt.redisStore, FS: rt.fsStore}
+	sessions := service.NewSessionService(deps)
+	return &turn.ScheduledServices{
+		Sessions:   sessions,
+		Messages:   service.NewMessageService(deps, sessions.SaveMessage),
+		Titles:     service.NewTitleService(llmClient, scheduledStore, titleCfg),
+		Compaction: service.NewCompactionService(deps, llmClient, rt.cfg.DefaultModelName(), defaultMaxContext),
+		Snapshots:  scheduledStore,
+	}
+}
+
 // wireAgent builds the agent layer for the agent role (and contributes it in
 // the all role): the tool registry, the external MCP manager, the OpenAI
 // client (with raw-capture sink attached), the orchestrator, the title
@@ -965,7 +981,11 @@ func wireAgent(rt *appRuntime, sessSvc *service.SessionService, internalSrv *grp
 	// registry is returned so serveRun can cancel all running turns within
 	// the bounded graceful-shutdown window.
 	runMgr := run.NewManager(rt.redisStore.RunStore(), run.NewRegistry())
-	streamHandler := handler.NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr, handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit()).
+	streamHandler := handler.NewMessageStreamHandler(
+		sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr,
+		handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit(),
+		newScheduledTurnServices(rt, llmClient, titleCfg, defaultMaxContext),
+	).
 		WithRuntimeStatusStore(rt.redisStore).
 		WithAttachmentStore(rt.mysqlStore).
 		WithArtifactService(newArtifactService(rt))
