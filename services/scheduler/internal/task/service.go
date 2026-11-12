@@ -153,7 +153,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*model.ScheduledT
 	}
 	if !task.Enabled {
 		task.PausedReason = model.ScheduledReasonTaskPaused
-		task.NextRunAt = nil
+		if in.Schedule.Type == schedule.TypeCron {
+			task.NextRunAt = nil
+		}
 	}
 	task.SetSchedule(in.Schedule)
 	task.ApplyDefaults()
@@ -243,7 +245,9 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*model.ScheduledT
 		task.Enabled = *in.Enabled
 		if !task.Enabled {
 			task.PausedReason = model.ScheduledReasonTaskPaused
-			task.NextRunAt = nil
+			if task.ScheduleType == schedule.TypeCron {
+				task.NextRunAt = nil
+			}
 		} else {
 			task.PausedReason = ""
 			if !wasEnabled && !scheduleChanged && task.ScheduleType == schedule.TypeCron {

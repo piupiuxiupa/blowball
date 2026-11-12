@@ -210,6 +210,57 @@ func TestUpdateMigratesLegacySessionPolicy(t *testing.T) {
 	assert.Nil(t, updated.SessionID)
 }
 
+func TestPauseResumeFutureAtKeepsSlot(t *testing.T) {
+	svc, _, _ := newService(t)
+	ctx := t.Context()
+	future := svc.now().Add(2 * time.Hour)
+	created, err := svc.Create(ctx, CreateInput{
+		ActorUserID: "user-1", Name: "n", Prompt: "p",
+		Schedule: schedule.Rule{Type: schedule.TypeAt, RunAt: future.Format(time.RFC3339), Timezone: "UTC"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, new(future), created.NextRunAt)
+
+	paused, err := svc.Update(ctx, UpdateInput{
+		ActorUserID: "user-1", TaskID: created.TaskID, Enabled: new(false),
+	})
+	require.NoError(t, err)
+	assert.False(t, paused.Enabled)
+	assert.Equal(t, model.ScheduledReasonTaskPaused, paused.PausedReason)
+	assert.Equal(t, new(future), paused.NextRunAt)
+
+	resumed, err := svc.Update(ctx, UpdateInput{
+		ActorUserID: "user-1", TaskID: created.TaskID, Enabled: new(true),
+	})
+	require.NoError(t, err)
+	assert.True(t, resumed.Enabled)
+	assert.Empty(t, resumed.PausedReason)
+	assert.Equal(t, new(future), resumed.NextRunAt, "enabled=%t at task lost its future slot", resumed.Enabled)
+}
+
+func TestEnableInitiallyDisabledFutureAtKeepsSlot(t *testing.T) {
+	svc, _, _ := newService(t)
+	ctx := t.Context()
+	future := svc.now().Add(2 * time.Hour)
+	created, err := svc.Create(ctx, CreateInput{
+		ActorUserID: "user-1", Name: "n", Prompt: "p",
+		Schedule: schedule.Rule{Type: schedule.TypeAt, RunAt: future.Format(time.RFC3339), Timezone: "UTC"},
+		Enabled:  new(false),
+	})
+	require.NoError(t, err)
+	assert.False(t, created.Enabled)
+	assert.Equal(t, model.ScheduledReasonTaskPaused, created.PausedReason)
+	assert.Equal(t, new(future), created.NextRunAt)
+
+	resumed, err := svc.Update(ctx, UpdateInput{
+		ActorUserID: "user-1", TaskID: created.TaskID, Enabled: new(true),
+	})
+	require.NoError(t, err)
+	assert.True(t, resumed.Enabled)
+	assert.Empty(t, resumed.PausedReason)
+	assert.Equal(t, new(future), resumed.NextRunAt, "enabled=%t at task lost its future slot", resumed.Enabled)
+}
+
 func TestResumeConsumedAtDoesNotReplay(t *testing.T) {
 	svc, store, _ := newService(t)
 	store.tasks["task-at"] = &model.ScheduledTask{
