@@ -33,6 +33,11 @@ Runtime SHALL 复用现有 turn 引擎，以服务端验证的会话来源选择
 - **WHEN** scheduled session 缓存缺失
 - **THEN** 只从对应 scheduled 表组按现有 canonical 规则重建，不写普通缓存内容或普通数据库表
 
+#### Scenario: Production headless execution uses scheduled services
+- **WHEN** Agent/all 接收权威来源为 scheduled 的执行
+- **THEN** 共用 turn 入口同时使用 scheduled sessions/messages/titles/compaction/sub-agent snapshots 服务
+- **AND** 没有配置该表组时继续 fail-closed，不回退普通服务
+
 ### Requirement: Preserve canonical runtime behavior
 
 任务会话 SHALL 遵守现行 round 终稿事务、工具顺序、子 Agent 分流、压缩锚点和用户原文规则，不复活全局 chunk 入库队列。current_status/tool_budget SHALL 继续只存在于 active transcript 和独立 runtime cache；SHALL NOT 写入任何 MySQL/消息缓存、SSE、标题、真实用户序号或子 Agent transcript。任务的跨会话记忆 SHALL 继承现有开关、授权和读写策略，不因分表另行改变。
@@ -60,6 +65,14 @@ API/all SHALL 提供已鉴权的 scheduled-sessions 列表、详情、消息游�
 #### Scenario: Reject conversational follow-up
 - **WHEN** 客户端尝试向任务会话发送用户消息
 - **THEN** 没有可用的发送消息接口，不创建新的交互 Run
+
+#### Scenario: Read scheduled placeholder pages
+- **WHEN** owner 使用 subagent_content=placeholder 按升序或降序读取任务消息，或请求空页
+- **THEN** 在 scheduled 表组内先过滤再分页，不因普通表限定名产生 SQL 错误
+
+#### Scenario: Read back a persisted scheduled sub-agent run
+- **WHEN** 任务子 Agent 已保存 run，随后请求 list/get/child/history
+- **THEN** 均能从 scheduled 表组读回同一 run 及完整时间字段，包括增量迁移之前已写入的行
 
 ### Requirement: Immutable historical configuration and editable parent task
 

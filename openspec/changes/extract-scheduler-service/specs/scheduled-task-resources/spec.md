@@ -72,6 +72,11 @@
 - **WHEN** 普通或定时会话的 bash 写入 .cron/draft 或 revisions
 - **THEN** 被只读沙箱挂载拒绝；受控文件入口仍可修改授权 draft
 
+#### Scenario: A controlled file tool creates replaces or appends a draft file
+- **WHEN** owner 经文件工具写入自己的合法 draft，使用默认、write 或 append 模式
+- **THEN** 传递受支持的 guard 操作类型，先检查 owner 并推进 draft fence，再执行文件修改
+- **AND** 发布区、他人草稿及 fence 不可用时仍在修改文件前拒绝
+
 ### Requirement: Resource lifecycle independent of session deletion
 
 删除/暂停 Task SHALL 不立即清理执行引用资源；删除单个任务会话 SHALL 不删除 .cron 或解除保留历史的资源引用。Task、保留 occurrence 或运行中的执行引用的版本 SHALL 保留；受控维护仅能清理已证明未引用且无活跃使用的 staging/版本。

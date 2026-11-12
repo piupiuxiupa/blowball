@@ -94,6 +94,11 @@ accepted/preparing 的恢复或有界重试 SHALL 有明确未启动证明并围
 - **WHEN** 用户在没有可靠停止证明时恢复/编辑该任务
 - **THEN** 配置可以按授权更新，但执行阻塞保持，不能产生新的 start grant
 
+#### Scenario: Hold persistence fails before interrupted projection
+- **WHEN** 对账已经确认执行结果未知，但 task hold 写入失败
+- **THEN** occurrence 保持非终态、活跃和可对账状态，不先展示会释放不重叠限制的 interrupted
+- **AND** 后续对账可以重试；只有 hold 可靠保存后才能投影 interrupted
+
 #### Scenario: Reconciliation positively proves termination
 - **WHEN** Runtime 确认原 Agent/受管命令已经结束并围栏对应 generation
 - **THEN** Scheduler 仅对匹配的 hold CAS 清除，后续槽位可正常调度，不重放阻塞期间跳过槽位

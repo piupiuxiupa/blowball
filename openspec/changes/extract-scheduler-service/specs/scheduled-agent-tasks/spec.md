@@ -98,6 +98,11 @@
 - **WHEN** 用户恢复暂停一段时间的 cron
 - **THEN** 下一槽位晚于当前时间，不补暂停历史
 
+#### Scenario: Enable an unconsumed future at task
+- **WHEN** 未来 at 任务创建时禁用，或在计划时间前暂停并恢复
+- **THEN** 保留原来尚未消耗的槽位，禁用时不触发，恢复后只执行该槽位一次
+- **AND** 已消费 at 的空 next_run_at 不因恢复而重建
+
 #### Scenario: Update an already materialized task
 - **WHEN** 用户修改指令、模型、时间或资源版本，已有触发快照
 - **THEN** 旧快照不变，仅后续新触发使用新配置

@@ -67,11 +67,11 @@ The user approved the seven fixes in the preceding review. Use the current clean
 
 **Files:** `internal/tool/xizhi/register.go`, `guard_test.go`.
 **Interface:** The write-file tool must pass a guard-supported create/modify kind for write and append modes.
-- [ ] Add a caller/guard contract regression for valid owned draft writes, preserving denied managed paths and ordinary writes.
-- [ ] Observe the unsupported `write` operation failure.
-- [ ] Use a supported operation kind; keep ownership/fence checks before file mutation.
-- [ ] Run `go test ./internal/tool/xizhi ./internal/resource`.
-- [ ] Commit `fix(xizhi): authorize draft writes with supported guard operation`.
+- [x] Add a caller/guard contract regression for valid owned draft writes, preserving denied managed paths and ordinary writes.
+- [x] Observe the unsupported `write` operation failure.
+- [x] Use a supported operation kind; keep ownership/fence checks before file mutation.
+- [x] Run `go test ./internal/tool/xizhi ./internal/resource`.
+- [x] Commit `fix(xizhi): authorize draft writes with supported guard operation`.
 
 ### Task 5: Fix scheduled placeholder pagination
 
@@ -87,24 +87,28 @@ The user approved the seven fixes in the preceding review. Use the current clean
 
 **Files:** New `migrations/031_scheduled_subagent_run_timestamps.sql`, `internal/store/mysql/scheduled_store_test.go`, `subagent_run_test.go`, `docs/scheduled-tasks.md`.
 **Interface:** Add `create_time` and `update_time` matching ordinary sub-agent runs; apply the new migration in scheduled fixtures.
-- [ ] Add scheduled list/get/child/history readback regressions after writing a run.
-- [ ] Observe the missing timestamp-column failures against the original schema.
-- [ ] Add the forward migration and backfill existing run timestamps from started/finished times; document manual application.
-- [ ] Verify migrated fresh tables and pre-migration rows on the dedicated MySQL test database.
-- [ ] Commit `fix(mysql): migrate scheduled subagent run timestamps`.
+- [x] Add scheduled list/get/child/history readback regressions after writing a run.
+- [x] Observe the missing timestamp-column failures against the original schema.
+- [x] Add the forward migration and backfill existing run timestamps from started/finished times; document manual application.
+- [x] Verify migrated fresh tables and pre-migration rows on the dedicated MySQL test database.
+- [x] Commit `fix(mysql): migrate scheduled subagent run timestamps`.
 
 ### Task 7: Preserve future one-shot slots across pause
 
 **Files:** `services/scheduler/internal/task/service.go`, `service_test.go`.
 **Interface:** A future unconsumed `at` keeps `NextRunAt` while disabled; cron resume recomputes its next slot; consumed `at` remains nil.
-- [ ] Add future-at pause/resume and initially-disabled-at enable regressions.
-- [ ] Observe `enabled=true` with a lost `NextRunAt`.
-- [ ] Clear the cursor on disable only where the existing cron resume path restores it.
-- [ ] Run `go test ./services/scheduler/internal/task`.
-- [ ] Commit `fix(scheduler): retain unconsumed at slots while paused`.
+- [x] Add future-at pause/resume and initially-disabled-at enable regressions.
+- [x] Observe `enabled=true` with a lost `NextRunAt`.
+- [x] Clear the cursor on disable only where the existing cron resume path restores it.
+- [x] Run `go test ./services/scheduler/internal/task`.
+- [x] Commit `fix(scheduler): retain unconsumed at slots while paused`.
 
 ## Final Verification
 
-- [ ] Recheck the complete diff and all seven scoped commits; synchronize OpenSpec scenarios/task checkboxes.
-- [ ] Run focused MySQL regressions without skips, `make test`, `make lint`, both binary builds to temporary output paths and OpenSpec strict validation.
-- [ ] Confirm the worktree is clean and no credentials, binaries, test data or temporary probes are committed.
+- [x] Recheck the complete diff and all seven scoped commits; synchronize OpenSpec scenarios/task checkboxes.
+- [x] Run focused MySQL regressions without skips, `make test`, `make lint`, both binary builds to temporary output paths and OpenSpec strict validation.
+- [x] Confirm the worktree is clean and no credentials, binaries, test data or temporary probes are committed.
+
+Verified on November 12, 2026: the complete race suite passed with real MySQL fixtures on an isolated test schema. Pagination, receipt rejection and both fresh/upgrade sub-agent readbacks passed without skips. Whole-repository vet and both binaries also passed under Go 1.26.2; binary outputs stayed in temporary storage. Migration 031 was validated on test data only and must be applied manually to existing application databases with scheduled writers stopped.
+
+The independent final review passed both spec compliance and code quality with no blocking findings. The isolated test database/account and private credential files were removed after verification; application data and the original master branch were unchanged.
