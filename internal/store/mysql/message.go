@@ -193,7 +193,7 @@ func listMessagesPagedPlaceholderAscSQL(t Tables) string {
 FROM ` + t.Messages + ` msg
 INNER JOIN
 (
-	SELECT id FROM ` + t.Messages + `
+	SELECT id FROM ` + t.Messages + ` messages
 	WHERE session_id = ?
 		AND (msg_time, msg_index, id) > (?, ?, ?)
 ` + subagentPlaceholderFilter(t) + `
@@ -206,7 +206,7 @@ func listMessagesPagedPlaceholderDescSQL(t Tables) string {
 	return `SELECT msg.id as id, session_id, msg_time, agent, msg_index, COALESCE(tool_call_id, '') AS tool_call_id, role, event_type, COALESCE(status, '') AS status, content, attachments_json, COALESCE(reasoning_content, '') AS reasoning_content, trace_id, COALESCE(client_msg_id, '') AS client_msg_id, COALESCE(run_id, '') AS run_id, COALESCE(agent_instance_id, '') AS agent_instance_id, update_time
 FROM
 (
-	SELECT id FROM ` + t.Messages + `
+	SELECT id FROM ` + t.Messages + ` messages
 	WHERE session_id = ?
 		AND (msg_time, msg_index, id) > (?, ?, ?)
 ` + subagentPlaceholderFilter(t) + `

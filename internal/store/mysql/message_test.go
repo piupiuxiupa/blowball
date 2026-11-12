@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,24 @@ func TestListMessagesSQL_HasStableOuterOrder(t *testing.T) {
 	assert.Contains(t, normalized,
 		"ORDER BY msg.msg_time ASC, msg.msg_index ASC, msg.id ASC",
 		"derived-table ordering is not guaranteed to survive the outer join")
+}
+
+func TestListMessagesPagedPlaceholderSQL_HasFixedInnerAlias(t *testing.T) {
+	for _, tables := range []Tables{interactiveTables, scheduledTables} {
+		for _, page := range []struct {
+			order string
+			query func(Tables) string
+		}{
+			{"asc", listMessagesPagedPlaceholderAscSQL},
+			{"desc", listMessagesPagedPlaceholderDescSQL},
+		} {
+			t.Run(tables.Messages+"/"+page.order, func(t *testing.T) {
+				query := strings.Join(strings.Fields(page.query(tables)), " ")
+				assert.Contains(t, query, "SELECT id FROM "+tables.Messages+" messages WHERE",
+					"the inner source must use the fixed alias referenced by the placeholder filter")
+			})
+		}
+	}
 }
 
 // setupTestStore opens a connection and creates the messages table. Tests are
@@ -607,6 +626,73 @@ func placeholderContents(msgs []model.Message) []string {
 		out[i] = m.Content
 	}
 	return out
+}
+
+func TestListMessagesPaged_SourceBoundPlaceholderAlias(t *testing.T) {
+	store, sessionID, cleanup := setupPlaceholderFixture(t)
+	defer cleanup()
+
+	// Clone the ordinary fixture into the other physical source group without
+	// changing the shared scheduled-store fixture.
+	tables := []struct {
+		scheduled string
+		ordinary  string
+	}{
+		{"scheduled_messages", "messages"},
+		{"scheduled_subagent_runs", "subagent_runs"},
+	}
+	defer func() {
+		for _, table := range tables {
+			_, err := store.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+table.scheduled)
+			assert.NoError(t, err)
+		}
+	}()
+	for _, table := range tables {
+		_, err := store.db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+table.scheduled)
+		require.NoError(t, err)
+		_, err = store.db.ExecContext(t.Context(), "CREATE TABLE "+table.scheduled+" LIKE "+table.ordinary)
+		require.NoError(t, err)
+		_, err = store.db.ExecContext(t.Context(), "INSERT INTO "+table.scheduled+" SELECT * FROM "+table.ordinary)
+		require.NoError(t, err)
+	}
+
+	fullIndices := make([]int, 13)
+	for i := range fullIndices {
+		fullIndices[i] = i
+	}
+	placeholderIndices := []int{0, 1, 3, 8, 9, 10, 11, 12}
+	cases := []struct {
+		name        string
+		source      model.SessionSource
+		sessionID   string
+		content     string
+		wantIndices []int
+	}{
+		{"ordinary_full", model.SessionSourceInteractive, sessionID, model.SubagentContentFull, fullIndices},
+		{"ordinary_placeholder", model.SessionSourceInteractive, sessionID, model.SubagentContentPlaceholder, placeholderIndices},
+		{"scheduled_full", model.SessionSourceScheduled, sessionID, model.SubagentContentFull, fullIndices},
+		{"scheduled_placeholder", model.SessionSourceScheduled, sessionID, model.SubagentContentPlaceholder, placeholderIndices},
+		{"scheduled_empty", model.SessionSourceScheduled, "missing-session", model.SubagentContentPlaceholder, []int{}},
+	}
+	for _, order := range []string{"asc", "desc"} {
+		for _, tc := range cases {
+			t.Run(order+"/"+tc.name, func(t *testing.T) {
+				msgs, nextCursor, err := store.ForSource(tc.source).ListMessagesPaged(
+					t.Context(), tc.sessionID, "", 50, order, tc.content)
+				require.NoError(t, err)
+				indices := make([]int, len(msgs))
+				for i, msg := range msgs {
+					indices[i] = msg.MsgIndex
+				}
+				want := slices.Clone(tc.wantIndices)
+				if order == "desc" {
+					slices.Reverse(want)
+				}
+				assert.Equal(t, want, indices)
+				assert.Empty(t, nextCursor)
+			})
+		}
+	}
 }
 
 // TestListMessagesPaged_FullModeReturnsEverything verifies the default view is
