@@ -58,6 +58,8 @@ send-time 用户消息持久化 SHALL 只保存用户提交的正文及既有附
 ### Requirement: Deterministic cross-table reconstruction
 对话历史重建 SHALL 按 `(msg_time, msg_index)` 顺序遍历 `messages`，并将同一 round 的 assistant 终稿行与其工具占位行重建为一条 wire-format assistant 消息：该消息 SHALL 携带原 round 的 content、reasoning_content 以及按 LLM 响应顺序排列的 `tool_calls` 数组，后接按同一顺序排列的 `role=tool` 结果消息。工具占位行 SHALL 通过 `tool_call_id` join `tool_calls` 表取回 payload。除压缩显式改写上下文外，重建产出的 durable canonical 请求前缀 SHALL 与当初 live agent durable canonical round 的对应消息序列逐 byte 一致。重建的 row attribution SHALL 覆盖合并 assistant/tool 单元的全部来源行，压缩边界 SHALL NOT 将该单元的 assistant 消息与其工具结果分离。
 
+重建 SHALL 保留已知的 assistant round 与 turn 边界。相邻的工具占位行及其关联 assistant 终稿如果属于不同的已知 TraceID，SHALL 关闭前一单元后再重建后一单元，即使前一单元没有 token/reasoning 或后续 assistant 文本。下一 turn 的 send-time synthetic recall placeholder SHALL NOT 并入上一 turn 的工具调用数组。相同 turn、相同 assistant round 内的多个 placeholder SHALL 仍合并为一个完整并行工具单元，不得因为每个 placeholder 都可取到 canonical result 而逐个拆组。缺失 TraceID 的遗留行 SHALL 沿用已有可确定的边界，不凭工具名、call ID 前缀或完成顺序推断不存在的 turn 身份。
+
 `agent-runtime-status` 的 synthetic 状态 SHALL NOT 写入上述 durable 表或现有 `msgs:{sid}` 消息行缓存。独立 Redis 状态日志命中且全部锚点有效时，系统 SHALL 按原内容、原顺序、原锚点将其合并回 active model transcript，使状态参与后的上一完整 live 请求仍可成为下一请求前缀。Redis miss 或锚点失效 SHALL 被显式视为新缓存纪元：系统只保证 durable canonical 前缀，从干净 MySQL 历史生成新状态，不得宣称旧 cache-only 状态仍存在或影响 durable 数据正确性。
 
 #### Scenario: 双表合并顺序确定
@@ -96,6 +98,31 @@ send-time 用户消息持久化 SHALL 只保存用户提交的正文及既有附
 #### Scenario: 压缩边界保持工具单元完整
 - **WHEN** 压缩边界落在一个包含 assistant 终稿、工具占位和已完成工具结果的 round 附近
 - **THEN** 保留在尾部的历史 SHALL 将该 round 的 assistant tool_calls 与对应 tool results 作为完整单元输出
+
+#### Scenario: 不同 turn 的相邻工具占位行不合并
+- **WHEN** turn A 的工具终稿及已完成 call A 后紧邻 turn B 的已完成 recall placeholder，二者之间没有 token/reasoning 或后续 assistant 文本
+- **THEN** 重建输出为 `assistant[A] → tool[A] → assistant[recall-B] → tool[recall-B]`
+- **AND THEN** 不产生包含 A 与 recall-B 的同一个 assistant tool_calls 数组
+
+#### Scenario: 无文本的同轮并行占位行仍合组
+- **WHEN** 一个 tool-only assistant round 的三个 placeholder 均能取到已完成的 canonical result
+- **THEN** 三个调用仍重建到一条 assistant 消息，后接三个按调用序排列的结果
+- **AND THEN** 不因第一个 placeholder 已有 result 而提前关闭该 round
+
+#### Scenario: 同 turn 连续 tool-only round 保留既有边界
+- **WHEN** 同一 TraceID 中 round 1 与 round 2 均无 content/reasoning，但有独立的 assistant 终稿边界及各自工具占位行
+- **THEN** 两轮重建为两个独立的 assistant/tool 单元
+- **AND THEN** 同 TraceID 不作为把不同 assistant round 合并的理由
+
+#### Scenario: 拆分后来源行归属只覆盖各自工具单元
+- **WHEN** 不同 turn 的相邻工具占位行被重建为两个独立单元
+- **THEN** 每个单元的 assistant attribution 与结果 attribution 只覆盖该单元自己的 canonical 来源行
+- **AND THEN** 基于 attribution 的压缩保留边界不会把两个 turn 合并或拆开各自的调用与结果
+
+#### Scenario: 上一 turn 的 narration 不附着到新召回
+- **WHEN** 上一 turn 的 assistant content/reasoning 或终稿后紧邻另一 TraceID 的 synthetic recall placeholder
+- **THEN** 既有 assistant 内容保持自身的原 wire-format 单元，新召回保持独立 assistant/tool 对
+- **AND THEN** 新召回不吸收上一 turn 的 content 或 reasoning，不改变已经发送过的历史前缀
 
 ### Requirement: Streaming chunks live in Redis until round completion
 进行中 round 的流式内容 SHALL 仅存在于 Redis（复用 run event log）；round 完成批写成功后，对应 in-flight 累积 SHALL 被清理。msgflush chunk 级全局队列与 flusher SHALL 退役；用户消息 send-time 持久化 SHALL 保留。
