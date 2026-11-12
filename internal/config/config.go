@@ -648,12 +648,15 @@ const (
 // listener and its Scheduler client. It is disabled by default: scheduling
 // requires an explicitly deployed Scheduler (the embedded scheduler is gone).
 type InternalRPCConfig struct {
-	Enabled           bool           `yaml:"enabled"`
-	Listen            string         `yaml:"listen"`
-	Timeout           time.Duration  `yaml:"timeout"`
-	TLS               TLSFilesConfig `yaml:"tls"`
-	SchedulerEndpoint string         `yaml:"scheduler_endpoint"`
-	SchedulerTLS      TLSFilesConfig `yaml:"scheduler_tls"`
+	SecurityMode      rpcx.SecurityMode `yaml:"security_mode"`
+	PeerTokens        RPCPeerTokens     `yaml:"peer_tokens"`
+	ClientToken       string            `yaml:"client_token"`
+	Enabled           bool              `yaml:"enabled"`
+	Listen            string            `yaml:"listen"`
+	Timeout           time.Duration     `yaml:"timeout"`
+	TLS               TLSFilesConfig    `yaml:"tls"`
+	SchedulerEndpoint string            `yaml:"scheduler_endpoint"`
+	SchedulerTLS      TLSFilesConfig    `yaml:"scheduler_tls"`
 }
 
 // TLSFilesConfig is the shared mTLS file set. ServerName pins the expected
@@ -678,6 +681,9 @@ func (t TLSFilesConfig) applyDefaults() TLSFilesConfig {
 }
 
 func (r *InternalRPCConfig) applyDefaults() {
+	if r.SecurityMode == "" {
+		r.SecurityMode = rpcx.SecurityModeMTLS
+	}
 	if r.Listen == "" {
 		r.Listen = ":9092"
 	}
@@ -694,17 +700,32 @@ func (r InternalRPCConfig) Validate() error {
 	if !r.Enabled {
 		return nil
 	}
+	mode, err := rpcx.NormalizeSecurityMode(r.SecurityMode)
+	if err != nil {
+		return fmt.Errorf("internal_rpc.security_mode: %w", err)
+	}
 	if strings.TrimSpace(r.Listen) == "" {
 		return fmt.Errorf("internal_rpc.listen is required when internal_rpc.enabled is true")
 	}
-	if err := requireTLSFiles("internal_rpc.tls", r.TLS); err != nil {
-		return err
+	if mode == rpcx.SecurityModeMTLS {
+		if err := requireTLSFiles("internal_rpc.tls", r.TLS); err != nil {
+			return err
+		}
+	} else {
+		if err := rpcx.ValidatePeerTokens(r.PeerTokens); err != nil {
+			return fmt.Errorf("internal_rpc.peer_tokens: %w", err)
+		}
+		if err := rpcx.ValidateClientToken(r.ClientToken); err != nil {
+			return fmt.Errorf("internal_rpc.client_token: %w", err)
+		}
 	}
 	if strings.TrimSpace(r.SchedulerEndpoint) == "" {
 		return fmt.Errorf("internal_rpc.scheduler_endpoint is required when internal_rpc.enabled is true")
 	}
-	if err := requireTLSFiles("internal_rpc.scheduler_tls", r.SchedulerTLS); err != nil {
-		return err
+	if mode == rpcx.SecurityModeMTLS {
+		if err := requireTLSFiles("internal_rpc.scheduler_tls", r.SchedulerTLS); err != nil {
+			return err
+		}
 	}
 	return nil
 }

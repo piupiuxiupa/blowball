@@ -32,15 +32,18 @@ type MySQLConfig struct {
 
 // RPCConfig is the Scheduler's own mTLS listener.
 type RPCConfig struct {
-	Listen  string        `yaml:"listen"`
-	TLS     rpcx.TLSFiles `yaml:"tls"`
-	Timeout time.Duration `yaml:"timeout"`
+	SecurityMode rpcx.SecurityMode        `yaml:"security_mode"`
+	PeerTokens   mainconfig.RPCPeerTokens `yaml:"peer_tokens"`
+	Listen       string                   `yaml:"listen"`
+	TLS          rpcx.TLSFiles            `yaml:"tls"`
+	Timeout      time.Duration            `yaml:"timeout"`
 }
 
 // MainServiceConfig contains the endpoints the Scheduler calls: the API
 // control surface for validation/resources and the Agent runtime surface for
 // execution. Both may point at the same combined-role listener.
 type MainServiceConfig struct {
+	ClientToken   string        `yaml:"client_token"`
 	APIEndpoint   string        `yaml:"api_endpoint"`
 	AgentEndpoint string        `yaml:"agent_endpoint"`
 	TLS           rpcx.TLSFiles `yaml:"tls"`
@@ -117,6 +120,9 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.RPC.SecurityMode == "" {
+		c.RPC.SecurityMode = rpcx.SecurityModeMTLS
+	}
 	if c.RPC.Listen == "" {
 		c.RPC.Listen = ":9091"
 	}
@@ -149,14 +155,29 @@ func (c *Config) validate() error {
 	if c.RPC.Listen == "" {
 		return fmt.Errorf("scheduler config: rpc.listen is required")
 	}
-	if err := requireTLS("rpc.tls", c.RPC.TLS); err != nil {
-		return err
+	mode, err := rpcx.NormalizeSecurityMode(c.RPC.SecurityMode)
+	if err != nil {
+		return fmt.Errorf("scheduler config: rpc.security_mode: %w", err)
+	}
+	if mode == rpcx.SecurityModeMTLS {
+		if err := requireTLS("rpc.tls", c.RPC.TLS); err != nil {
+			return err
+		}
+	} else {
+		if err := rpcx.ValidatePeerTokens(c.RPC.PeerTokens); err != nil {
+			return fmt.Errorf("scheduler config: rpc.peer_tokens: %w", err)
+		}
+		if err := rpcx.ValidateClientToken(c.MainService.ClientToken); err != nil {
+			return fmt.Errorf("scheduler config: main_service.client_token: %w", err)
+		}
 	}
 	if c.MainService.APIEndpoint == "" {
 		return fmt.Errorf("scheduler config: main_service.api_endpoint is required")
 	}
-	if err := requireTLS("main_service.tls", c.MainService.TLS); err != nil {
-		return err
+	if mode == rpcx.SecurityModeMTLS {
+		if err := requireTLS("main_service.tls", c.MainService.TLS); err != nil {
+			return err
+		}
 	}
 	enabled, poll, maxRun, lease, backoff, concurrent, attempts, scan, maxInput := c.Scheduler.Values()
 	if enabled && c.MainService.AgentEndpoint == "" {

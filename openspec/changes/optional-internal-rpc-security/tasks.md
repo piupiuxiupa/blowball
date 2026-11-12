@@ -63,11 +63,11 @@
 
 **Interfaces:** 消费第 2 组校验；主服务新增 `internal_rpc.security_mode`/`peer_tokens`/`client_token`，Scheduler 新增 `rpc.security_mode`/`peer_tokens` 和 `main_service.client_token`。原 TLS 转换、endpoint 和调度 bounds 不变。
 
-- [ ] 4.1 先写/扩展两侧配置测试：旧配置默认 mTLS、明文无 TLS 文件、缺失环境变量、空/重复/未知身份 Token、非法 Token 字符、未知启用模式、主服务 RPC 关闭时凭证缺失、Scheduler 执行关闭仍需认证；mTLS 模式不要求 Token。
-- [ ] 4.2 运行 `go test ./internal/config ./services/scheduler/internal/config -count=1`，确认新配置行为尚未实现，原基线失败单独记录。
-- [ ] 4.3 实现字段加载、环境展开后的按模式校验和安全默认值；只在启用 RPC 时检查主服务凭证，Scheduler 始终检查 RPC。明文不触发 TLS 文件检查，mTLS 不因 Token 字段存在而改变认证，错误只显示字段/身份、不显示秘密。
-- [ ] 4.4 运行 `go test -race ./internal/config ./services/scheduler/internal/config -count=1`，确认所有配置回归通过，不改变原 endpoint、timeout、正值和旧调度配置迁移规则。
-- [ ] 4.5 仅提交本组改动，使用 `feat(config): configure optional rpc security modes`。
+- [x] 4.1 先写/扩展两侧配置测试：旧配置默认 mTLS、明文无 TLS 文件、缺失环境变量、空/重复/未知身份 Token、非法 Token 字符、未知启用模式、主服务 RPC 关闭时凭证缺失、Scheduler 执行关闭仍需认证；mTLS 模式不要求 Token。
+- [x] 4.2 运行 `go test ./internal/config ./services/scheduler/internal/config -count=1`，确认新配置行为尚未实现，原基线失败单独记录。
+- [x] 4.3 实现字段加载、环境展开后的按模式校验和安全默认值；只在启用 RPC 时检查主服务凭证，Scheduler 始终检查 RPC。明文不触发 TLS 文件检查，mTLS 不因 Token 字段存在而改变认证，错误只显示字段/身份、不显示秘密。
+- [x] 4.4 运行 `go test -race ./internal/config ./services/scheduler/internal/config -count=1`，确认所有配置回归通过，不改变原 endpoint、timeout、正值和旧调度配置迁移规则。
+- [x] 4.5 仅提交本组改动，使用 `feat(config): configure optional rpc security modes`。
 
 ## 5. 启动接线与真实跨服务回归
 

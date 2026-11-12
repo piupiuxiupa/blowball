@@ -60,6 +60,8 @@ plaintext_token → 校验 Token、读取配置身份 ──┘
 
 Token 首期由部署方生成，建议使用至少 32 个随机字节并编码为 Base64URL；程序不尝试推断字符串熵。替换 Token 通过协调修改配置/Secret 并重启完成，不做多版本热轮换。
 
+配置层使用共享的 `RPCPeerTokens` YAML 映射解码器，只检查映射/字符串形状并返回不含输入值的错误；避免 YAML 库在错误类型诊断中回显截断的 Token。运行层仍接收 `map[string]string`，模式和身份/Token 值校验继续由 `rpcx` 负责，不改全局 YAML 解析或其他配置字段。
+
 ### D3. 配置保持原有结构
 
 | 所属配置 | 新字段 | 用途 |
