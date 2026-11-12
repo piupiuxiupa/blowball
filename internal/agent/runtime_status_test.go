@@ -6,14 +6,18 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/lush/blowball/internal/config"
 	"github.com/lush/blowball/internal/model"
 	"github.com/lush/blowball/internal/pkg/trace"
+	"github.com/lush/blowball/internal/stream"
+	"github.com/lush/blowball/internal/tool"
 )
 
 type fakeAgentRuntimeStatusStore struct {
@@ -73,6 +77,128 @@ func TestConfucius_RuntimeStatusAppendFailureDoesNotFailTurn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "done", content)
 	assert.Empty(t, store.entries)
+}
+
+func TestRuntimeStatus_ParallelBudgetWaitsForCompleteGroup(t *testing.T) {
+	for _, name := range []string{"root", "subagent"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			slowStarted := make(chan struct{})
+			fastFinished := make(chan struct{})
+			releaseSlow := make(chan struct{})
+			var release sync.Once
+			reg := tool.NewRegistry()
+			require.NoError(t, reg.Register(&tool.ToolSpec{
+				Name: "slow", Description: "slow tool", ParametersJSON: json.RawMessage(`{"type":"object"}`),
+				Execute: func(ctx context.Context, _ json.RawMessage) (any, error) {
+					close(slowStarted)
+					select {
+					case <-releaseSlow:
+						return "slow result", nil
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				},
+			}))
+			require.NoError(t, reg.Register(&tool.ToolSpec{
+				Name: "fast", Description: "fast tool", ParametersJSON: json.RawMessage(`{"type":"object"}`),
+				Execute: func(ctx context.Context, _ json.RawMessage) (any, error) {
+					select {
+					case <-slowStarted:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					close(fastFinished)
+					return "fast result", nil
+				},
+			}))
+			client := newFake(
+				fakeResponse{finishReason: "tool_calls", toolCalls: []ToolCall{
+					{ID: "slow-call", Function: ToolCallFunction{Name: "slow", Arguments: `{}`}},
+					{ID: "fast-call", Function: ToolCallFunction{Name: "fast", Arguments: `{}`}},
+				}},
+				fakeResponse{content: "done", finishReason: "stop"},
+			)
+			cfg := config.AgentConfig{Name: "Confucius", SystemPrompt: "test", Tools: []string{"slow", "fast"}, MaxRounds: 5}
+			var runner Agent
+			var err error
+			if name == "root" {
+				runner, err = NewConfucius(cfg, client, reg, testSpawnCoordinator(reg, nil), testTurn())
+			} else {
+				cfg.Name = "Subagent"
+				runner, err = newGenericFromAgentConfig(cfg, client, reg, testTurn())
+			}
+			require.NoError(t, err)
+			store := &fakeAgentRuntimeStatusStore{}
+			ctx = WithRuntimeStatusStore(WithSessionID(trace.WithContext(ctx, "parallel"), "s-1"), store)
+			hub := stream.NewHub(128)
+			done := make(chan error, 1)
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				_, _, _, err := runner.Run(ctx, []Message{{Role: "user", Content: "work"}}, hub)
+				done <- err
+			})
+			t.Cleanup(func() {
+				cancel()
+				release.Do(func() { close(releaseSlow) })
+				wg.Wait()
+				hub.Close()
+			})
+
+			select {
+			case <-fastFinished:
+			case <-ctx.Done():
+				t.Fatal("both tools must start concurrently while the first call is blocked")
+			}
+			assert.Equal(t, 1, client.requestCount())
+			select {
+			case <-done:
+				t.Fatal("the turn finished before the slow tool result")
+			case <-time.After(30 * time.Millisecond):
+			}
+			assert.Equal(t, 1, client.requestCount(), "no follow-up request while one result is still pending")
+			release.Do(func() { close(releaseSlow) })
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-ctx.Done():
+				t.Fatal("turn did not finish after both tool results")
+			}
+			wg.Wait()
+			require.Equal(t, 2, client.requestCount())
+			first, second := client.calls[0].Messages, client.calls[1].Messages
+			require.GreaterOrEqual(t, len(second), len(first))
+			assert.Equal(t, first, second[:len(first)])
+			suffix := second[len(first):]
+			require.Len(t, suffix, 4)
+			assert.Len(t, suffix[0].ToolCalls, 2)
+			assert.Equal(t, "slow-call", suffix[1].ToolCallID)
+			assert.Equal(t, "fast-call", suffix[2].ToolCallID)
+			assert.Contains(t, suffix[1].Content, "slow result")
+			assert.Contains(t, suffix[2].Content, "fast result")
+			assert.Equal(t, RuntimeStatusToolBudget, suffix[3].RuntimeStatus)
+			assert.Contains(t, suffix[3].Content, "rounds_used: 1")
+			assert.Contains(t, suffix[3].Content, "rounds_remaining: 4")
+			if name == "root" {
+				require.Len(t, store.entries, 2)
+				assert.Equal(t, "fast-call", store.entries[1].AfterToolCallID,
+					"the anchor follows call order, not execution completion order")
+			} else {
+				assert.Empty(t, store.entries, "subagent status must not enter the root Redis log")
+				for _, message := range runner.(*SubAgent).LastRunMessages() {
+					assert.Empty(t, message.RuntimeStatus, "subagent durable transcript must be status-free")
+				}
+			}
+			hub.Close()
+			for len(hub.Events()) > 0 {
+				raw, err := json.Marshal(<-hub.Events())
+				require.NoError(t, err)
+				assert.NotContains(t, string(raw), "tool_budget", "runtime status must not become an SSE event")
+				assert.NotContains(t, string(raw), "current_status", "runtime status must not become an SSE event")
+			}
+		})
+	}
 }
 
 func TestNewCurrentStatusForRequest_UsesConservativeCompleteEstimate(t *testing.T) {
