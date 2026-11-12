@@ -38,11 +38,11 @@
 
 **Interfaces:** 产出 `SecurityMode`、`SecurityModeMTLS`、`SecurityModePlaintextToken`；`NormalizeSecurityMode(SecurityMode) (SecurityMode, error)`、`ValidatePeerTokens(map[string]string) error`、`ValidateClientToken(string) error`。身份常量复用现有定义，校验不进行 I/O 或日志输出。
 
-- [ ] 2.1 先写 `TestNormalizeSecurityMode`、`TestValidatePeerTokens`、`TestValidateClientToken` 的表驱动测试：省略/两合法模式、未知模式、空映射、未知身份、跨身份重复 Token、空值、空白、控制字符、非 ASCII 和合法 Token；错误不得含凭证标记。
-- [ ] 2.2 运行 `go test ./internal/rpcx -run 'Test(NormalizeSecurityMode|ValidatePeerTokens|ValidateClientToken)' -count=1`，确认当前实现尚不满足新接口/规范，排除无关环境失败。
-- [ ] 2.3 实现以上类型、常量和纯校验函数，默认仅归一化省略值为 `mtls`；不自动修剪 Token、不猜身份、不提供秘密默认值或认证插件注册表。
-- [ ] 2.4 重跑 2.2 和 `go test -race ./internal/rpcx -count=1`，确认校验用例通过、现有 RPC 测试无回归。
-- [ ] 2.5 仅提交本组源文件和测试，使用 `feat(rpcx): add explicit security mode validation`。
+- [x] 2.1 先写 `TestNormalizeSecurityMode`、`TestValidatePeerTokens`、`TestValidateClientToken` 的表驱动测试：省略/两合法模式、未知模式、空映射、未知身份、跨身份重复 Token、空值、空白、控制字符、非 ASCII 和合法 Token；错误不得含凭证标记。
+- [x] 2.2 运行 `go test ./internal/rpcx -run 'Test(NormalizeSecurityMode|ValidatePeerTokens|ValidateClientToken)' -count=1`，确认当前实现尚不满足新接口/规范，排除无关环境失败。
+- [x] 2.3 实现以上类型、常量和纯校验函数，默认仅归一化省略值为 `mtls`；不自动修剪 Token、不猜身份、不提供秘密默认值或认证插件注册表。
+- [x] 2.4 重跑 2.2 和 `go test -race ./internal/rpcx -count=1`，确认校验用例通过、现有 RPC 测试无回归。
+- [x] 2.5 仅提交本组源文件和测试，使用 `feat(rpcx): add explicit security mode validation`。
 
 ## 3. 传输选择、Token 身份与健康检查
 
