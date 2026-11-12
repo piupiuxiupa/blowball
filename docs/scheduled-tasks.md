@@ -28,13 +28,14 @@ API (api/all) ──gRPC(mTLS)──> Scheduler <──gRPC(mTLS)── Agent ru
 Existing databases must apply migrations manually; the Docker initdb mount only
 runs on a fresh volume.
 
-1. **Apply the additive migrations first** (026 → 030):
+1. **Apply the additive migrations first** (026–029 and 031):
 
    ```bash
    for f in migrations/026_scheduled_agent_tasks.sql \
             migrations/027_scheduled_service_fields.sql \
             migrations/028_scheduled_session_store.sql \
-            migrations/029_scheduled_execution_control.sql; do
+            migrations/029_scheduled_execution_control.sql \
+            migrations/031_scheduled_subagent_run_timestamps.sql; do
      mysql -h 127.0.0.1 -u blowball -p blowball < "$f"
    done
    ```
@@ -43,6 +44,21 @@ runs on a fresh volume.
    and pauses `session.mode=existing` tasks with
    `SESSION_POLICY_MIGRATION_REQUIRED`. It does not move or copy any ordinary
    session data.
+
+   031 adds the missing scheduled sub-agent run `create_time` and `update_time`
+   columns with the same millisecond precision, defaults, and automatic update
+   behavior as ordinary sub-agent runs. Existing rows are backfilled from
+   `started_at` and `finished_at`; those original fields and the transcript are
+   unchanged.
+
+   Databases already upgraded through 030 must apply **031 once**, rather than
+   editing or rerunning 028 (its `CREATE TABLE IF NOT EXISTS` cannot upgrade an
+   existing table). Pause scheduled execution and let active executions settle
+   before applying the ALTER and backfill:
+
+   ```bash
+   mysql -h 127.0.0.1 -u blowball -p blowball < migrations/031_scheduled_subagent_run_timestamps.sql
+   ```
 
 2. **Stop the old embedded scheduler** (`scheduled_tasks.enabled: true` on the
    previous binary) and let its non-terminal occurrences settle. Then apply the

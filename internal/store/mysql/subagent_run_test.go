@@ -95,6 +95,57 @@ func testSubAgentRun(instance model.SubAgentInstance, runID, previous string, ru
 	}
 }
 
+func TestScheduledSubAgentRuns_Readback(t *testing.T) {
+	_, scheduled, cleanup := setupScheduledStore(t)
+	defer cleanup()
+	ctx := t.Context()
+	session := scheduledTestSession("ss-subagent-readback", "occ-subagent-readback", "root-run-readback")
+	_, err := scheduled.CreateScheduledSession(ctx, session)
+	require.NoError(t, err)
+	instance := testSubAgentInstance(session.SessionID, "w-scheduled")
+	run := testSubAgentRun(instance, "child-readback", "", 1)
+	run.StartedAt = time.Date(2024, time.January, 2, 3, 4, 5, 123_000_000, time.UTC)
+	run.FinishedAt = run.StartedAt.Add(7*time.Second + 456*time.Millisecond)
+	require.NoError(t, scheduled.AppendSubAgentRun(ctx, instance, run))
+
+	checkRun := func(t *testing.T, got model.SubAgentRun) {
+		t.Helper()
+		assert.Equal(t, run.RunID, got.RunID)
+		assert.True(t, run.StartedAt.Equal(got.StartedAt))
+		assert.True(t, run.FinishedAt.Equal(got.FinishedAt))
+		assert.False(t, got.CreateTime.IsZero())
+		assert.False(t, got.UpdateTime.IsZero())
+	}
+	t.Run("list", func(t *testing.T) {
+		runs, err := scheduled.ListSubAgentRuns(t.Context(), session.SessionID, instance.AgentInstanceID)
+		require.NoError(t, err)
+		require.Len(t, runs, 1)
+		checkRun(t, runs[0])
+		assert.JSONEq(t, string(run.MessagesJSON), string(runs[0].MessagesJSON))
+	})
+	t.Run("get", func(t *testing.T) {
+		got, ok, err := scheduled.GetSubAgentRun(t.Context(), session.SessionID, instance.AgentInstanceID, run.RunID)
+		require.NoError(t, err)
+		require.True(t, ok)
+		checkRun(t, got)
+	})
+	t.Run("children", func(t *testing.T) {
+		children, err := scheduled.ListSubAgentChildRuns(t.Context(), session.SessionID, instance.ParentInstanceID)
+		require.NoError(t, err)
+		require.Len(t, children, 1)
+		checkRun(t, children[0])
+		assert.Nil(t, children[0].MessagesJSON)
+	})
+	t.Run("history", func(t *testing.T) {
+		history, ok, err := scheduled.GetSubAgentHistory(t.Context(), session.SessionID, instance.AgentInstanceID)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Len(t, history.Runs, 1)
+		assert.Equal(t, run.RunID, history.Instance.LatestRunID)
+		checkRun(t, history.Runs[0])
+	})
+}
+
 func TestSubAgentRuns_MultipleDeltasRetryAndScopedRead(t *testing.T) {
 	store, cleanup := setupSubAgentRunStore(t)
 	defer cleanup()

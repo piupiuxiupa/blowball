@@ -19,6 +19,7 @@ import (
 var scheduledSchemaFiles = []string{
 	"../../../migrations/028_scheduled_session_store.sql",
 	"../../../migrations/029_scheduled_execution_control.sql",
+	"../../../migrations/031_scheduled_subagent_run_timestamps.sql",
 }
 
 var scheduledTableNames = []string{
@@ -361,4 +362,59 @@ func TestListScheduledSessionsOwnerScoped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, filtered)
 	_ = store
+}
+
+func TestScheduledSubAgentRunTimestampsMigration_UpgradesExistingRows(t *testing.T) {
+	store, scheduled, cleanup := setupScheduledStore(t)
+	defer cleanup()
+	ctx := t.Context()
+
+	// Recreate the run table from the original deployed schema, even after the
+	// shared fresh fixture starts applying migration 031.
+	_, err := store.db.ExecContext(ctx, "DROP TABLE scheduled_subagent_runs")
+	require.NoError(t, err)
+	execSQLFile(t, store, "../../../migrations/028_scheduled_session_store.sql")
+	session := scheduledTestSession("ss-subagent-upgrade", "occ-subagent-upgrade", "root-run-upgrade")
+	_, err = scheduled.CreateScheduledSession(ctx, session)
+	require.NoError(t, err)
+	instance := testSubAgentInstance(session.SessionID, "w-before-upgrade")
+	run := testSubAgentRun(instance, "child-before-upgrade", "", 1)
+	run.StartedAt = time.Date(2024, time.January, 2, 3, 4, 5, 123_000_000, time.UTC)
+	run.FinishedAt = run.StartedAt.Add(7*time.Second + 456*time.Millisecond)
+	require.NoError(t, scheduled.AppendSubAgentRun(ctx, instance, run))
+
+	_, err = scheduled.ListSubAgentRuns(ctx, session.SessionID, instance.AgentInstanceID)
+	require.ErrorContains(t, err, "Unknown column 'create_time'")
+	execSQLFile(t, store, "../../../migrations/031_scheduled_subagent_run_timestamps.sql")
+	got, ok, err := scheduled.GetSubAgentRun(ctx, session.SessionID, instance.AgentInstanceID, run.RunID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.True(t, run.StartedAt.Equal(got.CreateTime), "backfill preserves the original start time")
+	assert.True(t, run.FinishedAt.Equal(got.UpdateTime), "backfill preserves the original finish time")
+	assert.True(t, run.StartedAt.Equal(got.StartedAt))
+	assert.True(t, run.FinishedAt.Equal(got.FinishedAt))
+	assert.Equal(t, run.Status, got.Status)
+	assert.JSONEq(t, string(run.MessagesJSON), string(got.MessagesJSON))
+
+	var columns int
+	require.NoError(t, store.db.GetContext(ctx, &columns, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = 'scheduled_subagent_runs'
+		  AND column_name IN ('create_time', 'update_time')
+		  AND column_type = 'timestamp(3)' AND is_nullable = 'NO'
+		  AND LOWER(column_default) = 'current_timestamp(3)'
+	`))
+	assert.Equal(t, 2, columns, "both columns match ordinary run precision, nullability and defaults")
+
+	_, err = store.db.ExecContext(ctx, `
+		UPDATE scheduled_subagent_runs SET status = ? WHERE session_id = ? AND run_id = ?
+	`, model.SubAgentStatusError, session.SessionID, run.RunID)
+	require.NoError(t, err)
+	updated, ok, err := scheduled.GetSubAgentRun(ctx, session.SessionID, instance.AgentInstanceID, run.RunID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.True(t, run.StartedAt.Equal(updated.CreateTime), "ordinary updates preserve create_time")
+	assert.True(t, updated.UpdateTime.After(got.UpdateTime), "update_time advances automatically")
+	assert.True(t, run.StartedAt.Equal(updated.StartedAt))
+	assert.True(t, run.FinishedAt.Equal(updated.FinishedAt))
 }
