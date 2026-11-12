@@ -102,43 +102,66 @@
 - **THEN** 系统返回 HTTP 400，提示 "binary file, use download endpoint"
 
 ### Requirement: Write file content as text
-系统 SHALL 提供已鉴权的文本内容写入端点 `PUT /api/v1/workspace/files/*path/content`，作为现有 `GET .../content`（“Get file content as text”）读取接口的对称写入能力。路径 SHALL 经 `xizhi.ValidatePathAllowReserved` 校验（与读取/下载/删除等 REST 接口一致，越界返回 403；REST 接口允许 `.blowball/` 命名空间，区别于 agent 的 `xizhi_*` 工具）。
 
-写入 SHALL 为“创建或替换”（HTTP PUT 语义，与 `xizhi_write_file` 一致）：目标文件不存在时创建（必要时 `MkdirAll` 创建父目录），已存在时整体替换。写入 SHALL 原子完成——先写入目标所在目录下的临时文件，写入成功后再用 `os.Rename` 替换目标；任何中途失败（磁盘满、写错误、超限）都不改动原文件。请求体 SHALL 受服务配置的 `maxUploadBytes` 上限约束。
+系统 SHALL 保留已鉴权 PUT /api/v1/workspace/files/*path/content，与文本读取对称。路径 SHALL 经现有 ValidatePathAllowReserved 安全检查；REST 的 .blowball 访问保持，但 SHALL 额外应用 .cron 受管理路径保护，只允许编辑授权 draft，发布区、staging、元数据及受保护祖先不可经该端点覆盖。
 
-该端点仅写文本：当 `content` 包含 NUL 字节时 SHALL 返回 400 `BINARY_FILE`（与读取侧拒绝返回二进制的策略对称，保证写入的内容可被 `GET .../content` 原样读回）；二进制与大文件仍走 `POST .../upload`。
+合法文本写入 SHALL 保留创建/替换、必要父目录创建、同目录临时文件和原子 rename；失败不改原文件。请求体 SHALL 受 maxUploadBytes 限制；NUL 文本返回 400 BINARY_FILE，二进制仍走上传，上传也遵循同样的 .cron 保护。
 
 #### Scenario: 创建新文本文件
-- **WHEN** 已鉴权用户发送 `PUT /api/v1/workspace/files/notes.md/content`，body 为 `{"content": "hello"}`，且 `notes.md` 不存在
-- **THEN** 系统创建该文件（必要时创建父目录），返回 HTTP 200，body 为 `{"path": "notes.md", "size": 5}`
+- **WHEN** 已鉴权用户向不存在的 notes.md 写 hello
+- **THEN** 创建并返回 200 与 path/size
 
 #### Scenario: 原子覆盖已有文本文件
-- **WHEN** 已鉴权用户对一个已存在的文本文件发送 `PUT /api/v1/workspace/files/notes.md/content` 写入新内容
-- **THEN** 系统先写临时文件再 `os.Rename` 替换；返回 HTTP 200，body 为 `{"path": "notes.md", "size": <新字节数>}`；任何中途失败都不改动原文件
+- **WHEN** 合法已有文件收到文本替换
+- **THEN** 先临时写再 rename，失败不改变原内容
 
 #### Scenario: 自动创建嵌套父目录
-- **WHEN** 已鉴权用户发送 `PUT /api/v1/workspace/files/a/b/c.md/content`，且 `a/b/` 不存在
-- **THEN** 系统创建 `a/b/` 后写入 `c.md`，返回 HTTP 200
+- **WHEN** 合法 a/b/c.md 的父目录不存在
+- **THEN** 创建父目录并返回 200
 
 #### Scenario: 文本含 NUL 字节被拒绝
-- **WHEN** `content` 包含 NUL 字节（即试图写入二进制内容）
-- **THEN** 系统返回 HTTP 400，body 包含 `BINARY_FILE`，原文件不变
+- **WHEN** content 包含 NUL
+- **THEN** 返回 400 BINARY_FILE，原文件不变
 
 #### Scenario: 超过最大尺寸被拒绝
-- **WHEN** 请求体超过配置的 `maxUploadBytes`
-- **THEN** 系统返回 HTTP 413，错误信息 `file too large`，原文件不变
+- **WHEN** 请求体超 maxUploadBytes
+- **THEN** 返回 413，原文件不变
 
 #### Scenario: 路径越界被拒绝
-- **WHEN** `path` 解析后超出 workspace（绝对路径、含 `..`、或符号链接逃逸）
-- **THEN** 系统返回 HTTP 403，body 包含 `FORBIDDEN`
+- **WHEN** 路径为绝对路径、穿越或符号链接逃逸
+- **THEN** 返回 403 FORBIDDEN，不越界读写
 
 #### Scenario: 目标是已存在目录
-- **WHEN** `path` 解析为一个已存在的目录
-- **THEN** 系统返回 HTTP 400，body 包含 `BAD_REQUEST`
+- **WHEN** 文本目标是目录
+- **THEN** 返回 400 BAD_REQUEST
 
 #### Scenario: 缺少鉴权
-- **WHEN** 请求未携带有效 JWT
-- **THEN** 系统返回 HTTP 401
+- **WHEN** JWT 缺失或无效
+- **THEN** 返回 401
+
+#### Scenario: 修改任务草稿
+- **WHEN** owner 修改自己合法 Task 的 .cron/<task_id>/draft 文件
+- **THEN** 按受控 draft revision/写入围栏原子完成，当前发布版本不变
+
+#### Scenario: 覆盖已发布任务资源
+- **WHEN** 通用文本写入目标为 revisions、staging 或管理元数据
+- **THEN** 返回 403 RESOURCE_READ_ONLY，不修改资源
+
+### Requirement: Cron namespace protection across workspace mutations
+
+工作空间列表/下载/文本读取 SHALL 在 owner 授权下支持任务草稿及发布资源，默认隐藏条目规则保持。上传、创建、删除、rename、Office 写回和文件工具 SHALL 共用 .cron 保护规则，包括路径祖先和移动目标；不能通过通用接口删除整个任务根来破坏发布资源。他人 Task/资源 SHALL 返回 404；受保护写入 SHALL 返回明确 403。
+
+#### Scenario: List resources with hidden entries enabled
+- **WHEN** owner 请求 include_hidden=true 并读取受管理 .cron
+- **THEN** 可以查看授权资源，默认 workspace 根列表仍隐藏 .cron
+
+#### Scenario: Rename bypass is attempted
+- **WHEN** 请求通过覆盖/移动 Task 根或发布区祖先绕过只读保护
+- **THEN** 操作拒绝，草稿与发布版本没有部分移动
+
+#### Scenario: Another user's task identifier is supplied
+- **WHEN** 用户在资源路径或发布接口使用他人 task_id
+- **THEN** 返回 404，不访问该用户目录
 
 ### Requirement: User data directory structure
 每个用户的文件 SHALL 按固定结构组织在 data/{user_uuid}/ 下。

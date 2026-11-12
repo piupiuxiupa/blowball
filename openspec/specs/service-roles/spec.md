@@ -8,64 +8,63 @@
 
 ### Requirement: Process role selection
 
-系统 SHALL 允许通过 `serve` 子命令选择运行角色，取值为 `all`、`api`、`agent`，默认 `all`。角色决定该进程注册的路由子集、监听端口与日志文件名；`all` 角色保留拆分前的单进程行为。
+主服务 SHALL 保留 serve 的 all/api/agent 角色，默认 all，现有 HTTP 端口和路由分区不变。all SHALL 合并 API/Agent 能力，但 SHALL NOT 内嵌 Scheduler。独立 Scheduler SHALL 使用 services/scheduler 下的独立入口，不作为主服务的新 role 或兼容 fallback。
 
 #### Scenario: 默认角色为 all 以保持向后兼容
-- **WHEN** 执行 `serve` 且未指定角色
-- **THEN** 进程以 `all` 角色运行，注册全部路由、在 `server.port` 上启动单一 HTTP 监听，行为与拆分前的单体一致
+- **WHEN** serve 未指定角色
+- **THEN** 以 all 注册现有 API/Agent HTTP 并在 server.port 单监听，不启动调度模块
 
 #### Scenario: 显式选择 api 角色
-- **WHEN** 执行 `serve --role api`
-- **THEN** 进程以 `api` 角色运行，仅注册 API 侧路由，在 `server.port` 上监听
+- **WHEN** serve --role api
+- **THEN** 只注册 API HTTP 分区，在 server.port 监听，内部提供非 LLM 能力
 
 #### Scenario: 显式选择 agent 角色
-- **WHEN** 执行 `serve --role agent`
-- **THEN** 进程以 `agent` 角色运行，仅注册 agent 侧路由，在 `server.agent_port` 上监听
+- **WHEN** serve --role agent
+- **THEN** 只注册 Agent HTTP 分区，在 server.agent_port 监听，并提供任务执行内部 RPC
 
 #### Scenario: 非法角色被拒绝
-- **WHEN** 执行 `serve --role foo`
-- **THEN** 系统打印错误并以非零状态码退出，不启动服务
+- **WHEN** serve --role foo 或把 scheduler 当作主服务 role
+- **THEN** 非零退出，不启动服务
 
 ### Requirement: Role-scoped route ownership
 
-系统 SHALL 按角色注册路由：`api` 角色注册鉴权/会话 CRUD/消息历史读取/标题更新/工作空间文件 CRUD/skills 列表/模型列表等 CRUD 路由，以及定时任务管理端点（`POST /api/v1/scheduled-tasks`、`GET /api/v1/scheduled-tasks`、`GET /api/v1/scheduled-tasks/:task_id`、`PATCH /api/v1/scheduled-tasks/:task_id`、`DELETE /api/v1/scheduled-tasks/:task_id`）和运行历史端点 `GET /api/v1/scheduled-tasks/:task_id/runs`；`agent` 角色注册流式消息端点 `POST /api/v1/sessions/:session_id/messages`、turn 生命周期端点（`POST /api/v1/sessions/:session_id/turns/:run_id/cancel` 与 `GET /api/v1/sessions/:session_id/turns/:run_id/events`）以及 MCP 工具列表 `GET /api/v1/mcp/tools`；`all` 角色注册两者之并集。
+API SHALL 保留鉴权/普通会话 CRUD/消息历史/标题/工作空间/skills/模型等 CRUD，任务 HTTP 管理和运行历史改经 Scheduler RPC，新增任务会话/资源只读或管理接口。Agent SHALL 保留普通流式消息、turn 取消/事件恢复、MCP 工具列表，并提供任务 Run 显式取消；SHALL 不注册任务 CRUD/历史 HTTP。all SHALL 合并两组，不重复注册。
 
 #### Scenario: api 角色不注册流式消息端点
-- **WHEN** 以 `api` 角色启动
-- **THEN** `POST /api/v1/sessions/:session_id/messages` 不被注册，对该端点的请求返回 404
+- **WHEN** 以 api 启动
+- **THEN** 普通 POST /api/v1/sessions/:session_id/messages 返回 404
 
 #### Scenario: api 角色不注册 turn 生命周期端点
-- **WHEN** 以 `api` 角色启动
-- **THEN** `POST /api/v1/sessions/:session_id/turns/:run_id/cancel` 与 `GET /api/v1/sessions/:session_id/turns/:run_id/events` 不被注册，对这两个端点的请求返回 404
+- **WHEN** 以 api 启动
+- **THEN** 普通 turn cancel/events 和任务 Run cancel 不注册，返回 404
 
 #### Scenario: 模型列表由 api 角色提供
-- **WHEN** 以 `api` 角色启动
-- **THEN** `GET /api/v1/models` 被注册并返回模型目录；`agent` 角色不注册该端点（对 agent 端口的请求返回 404）
+- **WHEN** api 在线
+- **THEN** GET /api/v1/models 提供目录，agent 端口返回 404
 
 #### Scenario: agent 角色不注册 CRUD 路由
-- **WHEN** 以 `agent` 角色启动
-- **THEN** 会话列表/创建、消息历史读取、工作空间文件 CRUD、skills 列表、模型列表等 CRUD 路由均不被注册，对这些端点的请求返回 404
+- **WHEN** 以 agent 启动
+- **THEN** 普通/任务会话列表历史、工作空间及模型 CRUD 均不注册
 
 #### Scenario: turn 生命周期端点由 agent 角色提供
-- **WHEN** 以 `agent` 角色启动
-- **THEN** `POST /api/v1/sessions/:session_id/turns/:run_id/cancel` 与 `GET /api/v1/sessions/:session_id/turns/:run_id/events` 被注册并可处理请求
+- **WHEN** 以 agent 启动
+- **THEN** 现有普通 cancel/events 和任务 Run 显式取消可用
 
 #### Scenario: MCP 工具列表由 agent 角色提供
-- **WHEN** 以 `agent` 角色启动
-- **THEN** `GET /api/v1/mcp/tools` 被注册并返回已发现的 MCP 工具
+- **WHEN** 以 agent 启动
+- **THEN** GET /api/v1/mcp/tools 仍可用
 
 #### Scenario: all 角色注册全部路由
-- **WHEN** 以 `all` 角色启动
-- **THEN** 上述 CRUD 路由（含模型列表、定时任务管理和运行历史）与流式/turn 生命周期/MCP 路由全部被注册，无重复注册冲突
+- **WHEN** 以 all 启动
+- **THEN** API/Agent 路由合并，包含任务管理/历史/资源及取消，无冲突
 
 #### Scenario: api 角色管理定时任务
-- **WHEN** 以 `api` 角色启动且数据库迁移已就绪
-- **THEN** 定时任务管理及运行历史路由已注册，并按用户身份提供服务
-- **AND** 不要求 Agent 进程在线
+- **WHEN** API 与 Scheduler 可用但 Agent 离线
+- **THEN** 不需要执行的任务管理/历史功能可用，主服务不启动本地 Agent 或调度
 
 #### Scenario: agent 角色不注册任务管理路由
-- **WHEN** 以 `agent` 角色启动
-- **THEN** 所有定时任务管理和运行历史 HTTP 路由均不注册，请求返回 404
+- **WHEN** 请求 agent 的任务 CRUD/运行历史 HTTP
+- **THEN** 返回 404；其 Agent 管理工具使用内部 RPC
 
 ### Requirement: Per-role HTTP listener
 
@@ -153,16 +152,28 @@
 
 ### Requirement: Scheduled task runtime ownership
 
-系统 SHALL 仅在已启用调度的 `agent / all` 角色启动后台调度与恢复模块，该模块 SHALL 共用本进程的 Turn 执行入口、Run registry 和既有 Agent 实现。`api` 角色 SHALL 不启动调度或任务执行，不构造 LLM 客户端、Orchestrator、工具注册表或沙箱。第一版 SHALL 保留 `all / api / agent` 三种角色及现有监听边界，不要求新增服务或运行角色。
+Scheduler SHALL 独立承担后台调度与恢复；all/api/agent SHALL 均不启动该模块。Agent/all SHALL 通过内部执行 RPC 共用现行 turn/Run registry/Agent 处理任务，并持有执行凭证/时限；API/all SHALL 只提供非 LLM 内部及公共管理/历史能力，不构造 Agent 依赖。跨服务任务管理、启动授权和资源引用 SHALL 经内部 RPC。
 
 #### Scenario: Agent role executes without an API process
-- **WHEN** 调度已启用、任务已保存，只有 Agent 角色在线
-- **THEN** Agent 角色从 MySQL 领取并执行任务，不跨进程调用 API 角色
+- **WHEN** Agent 在线但所需 API 身份/资源校验不可用
+- **THEN** 不能绕过校验启动新任务，不回退内嵌调度；已接收任务按可靠状态和既定时限处理
 
 #### Scenario: API role remains lightweight
-- **WHEN** 只有 API 角色在线
-- **THEN** 任务管理和运行历史仍可使用，但不启动后台 Agent 执行或加载 Agent 运行时依赖
+- **WHEN** 只有 API 与 Scheduler 在线
+- **THEN** 管理/历史可用，不运行模型或加载 Agent
 
 #### Scenario: Combined role starts one scheduler
-- **WHEN** 以 all 角色启动且调度已启用
-- **THEN** 该进程只有一个调度模块实例，HTTP 及定时入口共享同一套 Turn 执行代码
+- **WHEN** all 启动
+- **THEN** 内嵌调度实例数量为零；调度必须由独立 Scheduler 提供，执行仍共用 turn 代码
+
+### Requirement: Role-scoped internal RPC listeners
+
+API/Agent SHALL 按角色提供独立配置的内部 RPC 能力；all 可以在同一内部监听器合并两组。内部监听 SHALL 不改变公共 HTTP 角色/端口，并遵循 mTLS/服务身份授权。缺少 Scheduler endpoint 或 Scheduler 故障 SHALL 不阻止普通主服务启动；旧启用内嵌调度配置 SHALL 给出明确迁移错误/指引，不能启动第二调度器。
+
+#### Scenario: Scheduler is offline at main service startup
+- **WHEN** Scheduler 暂时不可达
+- **THEN** 普通主服务可启动；任务调用明确不可用，无本地 fallback
+
+#### Scenario: Legacy embedded scheduling configuration remains
+- **WHEN** 主服务仍配置旧 scheduled_tasks.enabled=true
+- **THEN** 明确提示迁移且不启动内嵌实例，禁止静默双调度
