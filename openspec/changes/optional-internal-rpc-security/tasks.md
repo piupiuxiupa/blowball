@@ -8,7 +8,7 @@
 
 **Tech Stack:** 项目 Go 1.26.2、现有 gRPC/Protobuf、Go 标准库、现有 Testify/bufconn/测试 PKI；不新增依赖。
 
-**Spec:** `design.md`、`specs/scheduled-task-service/spec.md`、`specs/service-roles/spec.md`；前置为 `extract-scheduler-service` 的已实现代码与待同步规格。
+**Spec:** `design.md`、`specs/scheduled-task-service/spec.md`、`specs/service-roles/spec.md`；前置为已归档 `extract-scheduler-service` 的实现和已落位主规格。
 
 ## 1. 全局约束与前置基线
 
@@ -29,8 +29,8 @@
 4. 健康检查豁免 deadline 不得变成明文匿名入口 → 3.1。
 5. 凭证标记不得出现在错误、启动日志、业务持久记录、模型请求或默认工具环境 → 3.1、5.3、6.1。
 
-- [ ] 1.1 核对前置代码和规格来源，记录 `scheduled-task-service` 与 `Role-scoped internal RPC listeners` 是否已同步；未同步时先取得同步操作授权，确认顺序为 `extract-scheduler-service` → 本变更，不自动归档或改写前置 delta。
-- [ ] 1.2 运行 `openspec validate optional-internal-rpc-security --strict` 和 `go test ./internal/rpcx ./internal/config ./services/scheduler/internal/config ./cmd/blowball ./services/scheduler/cmd/scheduler -count=1`，记录实际基线、失败和集成环境条件；区分前置问题与本变更，不顺手修复无关问题。
+- [x] 1.1 核对前置代码和规格来源，记录 `scheduled-task-service` 与 `Role-scoped internal RPC listeners` 是否已同步；未同步时先取得同步操作授权，确认顺序为 `extract-scheduler-service` → 本变更，不自动归档或改写前置 delta。
+- [x] 1.2 运行 `openspec validate optional-internal-rpc-security --strict` 和 `go test ./internal/rpcx ./internal/config ./services/scheduler/internal/config ./cmd/blowball ./services/scheduler/cmd/scheduler -count=1`，记录实际基线、失败和集成环境条件；区分前置问题与本变更，不顺手修复无关问题。
 
 ## 2. 公共模式与凭证校验
 

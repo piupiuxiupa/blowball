@@ -4,7 +4,7 @@
 
 使用者希望内网正式部署继续使用 TLS，同时可以在没有证书的受控联调环境启动服务。关闭传输加密不能等同于关闭服务身份认证，更不能把来源 IP 或客户端声明的身份当作可信主体。
 
-`scheduled-task-service` 和 `Role-scoped internal RPC listeners` 的有效基线目前位于前置变更的 delta 中，尚未全部进入 `openspec/specs/`。本变更不修改前置提案；主规格同步必须按前置变更、本变更的顺序进行。
+`extract-scheduler-service` 已于 2026-11-12 归档，`scheduled-task-service` 和 `Role-scoped internal RPC listeners` 的有效基线已进入 `openspec/specs/`。本变更不修改已归档的前置提案，也无需再次同步前置规格。
 
 ## Goals / Non-Goals
 
@@ -136,9 +136,9 @@ CN 的应用身份映射不能代替服务端 SAN 主机名校验。受控开发
 
 ### D7. 规格基线和验证
 
-本变更只修改前置变更中的 `Versioned and authenticated internal RPC` 和 `Role-scoped internal RPC listeners` 的安全要求，并增加模式、Token、健康检查、凭证、告警和证书指引要求。完整保留原 actor、资源、执行归属、角色隔离和无本地 fallback 场景。
+本变更只修改已落位主规格中的 `Versioned and authenticated internal RPC` 和 `Role-scoped internal RPC listeners` 的安全要求，并增加模式、Token、健康检查、凭证、告警和证书指引要求。完整保留原 actor、资源、执行归属、角色隔离和无本地 fallback 场景。
 
-实施前核对前置代码和规格；如果前置规格仍未落位，需要获得同步操作授权并先同步 `extract-scheduler-service`。最终同步本变更必须在前置之后，不能直接修改前置 delta 来让两者“同时正确”。
+实施前已核对前置代码和规格均已落位。最终同步本变更仍需用户授权，不能直接修改已归档的前置 delta 来让两者“同时正确”。
 
 测试优先复用 `rpcx` 的 bufconn/测试 PKI 和配置临时 YAML。覆盖两种模式的合法调用、凭证缺失/伪造、方法越权、健康检查、deadline、协议不匹配和凭证不泄露；任务管理/执行回归仍使用现有服务，不改调度逻辑来适配协议。
 
@@ -153,7 +153,7 @@ CN 的应用身份映射不能代替服务端 SAN 主机名校验。受控开发
 
 ## Migration Plan
 
-1. 先确认前置规格同步顺序，再按任务实施和验证；本次提案生成不执行同步。
+1. 使用已确认落位的前置规格按任务实施和验证，不重复同步前置变更。
 2. 部署新版时保持默认 `mtls`，既有证书配置和旧节点可继续工作；不需要数据库迁移。
 3. 联调需要明文时，先准备双方不同的 Token 和对应角色映射，再协调切换双方模式并重启；检查启动 WARN、认证健康检查、任务管理和执行。
 4. 内网正式部署始终配置/保留 mTLS；明文配置不能作为证书缺失时的自动容错策略。
@@ -161,4 +161,4 @@ CN 的应用身份映射不能代替服务端 SAN 主机名校验。受控开发
 
 ## Open Questions
 
-没有阻塞性的功能或协议选择。实际内网 DNS/SAN、CA 和角色拆分由部署方填写；前置规格是否已经同步须在实施前核对，不在本次生成过程中替用户执行。
+没有阻塞性的功能或协议选择。实际内网 DNS/SAN、CA 和角色拆分由部署方填写；前置规格已经核对，本变更不替用户执行同步/归档。

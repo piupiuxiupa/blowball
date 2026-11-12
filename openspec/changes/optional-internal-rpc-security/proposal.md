@@ -29,4 +29,4 @@
 - 测试：两种模式的配置、传输、服务身份、逐方法授权、健康检查、错误码和任务链路回归；继续检查凭证不进入业务 proto、模型上下文或日志，不扩大工具环境变量白名单。
 - 配置与文档：`config.example.yaml`、`services/scheduler/config.example.yaml`、`docs/scheduled-tasks.md`。现有 mTLS 配置兼容；新增 Token 示例仅使用环境变量占位符，不提交真实凭证、证书私钥或 CA 私钥。
 - API、数据和依赖：无 HTTP/proto 字段变化，无 SQL migration；复用现有 gRPC 和 Go 标准库，不新增依赖或额外服务。
-- 规格依赖：`extract-scheduler-service` 已实现但尚未同步/归档，`scheduled-task-service` 目前尚未进入主规格。本提案的 delta 基于该变更的有效要求；实施前须确认前置规格已同步，或明确先同步 `extract-scheduler-service`、再同步本变更的顺序。本次生成不修改、同步或归档前置变更。
+- 规格依赖：`extract-scheduler-service` 已于 2026-11-12 归档，`scheduled-task-service` 和所需服务角色要求已经进入主规格。本提案的 delta 基于该已落位基线实施，无需再次同步前置变更；本变更的同步/归档仍须由用户另行要求。
