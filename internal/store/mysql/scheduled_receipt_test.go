@@ -35,6 +35,44 @@ func acceptFixture(t *testing.T) (*Store, model.ScheduledExecutionReceipt) {
 	return store, *stored
 }
 
+func TestReceiptBeforeStartPersistsTerminalStatusAndReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		reason string
+	}{
+		{"owner_unavailable", model.ScheduledReceiptError, model.ScheduledReasonUserUnavailable},
+		{"session_busy", model.ScheduledReceiptSkipped, model.ScheduledReasonSessionBusy},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, stored := acceptFixture(t)
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			claimed, ok, err := store.ClaimScheduledReceipt(t.Context(), stored.OccurrenceID, "worker-before-start", time.Minute, 0, now)
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			ok, err = store.FinishScheduledReceiptBeforeStart(t.Context(), stored.OccurrenceID,
+				claimed.ReceiptGeneration, "worker-before-start", tc.status, tc.reason, "startup rejected", now)
+			require.NoError(t, err)
+			require.True(t, ok)
+			receipt, err := store.GetScheduledExecutionBySession(t.Context(), stored.SessionID)
+			require.NoError(t, err)
+			require.NotNil(t, receipt)
+			assert.Equal(t, tc.status, receipt.Status)
+			assert.Equal(t, tc.reason, receipt.Reason)
+			assert.Equal(t, "startup rejected", receipt.LastError)
+			assert.True(t, receipt.Terminal(), "startup rejection must be visible as a terminal fact")
+			assert.True(t, receipt.StopProofPresent)
+			assert.Equal(t, claimed.ReceiptGeneration, receipt.StopProofGen)
+			assert.Equal(t, model.ScheduledStopProofNotStarted, receipt.StopProofKind)
+			assert.Nil(t, receipt.StartIntentAt)
+			assert.Nil(t, receipt.StartedAt)
+			assert.Nil(t, receipt.LeaseUntil)
+		})
+	}
+}
+
 func TestAcceptScheduledExecutionIsIdempotent(t *testing.T) {
 	store, stored := acceptFixture(t)
 	ctx := context.Background()

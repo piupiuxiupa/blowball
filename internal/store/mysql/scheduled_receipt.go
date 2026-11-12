@@ -416,11 +416,11 @@ WHERE occurrence_id = ? AND receipt_generation = ? AND worker_generation = ?
 // stop proof is not_started.
 func (s *Store) FinishScheduledReceiptBeforeStart(ctx context.Context, occurrenceID string, generation uint64, workerGeneration, status, reason, lastError string, now time.Time) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE scheduled_execution_receipts
-SET status = 'terminal', reason = ?, last_error = NULLIF(?, ''), finished_at = ?, lease_until = NULL,
+SET status = ?, reason = ?, last_error = NULLIF(?, ''), finished_at = ?, lease_until = NULL,
     stop_proof_present = 1, stop_proof_generation = ?, stop_proof_kind = ?, stop_proof_at = ?
 WHERE occurrence_id = ? AND receipt_generation = ? AND worker_generation = ?
   AND status IN ('accepted','preparing')`,
-		status, lastError, now.UTC(), generation, model.ScheduledStopProofNotStarted, now.UTC(),
+		status, reason, lastError, now.UTC(), generation, model.ScheduledStopProofNotStarted, now.UTC(),
 		occurrenceID, generation, workerGeneration)
 	if err != nil {
 		return false, err

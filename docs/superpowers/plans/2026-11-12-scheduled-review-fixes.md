@@ -57,11 +57,11 @@ The user approved the seven fixes in the preceding review. Use the current clean
 
 **Files:** `internal/store/mysql/scheduled_receipt.go`, `scheduled_receipt_test.go`.
 **Interface:** Preserve `FinishScheduledReceiptBeforeStart`; bind its `status` and `reason` to separate SQL placeholders.
-- [ ] Add a real-store rejection/readback test asserting terminal classification, reason and not-started proof.
-- [ ] Observe the stored `terminal`/incorrect reason failure.
-- [ ] Correct only the update statement and argument order.
-- [ ] Run the receipt tests with `MYSQL_TEST_DSN` bound to the dedicated test database.
-- [ ] Commit `fix(runtime): persist recognized pre-start receipt terminal facts`.
+- [x] Add a real-store rejection/readback test asserting terminal classification, reason and not-started proof.
+- [x] Observe the stored `terminal`/incorrect reason failure.
+- [x] Correct only the update statement and argument order.
+- [x] Run the receipt tests with `MYSQL_TEST_DSN` bound to the dedicated test database.
+- [x] Commit `fix(runtime): persist recognized pre-start receipt terminal facts`.
 
 ### Task 4: Use a supported file-write operation kind
 

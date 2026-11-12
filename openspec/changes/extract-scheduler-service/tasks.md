@@ -78,7 +78,7 @@
 
 - [ ] 10.1 补齐主服务 shared turn 的 scheduled sessions/messages/titles/compaction/snapshots 接线，保留缺少存储依赖时 fail-closed，并添加生产构造/执行入口回归测试。
 - [x] 10.2 在释放 occurrence active 状态前可靠保存 execution hold；hold 写入失败保留非终态以便对账重试，覆盖提交顺序及失败恢复窗口。
-- [ ] 10.3 修正启动前 receipt 的 status/reason 参数绑定；真实 MySQL 读回验证可识别终态、原始原因与 not_started 停止证明。
+- [x] 10.3 修正启动前 receipt 的 status/reason 参数绑定；真实 MySQL 读回验证可识别终态、原始原因与 not_started 停止证明。
 - [ ] 10.4 修正 xizhi_write_file 的草稿写入操作类型，覆盖 write/append、授权草稿及发布区拒绝行为。
 - [ ] 10.5 修正 scheduled placeholder 分页的关联表别名，真实 MySQL 验证升序/降序、空页及普通/full 对照。
 - [ ] 10.6 增量迁移补齐 scheduled_subagent_runs 的 create_time/update_time，兼顾既有行，覆盖 list/get/child/history 读回并更新迁移文档。
