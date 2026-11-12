@@ -73,3 +73,13 @@
 - [x] 9.3 增加跨 API/Agent 的资源并发/故障与权限测试，覆盖保护祖先、真实 Linux bwrap、共享 workspace、固定版本和凭证泄露检查。
 - [x] 9.4 运行 OpenSpec strict 校验、OpenAPI/生成产物检查、go vet、构建与 make test；记录 Linux/外部依赖测试前置条件，不以跳过冒充通过。
 - [x] 9.5 每个完成的自包含阶段先运行对应测试再创建 scoped Conventional Commit；最终核对仅提交源代码、测试、文档与配置示例，不提交 bin、秘密、日志或运行数据。
+
+## 10. 审查回归修复
+
+- [ ] 10.1 补齐主服务 shared turn 的 scheduled sessions/messages/titles/compaction/snapshots 接线，保留缺少存储依赖时 fail-closed，并添加生产构造/执行入口回归测试。
+- [ ] 10.2 在释放 occurrence active 状态前可靠保存 execution hold；hold 写入失败保留非终态以便对账重试，覆盖提交顺序及失败恢复窗口。
+- [ ] 10.3 修正启动前 receipt 的 status/reason 参数绑定；真实 MySQL 读回验证可识别终态、原始原因与 not_started 停止证明。
+- [ ] 10.4 修正 xizhi_write_file 的草稿写入操作类型，覆盖 write/append、授权草稿及发布区拒绝行为。
+- [ ] 10.5 修正 scheduled placeholder 分页的关联表别名，真实 MySQL 验证升序/降序、空页及普通/full 对照。
+- [ ] 10.6 增量迁移补齐 scheduled_subagent_runs 的 create_time/update_time，兼顾既有行，覆盖 list/get/child/history 读回并更新迁移文档。
+- [ ] 10.7 保留暂停/初始禁用的未来 at 槽位，覆盖恢复与已消费 at 不重放、cron 重新计算槽位；完成全量 race/lint/build 和 OpenSpec strict 验证。
