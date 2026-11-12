@@ -2,6 +2,7 @@ package rpcx
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -89,6 +90,9 @@ func (a MethodAuthorizer) Allowed(fullMethod, identity string) bool {
 
 // ServerOptions configures the unary server interceptor.
 type ServerOptions struct {
+	SecurityMode SecurityMode
+	TLS          TLSFiles
+	PeerTokens   map[string]string
 	// Authorizer defaults to DefaultAuthorizer when nil.
 	Authorizer MethodAuthorizer
 	// RequireDeadline, when true (the production setting), rejects calls that
@@ -96,11 +100,37 @@ type ServerOptions struct {
 	RequireDeadline bool
 }
 
-// UnaryServerInterceptor enforces mTLS service identity, the per-method
+// NewServer constructs an authenticated internal RPC listener.
+func NewServer(opts ServerOptions) (*grpc.Server, error) {
+	mode, err := NormalizeSecurityMode(opts.SecurityMode)
+	if err != nil {
+		return nil, err
+	}
+	opts.SecurityMode = mode
+	serverOpts := []grpc.ServerOption{}
+	if mode == SecurityModeMTLS {
+		tlsCfg, err := ServerTLS(opts.TLS)
+		if err != nil {
+			return nil, err
+		}
+		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+	} else if err := ValidatePeerTokens(opts.PeerTokens); err != nil {
+		return nil, err
+	}
+	serverOpts = append(serverOpts, grpc.UnaryInterceptor(UnaryServerInterceptor(opts)))
+	return grpc.NewServer(serverOpts...), nil
+}
+
+// UnaryServerInterceptor enforces authenticated service identity, the per-method
 // authorization policy, a deadline, and panic containment. It runs before any
 // handler, so an unauthorized request can never read user data or start an
 // agent.
 func UnaryServerInterceptor(opts ServerOptions) grpc.UnaryServerInterceptor {
+	mode, modeErr := NormalizeSecurityMode(opts.SecurityMode)
+	if modeErr == nil && mode == SecurityModePlaintextToken {
+		modeErr = ValidatePeerTokens(opts.PeerTokens)
+		opts.PeerTokens = maps.Clone(opts.PeerTokens)
+	}
 	authorizer := opts.Authorizer
 	if authorizer == nil {
 		authorizer = DefaultAuthorizer()
@@ -112,7 +142,19 @@ func UnaryServerInterceptor(opts ServerOptions) grpc.UnaryServerInterceptor {
 			}
 		}()
 
-		// Health checks are infrastructure probes: they still require mTLS but
+		if modeErr != nil {
+			return nil, status.Error(codes.Unauthenticated, CodeUnauthenticated+": invalid rpc security configuration")
+		}
+		var identity string
+		if mode == SecurityModePlaintextToken {
+			var ok bool
+			identity, ok = tokenIdentity(ctx, opts.PeerTokens)
+			if !ok {
+				return nil, status.Error(codes.Unauthenticated, CodeUnauthenticated+": service token required")
+			}
+		}
+
+		// Health checks still require mTLS at the transport or a verified token,
 		// are exempt from the deadline and per-method policy so an orchestrator
 		// can probe liveness cheaply.
 		if strings.HasPrefix(info.FullMethod, healthServicePrefix) {
@@ -125,9 +167,12 @@ func UnaryServerInterceptor(opts ServerOptions) grpc.UnaryServerInterceptor {
 			}
 		}
 
-		identity, ok := PeerIdentity(ctx)
-		if !ok || identity == "" {
-			return nil, status.Error(codes.Unauthenticated, CodeUnauthenticated+": client certificate identity required")
+		if mode == SecurityModeMTLS {
+			var ok bool
+			identity, ok = PeerIdentity(ctx)
+			if !ok || identity == "" {
+				return nil, status.Error(codes.Unauthenticated, CodeUnauthenticated+": client certificate identity required")
+			}
 		}
 		if !authorizer.Allowed(info.FullMethod, identity) {
 			return nil, status.Error(codes.PermissionDenied, CodePermissionDenied+": service identity not authorized for method")

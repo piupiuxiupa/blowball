@@ -50,12 +50,12 @@
 
 **Interfaces:** 消费第 2 组；保留 `Dial(DialOptions) (*grpc.ClientConn, error)`、`PeerIdentity(context.Context) (string, bool)`、`UnaryServerInterceptor(ServerOptions) grpc.UnaryServerInterceptor`。`DialOptions` 新增 `SecurityMode`/`ClientToken`；`ServerOptions` 新增 `SecurityMode`/`TLS`/`PeerTokens`，产出 `NewServer(ServerOptions) (*grpc.Server, error)`。Token 调用凭据和 metadata 解析为包内实现，不外露新的身份声明 API。
 
-- [ ] 3.1 先写 `TestPlaintextTokenAuthorization`、`TestPlaintextHealthAuthorization`、`TestTransportModesDoNotDowngrade`、`TestRPCCredentialsDoNotLeak`：有效主服务 Token、缺失/错误/重复/Bearer 格式、scheme 大小写、伪造角色、Scheduler 方法越权、无 deadline 普通调用、有/无 Token 健康检查、跨模式失败、无证书明文成功和 mTLS 不接受 Token 代替证书。
-- [ ] 3.2 运行对应 `go test ./internal/rpcx -run 'Test(Plaintext|TransportModes|RPCCredentials)' -count=1`，确认预期失败；使用 bufconn、测试 PKI 和有界 deadline，不依赖真实服务。
-- [ ] 3.3 实现 `Dial` 的两种凭据分支和公共 `NewServer`：默认复用 mTLS，明文只使用 insecure transport + 专用调用凭据；保留 lazy 连接、默认 deadline、原错误映射和测试 dialer，不自动重试其他协议。
-- [ ] 3.4 实现单值 Bearer 认证及常量时间 Token 比较，主体只来自服务端配置；复用方法权限。明文 health 先认证再豁免 deadline/方法权限，mTLS health 保留原握手验证；任何错误分支均 fail closed，响应/日志不得回显凭证。
-- [ ] 3.5 运行 `go test -race ./internal/rpcx -count=1`，确认新增用例与既有服务身份、缺证书、deadline、health、错误码和 proto 凭证排除测试全部通过。
-- [ ] 3.6 仅提交本组改动，使用 `feat(rpcx): support authenticated plaintext transport`。
+- [x] 3.1 先写 `TestPlaintextTokenAuthorization`、`TestPlaintextHealthAuthorization`、`TestTransportModesDoNotDowngrade`、`TestRPCCredentialsDoNotLeak`：有效主服务 Token、缺失/错误/重复/Bearer 格式、scheme 大小写、伪造角色、Scheduler 方法越权、无 deadline 普通调用、有/无 Token 健康检查、跨模式失败、无证书明文成功和 mTLS 不接受 Token 代替证书。
+- [x] 3.2 运行对应 `go test ./internal/rpcx -run 'Test(Plaintext|TransportModes|RPCCredentials)' -count=1`，确认预期失败；使用 bufconn、测试 PKI 和有界 deadline，不依赖真实服务。
+- [x] 3.3 实现 `Dial` 的两种凭据分支和公共 `NewServer`：默认复用 mTLS，明文只使用 insecure transport + 专用调用凭据；保留 lazy 连接、默认 deadline、原错误映射和测试 dialer，不自动重试其他协议。
+- [x] 3.4 实现单值 Bearer 认证及常量时间 Token 比较，主体只来自服务端配置；复用方法权限。明文 health 先认证再豁免 deadline/方法权限，mTLS health 保留原握手验证；任何错误分支均 fail closed，响应/日志不得回显凭证。
+- [x] 3.5 运行 `go test -race ./internal/rpcx -count=1`，确认新增用例与既有服务身份、缺证书、deadline、health、错误码和 proto 凭证排除测试全部通过。
+- [x] 3.6 仅提交本组改动，使用 `feat(rpcx): support authenticated plaintext transport`。
 
 ## 4. 两侧配置与兼容行为
 
