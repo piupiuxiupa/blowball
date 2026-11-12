@@ -386,7 +386,7 @@ func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig,
 			default:
 				return nil, fmt.Errorf("xizhi_write_file: invalid mode %q (must be \"write\" or \"append\")", a.Mode)
 			}
-			if err := checkWrite(ctx, a.Path, "write"); err != nil {
+			if err := checkWrite(ctx, a.Path, "modify"); err != nil {
 				return nil, err
 			}
 			return WriteFile(workspaceRoot, a.Path, a.Content, a.Mode == "append")
