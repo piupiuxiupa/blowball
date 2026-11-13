@@ -1937,7 +1937,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
 
-	expanded := expandEnv(string(data))
+	expanded, err := expandRPCCredentialEnv(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
 
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {

@@ -28,6 +28,8 @@ API/Agent SHALL 按角色提供独立配置的内部 RPC 能力；all 可以在�
 
 明文入站映射 SHALL 非空，键 SHALL 仅为现有 `blowball-scheduler`、`blowball-api`、`blowball-agent`、`blowball-main`；不同身份 SHALL NOT 共享 Token。入站和出站 Token SHALL 非空、只包含可打印 ASCII 字符且无空白/控制字符。程序 SHALL 在环境变量展开后校验，SHALL NOT 提供默认 Token。主服务关闭内部 RPC 时 SHALL 不要求这些凭证；Scheduler 仅关闭执行时 SHALL 仍校验 RPC 配置。endpoint、timeout 和调度正值校验 SHALL 保持原行为。
 
+Token 环境引用 SHALL 作为字符串值只展开一次，SHALL 保留引号、反斜杠和环境变量值中的字面 `${VAR}`，不得将其解释为额外的 YAML 语法或再次展开。此处理 SHALL 保留别名解析和其他字段既有的环境展开、类型及校验语义。
+
 #### Scenario: Existing configuration keeps mutual TLS
 - **WHEN** 现有有效 TLS 配置省略 `security_mode`
 - **THEN** 监听和出站连接均继续使用 mTLS，不需要迁移字段
@@ -47,6 +49,14 @@ API/Agent SHALL 按角色提供独立配置的内部 RPC 能力；all 可以在�
 #### Scenario: Token is not representable as one credential value
 - **WHEN** Token 含空白、控制字符或非 ASCII 字符
 - **THEN** 拒绝配置，不等到 RPC 发送阶段才失败，也不自动修剪 Token
+
+#### Scenario: Preserve opaque token contents from the environment
+- **WHEN** 入站或出站 Token 环境变量包含合法的引号、反斜杠或字面 `${VAR}`，并通过 YAML 占位符提供
+- **THEN** 两侧加载后的 Token 与环境变量原值完全相同，不因 YAML 解析改变凭证，也不再次展开字面引用
+
+#### Scenario: Token expansion preserves aliases and existing scalar types
+- **WHEN** Token 占位符使用 YAML 别名或合并配置，其他字段仍使用未加引号的数值/布尔或多行 YAML 环境值
+- **THEN** Token 按原值解析，其他字段继续保持其既有类型、层级和校验结果
 
 #### Scenario: Unknown enabled security mode
 - **WHEN** 已启用 RPC 的 `security_mode` 为不支持的值

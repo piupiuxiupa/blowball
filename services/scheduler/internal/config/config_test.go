@@ -85,6 +85,40 @@ func TestLoadPlaintextCredentialsValidation(t *testing.T) {
 	}
 }
 
+func TestLoadRPCTokenEnvironmentValues(t *testing.T) {
+	t.Setenv("RPC_TOKEN_LITERAL_TEST", "must_not_expand")
+	tokens := []struct {
+		name  string
+		token string
+	}{
+		{name: "double quote", token: `MAY_LEAK_SECRET_"opaque`},
+		{name: "backslash", token: `MAY_LEAK_SECRET_\topaque`},
+		{name: "two backslashes", token: `MAY_LEAK_SECRET_\\opaque`},
+		{name: "literal reference", token: "MAY_LEAK_SECRET_${RPC_TOKEN_LITERAL_TEST}"},
+	}
+	for _, tt := range tokens {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RPC_TOKEN_ENV_TEST", tt.token)
+			for _, field := range []string{"inbound", "outbound"} {
+				t.Run(field, func(t *testing.T) {
+					original := "main_config_test_token"
+					if field == "outbound" {
+						original = "scheduler_config_test_token"
+					}
+					body := strings.Replace(plaintextConfig, original, `"${RPC_TOKEN_ENV_TEST}"`, 1)
+					cfg, err := Load(writeConfig(t, body))
+					require.NoError(t, err)
+					got := cfg.RPC.PeerTokens[rpcx.IdentityMain]
+					if field == "outbound" {
+						got = cfg.MainService.ClientToken
+					}
+					assert.Equal(t, tt.token, got)
+				})
+			}
+		})
+	}
+}
+
 func TestLoadRPCCredentialDecodeDoesNotLeak(t *testing.T) {
 	body := strings.Replace(plaintextConfig,
 		"peer_tokens:\n    blowball-main: main_config_test_token",
