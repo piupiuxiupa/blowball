@@ -1,6 +1,6 @@
 bin/
 .codegraph/
-/config.yaml
+config.yaml
 .claude/settings.local.json
 /data/
 .claude/
@@ -12,3 +12,4 @@ tmp/
 .pi/
 .codex/
 /blowball
+.superpowers/
