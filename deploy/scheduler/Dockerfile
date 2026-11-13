@@ -14,7 +14,7 @@ RUN go mod download
 # 拷源码并构建静态二进制（Scheduler 只依赖任务/调度组件与传输契约，纯 Go）。
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-    -o /out/blowball-scheduler ./services/scheduler/cmd/scheduler/
+    -o /out/blowball-scheduler ./services/scheduler/cmd/blowball-scheduler/
 
 # ---- Stage 2: minimal runtime ----
 FROM alpine:3.22.4

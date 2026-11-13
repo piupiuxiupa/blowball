@@ -80,7 +80,7 @@ runs on a fresh volume.
    sessions and workspace behavior are unaffected.
 
 4. **Deploy the Scheduler** (`make build-scheduler` →
-   `bin/scheduler -f services/scheduler/config.yaml -d /var/lib/blowball`) with
+   `bin/blowball-scheduler -f services/scheduler/config.yaml -d /var/lib/blowball`) with
    execution **off** (`scheduler.execution_enabled: false`). Task management and
    history work; no materialization/submission happens.
 
@@ -449,7 +449,7 @@ the Runtime's receipts are the authoritative execution facts, and the
 Scheduler never mutates them directly (it reads them through the Runtime RPC).
 A systemd unit example lives at
 `deploy/scheduler/blowball-scheduler.service`; the binary is `make
-build-scheduler` (`bin/scheduler`).
+build-scheduler` (`bin/blowball-scheduler`).
 
 ## Testing prerequisites
 

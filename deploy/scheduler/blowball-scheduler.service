@@ -10,7 +10,7 @@ User=blowball
 Group=blowball
 # The Scheduler needs its own config (MySQL + mTLS + main-service endpoints).
 # Execution stays off until scheduler.execution_enabled is set to true.
-ExecStart=/usr/local/bin/scheduler -f /etc/blowball/scheduler.yaml -d /var/lib/blowball
+ExecStart=/usr/local/bin/blowball-scheduler -f /etc/blowball/scheduler.yaml -d /var/lib/blowball
 Restart=on-failure
 RestartSec=5s
 # The process needs the MySQL port, the main-service internal gRPC ports and
