@@ -4,8 +4,8 @@ import (
 	"context"
 
 	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
-	"github.com/lush/blowball/internal/rpcx"
-	"github.com/lush/blowball/internal/schedule"
+	"github.com/lush/blowball/pkg/rpcx"
+	"github.com/lush/blowball/pkg/schedule"
 	"github.com/lush/blowball/services/scheduler/internal/task"
 )
 

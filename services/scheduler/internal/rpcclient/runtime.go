@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	scheduledruntimev1 "github.com/lush/blowball/api/gen/go/scheduledruntime/v1"
-	"github.com/lush/blowball/internal/rpcx"
+	"github.com/lush/blowball/pkg/rpcx"
 	sched "github.com/lush/blowball/services/scheduler/internal/scheduler"
 )
 

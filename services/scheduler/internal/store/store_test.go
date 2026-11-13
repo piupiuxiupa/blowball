@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/schedule"
-	"github.com/lush/blowball/internal/scheduledcontract"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/schedule"
+	"github.com/lush/blowball/pkg/scheduledcontract"
 )
 
 func setupStore(t *testing.T) (*Store, func()) {

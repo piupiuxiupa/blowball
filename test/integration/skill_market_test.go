@@ -14,15 +14,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/handler"
-	"github.com/lush/blowball/internal/middleware"
-	"github.com/lush/blowball/internal/pkg/jwt"
-	"github.com/lush/blowball/internal/skillmarket"
-	"github.com/lush/blowball/internal/store/fs"
-	"github.com/lush/blowball/internal/tool"
-	"github.com/lush/blowball/internal/tool/luban"
-	"github.com/lush/blowball/internal/tool/skill"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/handler"
+	"github.com/lush/blowball/pkg/middleware"
+	"github.com/lush/blowball/pkg/jwt"
+	"github.com/lush/blowball/pkg/skillmarket"
+	"github.com/lush/blowball/pkg/store/fs"
+	"github.com/lush/blowball/pkg/tool"
+	"github.com/lush/blowball/pkg/tool/luban"
+	"github.com/lush/blowball/pkg/tool/skill"
 )
 
 // This file exercises the skill-market capability end-to-end against a fake

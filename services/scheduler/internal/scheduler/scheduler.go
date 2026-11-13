@@ -12,10 +12,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/pkg/logger"
-	"github.com/lush/blowball/internal/rpcx"
-	"github.com/lush/blowball/internal/scheduledcontract"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/rpcx"
+	"github.com/lush/blowball/pkg/scheduledcontract"
 )
 
 // Config bounds the standalone scheduler.

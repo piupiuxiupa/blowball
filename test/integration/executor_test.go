@@ -12,11 +12,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/pkg/logger"
-	"github.com/lush/blowball/internal/tool"
-	"github.com/lush/blowball/internal/tool/executor"
-	"github.com/lush/blowball/internal/tool/skill"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/tool"
+	"github.com/lush/blowball/pkg/tool/executor"
+	"github.com/lush/blowball/pkg/tool/skill"
 )
 
 func init() {

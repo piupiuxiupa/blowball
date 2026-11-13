@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/rpcx"
-	"github.com/lush/blowball/internal/schedule"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/rpcx"
+	"github.com/lush/blowball/pkg/schedule"
 )
 
 type fakeStore struct {

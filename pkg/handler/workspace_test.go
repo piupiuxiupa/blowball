@@ -1,0 +1,3089 @@
+package handler
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	jwtpkg "github.com/golang-jwt/jwt/v5"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/lush/blowball/pkg/middleware"
+	"github.com/lush/blowball/pkg/jwt"
+	"github.com/lush/blowball/pkg/store/fs"
+	"github.com/lush/blowball/pkg/tool/xizhi"
+)
+
+const testMaxUploadBytes = 1 << 20 // 1 MiB cap for tests
+
+// wsTestEnv sets up a temp data dir, fs.Store, and WorkspaceHandler wired to
+// a gin engine with auth stubs that inject user-1.
+type wsTestEnv struct {
+	handler *WorkspaceHandler
+	engine  *gin.Engine
+	dataDir string
+	fsSvc   *fs.Store
+}
+
+func newWSTestEnv(t *testing.T) *wsTestEnv {
+	t.Helper()
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	// Create user workspace so List/Download can succeed.
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
+
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Set(middleware.TraceIDKey, "trace-ws")
+		c.Next()
+	})
+	r.GET("/api/v1/workspace/files", h.List)
+	r.POST("/api/v1/workspace/upload", h.Upload)
+	r.GET("/api/v1/workspace/search", h.Search)
+	r.GET("/api/v1/workspace/files/*path", func(c *gin.Context) {
+		raw := c.Param("path")
+		if len(raw) > 8 && raw[len(raw)-8:] == "/content" {
+			trimmed := raw[:len(raw)-8]
+			c.Params = []gin.Param{{Key: "path", Value: trimmed}}
+			h.Content(c)
+			return
+		}
+		h.Download(c)
+	})
+	r.PUT("/api/v1/workspace/files/*path", func(c *gin.Context) {
+		raw := c.Param("path")
+		if len(raw) > 8 && raw[len(raw)-8:] == "/content" {
+			trimmed := raw[:len(raw)-8]
+			c.Params = []gin.Param{{Key: "path", Value: trimmed}}
+			h.WriteContent(c)
+			return
+		}
+		h.Rename(c)
+	})
+	r.DELETE("/api/v1/workspace/files/*path", h.Delete)
+	r.POST("/api/v1/workspace/files/*path", h.Create)
+	return &wsTestEnv{handler: h, engine: r, dataDir: dataDir, fsSvc: fsSvc}
+}
+
+func (e *wsTestEnv) wsRoot() string {
+	return filepath.Join(e.dataDir, "user-1", "workspace")
+}
+
+// TestList_Root verifies listing the workspace root returns all entries with
+// correct shape (dirs first, then files, sorted by name).
+func TestList_Root(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.txt"), []byte("hello"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "b.txt"), []byte("world"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name       string `json:"name"`
+			Type       string `json:"type"`
+			Size       int64  `json:"size"`
+			UpdateTime string `json:"update_time"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 3)
+	// dirs first, then files.
+	assert.Equal(t, "src", resp.Files[0].Name)
+	assert.Equal(t, "dir", resp.Files[0].Type)
+	assert.Equal(t, "a.txt", resp.Files[1].Name)
+	assert.Equal(t, "file", resp.Files[1].Type)
+	assert.Equal(t, int64(5), resp.Files[1].Size)
+	assert.Equal(t, "b.txt", resp.Files[2].Name)
+}
+
+// TestList_Subdirectory verifies the ?path= query parameter scopes the listing
+// to a subdirectory.
+func TestList_Subdirectory(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "src", "main.go"), []byte("package main"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?path=src", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 1)
+	assert.Equal(t, "main.go", resp.Files[0].Name)
+}
+
+// TestList_HiddenExcludedByDefault verifies hidden files and directories are
+// omitted when include_hidden is absent.
+func TestList_HiddenExcludedByDefault(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".hidden-dir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".hidden-file"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "visible.txt"), []byte("hello"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 1)
+	assert.Equal(t, "visible.txt", resp.Files[0].Name)
+}
+
+// TestList_IncludeHidden verifies hidden files and directories are returned
+// when include_hidden=true.
+func TestList_IncludeHidden(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".hidden-dir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".hidden-file"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "visible.txt"), []byte("hello"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?include_hidden=true", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 3)
+
+	names := make([]string, len(resp.Files))
+	for i, f := range resp.Files {
+		names[i] = f.Name
+	}
+	assert.ElementsMatch(t, []string{".hidden-dir", ".hidden-file", "visible.txt"}, names)
+
+	// Directories still sort before files.
+	assert.Equal(t, ".hidden-dir", resp.Files[0].Name)
+	assert.Equal(t, "dir", resp.Files[0].Type)
+}
+
+// TestList_IncludeHiddenOne verifies the numeric truthy form include_hidden=1
+// is accepted and returns hidden entries.
+func TestList_IncludeHiddenOne(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".hidden-file"), []byte("secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "visible.txt"), []byte("hello"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?include_hidden=1", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 2)
+
+	names := make([]string, len(resp.Files))
+	for i, f := range resp.Files {
+		names[i] = f.Name
+	}
+	assert.ElementsMatch(t, []string{".hidden-file", "visible.txt"}, names)
+}
+
+// TestList_PathOutsideWorkspace_403 verifies that a path traversal attempt is
+// rejected with 403.
+func TestList_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?path=../../../etc", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var env2 struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env2))
+	assert.Equal(t, "FORBIDDEN", env2.Error.Code)
+}
+
+// TestList_ReservedNamespace_Allowed verifies the REST API — unlike the xizhi_*
+// agent tools — lets the user browse the reserved .blowball/ namespace (e.g. to
+// manage their own per-user skills), returning 200 rather than 403.
+func TestList_ReservedNamespace_Allowed(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".blowball", "skills", "foo"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".blowball", "skills", "foo", "SKILL.md"), []byte("# foo"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files?path=.blowball", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Files []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Files, 1)
+	assert.Equal(t, "skills", resp.Files[0].Name)
+	assert.Equal(t, "dir", resp.Files[0].Type)
+}
+
+// TestUpload_Success writes a small file to the workspace root and verifies
+// the response contains the path and size.
+func TestUpload_Success(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "test.txt")
+	require.NoError(t, err)
+	_, err = io.Copy(part, bytes.NewReader([]byte("upload content")))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("path", ""))
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "test.txt", resp.Path)
+	assert.Equal(t, int64(14), resp.Size)
+
+	// File actually exists on disk.
+	data, err := os.ReadFile(filepath.Join(env.wsRoot(), "test.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "upload content", string(data))
+}
+
+// TestUpload_PathOutsideWorkspace_403 verifies a path traversal in the upload
+// destination is rejected.
+func TestUpload_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "evil.txt")
+	require.NoError(t, err)
+	_, err = io.Copy(part, bytes.NewReader([]byte("x")))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("path", "../../etc"))
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// TestUpload_FileTooLarge_413 creates a body slightly larger than the limit
+// and verifies 413 is returned.
+func TestUpload_FileTooLarge_413(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	// Write a 1-byte-over-limit payload into the multipart field.
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "big.bin")
+	require.NoError(t, err)
+	_, err = io.Copy(part, bytes.NewReader(make([]byte, testMaxUploadBytes+1)))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("path", ""))
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "body: %s", w.Body.String())
+	var env2 struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env2))
+	assert.Equal(t, "FILE_TOO_LARGE", env2.Error.Code)
+}
+
+// TestDownload_ExistingFile serves an existing file and verifies the status
+// and body content match.
+func TestDownload_ExistingFile(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "hello.txt"), []byte("download me"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/hello.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "download me", w.Body.String())
+}
+
+// TestDownload_NonExistent_404 verifies a missing file returns 404.
+func TestDownload_NonExistent_404(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/nope.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var env2 struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env2))
+	assert.Equal(t, "NOT_FOUND", env2.Error.Code)
+}
+
+// TestContent_TextFile returns text content as JSON.
+// tokenDownloadTestEnv is a test harness for the query-token download endpoint.
+// It wires WorkspaceHandler.TokenDownload behind the real
+// QueryTokenAuthMiddleware so both auth and file-serving logic are exercised.
+type tokenDownloadTestEnv struct {
+	handler *WorkspaceHandler
+	engine  *gin.Engine
+	dataDir string
+	secret  string
+}
+
+func newTokenDownloadTestEnv(t *testing.T) *tokenDownloadTestEnv {
+	t.Helper()
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-td", "workspace"), 0o755))
+
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
+	secret := "ws-token-secret"
+
+	r := gin.New()
+	r.Use(middleware.TraceMiddleware())
+	// Replicate production routing: a single catch-all dispatches
+	// /workspace/files/download/*path to TokenDownload.
+	r.GET("/api/v1/workspace/files/*path", middleware.QueryTokenAuthMiddleware(secret), func(c *gin.Context) {
+		raw := strings.TrimPrefix(c.Param("path"), "/")
+		if raw != tokenDownloadPath && !strings.HasPrefix(raw, tokenDownloadPath+"/") {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": "not found"}})
+			return
+		}
+		filePath := strings.TrimPrefix(raw, tokenDownloadPath)
+		filePath = strings.TrimPrefix(filePath, "/")
+		c.Params = []gin.Param{{Key: "path", Value: filePath}}
+		h.TokenDownload(c)
+	})
+	return &tokenDownloadTestEnv{handler: h, engine: r, dataDir: dataDir, secret: secret}
+}
+
+func (e *tokenDownloadTestEnv) wsRoot() string {
+	return filepath.Join(e.dataDir, "user-td", "workspace")
+}
+
+func (e *tokenDownloadTestEnv) sign(t *testing.T, userID string, expire time.Duration) string {
+	t.Helper()
+	tok, err := jwt.Sign(e.secret, userID, expire)
+	require.NoError(t, err)
+	return tok
+}
+
+func (e *tokenDownloadTestEnv) downloadURL(path, token string, inline bool) string {
+	q := url.Values{}
+	q.Set("token", token)
+	if inline {
+		q.Set("inline", "1")
+	}
+	return "/api/v1/workspace/files/download/" + url.PathEscape(path) + "?" + q.Encode()
+}
+
+func TestTokenDownload_ExistingFile_Attachment(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "report.md"), []byte("# report"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("report.md", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "# report", w.Body.String())
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "attachment")
+	assert.Contains(t, w.Header().Get("Content-Disposition"), `filename="report.md"`)
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "filename*=utf-8''report.md")
+	assert.Equal(t, "private, no-store", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
+}
+
+func TestTokenDownload_Inline(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "pic.png"), []byte("png"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("pic.png", token, true), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "inline")
+	assert.Contains(t, w.Header().Get("Content-Disposition"), `filename="pic.png"`)
+}
+
+func TestTokenDownload_ChineseFilename(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	name := "中文报告.md"
+	require.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte("content"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL(name, token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	disp := w.Header().Get("Content-Disposition")
+	assert.Contains(t, disp, "filename*=utf-8''%E4%B8%AD%E6%96%87%E6%8A%A5%E5%91%8A.md")
+}
+
+// TestTokenDownload_NestedPath_EncodedSlashes verifies that a deeply nested file
+// addressed by URL-encoded slashes (the wire form the React frontend emits via
+// encodeURIComponent) round-trips through the catch-all to the correct file.
+func TestTokenDownload_NestedPath_EncodedSlashes(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub", "deep"), 0o755))
+	nested := filepath.Join(ws, "sub", "deep", "note.md")
+	rootDecoy := filepath.Join(ws, "note.md")
+	require.NoError(t, os.WriteFile(nested, []byte("nested"), 0o644))
+	require.NoError(t, os.WriteFile(rootDecoy, []byte("root"), 0o644))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("sub/deep/note.md", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "nested", w.Body.String())
+}
+
+func TestTokenDownload_MissingPath(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?token="+url.QueryEscape(token), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BAD_REQUEST", resp.Error.Code)
+}
+
+func TestTokenDownload_MissingToken(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download/report.md", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "missing token", resp.Error.Message)
+}
+
+func TestTokenDownload_InvalidToken(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download?token=bad-token&path=report.md", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "invalid token", resp.Error.Message)
+}
+
+func TestTokenDownload_ExpiredToken(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", -time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("report.md", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "token expired", resp.Error.Message)
+}
+
+func TestTokenDownload_PathOutsideWorkspace_403(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("../../../etc/passwd", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
+func TestTokenDownload_Directory_400(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "folder"), 0o755))
+
+	token := env.sign(t, "user-td", time.Hour)
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("folder", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BAD_REQUEST", resp.Error.Code)
+}
+
+func TestTokenDownload_NotFound_404(t *testing.T) {
+	env := newTokenDownloadTestEnv(t)
+	token := env.sign(t, "user-td", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, env.downloadURL("missing.txt", token, false), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+}
+
+// TestTokenDownload_ProductionRouting verifies that the production route
+// registration (catch-all /*path with workspaceFileAuthMW) correctly dispatches
+// /workspace/files/download to TokenDownload using the query token. This is a
+// regression guard for the gin static/wildcard sibling limitation.
+func TestTokenDownload_ProductionRouting(t *testing.T) {
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-prod", "workspace"), 0o755))
+
+	secret := "prod-routing-secret"
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
+	ws := filepath.Join(dataDir, "user-prod", "workspace")
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "multiply_1_to_100.py"), []byte("print(1)"), 0o644))
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(middleware.TraceIDKey, "trace-prod")
+		c.Next()
+	})
+	RegisterRoutes(r, RouteDeps{
+		AuthMW: func(c *gin.Context) {
+			c.AbortWithStatusJSON(401, gin.H{"error": gin.H{"code": "UNAUTHORIZED", "message": "header auth required"}})
+		},
+		QueryTokenAuthMW:       middleware.QueryTokenAuthMiddleware(secret),
+		WorkspaceTokenDownload: h.TokenDownload,
+		Login:                  func(*gin.Context) {},
+		SessionList:            func(*gin.Context) {},
+		SessionCreate:          func(*gin.Context) {},
+		SessionMessages:        func(*gin.Context) {},
+		SendMessage:            func(*gin.Context) {},
+		SessionDelete:          func(*gin.Context) {},
+		SessionUpdateTitle:     func(*gin.Context) {},
+		WorkspaceList:          h.List,
+		WorkspaceUpload:        h.Upload,
+		WorkspaceDownload:      h.Download,
+		WorkspaceContent:       h.Content,
+		WorkspaceWriteContent:  h.WriteContent,
+		WorkspaceDelete:        h.Delete,
+		WorkspaceRename:        h.Rename,
+		WorkspaceCreate:        h.Create,
+		MCPTools:               func(*gin.Context) {},
+		SkillsList:             func(*gin.Context) {},
+	})
+
+	token, err := jwt.Sign(secret, "user-prod", time.Hour)
+	require.NoError(t, err)
+
+	q := url.Values{}
+	q.Set("token", token)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/download/multiply_1_to_100.py?"+q.Encode(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "print(1)", w.Body.String())
+	assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "filename*=utf-8''multiply_1_to_100.py")
+}
+
+func TestContent_TextFile(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "readme.md"), []byte("# Title"), 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/readme.md/content", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+		Size    int    `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "readme.md", resp.Path)
+	assert.Equal(t, "# Title", resp.Content)
+	assert.Equal(t, 7, resp.Size)
+}
+
+// TestContent_BinaryFile_400 verifies a binary file is rejected with the
+// BINARY_FILE error code and the client is told to use the download endpoint.
+func TestContent_BinaryFile_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	// Write a file with a NUL byte in the first 1024 bytes.
+	binaryData := append([]byte{0x89, 0x50, 0x4E, 0x47}, make([]byte, 100)...)
+	binaryData[10] = 0x00 // NUL byte triggers binary detection
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "image.png"), binaryData, 0o644))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/image.png/content", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var env2 struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env2))
+	assert.Equal(t, "BINARY_FILE", env2.Error.Code)
+	assert.Contains(t, env2.Error.Message, "download")
+}
+
+// TestDownload_PathOutsideWorkspace_403 verifies the download path is
+// validated for traversal.
+func TestDownload_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/../../etc/passwd", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// TestContent_PathOutsideWorkspace_403 verifies the content path is validated.
+func TestContent_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/../../etc/passwd/content", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// --- WriteContent (PUT /api/v1/workspace/files/*path/content) tests ---
+
+// TestWriteContent_CreateNewFile verifies the create case: a missing target is
+// created and the response reports the relative path and byte size.
+func TestWriteContent_CreateNewFile(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/notes.md/content",
+		strings.NewReader(`{"content":"hello world"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Path string `json:"path"`
+		Size int    `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "notes.md", resp.Path)
+	assert.Equal(t, len("hello world"), resp.Size)
+
+	data, err := os.ReadFile(filepath.Join(ws, "notes.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", string(data))
+}
+
+// TestWriteContent_AutoCreateParentDirs verifies missing parent directories are
+// created so a write into a fresh nested path succeeds.
+func TestWriteContent_AutoCreateParentDirs(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a/b/c.md/content",
+		strings.NewReader(`{"content":"nested"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(ws, "a", "b", "c.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested", string(data))
+}
+
+// TestWriteContent_OverwriteExisting verifies an existing file is fully replaced
+// (atomic create-or-replace): old content is gone, new content in place.
+func TestWriteContent_OverwriteExisting(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "greeting.md"), []byte("old content here"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/greeting.md/content",
+		strings.NewReader(`{"content":"brand new"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(ws, "greeting.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "brand new", string(data))
+	assert.NotContains(t, string(data), "old content")
+}
+
+// TestWriteContent_BinaryRejected_400 verifies a NUL byte in content is rejected
+// with 400 BINARY_FILE and the pre-existing file is left untouched.
+func TestWriteContent_BinaryRejected_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "data.txt"), []byte("keep-me"), 0o644))
+
+	// Build the body via json.Marshal so the NUL byte in content is properly
+	// escaped as \u0000 in the JSON (a raw NUL inside a JSON string is invalid
+	// JSON). The decoded value then carries a NUL, which the read side would
+	// refuse to return, so the write side rejects it with BINARY_FILE.
+	payload, err := json.Marshal(map[string]string{"content": "bad\x00data"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/data.txt/content",
+		bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BINARY_FILE", resp.Error.Code)
+
+	data, err := os.ReadFile(filepath.Join(ws, "data.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep-me", string(data), "original file must be untouched")
+}
+
+// TestWriteContent_TooLarge_413 verifies a body exceeding maxUploadBytes is
+// rejected with 413 FILE_TOO_LARGE and the pre-existing file is untouched.
+func TestWriteContent_TooLarge_413(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "big.md"), []byte("original"), 0o644))
+
+	huge := strings.Repeat("x", testMaxUploadBytes+10)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/big.md/content",
+		strings.NewReader(`{"content":"`+huge+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "FILE_TOO_LARGE", resp.Error.Code)
+
+	data, err := os.ReadFile(filepath.Join(ws, "big.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(data), "original file must be untouched")
+}
+
+// TestWriteContent_TargetIsDirectory_400 verifies writing "into" an existing
+// directory is rejected with 400 BAD_REQUEST.
+func TestWriteContent_TargetIsDirectory_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "afolder"), 0o755))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/afolder/content",
+		strings.NewReader(`{"content":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "BAD_REQUEST", resp.Error.Code)
+}
+
+// TestWriteContent_PathOutsideWorkspace_403 verifies the write path is validated
+// for traversal / escape exactly like the read endpoints.
+func TestWriteContent_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/../../etc/passwd/content",
+		strings.NewReader(`{"content":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// TestAtomicWriteFile_TooLargeLeavesOriginalUntouched verifies the atomicity
+// invariant: when the payload exceeds the limit, the original file is left
+// byte-for-byte unchanged and no staging temp leaks into the directory. This is
+// the "simulated write failure" case — the limit check fails before any rename,
+// so the destination is never touched.
+func TestAtomicWriteFile_TooLargeLeavesOriginalUntouched(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "orig.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o644))
+
+	// limit (4) is smaller than the data → errWriteTooLarge before staging a temp.
+	_, err := atomicWriteFile(target, []byte("overflow"), 4)
+	require.ErrorIs(t, err, errWriteTooLarge)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(data))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "no stale .ws-write-* temp should remain")
+}
+
+// TestAtomicWriteFile_OverwriteReplacesContent verifies the happy path of the
+// primitive: a successful write fully replaces the destination via temp+rename
+// and leaves no temp behind.
+func TestAtomicWriteFile_OverwriteReplacesContent(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0o644))
+
+	n, err := atomicWriteFile(target, []byte("replacement"), 1<<20)
+	require.NoError(t, err)
+	assert.Equal(t, len("replacement"), n)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "replacement", string(data))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "no stale .ws-write-* temp should remain")
+}
+
+// newWorkspaceRoutingEngine builds a production-style engine via RegisterRoutes
+// with the REAL AuthMiddleware (not a stub), so routing and auth-gating tests
+// exercise the PUT catch-all dispatch and JWT enforcement exactly as deployed.
+// The authenticated user is "user-rt".
+func newWorkspaceRoutingEngine(t *testing.T) (engine *gin.Engine, jwtSecret, wsRoot string) {
+	t.Helper()
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	wsRoot = filepath.Join(dataDir, "user-rt", "workspace")
+	require.NoError(t, os.MkdirAll(wsRoot, 0o755))
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{})
+	jwtSecret = "wc-routing-secret"
+	r := gin.New()
+	RegisterRoutes(r, RouteDeps{
+		AuthMW:                 middleware.AuthMiddleware(jwtSecret),
+		QueryTokenAuthMW:       middleware.QueryTokenAuthMiddleware(jwtSecret),
+		Login:                  func(*gin.Context) {},
+		SessionList:            func(*gin.Context) {},
+		SessionCreate:          func(*gin.Context) {},
+		SessionMessages:        func(*gin.Context) {},
+		SendMessage:            func(*gin.Context) {},
+		SessionDelete:          func(*gin.Context) {},
+		SessionUpdateTitle:     func(*gin.Context) {},
+		WorkspaceList:          h.List,
+		WorkspaceUpload:        h.Upload,
+		WorkspaceSearch:        h.Search,
+		WorkspaceDownload:      h.Download,
+		WorkspaceTokenDownload: h.TokenDownload,
+		WorkspaceContent:       h.Content,
+		WorkspaceWriteContent:  h.WriteContent,
+		WorkspaceDelete:        h.Delete,
+		WorkspaceRename:        h.Rename,
+		WorkspaceCreate:        h.Create,
+		MCPTools:               func(*gin.Context) {},
+		SkillsList:             func(*gin.Context) {},
+	})
+	return r, jwtSecret, wsRoot
+}
+
+// TestWriteContent_MissingAuth_401 verifies the PUT /content route is gated by
+// AuthMiddleware: a request without a Bearer token is rejected with 401.
+func TestWriteContent_MissingAuth_401(t *testing.T) {
+	engine, _, _ := newWorkspaceRoutingEngine(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/notes.md/content",
+		strings.NewReader(`{"content":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestWorkspacePut_ProductionRouting asserts the PUT catch-all dispatches by
+// suffix exactly as deployed: a trailing /content reaches WriteContent, while a
+// bare /*path reaches Rename. Mirrors TestTokenDownload_ProductionRouting.
+func TestWorkspacePut_ProductionRouting(t *testing.T) {
+	engine, secret, wsRoot := newWorkspaceRoutingEngine(t)
+	require.NoError(t, os.WriteFile(filepath.Join(wsRoot, "movable.md"), []byte("move me"), 0o644))
+
+	token, err := jwt.Sign(secret, "user-rt", time.Hour)
+	require.NoError(t, err)
+
+	// /content suffix → WriteContent: creates a brand-new file.
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/made.txt/content",
+		strings.NewReader(`{"content":"written"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "WriteContent dispatch: body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(wsRoot, "made.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "written", string(data))
+
+	// bare /*path → Rename: moves movable.md → moved.md.
+	req = httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/movable.md",
+		strings.NewReader(`{"new_path":"moved.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "Rename dispatch: body: %s", w.Body.String())
+	var rr renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rr))
+	assert.Equal(t, "movable.md", rr.OldPath)
+	assert.Equal(t, "moved.md", rr.NewPath)
+
+	_, err = os.Stat(filepath.Join(wsRoot, "movable.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err = os.ReadFile(filepath.Join(wsRoot, "moved.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "move me", string(data))
+}
+
+// --- Create (POST /api/v1/workspace/files/*path) tests ---
+
+// createNodePOST issues a POST create request against the wsTestEnv engine and
+// returns the recorder. body is the raw JSON body ({"type": ...}).
+func (e *wsTestEnv) createNodePOST(t *testing.T, urlPath, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, urlPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	return w
+}
+
+// TestCreate_File verifies an authenticated create of an empty file returns 200,
+// echoes {path, type}, and leaves a 0-byte file on disk.
+func TestCreate_File(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", `{"type":"file"}`)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "notes.md", resp.Path)
+	assert.Equal(t, "file", resp.Type)
+
+	info, err := os.Stat(filepath.Join(ws, "notes.md"))
+	require.NoError(t, err)
+	assert.False(t, info.IsDir())
+	assert.Equal(t, int64(0), info.Size(), "created file must be empty")
+}
+
+// TestCreate_Directory verifies creating an empty directory returns 200 and the
+// directory exists on disk.
+func TestCreate_Directory(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/sub", `{"type":"directory"}`)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "sub", resp.Path)
+	assert.Equal(t, "directory", resp.Type)
+
+	info, err := os.Stat(filepath.Join(ws, "sub"))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+// TestCreate_NestedAutoParents verifies a nested create auto-builds the missing
+// parent directories (leaf-strict + auto-parents) in one call.
+func TestCreate_NestedAutoParents(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/a/b/c", `{"type":"directory"}`)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "a/b/c", resp.Path)
+	assert.Equal(t, "directory", resp.Type)
+
+	assert.DirExists(t, filepath.Join(ws, "a", "b", "c"))
+}
+
+// TestCreate_ExistingFile_409 verifies creating a file that already exists is
+// rejected with 409 ALREADY_EXISTS and the original is left untouched.
+func TestCreate_ExistingFile_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "notes.md"), []byte("keep"), 0o644))
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", `{"type":"file"}`)
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
+
+	data, err := os.ReadFile(filepath.Join(ws, "notes.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(data), "original file must be untouched")
+}
+
+// TestCreate_ExistingDirectory_409 verifies the 409 contract is identical when
+// the existing leaf is a directory (D4: files and directories behave the same).
+func TestCreate_ExistingDirectory_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "sub", "inner.md"), []byte("x"), 0o644))
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/sub", `{"type":"directory"}`)
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
+
+	// Directory and its contents survive untouched.
+	assert.DirExists(t, filepath.Join(ws, "sub"))
+	data, err := os.ReadFile(filepath.Join(ws, "sub", "inner.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+// TestCreate_WorkspaceRoot_400 verifies "creating" the workspace root (empty
+// path) is rejected with 400 BAD_REQUEST rather than a confusing EEXIST.
+func TestCreate_WorkspaceRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	w := env.createNodePOST(t, "/api/v1/workspace/files/", `{"type":"directory"}`)
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+}
+
+// TestCreate_InvalidOrMissingType_400 verifies a missing or invalid type is
+// rejected with 400 BAD_REQUEST.
+func TestCreate_InvalidOrMissingType_400(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing type", `{}`},
+		{"invalid type", `{"type":"folder"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := env.createNodePOST(t, "/api/v1/workspace/files/notes.md", tc.body)
+			require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+		})
+	}
+}
+
+// TestCreate_PathOutsideWorkspace_403 verifies traversal and symlink escapes are
+// rejected with 403 before any node is created.
+func TestCreate_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	t.Run("traversal", func(t *testing.T) {
+		w := env.createNodePOST(t, "/api/v1/workspace/files/../../etc/passwd", `{"type":"file"}`)
+		require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		assert.Equal(t, "FORBIDDEN", body.Error.Code)
+	})
+
+	t.Run("symlink_escape", func(t *testing.T) {
+		// A symlink inside the workspace pointing outside must not let a create
+		// land beyond the workspace root.
+		require.NoError(t, os.Symlink(os.TempDir(), filepath.Join(ws, "escape")))
+		w := env.createNodePOST(t, "/api/v1/workspace/files/escape/x", `{"type":"file"}`)
+		require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	})
+}
+
+// TestCreate_MissingAuth_401 verifies the POST catch-all is gated by
+// AuthMiddleware: a request without a Bearer token is rejected with 401.
+func TestCreate_MissingAuth_401(t *testing.T) {
+	engine, _, _ := newWorkspaceRoutingEngine(t)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/workspace/files/notes.md",
+		strings.NewReader(`{"type":"file"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestWorkspaceCreate_ProductionRouting asserts the POST catch-all routes to
+// WorkspaceCreate under the production route registration, and that it does not
+// collide with the static POST /workspace/upload route (both work independently).
+// Mirrors TestWorkspacePut_ProductionRouting / TestTokenDownload_ProductionRouting.
+func TestWorkspaceCreate_ProductionRouting(t *testing.T) {
+	engine, secret, wsRoot := newWorkspaceRoutingEngine(t)
+
+	token, err := jwt.Sign(secret, "user-rt", time.Hour)
+	require.NoError(t, err)
+
+	// POST /workspace/files/<path> routes to Create: a new file appears on disk.
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/workspace/files/made.txt",
+		strings.NewReader(`{"type":"file"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "Create dispatch: body: %s", w.Body.String())
+	var cr createNodeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &cr))
+	assert.Equal(t, "made.txt", cr.Path)
+	assert.Equal(t, "file", cr.Type)
+	_, err = os.Stat(filepath.Join(wsRoot, "made.txt"))
+	require.NoError(t, err, "file must be created")
+
+	// POST /workspace/upload still routes to Upload (no catch-all collision): a
+	// multipart upload lands a file and returns the upload response shape, not
+	// Create's {path, type}.
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "up.txt")
+	require.NoError(t, err)
+	_, err = io.Copy(part, bytes.NewReader([]byte("uploaded")))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("path", ""))
+	require.NoError(t, writer.Close())
+	upReq := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", body)
+	upReq.Header.Set("Content-Type", writer.FormDataContentType())
+	upReq.Header.Set("Authorization", "Bearer "+token)
+	upW := httptest.NewRecorder()
+	engine.ServeHTTP(upW, upReq)
+	require.Equal(t, http.StatusOK, upW.Code, "Upload dispatch: body: %s", upW.Body.String())
+	var up struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	require.NoError(t, json.Unmarshal(upW.Body.Bytes(), &up))
+	assert.Equal(t, "up.txt", up.Path)
+	assert.Equal(t, int64(len("uploaded")), up.Size)
+}
+
+// TestList_EmptyWorkspace verifies an empty workspace returns 200 with an
+// empty array.
+func TestList_EmptyWorkspace(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Files []any `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Empty(t, resp.Files)
+}
+
+// TestUpload_Subdirectory uploads a file into a nested subdirectory and
+// verifies auto-creation.
+func TestUpload_Subdirectory(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "nested.txt")
+	require.NoError(t, err)
+	_, err = io.Copy(part, bytes.NewReader([]byte("nested content")))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("path", "sub/dir"))
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	data, err := os.ReadFile(filepath.Join(env.wsRoot(), "sub", "dir", "nested.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested content", string(data))
+}
+
+// TestDelete_File_204 deletes a single file and verifies it is gone.
+func TestDelete_File_204(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "note.txt")
+	require.NoError(t, os.WriteFile(target, []byte("bye"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/note.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(target)
+	require.ErrorIs(t, err, os.ErrNotExist, "file must be removed from disk")
+}
+
+// TestDelete_Directory_Recursive deletes a directory and verifies its contents
+// are removed with it.
+func TestDelete_Directory_Recursive(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	dir := filepath.Join(ws, "project")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("package main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# hi"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/project", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(dir)
+	require.ErrorIs(t, err, os.ErrNotExist, "directory and its contents must be removed")
+}
+
+// TestDelete_NestedPath_EncodedSlashes deletes a deeply nested file addressed
+// by a catch-all path with URL-encoded slashes — the exact wire form the React
+// frontend emits (encodeURIComponent("sub/deep/note.md") -> "sub%2Fdeep%2Fnote.md").
+// It asserts the encoded slashes round-trip through gin's catch-all to the
+// nested file, AND that a distinct same-named file at the workspace root is
+// left untouched (no wrong-file deletion).
+func TestDelete_NestedPath_EncodedSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	// A nested file plus a decoy at the root sharing the basename.
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub", "deep"), 0o755))
+	nested := filepath.Join(ws, "sub", "deep", "note.md")
+	require.NoError(t, os.WriteFile(nested, []byte("nested"), 0o644))
+	rootDecoy := filepath.Join(ws, "note.md")
+	require.NoError(t, os.WriteFile(rootDecoy, []byte("root"), 0o644))
+
+	// Frontend encoding: encodeURIComponent on the full relative path. Go's
+	// url.PathEscape escapes "/" the same way (to %2F), reproducing the wire form.
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/workspace/files/"+url.PathEscape("sub/deep/note.md"), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(nested)
+	require.ErrorIs(t, err, os.ErrNotExist, "nested file must be removed")
+	_, err = os.Stat(rootDecoy)
+	require.NoError(t, err, "root decoy must NOT be deleted (wrong-file regression)")
+}
+
+// TestDelete_NestedPath_LiteralSlashes is the same scenario but with literal
+// (unencoded) slashes in the catch-all, which the router must also accept.
+func TestDelete_NestedPath_LiteralSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "a", "b"), 0o755))
+	nested := filepath.Join(ws, "a", "b", "c.txt")
+	require.NoError(t, os.WriteFile(nested, []byte("c"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/a/b/c.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(nested)
+	require.ErrorIs(t, err, os.ErrNotExist, "nested file must be removed")
+}
+
+// TestDelete_PathOutsideWorkspace_403 verifies a traversal attempt is rejected.
+func TestDelete_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/../../etc/passwd", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
+// TestDelete_ReservedNamespace_Allowed verifies the user can remove entries
+// under .blowball/ (e.g. an obsolete skill) through the REST API, which the
+// xizhi_* agent tools cannot reach.
+func TestDelete_ReservedNamespace_Allowed(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, ".blowball", "skills", "old")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("# old"), 0o644))
+
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/workspace/files/"+url.PathEscape(".blowball/skills/old"), nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(target)
+	require.ErrorIs(t, err, os.ErrNotExist, "reserved-namespace target must be removed")
+}
+
+// TestDelete_NotFound_404 verifies deleting a missing target returns 404.
+func TestDelete_NotFound_404(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/nope.txt", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+}
+
+// TestRename_File_Success renames a file within the workspace root.
+func TestRename_File_Success(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "old.md"), []byte("content"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/old.md",
+		strings.NewReader(`{"new_path":"new.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "old.md", resp.OldPath)
+	assert.Equal(t, "new.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "old.md"))
+	require.ErrorIs(t, err, os.ErrNotExist, "source must be gone")
+	data, err := os.ReadFile(filepath.Join(ws, "new.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "content", string(data))
+}
+
+// TestRename_Directory_Success renames a directory recursively.
+func TestRename_Directory_Success(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "old-dir", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "old-dir", "sub", "f.txt"), []byte("x"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/old-dir",
+		strings.NewReader(`{"new_path":"new-dir"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "old-dir", resp.OldPath)
+	assert.Equal(t, "new-dir", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "old-dir"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "new-dir", "sub", "f.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+// TestRename_MoveToSubdirectory moves a file into an existing subdirectory.
+func TestRename_MoveToSubdirectory(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "subdir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("move me"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a.md",
+		strings.NewReader(`{"new_path":"subdir/b.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "subdir/b.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "a.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "subdir", "b.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "move me", string(data))
+}
+
+// TestRename_DestinationExists_409 verifies no overwrite when destination exists.
+func TestRename_DestinationExists_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "src.md"), []byte("src"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "dst.md"), []byte("dst"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/src.md",
+		strings.NewReader(`{"new_path":"dst.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ALREADY_EXISTS", body.Error.Code)
+
+	// Source and destination are untouched.
+	srcData, err := os.ReadFile(filepath.Join(ws, "src.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "src", string(srcData))
+	dstData, err := os.ReadFile(filepath.Join(ws, "dst.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "dst", string(dstData))
+}
+
+// TestRename_SourceMissing_404 verifies renaming a missing source returns 404.
+func TestRename_SourceMissing_404(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/missing.md",
+		strings.NewReader(`{"new_path":"x.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "NOT_FOUND", body.Error.Code)
+}
+
+// TestRename_PathOutsideWorkspace_403 verifies traversal attempts for either
+// source or destination are rejected.
+func TestRename_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("a"), 0o644))
+
+	cases := []struct {
+		name    string
+		path    string
+		newPath string
+	}{
+		{"source outside", "../../etc/passwd", "x.md"},
+		{"destination outside", "a.md", "../../etc/passwd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut,
+				"/api/v1/workspace/files/"+tc.path,
+				strings.NewReader(`{"new_path":"`+tc.newPath+`"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			env.engine.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "FORBIDDEN", body.Error.Code)
+		})
+	}
+}
+
+// TestRename_WorkspaceRoot_400 verifies the workspace root cannot be renamed.
+func TestRename_WorkspaceRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/.",
+		strings.NewReader(`{"new_path":"new-root"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+}
+
+// TestRename_MissingNewPath_400 verifies a missing or empty new_path is rejected.
+func TestRename_MissingNewPath_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("a"), 0o644))
+
+	cases := []string{
+		`{}`,
+		`{"new_path":""}`,
+		`{"new_path":"   "}`,
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest(http.MethodPut,
+			"/api/v1/workspace/files/a.md",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	}
+}
+
+// TestRename_NestedPath_EncodedSlashes verifies renaming a deeply nested file
+// via URL-encoded slashes (the frontend wire form) hits the right file and
+// leaves a root decoy untouched.
+func TestRename_NestedPath_EncodedSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "sub", "deep"), 0o755))
+	nested := filepath.Join(ws, "sub", "deep", "note.md")
+	rootDecoy := filepath.Join(ws, "note.md")
+	require.NoError(t, os.WriteFile(nested, []byte("nested"), 0o644))
+	require.NoError(t, os.WriteFile(rootDecoy, []byte("root"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/"+url.PathEscape("sub/deep/note.md"),
+		strings.NewReader(`{"new_path":"sub/deep/renamed.md"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(nested)
+	require.ErrorIs(t, err, os.ErrNotExist, "nested source must be gone")
+	_, err = os.Stat(rootDecoy)
+	require.NoError(t, err, "root decoy must remain")
+	data, err := os.ReadFile(filepath.Join(ws, "sub", "deep", "renamed.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested", string(data))
+}
+
+// TestRename_LiteralSlashes moves a file using literal slashes in the catch-all.
+func TestRename_LiteralSlashes(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a", "b", "c.txt"), []byte("c"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a/b/c.txt",
+		strings.NewReader(`{"new_path":"a/b/d.txt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	_, err := os.Stat(filepath.Join(ws, "a", "b", "c.txt"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "a", "b", "d.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "c", string(data))
+}
+
+// TestRename_CreateDestinationParent verifies a move into a not-yet-existing
+// subdirectory creates the parent directories.
+func TestRename_CreateDestinationParent(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "f.txt"), []byte("f"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/f.txt",
+		strings.NewReader(`{"new_path":"new/sub/f.txt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	data, err := os.ReadFile(filepath.Join(ws, "new", "sub", "f.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "f", string(data))
+}
+
+// TestRename_MoveIntoExistingFolder verifies the move-into-folder gesture: when
+// new_path is an existing directory, the source moves inside it as
+// <dir>/<basename(source)> instead of returning 409.
+func TestRename_MoveIntoExistingFolder(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "subdir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.md"), []byte("move me"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/a.md",
+		strings.NewReader(`{"new_path":"subdir"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "a.md", resp.OldPath)
+	assert.Equal(t, "subdir/a.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "a.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "subdir", "a.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "move me", string(data))
+}
+
+// TestRename_MoveDirectoryIntoExistingFolder verifies a directory source also
+// moves inside an existing destination directory.
+func TestRename_MoveDirectoryIntoExistingFolder(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "parent"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "old-dir", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "old-dir", "sub", "f.txt"), []byte("x"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/old-dir",
+		strings.NewReader(`{"new_path":"parent"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "old-dir", resp.OldPath)
+	assert.Equal(t, "parent/old-dir", resp.NewPath)
+
+	data, err := os.ReadFile(filepath.Join(ws, "parent", "old-dir", "sub", "f.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+// TestRename_OverwriteExistingFile verifies overwrite:true atomically replaces
+// an existing file destination (os.Rename over the file).
+func TestRename_OverwriteExistingFile(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "src.md"), []byte("src"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "dst.md"), []byte("dst"), 0o644))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/src.md",
+		strings.NewReader(`{"new_path":"dst.md","overwrite":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp renameResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "src.md", resp.OldPath)
+	assert.Equal(t, "dst.md", resp.NewPath)
+
+	_, err := os.Stat(filepath.Join(ws, "src.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(ws, "dst.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "src", string(data), "destination must hold the source content")
+}
+
+// TestRename_OverwriteDirectoryRejected_409 verifies overwrite:true is rejected
+// with 409 DEST_NOT_EMPTY when the final destination (after move-into-folder
+// resolution) is an existing directory — tree merge is not supported.
+func TestRename_OverwriteDirectoryRejected_409(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	// Source file "collide"; new_path "dest" is an existing directory that
+	// already contains a directory named "collide". After move-into-folder
+	// resolution the final destination (dest/collide) is an existing directory.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "collide"), []byte("src"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "dest", "collide"), 0o755))
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/workspace/files/collide",
+		strings.NewReader(`{"new_path":"dest","overwrite":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "DEST_NOT_EMPTY", resp.Error.Code)
+
+	// Both source and destination survive untouched (no merge).
+	srcData, err := os.ReadFile(filepath.Join(ws, "collide"))
+	require.NoError(t, err)
+	assert.Equal(t, "src", string(srcData))
+	_, err = os.Stat(filepath.Join(ws, "dest", "collide"))
+	require.NoError(t, err)
+}
+
+// TestDelete_WorkspaceRoot_400 verifies a path that resolves to the workspace
+// root (".", "./", "foo/..") is refused — never wiping the whole workspace —
+// and that the root survives.
+func TestDelete_WorkspaceRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "keep.txt"), []byte("survive"), 0o644))
+
+	for _, p := range []string{".", "./", "foo/.."} {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/workspace/files/"+p, nil)
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code, "path %q: body: %s", p, w.Body.String())
+		var resp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "BAD_REQUEST", resp.Error.Code, "path %q", p)
+	}
+
+	// The workspace root and its contents are intact.
+	_, err := os.Stat(ws)
+	require.NoError(t, err, "workspace root must not be deleted")
+	data, err := os.ReadFile(filepath.Join(ws, "keep.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "survive", string(data))
+}
+
+// --- OnlyOffice editor-config + save-callback tests ---
+
+// ooTestEnv wires a WorkspaceHandler with OnlyOffice enabled behind a gin engine
+// whose routing mirrors production: the config endpoint hangs off the catch-all
+// behind AuthMiddleware (Bearer), and the callback endpoint is a standalone POST
+// behind QueryTokenAuthMiddleware. A backing httptest.Server plays the
+// DocumentServer for the callback download (its URL is also ServerURL, so the
+// host allowlist accepts its result URLs).
+type ooTestEnv struct {
+	engine            *gin.Engine
+	dataDir           string
+	jwtSecret         string // blowball user-JWT secret (AuthMiddleware)
+	ooSecret          string // OnlyOffice editor-config signing secret
+	serverURL         string // OnlyOffice ServerURL = backing server URL
+	backend           string // InternalBackend (host the container reaches the backend at)
+	versionServiceURL string // office-vers base URL for the version-view config endpoint
+	dlServer          *httptest.Server
+}
+
+func newOnlyOfficeTestEnv(t *testing.T) *ooTestEnv {
+	t.Helper()
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
+
+	// Backing "DocumentServer": serves the edited result the callback downloads.
+	// Branch on path so one server covers the persist / 404 / oversize cases.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edited", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("EDITED-CONTENT"))
+	})
+	mux.HandleFunc("/missing", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/oversize", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), testMaxUploadBytes+10))
+	})
+	dlServer := httptest.NewServer(mux)
+	t.Cleanup(dlServer.Close)
+
+	jwtSecret := "oo-user-jwt-secret"
+	ooSecret := "oo-editor-secret"
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{
+		Secret:            ooSecret,
+		ServerURL:         dlServer.URL,
+		InternalBackend:   "http://oo-backend.local",
+		VersionServiceURL: "http://office-vers.local",
+	})
+
+	r := gin.New()
+	r.Use(middleware.TraceMiddleware())
+	// Config endpoint: catch-all with /onlyoffice-config suffix, Bearer auth.
+	r.GET("/api/v1/workspace/files/*path", middleware.AuthMiddleware(jwtSecret), func(c *gin.Context) {
+		raw := strings.TrimPrefix(c.Param("path"), "/")
+		if strings.HasSuffix(raw, onlyOfficeConfigSuffix) {
+			c.Params = []gin.Param{{Key: "path", Value: strings.TrimSuffix(raw, onlyOfficeConfigSuffix)}}
+			h.OnlyOfficeConfig(c)
+			return
+		}
+		if strings.HasSuffix(raw, onlyOfficeVersionConfigSuffix) {
+			c.Params = []gin.Param{{Key: "path", Value: strings.TrimSuffix(raw, onlyOfficeVersionConfigSuffix)}}
+			h.OnlyOfficeVersionConfig(c)
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": "not found"}})
+	})
+	// Callback endpoint: standalone POST with query-token auth.
+	r.POST("/api/v1/workspace/onlyoffice-callback", middleware.QueryTokenAuthMiddleware(jwtSecret), h.OnlyOfficeCallback)
+
+	return &ooTestEnv{
+		engine: r, dataDir: dataDir, jwtSecret: jwtSecret, ooSecret: ooSecret,
+		serverURL: dlServer.URL, backend: "http://oo-backend.local",
+		versionServiceURL: "http://office-vers.local", dlServer: dlServer,
+	}
+}
+
+func (e *ooTestEnv) wsRoot() string { return filepath.Join(e.dataDir, "user-1", "workspace") }
+
+// userJWT signs a blowball user JWT for user-1 (the configured workspace owner).
+func (e *ooTestEnv) userJWT(t *testing.T) string {
+	t.Helper()
+	tok, err := jwt.Sign(e.jwtSecret, "user-1", time.Hour)
+	require.NoError(t, err)
+	return tok
+}
+
+// postCallback issues a callback POST with the given JSON body and file path.
+func (e *ooTestEnv) postCallback(t *testing.T, rel, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	q := url.Values{}
+	q.Set("path", rel)
+	q.Set("token", e.userJWT(t))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/onlyoffice-callback?"+q.Encode(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	return w
+}
+
+// onlyOfficeConfigBody decodes the dual-mode editor-config response.
+type onlyOfficeConfigBody struct {
+	ServerURL string             `json:"server_url"`
+	Edit      onlyOfficeModeBody `json:"edit"`
+	View      onlyOfficeModeBody `json:"view"`
+}
+
+// onlyOfficeModeBody is one signed {config, token} pair (edit or view).
+type onlyOfficeModeBody struct {
+	Config map[string]any `json:"config"`
+	Token  string         `json:"token"`
+}
+
+// verifyOnlyOfficeToken parses an OnlyOffice config JWT with the given secret,
+// requiring it to be valid and to carry exactly the supplied config as payload.
+func verifyOnlyOfficeToken(t *testing.T, token, secret string, cfg map[string]any) jwtpkg.MapClaims {
+	t.Helper()
+	claims := jwtpkg.MapClaims{}
+	parsed, err := jwtpkg.ParseWithClaims(token, claims, func(*jwtpkg.Token) (any, error) {
+		return []byte(secret), nil
+	})
+	require.NoError(t, err, "token must verify with the onlyoffice secret")
+	require.True(t, parsed.Valid)
+	require.True(t, reflect.DeepEqual(normalizeJSON(cfg), normalizeJSON(map[string]any(claims))),
+		"token payload must equal the returned config")
+	return claims
+}
+
+// TestOnlyOfficeConfig_SignedConfig verifies the happy path: the endpoint
+// returns both an edit-mode and a view-mode config, each with its own token.
+// The two configs share one random document.key; document.url and callbackUrl
+// are rooted at InternalBackend and carry the user JWT; each token verifies with
+// the same secret and carries exactly its config as payload, and the two tokens
+// differ. edit has mode:"edit"/permissions.edit:true/forcesave; view has
+// mode:"view"/permissions.edit:false/download:true and no forcesave.
+func TestOnlyOfficeConfig_SignedConfig(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "report.docx"), []byte("orig"), 0o644))
+
+	target := "/api/v1/workspace/files/" + url.PathEscape("report.docx") + onlyOfficeConfigSuffix
+	userTok := env.userJWT(t)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+userTok)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp onlyOfficeConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, env.serverURL, resp.ServerURL)
+
+	editDoc := resp.Edit.Config["document"].(map[string]any)
+	editEditor := resp.Edit.Config["editorConfig"].(map[string]any)
+	viewDoc := resp.View.Config["document"].(map[string]any)
+	viewEditor := resp.View.Config["editorConfig"].(map[string]any)
+
+	// Shared document identity across both modes.
+	assert.Equal(t, "word", resp.Edit.Config["documentType"])
+	assert.Equal(t, "word", resp.View.Config["documentType"])
+	for label, doc := range map[string]map[string]any{"edit": editDoc, "view": viewDoc} {
+		assert.Equal(t, "docx", doc["fileType"], "%s fileType", label)
+		assert.Equal(t, "report.docx", doc["title"], "%s title", label)
+		assert.NotEmpty(t, doc["key"], "%s key must be randomly generated", label)
+		// document.url rooted at InternalBackend, carrying the user JWT.
+		docURL := doc["url"].(string)
+		assert.Contains(t, docURL, env.backend+"/api/v1/workspace/files/download/report.docx", "%s url host", label)
+		assert.Contains(t, docURL, "token="+url.QueryEscape(userTok), "%s url token", label)
+	}
+	// Both modes share one random document.key.
+	assert.Equal(t, editDoc["key"], viewDoc["key"], "edit and view must share document.key")
+
+	// edit config: mode edit, edit+download permitted, forcesave on.
+	editPerms := editDoc["permissions"].(map[string]any)
+	assert.Equal(t, "edit", editEditor["mode"])
+	assert.Equal(t, true, editPerms["edit"])
+	assert.Equal(t, true, editPerms["download"])
+	editCustom := editEditor["customization"].(map[string]any)
+	assert.Equal(t, true, editCustom["forcesave"])
+
+	// view config: mode view, edit denied but download allowed, NO forcesave.
+	// (Layout customization IS allowed in view mode — e.g. hiding the left
+	// menu — as long as no save semantics sneak in.)
+	viewPerms := viewDoc["permissions"].(map[string]any)
+	assert.Equal(t, "view", viewEditor["mode"])
+	assert.Equal(t, false, viewPerms["edit"])
+	assert.Equal(t, true, viewPerms["download"])
+	if viewCustom, ok := viewEditor["customization"].(map[string]any); ok {
+		assert.NotContains(t, viewCustom, "forcesave", "view config must not request forcesave")
+	}
+
+	// callbackUrl is present in both modes, rooted at InternalBackend + JWT.
+	for label, editor := range map[string]map[string]any{"edit": editEditor, "view": viewEditor} {
+		cbURL := editor["callbackUrl"].(string)
+		assert.Contains(t, cbURL, env.backend+"/api/v1/workspace/onlyoffice-callback", "%s callbackUrl host", label)
+		assert.Contains(t, cbURL, "path=report.docx", "%s callbackUrl path", label)
+		assert.Contains(t, cbURL, "token="+url.QueryEscape(userTok), "%s callbackUrl token", label)
+	}
+
+	// Each token verifies with the same secret and carries its own config; the two
+	// tokens are distinct.
+	verifyOnlyOfficeToken(t, resp.Edit.Token, env.ooSecret, resp.Edit.Config)
+	verifyOnlyOfficeToken(t, resp.View.Token, env.ooSecret, resp.View.Config)
+	assert.NotEqual(t, resp.Edit.Token, resp.View.Token, "edit and view tokens must differ")
+}
+
+// TestOnlyOfficeConfig_DocURLStrictEscaping pins the document.url escaping for
+// the characters that break the DocumentServer download when left literal:
+// url.PathEscape (the previous escaper) keeps "+" and the other sub-delims
+// unescaped in path-segment mode, and the DocumentServer decodes a path "+"
+// with query semantics — "1+3.xlsx" reached it as "1 3.xlsx" and 404'd. The
+// strict per-segment escaper encodes everything outside the RFC 3986 unreserved
+// set (space → %20, "+" → %2B, "&" → %26) while keeping "/" as a literal
+// separator, and still round-trips to the identical logical path.
+func TestOnlyOfficeConfig_DocURLStrictEscaping(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	rel := "测试 123/1+3&x.xlsx"
+	require.NoError(t, os.MkdirAll(filepath.Join(env.wsRoot(), "测试 123"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(env.wsRoot(), rel), []byte("orig"), 0o644))
+
+	target := "/api/v1/workspace/files/" + url.PathEscape(rel) + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp onlyOfficeConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	docURL := resp.Edit.Config["document"].(map[string]any)["url"].(string)
+	// Strict wire form: space %20, "+" %2B, "&" %26; CJK UTF-8 %XX; the directory
+	// separator stays a literal "/".
+	assert.Contains(t, docURL,
+		"/api/v1/workspace/files/download/%E6%B5%8B%E8%AF%95%20123/1%2B3%26x.xlsx?inline=1&token=",
+		"document.url must escape strictly per segment: %s", docURL)
+	pathPart, _, _ := strings.Cut(docURL, "?")
+	assert.NotContains(t, pathPart, "+")
+	assert.NotContains(t, pathPart, " ")
+
+	// The strict form round-trips to the identical logical path the backend
+	// will resolve.
+	u, err := url.Parse(docURL)
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/workspace/files/download/"+rel, u.Path)
+	assert.Equal(t, "1", u.Query().Get("inline"), "token/inline params must stay intact")
+
+	// The callbackUrl keeps its query-context encoding (QueryEscape): "+" → %2B,
+	// space → "+", and the backend's c.Query decodes both back — assert the
+	// round-trip rather than the wire spelling.
+	cbURL := resp.Edit.Config["editorConfig"].(map[string]any)["callbackUrl"].(string)
+	cbu, err := url.Parse(cbURL)
+	require.NoError(t, err)
+	assert.Equal(t, rel, cbu.Query().Get("path"), "callback path must round-trip")
+
+	// The version endpoint shares the same strict escaper via
+	// escapeOnlyOfficePath (it feeds office-vers's *filepath catch-all).
+	vcfg := env.versionConfig(t, rel, "vid-1")
+	vURL := vcfg["document"].(map[string]any)["url"].(string)
+	assert.Contains(t, vURL, "/documents/user-1/%E6%B5%8B%E8%AF%95%20123/1%2B3%26x.xlsx?", "version url: %s", vURL)
+}
+
+// versionConfig requests the version-view endpoint and returns the signed
+// config map (test-local helper for URL-escaping assertions).
+func (e *ooTestEnv) versionConfig(t *testing.T, rel, versionID string) map[string]any {
+	t.Helper()
+	target := "/api/v1/workspace/files/" + url.PathEscape(rel) + onlyOfficeVersionConfigSuffix + "?versionId=" + url.QueryEscape(versionID)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+e.userJWT(t))
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		View struct {
+			Config map[string]any `json:"config"`
+		} `json:"view"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	return resp.View.Config
+}
+
+// TestOnlyOfficeConfig_PathOutsideWorkspace_403 verifies a traversal attempt is
+// rejected with 403 before any config is built.
+func TestOnlyOfficeConfig_PathOutsideWorkspace_403(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/" + url.PathEscape("../../etc/passwd") + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "FORBIDDEN", body.Error.Code)
+}
+
+// TestOnlyOfficeConfig_NotFound_404 verifies a missing file returns 404.
+func TestOnlyOfficeConfig_NotFound_404(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/missing.docx" + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "NOT_FOUND", body.Error.Code)
+}
+
+// TestOnlyOfficeConfig_Directory_400 verifies that a path resolving to a
+// directory is rejected with 400 before any config is built.
+func TestOnlyOfficeConfig_Directory_400(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(env.wsRoot(), "subdir"), 0o755))
+
+	target := "/api/v1/workspace/files/" + url.PathEscape("subdir") + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+}
+
+// TestOnlyOfficeConfig_Unauthenticated_401 verifies a request without a Bearer
+// token is rejected by AuthMiddleware.
+func TestOnlyOfficeConfig_Unauthenticated_401(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/report.docx" + onlyOfficeConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestOnlyOfficeConfig_Disabled_503 verifies that when the secret is empty the
+// endpoint returns 503 instead of signing an unverifiable config.
+func TestOnlyOfficeConfig_Disabled_503(t *testing.T) {
+	dataDir := t.TempDir()
+	fsSvc, err := fs.New(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "user-1", "workspace", "report.docx"), []byte("x"), 0o644))
+	h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, OnlyOfficeSettings{}) // disabled
+
+	r := gin.New()
+	r.GET("/api/v1/workspace/files/*path", func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Params = []gin.Param{{Key: "path", Value: strings.TrimPrefix(c.Param("path"), "/")}}
+		h.OnlyOfficeConfig(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/report.docx"+onlyOfficeConfigSuffix, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ONLYOFFICE_DISABLED", body.Error.Code)
+}
+
+// onlyOfficeVersionConfigBody decodes the single-mode (view) version-view
+// editor-config response: { server_url, view: { config, token } }.
+type onlyOfficeVersionConfigBody struct {
+	ServerURL string             `json:"server_url"`
+	View      onlyOfficeModeBody `json:"view"`
+}
+
+// expectedVersionKey mirrors deriveOnlyOfficeVersionKey for deterministic-key
+// test assertions: base32(sha256(path + ":" + versionID)), lowercase, unpadded.
+func expectedVersionKey(rel, versionID string) string {
+	sum := sha256.Sum256([]byte(rel + ":" + versionID))
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:]))
+}
+
+// versionConfigKeyFor requests the version-view config for (path, versionID) on
+// the env engine and returns the resulting document.key.
+func versionConfigKeyFor(t *testing.T, env *ooTestEnv, auth, rel, versionID string) string {
+	t.Helper()
+	target := "/api/v1/workspace/files/" + url.PathEscape(rel) + onlyOfficeVersionConfigSuffix + "?versionId=" + url.QueryEscape(versionID)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", auth)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp onlyOfficeVersionConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	doc := resp.View.Config["document"].(map[string]any)
+	k, ok := doc["key"].(string)
+	require.True(t, ok, "document.key must be a string")
+	return k
+}
+
+// TestOnlyOfficeVersionConfig_SignedConfig verifies the happy path: the endpoint
+// returns a single view-mode config + token. The local file need NOT exist (the
+// version's source of truth is office-vers, so the endpoint does not stat it).
+// document.url targets office-vers (rooted at version_service_url, namespaced by
+// the user UUID) and carries NO credential; the config is view-only (mode:view,
+// edit:false, download:true, no callbackUrl, no forcesave); the token verifies
+// with the secret and carries exactly the returned config as payload.
+func TestOnlyOfficeVersionConfig_SignedConfig(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+
+	target := "/api/v1/workspace/files/" + url.PathEscape("report.docx") + onlyOfficeVersionConfigSuffix + "?versionId=vid-123"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp onlyOfficeVersionConfigBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, env.serverURL, resp.ServerURL)
+
+	view := resp.View.Config
+	doc := view["document"].(map[string]any)
+	editorCfg := view["editorConfig"].(map[string]any)
+
+	// View-only content constraints.
+	assert.Equal(t, "view", editorCfg["mode"])
+	docPerms := doc["permissions"].(map[string]any)
+	assert.Equal(t, false, docPerms["edit"])
+	assert.Equal(t, true, docPerms["download"])
+	assert.NotContains(t, editorCfg, "callbackUrl")
+	assert.NotContains(t, editorCfg, "customization")
+
+	// document.url → office-vers, namespaced by the user UUID, no credential.
+	docURL, ok := doc["url"].(string)
+	require.True(t, ok, "document.url must be a string")
+	assert.Contains(t, docURL, env.versionServiceURL+"/documents/user-1/report.docx")
+	assert.Contains(t, docURL, "action=version")
+	assert.Contains(t, docURL, "versionId=vid-123")
+	assert.NotContains(t, docURL, "token=")
+	assert.NotContains(t, docURL, "Bearer")
+
+	// Token verifies with the secret and carries exactly the returned config.
+	verifyOnlyOfficeToken(t, resp.View.Token, env.ooSecret, resp.View.Config)
+}
+
+// TestOnlyOfficeVersionConfig_DeterministicKey verifies document.key is derived
+// deterministically from (path, versionId): the same pair always yields the same
+// key (== base32(sha256(path+":"+versionId))), and a different versionId yields
+// a different key. A historical version is immutable, so a stable key lets
+// OnlyOffice cache and share the conversion across opens and users.
+func TestOnlyOfficeVersionConfig_DeterministicKey(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	auth := "Bearer " + env.userJWT(t)
+
+	k1 := versionConfigKeyFor(t, env, auth, "report.docx", "vid-A")
+	k2 := versionConfigKeyFor(t, env, auth, "report.docx", "vid-A") // same pair
+	k3 := versionConfigKeyFor(t, env, auth, "report.docx", "vid-B") // different versionId
+
+	assert.Equal(t, expectedVersionKey("report.docx", "vid-A"), k1)
+	assert.Equal(t, k1, k2, "same (path, versionId) must yield the same key")
+	assert.NotEqual(t, k1, k3, "different versionId must yield a different key")
+}
+
+// TestOnlyOfficeVersionConfig_MissingVersionId_400 verifies that omitting the
+// versionId query parameter returns 400.
+func TestOnlyOfficeVersionConfig_MissingVersionId_400(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/report.docx" + onlyOfficeVersionConfigSuffix
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "BAD_REQUEST", body.Error.Code)
+}
+
+// TestOnlyOfficeVersionConfig_PathOutsideWorkspace_403 verifies a traversal
+// attempt is rejected before any office-vers URL is built.
+func TestOnlyOfficeVersionConfig_PathOutsideWorkspace_403(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/" + url.PathEscape("../../etc/passwd") + onlyOfficeVersionConfigSuffix + "?versionId=vid"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+env.userJWT(t))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+}
+
+// TestOnlyOfficeVersionConfig_Unauthenticated_401 verifies a request without a
+// Bearer token is rejected by AuthMiddleware.
+func TestOnlyOfficeVersionConfig_Unauthenticated_401(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	target := "/api/v1/workspace/files/report.docx" + onlyOfficeVersionConfigSuffix + "?versionId=vid"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestOnlyOfficeVersionConfig_Disabled_503 verifies the endpoint returns 503 when
+// either the signing secret OR version_service_url is not configured (both are
+// required: the secret to sign, the base URL to build document.url).
+func TestOnlyOfficeVersionConfig_Disabled_503(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		oo   OnlyOfficeSettings
+	}{
+		{"both empty", OnlyOfficeSettings{}},
+		{"secret only", OnlyOfficeSettings{Secret: "s"}},                                                // no version_service_url
+		{"version_service_url only", OnlyOfficeSettings{VersionServiceURL: "http://office-vers.local"}}, // no secret
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			fsSvc, err := fs.New(dataDir)
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "user-1", "workspace"), 0o755))
+			h := NewWorkspaceHandler(fsSvc, testMaxUploadBytes, tc.oo)
+
+			r := gin.New()
+			r.GET("/api/v1/workspace/files/*path", func(c *gin.Context) {
+				c.Set(middleware.UserIDKey, "user-1")
+				c.Params = []gin.Param{{Key: "path", Value: strings.TrimPrefix(c.Param("path"), "/")}}
+				h.OnlyOfficeVersionConfig(c)
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/report.docx"+onlyOfficeVersionConfigSuffix+"?versionId=vid", nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusServiceUnavailable, w.Code, "body: %s", w.Body.String())
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "ONLYOFFICE_DISABLED", body.Error.Code)
+		})
+	}
+}
+
+// TestOnlyOfficeCallback_SaveStatus_Persists verifies status 2 and 6 download the
+// result file and atomically overwrite the workspace file, returning error:0.
+func TestOnlyOfficeCallback_SaveStatus_Persists(t *testing.T) {
+	for _, status := range []int{2, 6} {
+		t.Run(fmt.Sprintf("status=%d", status), func(t *testing.T) {
+			env := newOnlyOfficeTestEnv(t)
+			ws := env.wsRoot()
+			target := filepath.Join(ws, "report.docx")
+			require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+			body := fmt.Sprintf(`{"status":%d,"key":"k","url":%q}`, status, env.dlServer.URL+"/edited")
+			w := env.postCallback(t, "report.docx", body)
+
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			var resp struct {
+				Error int `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, 0, resp.Error, "save must ack error:0")
+
+			data, err := os.ReadFile(target)
+			require.NoError(t, err)
+			assert.Equal(t, "EDITED-CONTENT", string(data), "workspace file must be overwritten")
+		})
+	}
+}
+
+// TestOnlyOfficeCallback_NonSaveStatus_NoWrite verifies status 1 and 4 do not
+// touch disk but still ack error:0.
+func TestOnlyOfficeCallback_NonSaveStatus_NoWrite(t *testing.T) {
+	for _, status := range []int{1, 4} {
+		t.Run(fmt.Sprintf("status=%d", status), func(t *testing.T) {
+			env := newOnlyOfficeTestEnv(t)
+			ws := env.wsRoot()
+			target := filepath.Join(ws, "report.docx")
+			require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+			body := fmt.Sprintf(`{"status":%d,"key":"k","url":%q}`, status, env.dlServer.URL+"/edited")
+			w := env.postCallback(t, "report.docx", body)
+
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			var resp struct {
+				Error int `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, 0, resp.Error)
+
+			data, err := os.ReadFile(target)
+			require.NoError(t, err)
+			assert.Equal(t, "ORIGINAL", string(data), "non-save status must not modify the file")
+		})
+	}
+}
+
+// TestOnlyOfficeCallback_HostNotAllowed verifies a result URL whose host differs
+// from ServerURL is rejected (SSRF mitigation) with error:1 and no write.
+func TestOnlyOfficeCallback_HostNotAllowed(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "report.docx")
+	require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+	body := fmt.Sprintf(`{"status":2,"key":"k","url":%q}`, "http://evil.example/edited")
+	w := env.postCallback(t, "report.docx", body)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error int `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Error, "disallowed host must error:1")
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "ORIGINAL", string(data), "rejected callback must not modify the file")
+}
+
+// TestOnlyOfficeCallback_DownloadFails verifies a non-2xx download leaves the
+// original file intact and replies error:1.
+func TestOnlyOfficeCallback_DownloadFails(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "report.docx")
+	require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+	body := fmt.Sprintf(`{"status":2,"key":"k","url":%q}`, env.dlServer.URL+"/missing")
+	w := env.postCallback(t, "report.docx", body)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error int `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Error)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "ORIGINAL", string(data), "failed download must leave the original intact")
+}
+
+// TestOnlyOfficeCallback_Oversize verifies a result larger than maxUploadBytes is
+// rejected with error:1 and the original file is untouched.
+func TestOnlyOfficeCallback_Oversize(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	ws := env.wsRoot()
+	target := filepath.Join(ws, "report.docx")
+	require.NoError(t, os.WriteFile(target, []byte("ORIGINAL"), 0o644))
+
+	body := fmt.Sprintf(`{"status":2,"key":"k","url":%q}`, env.dlServer.URL+"/oversize")
+	w := env.postCallback(t, "report.docx", body)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp struct {
+		Error int `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Error)
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "ORIGINAL", string(data), "oversize result must leave the original intact")
+}
+
+// TestOnlyOfficeCallback_MissingToken_401 verifies the query-token middleware
+// rejects a callback without a token.
+func TestOnlyOfficeCallback_MissingToken_401(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/onlyoffice-callback?path=report.docx", strings.NewReader(`{"status":2}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "missing token", body.Error.Message)
+}
+
+// TestOnlyOfficeCallback_PathOutsideWorkspace_403 verifies a traversal attempt in
+// the path query is rejected with 403 even with a valid token.
+func TestOnlyOfficeCallback_PathOutsideWorkspace_403(t *testing.T) {
+	env := newOnlyOfficeTestEnv(t)
+	w := env.postCallback(t, "../../../etc/passwd", `{"status":2}`)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "FORBIDDEN", body.Error.Code)
+}
+
+// normalizeJSON normalizes a value decoded from JSON so two decodings of the
+// same object compare equal. It recurses into nested maps and slices; leaves are
+// returned as-is. (Numbers in this config are absent, so no float coercion.)
+func normalizeJSON(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = normalizeJSON(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = normalizeJSON(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// --- Search (GET /api/v1/workspace/search) tests ---
+
+// searchResp mirrors the Search endpoint's JSON body for test unmarshalling.
+type searchResp struct {
+	Pattern       string `json:"pattern"`
+	Total         int    `json:"total"`
+	Truncated     bool   `json:"truncated"`
+	AppliedLimit  int    `json:"applied_limit"`
+	AppliedOffset int    `json:"applied_offset"`
+	Entries       []struct {
+		Path       string `json:"path"`
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		Size       int64  `json:"size"`
+		UpdateTime string `json:"update_time"`
+	} `json:"entries"`
+}
+
+// searchGET issues a GET /api/v1/workspace/search?<query> against the
+// wsTestEnv engine and returns the recorder plus the decoded body.
+func (e *wsTestEnv) searchGET(t *testing.T, query string) (*httptest.ResponseRecorder, searchResp) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?"+query, nil)
+	w := httptest.NewRecorder()
+	e.engine.ServeHTTP(w, req)
+	var resp searchResp
+	if w.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "body: %s", w.Body.String())
+	}
+	return w, resp
+}
+
+// writeSearchFixture creates a deterministic search fixture tree under ws:
+//
+//	docs/guide.md, docs/sub/note.md
+//	reports/report(1).md, reports/a+b.txt
+//	src/main.go
+//	README.md
+//	.blowball/skills/x/SKILL.md
+func writeSearchFixture(t *testing.T, ws string) {
+	t.Helper()
+	write := func(rel string) {
+		abs := filepath.Join(ws, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+		require.NoError(t, os.WriteFile(abs, []byte("fixture-content"), 0o644))
+	}
+	write("docs/guide.md")
+	write("docs/sub/note.md")
+	write("reports/report(1).md")
+	write("reports/a+b.txt")
+	write("src/main.go")
+	write("README.md")
+	write(".blowball/skills/x/SKILL.md")
+}
+
+// TestSearch_SubstringWithSpecialChars verifies the pattern is matched as a
+// literal SUBSTRING: regex metacharacters must neither alter matching nor blow
+// up compilation, and only the basename participates.
+func TestSearch_SubstringWithSpecialChars(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "pattern=report(1)")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "report(1)", resp.Pattern, "the echoed pattern is the raw user input")
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "reports/report(1).md", resp.Entries[0].Path)
+	assert.Equal(t, "report(1).md", resp.Entries[0].Name)
+	assert.Equal(t, "file", resp.Entries[0].Type)
+	assert.Equal(t, 1, resp.Total)
+
+	// A "+" in the name is literal too.
+	w, resp = env.searchGET(t, "pattern=a%2Bb")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "reports/a+b.txt", resp.Entries[0].Path)
+
+	// Basename-only matching: "docs/guide" spans two components and must not hit.
+	w, resp = env.searchGET(t, "pattern=docs%2Fguide")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, resp.Entries, "path-spanning patterns must not match")
+}
+
+// TestSearch_EmptyPatternWithTypeEnumeration verifies a blank pattern plus a
+// type filter enumerates every non-hidden entry of that type.
+func TestSearch_EmptyPatternWithTypeEnumeration(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	// type=dir → every directory, hidden ones excluded.
+	w, resp := env.searchGET(t, "pattern=&type=dir")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	paths := make([]string, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		assert.Equal(t, "dir", e.Type)
+		paths = append(paths, e.Path)
+	}
+	assert.Equal(t, []string{"docs", "docs/sub", "reports", "src"}, paths)
+	assert.Equal(t, 4, resp.Total)
+	assert.False(t, resp.Truncated)
+
+	// type=file for contrast.
+	w, resp = env.searchGET(t, "type=file")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 6, resp.Total, "visible files only: guide.md, note.md, report(1).md, a+b.txt, main.go, README.md")
+
+	// The literal "any" is the openapi enum's own token — it must be accepted
+	// explicitly, not only via the omitted/blank param (once rejected with
+	// `type must be "file", "dir" or "any"`).
+	w, resp = env.searchGET(t, "pattern=&type=any")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, 10, resp.Total, "4 dirs + 6 visible files")
+}
+
+// TestSearch_IgnoreCaseDefaultTrue verifies the REST-only default divergence:
+// ignore_case defaults to true (the agent's xizhi_find defaults to false), and
+// an explicit false restores case sensitivity.
+func TestSearch_IgnoreCaseDefaultTrue(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "pattern=readme")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "README.md", resp.Entries[0].Path)
+
+	w, resp = env.searchGET(t, "pattern=readme&ignore_case=false")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, resp.Entries, "explicit ignore_case=false must be case-sensitive")
+}
+
+// TestSearch_HiddenExcludedByDefault verifies hidden entries are invisible by
+// default and appear with include_hidden=true — including the reserved
+// .blowball namespace, which the REST path may see (the agent's xizhi_find
+// cannot).
+func TestSearch_HiddenExcludedByDefault(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "pattern=SKILL")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Empty(t, resp.Entries, "hidden .blowball subtree must be excluded by default")
+	assert.Equal(t, 0, resp.Total)
+
+	w, resp = env.searchGET(t, "pattern=SKILL&include_hidden=true")
+	require.Equal(t, http.StatusOK, w.Code)
+	// Under the default ignore_case, "SKILL" also matches the "skills"
+	// directory name; both entries surface once hidden entries are included.
+	assert.Equal(t, []string{".blowball/skills", ".blowball/skills/x/SKILL.md"}, pathsOf(resp))
+}
+
+// TestSearch_ReservedNamespaceAsRoot verifies .blowball is usable as a search
+// root (ValidatePathAllowReserved), while the same path is rejected by the
+// agent-side ValidatePath.
+func TestSearch_ReservedNamespaceAsRoot(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "path=.blowball/skills&type=file")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "x/SKILL.md", resp.Entries[0].Path, "paths are relative to the search root")
+
+	// The agent-side validator still rejects the same path — the two policies
+	// are independent by design.
+	_, err := xizhi.ValidatePath(env.wsRoot(), ".blowball/skills")
+	require.ErrorIs(t, err, xizhi.ErrPathOutsideWorkspace)
+}
+
+// TestSearch_PathOutsideWorkspace_403 verifies a search root that escapes the
+// workspace is rejected with 403.
+func TestSearch_PathOutsideWorkspace_403(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	for _, q := range []string{"path=..%2Fescape", "path=%2Fetc"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?"+q, nil)
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusForbidden, w.Code, "query %s; body: %s", q, w.Body.String())
+	}
+}
+
+// TestSearch_MissingRoot_200Empty verifies a non-existent search root yields
+// an empty 200 page (matching List), not a 404.
+func TestSearch_MissingRoot_200Empty(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	w, resp := env.searchGET(t, "path=no%2Fsuch%2Fdir&pattern=x")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, 0, resp.Total)
+	assert.Empty(t, resp.Entries)
+	assert.NotNil(t, resp.Entries)
+	assert.False(t, resp.Truncated)
+	assert.Equal(t, 200, resp.AppliedLimit)
+	assert.Equal(t, 0, resp.AppliedOffset)
+}
+
+// TestSearch_FileRoot_400 verifies a regular-file search root is rejected with
+// 400 INVALID_PATH (deliberately diverging from List, which surfaces ENOTDIR
+// as a 500).
+func TestSearch_FileRoot_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?path=README.md", nil)
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "INVALID_PATH")
+	assert.Contains(t, w.Body.String(), "directory")
+}
+
+// TestSearch_PaginationWindowAndTruncated verifies the offset/head_limit
+// window, the truncated flag, and — via two pages — that lexicographic order
+// makes paging exhaustive without overlap.
+func TestSearch_PaginationWindowAndTruncated(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	for i := range 5 {
+		require.NoError(t, os.WriteFile(filepath.Join(ws, fmt.Sprintf("page%d.txt", i)), []byte("x"), 0o644))
+	}
+
+	w, p1 := env.searchGET(t, "pattern=page&head_limit=2&offset=0")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, p1.Entries, 2)
+	assert.Equal(t, 5, p1.Total)
+	assert.True(t, p1.Truncated)
+	assert.Equal(t, 2, p1.AppliedLimit)
+	assert.Equal(t, 0, p1.AppliedOffset)
+	assert.Equal(t, "page0.txt", p1.Entries[0].Path)
+
+	w, p2 := env.searchGET(t, "pattern=page&head_limit=2&offset=2")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, p2.Entries, 2)
+	assert.Equal(t, "page2.txt", p2.Entries[0].Path)
+
+	w, p3 := env.searchGET(t, "pattern=page&head_limit=2&offset=4")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, p3.Entries, 1)
+	assert.False(t, p3.Truncated)
+
+	all := append(append(append([]string{}, pathsOf(p1)...), pathsOf(p2)...), pathsOf(p3)...)
+	assert.Equal(t, []string{"page0.txt", "page1.txt", "page2.txt", "page3.txt", "page4.txt"}, all)
+}
+
+// pathsOf extracts the entry paths of a search response page.
+func pathsOf(r searchResp) []string {
+	out := make([]string, 0, len(r.Entries))
+	for _, e := range r.Entries {
+		out = append(out, e.Path)
+	}
+	return out
+}
+
+// TestSearch_StatFields verifies the per-entry stat enrichment: size, mtime,
+// basename, and the dir/file type mapping.
+func TestSearch_StatFields(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	writeSearchFixture(t, ws)
+
+	mtime := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(filepath.Join(ws, "docs", "guide.md"), mtime, mtime))
+
+	w, resp := env.searchGET(t, "pattern=guide")
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.Len(t, resp.Entries, 1)
+	e := resp.Entries[0]
+	assert.Equal(t, "docs/guide.md", e.Path)
+	assert.Equal(t, "guide.md", e.Name)
+	assert.Equal(t, "file", e.Type)
+	assert.Equal(t, int64(len("fixture-content")), e.Size)
+	assert.Equal(t, "2026-08-01T09:00:00Z", e.UpdateTime)
+
+	// A directory hit maps to the "dir" wire type and carries its stat.
+	w, resp = env.searchGET(t, "pattern=docs&type=dir")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "dir", resp.Entries[0].Type)
+	assert.NotEmpty(t, resp.Entries[0].UpdateTime)
+}
+
+// TestSearch_TOCTOUStatFailureDegrades verifies (at the helper level) that an
+// entry vanishing between the engine walk and the stat pass stays in the page
+// with size 0 / update_time "" instead of being dropped — the page count must
+// stay consistent with total/truncated for pagination to work.
+func TestSearch_TOCTOUStatFailureDegrades(t *testing.T) {
+	env := newWSTestEnv(t)
+	ws := env.wsRoot()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "kept.txt"), []byte("stay"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "keptdir"), 0o755))
+
+	entries := toSearchEntries(ws, []xizhi.SearchEntry{
+		{Path: "kept.txt", Type: xizhi.SearchTypeFile},
+		{Path: "vanished.txt", Type: xizhi.SearchTypeFile}, // never created / already deleted
+		{Path: "keptdir", Type: xizhi.SearchTypeDirectory},
+	})
+	require.Len(t, entries, 3, "a failed stat must not drop the entry")
+	assert.Equal(t, int64(4), entries[0].Size)
+	assert.NotEmpty(t, entries[0].UpdateTime)
+	assert.Equal(t, int64(0), entries[1].Size)
+	assert.Empty(t, entries[1].UpdateTime)
+	assert.Equal(t, "dir", entries[2].Type)
+}
+
+// TestSearch_InvalidParams_400 verifies parameter-level rejections.
+func TestSearch_InvalidParams_400(t *testing.T) {
+	env := newWSTestEnv(t)
+	writeSearchFixture(t, env.wsRoot())
+
+	for _, q := range []string{
+		"type=folder",
+		"max_depth=-1",
+		"max_depth=abc",
+		"head_limit=abc",
+		"offset=-3",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?"+q, nil)
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code, "query %s; body: %s", q, w.Body.String())
+	}
+}
+
+// TestSearch_MissingAuth_401 verifies the search route is gated by
+// AuthMiddleware, and — through the production RegisterRoutes wiring — that
+// the static /workspace/search fork is not swallowed by the /workspace/files
+// catch-all (an unregistered route would 404 before auth could 401).
+func TestSearch_MissingAuth_401(t *testing.T) {
+	engine, _, _ := newWorkspaceRoutingEngine(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?pattern=x", nil)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body: %s", w.Body.String())
+}
+
+// TestSearch_ProductionRouting drives the search endpoint through the full
+// production route table (real auth middleware + RegisterRoutes) to prove the
+// static /workspace/{search,files} fork coexists with the files catch-all.
+func TestSearch_ProductionRouting(t *testing.T) {
+	engine, secret, wsRoot := newWorkspaceRoutingEngine(t)
+	require.NoError(t, os.WriteFile(filepath.Join(wsRoot, "needle.txt"), []byte("x"), 0o644))
+
+	token, err := jwt.Sign(secret, "user-rt", time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/search?pattern=needle", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp searchResp
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "needle.txt", resp.Entries[0].Path)
+
+	// The catch-all is intact: a GET under /workspace/files still dispatches
+	// to Download (404 for a missing file, not the search handler).
+	dl := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/files/missing.txt", nil)
+	dl.Header.Set("Authorization", "Bearer "+token)
+	dw := httptest.NewRecorder()
+	engine.ServeHTTP(dw, dl)
+	assert.Equal(t, http.StatusNotFound, dw.Code)
+}

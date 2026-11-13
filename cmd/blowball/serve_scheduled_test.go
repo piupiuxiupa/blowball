@@ -9,10 +9,10 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
-	"github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/rpcx"
-	"github.com/lush/blowball/internal/store/mysql"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/rpcx"
+	"github.com/lush/blowball/pkg/store/mysql"
 )
 
 func TestInternalRPCOptionsPreserveSecurityMode(t *testing.T) {

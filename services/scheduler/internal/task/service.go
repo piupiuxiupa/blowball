@@ -12,10 +12,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/schedule"
-	"github.com/lush/blowball/internal/scheduledcontract"
-	"github.com/lush/blowball/internal/tokens"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/schedule"
+	"github.com/lush/blowball/pkg/scheduledcontract"
+	"github.com/lush/blowball/pkg/tokens"
 )
 
 var (

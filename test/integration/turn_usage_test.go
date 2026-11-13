@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/agent"
+	"github.com/lush/blowball/pkg/agent"
 )
 
 // TestTurnUsage_PersistedOnSuccess verifies that a completed turn writes a

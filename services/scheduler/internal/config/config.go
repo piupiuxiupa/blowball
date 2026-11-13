@@ -12,8 +12,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	mainconfig "github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/rpcx"
+	mainconfig "github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/rpcx"
 )
 
 // Config is the Scheduler process configuration.

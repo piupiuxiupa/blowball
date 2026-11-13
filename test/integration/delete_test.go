@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/stream"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/stream"
 )
 
 // TestDeleteSession_EndToEnd seeds the MySQL tier and the Redis cache for a

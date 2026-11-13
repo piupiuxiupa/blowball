@@ -4,13 +4,13 @@
 
 ## 1. P1 准备:包归属盘点
 
-- [ ] 1.1 生成导入关系清单:对根 `internal/` 每个包,统计被哪些服务(cmd/blowball 各角色 wiring、services/scheduler 生产代码)导入,产出 pkg / services/apiserver/internal / services/agent/internal 三归属划分表
-- [ ] 1.2 按划分表标记例外:仅测试代码跨服务导入的包不进 pkg(如 scheduler 测试导入 turn/store);`internal/pkg/*` 全部归 pkg;`api/gen/go`、`migrations/` 留根,在划分表中显式记录
+- [x] 1.1 生成导入关系清单:对根 `internal/` 每个包,统计被哪些服务(cmd/blowball 各角色 wiring、services/scheduler 生产代码)导入,产出 pkg / services/apiserver/internal / services/agent/internal 三归属划分表(产出物:division-table.md)
+- [x] 1.2 按划分表标记例外:仅测试代码跨服务导入的包不进 pkg(如 scheduler 测试导入 turn/store);`internal/pkg/*` 全部归 pkg;`api/gen/go`、`migrations/` 留根,在划分表中显式记录
 
 ## 2. P1:目录重组(单 module,git mv + import 重写)
 
 - [ ] 2.1 `git mv` 迁移共享包至根 `pkg/`(含原 `internal/pkg/` 并入),重写全部 import 路径,`go build ./...` 通过
-- [ ] 2.2 主服务包按归属迁入 `services/apiserver/internal/` 与 `services/agent/internal/`;`cmd/blowball` 保留在根并改为组合两个服务的导出装配包(此步先允许装配包为空壳过渡:引用原 wiring,不拆逻辑),全量构建通过
+- [ ] 2.2 主服务包按归属迁入 `pkg/`(任务 1.1 数据判定:全部主服务包为跨角色/跨服务共享,无服务专属包;`services/apiserver/`、`services/agent/` 目录在 P2 任务 5.1/5.2 随 wireAPI/wireAgent 装配拆分创建),`cmd/blowball` 保留在根、import 更新后全量构建通过
 - [ ] 2.3 `services/scheduler/` 内部结构对齐新布局(cmd 入口命名规范),import 重写,构建通过
 - [ ] 2.4 迁移 `deploy/redis-ha/` 原样保留并确认引用文档路径
 - [ ] 2.5 验证门槛:`go vet ./... && go test -race ./...`(含 test/integration)全绿;`make build`/`make run`/`make run-api`/`make run-agent`/`make build-scheduler` 目标更新后全部可用

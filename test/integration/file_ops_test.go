@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/stream"
-	"github.com/lush/blowball/internal/tool/xizhi"
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/stream"
+	"github.com/lush/blowball/pkg/tool/xizhi"
 )
 
 // TestFileOps_UploadThenAgentWritesThenListAndRead drives the full workspace

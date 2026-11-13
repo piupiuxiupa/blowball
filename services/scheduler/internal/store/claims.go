@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/pkg/model"
 )
 
 const terminalStatusPredicate = `status NOT IN ('succeeded','error','skipped','cancelled','interrupted')`

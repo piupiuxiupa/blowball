@@ -1,0 +1,496 @@
+package handler
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/middleware"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/run"
+	"github.com/lush/blowball/pkg/service"
+	"github.com/lush/blowball/pkg/stream"
+	turnexec "github.com/lush/blowball/pkg/turn"
+)
+
+// This file covers harden-turn-persistence: the terminal message batch is
+// durable (dual-write, or bounded retry) BEFORE Finalize releases the session
+// claim, a heartbeat keeper spans the persist/drain phase, and the send-time
+// at-least-once fallback for the user row actually triggers on a dual-tier
+// failure.
+
+// orderLog records cross-store event ordering (persist / drain / status /
+// release / retire) so tests can assert the terminal sequence.
+type orderLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *orderLog) add(ev string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, ev)
+}
+
+func (l *orderLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.events))
+	copy(out, l.events)
+	return out
+}
+
+// recordingRunStore wraps a run.Store, recording the Finalize-relevant calls
+// into an orderLog.
+type recordingRunStore struct {
+	run.Store
+	log *orderLog
+}
+
+func (s *recordingRunStore) SetStatus(ctx context.Context, runID, status string) error {
+	s.log.add("status")
+	return s.Store.SetStatus(ctx, runID, status)
+}
+
+func (s *recordingRunStore) ReleaseSession(ctx context.Context, sessionID, runID string) error {
+	s.log.add("release")
+	return s.Store.ReleaseSession(ctx, sessionID, runID)
+}
+
+func (s *recordingRunStore) Retire(ctx context.Context, runID string, retain time.Duration) error {
+	s.log.add("retire")
+	return s.Store.Retire(ctx, runID, retain)
+}
+
+// recordingRedis wraps handlerFakeRedis, recording every SUCCESSFUL dual
+// write as a "persist" marker (failed attempts are not persistence).
+type recordingRedis struct {
+	*handlerFakeRedis
+	log *orderLog
+}
+
+func (r *recordingRedis) AppendMessagesCache(ctx context.Context, sessionID string, raws [][]byte) error {
+	if err := r.handlerFakeRedis.AppendMessagesCache(ctx, sessionID, raws); err != nil {
+		return err
+	}
+	r.log.add("persist")
+	return nil
+}
+
+// persistTestEnv is a minimal SendMessage harness with recording seams on the
+// run store, the Redis dual write, and the drain primitive.
+type persistTestEnv struct {
+	engine  *gin.Engine
+	streamH *MessageStreamHandler
+	store   *recordingRunStore
+	redis   *recordingRedis
+	mysql   *handlerFakeMySQL
+	log     *orderLog
+	reg     *run.Registry
+}
+
+func newPersistTestEnv(t *testing.T, stub *stubOrchestrator, drainErr error) *persistTestEnv {
+	t.Helper()
+	log := &orderLog{}
+	env := &persistTestEnv{log: log}
+	mysql := &handlerFakeMySQL{
+		getSessionByIDFound: &model.Session{SessionID: "sess-1", UserID: "user-1"},
+	}
+	redis := &recordingRedis{handlerFakeRedis: &handlerFakeRedis{}, log: log}
+	drain := func(ctx context.Context) error {
+		log.add("drain")
+		return drainErr
+	}
+	deps := service.SessionDeps{
+		MySQL:             mysql,
+		Redis:             redis,
+		FS:                newHandlerFakeFS(),
+		DrainMessageQueue: drain,
+	}
+	sessSvc := service.NewSessionService(deps)
+	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
+	titleSvc := service.NewTitleService(nil, mysql, config.OpenAIConfig{TitleModel: "title-model"})
+	store := &recordingRunStore{Store: run.NewMemStore(), log: log}
+	reg := run.NewRegistry()
+	streamH := NewMessageStreamHandler(sessSvc, msgSvc, titleSvc, nil, nil, stub,
+		"/tmp/blowball-test-data", run.NewManager(store, reg), testSelectionConfig(), 0)
+
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, "user-1")
+		c.Set(middleware.TraceIDKey, "trace-1")
+		c.Next()
+	})
+	engine.POST("/api/v1/sessions/:session_id/messages", streamH.SendMessage)
+	env.engine = engine
+	env.streamH = streamH
+	env.store = store
+	env.redis = redis
+	env.mysql = mysql
+	env.reg = reg
+	return env
+}
+
+// postMessage drives one SendMessage request against env.
+func postMessage(t *testing.T, env *persistTestEnv) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-1/messages",
+		strings.NewReader(`{"content":"hi there"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	return w
+}
+
+// doneStub returns a stub emitting a minimal successful turn (with a usage
+// object so the turn_usage path also executes).
+func doneStub() *stubOrchestrator {
+	return &stubOrchestrator{
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "Hello"),
+			stream.AgentEndEvent(stream.AgentConfucius),
+			stream.DoneEvent(map[string]any{
+				"total":    map[string]any{"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
+				"by_agent": map[string]any{"Confucius": map[string]any{"total_tokens": 10}},
+				"meta":     map[string]any{"sub_agent_invocations": []string{}, "parallel": false},
+			}),
+		},
+	}
+}
+
+// TestStartTurn_WithoutSubscriberPersistsAndFinalizes pins the transport-
+// independent behavior the scheduled-task executor will reuse: once admission
+// has succeeded, the shared turn pipeline drains its own event stream and
+// reaches durable terminal state without an HTTP request or SSE reader.
+func TestStartTurn_WithoutSubscriberPersistsAndFinalizes(t *testing.T) {
+	env := newPersistTestEnv(t, doneStub(), nil)
+	ctx := agent.WithUserID(context.Background(), "user-1")
+	holder, ok, err := env.store.ClaimSession(ctx, "sess-1", "headless-run")
+	require.NoError(t, err)
+	require.Equal(t, "headless-run", holder)
+	require.True(t, ok)
+
+	sel, code, msg := resolveModelSelection(testSelectionConfig(), "", "")
+	require.Empty(t, code, msg)
+	now := time.Now().UTC()
+	started := env.streamH.startTurn(ctx, &turnRequest{
+		sessionID:     "sess-1",
+		userID:        "user-1",
+		traceID:       "headless-run",
+		content:       "offline work",
+		sel:           sel,
+		userMsgTime:   now,
+		metaCreatedAt: now,
+	})
+	require.NotNil(t, started)
+	require.NoError(t, started.aborted)
+
+	select {
+	case result := <-started.resultCh:
+		require.NoError(t, result.Err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("headless turn blocked without an SSE subscriber")
+	}
+
+	batches := env.redis.dualBatchSnapshot()
+	require.Len(t, batches, 2)
+	require.Len(t, batches[0], 1)
+	require.Equal(t, model.RoleUser, batches[0][0].Role)
+	require.Equal(t, "offline work", batches[0][0].Content)
+	require.Len(t, batches[1], 1)
+	require.Equal(t, model.RoleAssistant, batches[1][0].Role)
+	require.Equal(t, "Hello", batches[1][0].Content)
+
+	meta, ok, err := env.store.GetMeta(context.Background(), "headless-run")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, run.StatusDone, meta.Status)
+	requireTerminalSuffix(t, env.log.snapshot(), terminalOrder)
+}
+
+// terminalOrder is the harden-turn-persistence terminal sequence for the
+// turn's own persistence (the log may carry earlier markers from the read
+// path's miss-drain and the send-time user-row write, which are correct and
+// unrelated). The pre-release drain step is retired with the ingest queue
+// (refactor-message-storage): the terminal batch is itself a synchronous
+// transactional MySQL write.
+var terminalOrder = []string{"persist", "status", "release", "retire"}
+
+// requireTerminalSuffix asserts seq ENDS WITH want.
+func requireTerminalSuffix(t *testing.T, seq, want []string) {
+	t.Helper()
+	require.GreaterOrEqual(t, len(seq), len(want), "sequence %v shorter than suffix %v", seq, want)
+	require.Equal(t, want, seq[len(seq)-len(want):], "full sequence: %v", seq)
+}
+
+// TestSendMessage_TerminalPersistBeforeClaimRelease_DonePath verifies the
+// core harden-turn-persistence invariant on the success path: the terminal
+// message batch is durable and the pre-release drain has run BEFORE Finalize
+// flips the run terminal and releases the session claim — so generating:false
+// implies a complete, MySQL-visible history.
+func TestSendMessage_TerminalPersistBeforeClaimRelease_DonePath(t *testing.T) {
+	env := newPersistTestEnv(t, doneStub(), nil)
+
+	w := postMessage(t, env)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	requireTerminalSuffix(t, env.log.snapshot(), terminalOrder)
+}
+
+// TestSendMessage_TerminalPersistBeforeClaimRelease_ErrorPath repeats the
+// ordering invariant on the orchestrator-error path: the partial event stream
+// is persisted (and drained) before the run is marked error and unlocked.
+// The cancel path shares the same turn-goroutine code sequence.
+func TestSendMessage_TerminalPersistBeforeClaimRelease_ErrorPath(t *testing.T) {
+	stub := doneStub()
+	stub.returnErr = errors.New("upstream 429")
+	env := newPersistTestEnv(t, stub, nil)
+
+	w := postMessage(t, env)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	requireTerminalSuffix(t, env.log.snapshot(), terminalOrder)
+}
+
+// drain is best-effort: a drain failure logs a WARN but the claim is still
+// released after the (successful) message batch — the background flusher
+// closes the residual ≤1s visibility gap.
+func TestSendMessage_DrainFailure_DoesNotBlockFinalize(t *testing.T) {
+	env := newPersistTestEnv(t, doneStub(), errors.New("drain wedged"))
+
+	w := postMessage(t, env)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	requireTerminalSuffix(t, env.log.snapshot(), terminalOrder)
+}
+
+// TestSendMessage_PersistBudgetExhausted_StillFinalizes verifies the bounded
+// release: when every tier fails every attempt (send-time and all turn-end
+// retries), the turn still finalizes and releases the claim instead of
+// locking the session forever. The not-durable batch is now a loud, bounded
+// ERROR — not a silent fire-and-forget drop.
+func TestSendMessage_PersistBudgetExhausted_StillFinalizes(t *testing.T) {
+	env := newPersistTestEnv(t, doneStub(), nil)
+	env.redis.dualErr = errors.New("redis down")
+	env.mysql.appendMessagesErr = errors.New("mysql down")
+
+	w := postMessage(t, env)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// Send-time: 1 attempt (deferral is the recovery). Turn-end: 3 bounded
+	// retries of the direct transactional path (the read cache plays no
+	// durability role anymore).
+	env.mysql.mu.Lock()
+	calls := env.mysql.appendMessagesCalls
+	env.mysql.mu.Unlock()
+	require.Equal(t, 4, calls)
+
+	// Nothing persisted, yet the terminal sequence still runs — the session
+	// unlocks after the bounded budget.
+	requireTerminalSuffix(t, env.log.snapshot(), []string{"status", "release", "retire"})
+}
+
+// TestSendMessage_SendTimeFailure_TurnEndBatchIncludesUserRow verifies the
+// at-least-once fallback: when the send-time user-row write fails, the
+// turn-end final batch re-includes the user row ahead of the assistant final,
+// both carrying deterministic client_msg_ids so MySQL's UNIQUE index
+// collapses any redelivery.
+func TestSendMessage_SendTimeFailure_TurnEndBatchIncludesUserRow(t *testing.T) {
+	env := newSessionHandlerEnv(t, doneStub())
+	env.mysql.appendMessagesErrFirst = 1
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-1/messages",
+		strings.NewReader(`{"content":"hi there"}`))
+	req.Header.Set("Content-Type", "application/json")
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// The failed send-time write records no batch; the turn-end recovery
+	// carries the user row ahead of the assistant FINAL row.
+	batches := env.redis.dualBatchSnapshot()
+	require.Len(t, batches, 1, "only the turn-end recovery batch records")
+	require.Len(t, batches[0], 2, "user row + one assistant final")
+	require.Equal(t, model.RoleUser, batches[0][0].Role)
+	require.Equal(t, "trace-1:0", batches[0][0].ClientMsgID)
+	require.Equal(t, model.RoleAssistant, batches[0][1].Role)
+	require.Equal(t, model.EventTypeMessage, batches[0][1].EventType)
+	require.Equal(t, "trace-1:1", batches[0][1].ClientMsgID)
+}
+
+// TestStartPersistHeartbeat verifies the persist-phase heartbeat keeper beats
+// at the given cadence and stops cleanly (no goroutine leak, no beats after
+// stop) — the D3 guarantee that a slow terminal persist cannot let the
+// 15s alive TTL expire under an attach's dead-run check.
+func TestStartPersistHeartbeat(t *testing.T) {
+	store := &heartbeatRecordingStore{Store: run.NewMemStore()}
+	stop := startPersistHeartbeat(context.Background(), store, "rid-1", "sess-1", 5*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if store.count() >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	stop()
+	after := store.count()
+	require.GreaterOrEqual(t, after, 2, "keeper must beat repeatedly while armed")
+
+	// After stop returns the keeper goroutine has exited: no further beats
+	// regardless of how long we wait.
+	time.Sleep(20 * time.Millisecond)
+	require.Equal(t, after, store.count(), "no heartbeats after stop")
+}
+
+// TestSendMessage_RegistryFinishWaitsForTerminalSequence verifies the
+// graceful-shutdown guarantee (harden-turn-persistence D6): the run registry's
+// Finish signal — what shutdown's WaitAll waits on — fires only AFTER the
+// terminal final-batch transaction completes. While the transaction is held,
+// the run is still registered (WaitAll would block); once released, WaitAll
+// returns nil.
+func TestSendMessage_RegistryFinishWaitsForTerminalSequence(t *testing.T) {
+	env := newPersistTestEnv(t, doneStub(), nil)
+	hold := make(chan struct{})
+	entered := make(chan struct{})
+	env.mysql.setFinalBatchHold(entered, hold)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- postMessage(t, env)
+	}()
+
+	// Wait until the turn goroutine entered the terminal final-batch write.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn never reached the terminal final-batch write")
+	}
+
+	// The turn goroutine is parked inside the transaction, strictly before
+	// Finish: the run is still registered, so a bounded WaitAll must time out.
+	if _, ok := env.reg.Get("trace-1"); !ok {
+		t.Fatal("run finished before the terminal sequence completed")
+	}
+	wctx, wcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	err := env.reg.WaitAll(wctx)
+	wcancel()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "WaitAll must not unblock before the final batch completes")
+
+	// Release the probe: the terminal sequence completes, Finish fires, and
+	// WaitAll returns cleanly — the shutdown path needs no sleep heuristic.
+	close(hold)
+	w := <-done
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	wctx2, wcancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer wcancel2()
+	require.NoError(t, env.reg.WaitAll(wctx2))
+}
+
+// logContains reports whether the snapshot contains ev.
+func logContains(seq []string, ev string) bool {
+	for _, s := range seq {
+		if s == ev {
+			return true
+		}
+	}
+	return false
+}
+
+// heartbeatRecordingStore counts Heartbeat calls over a real MemStore.
+type heartbeatRecordingStore struct {
+	run.Store
+	mu sync.Mutex
+	n  int
+}
+
+func (s *heartbeatRecordingStore) Heartbeat(ctx context.Context, runID, sessionID string) error {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	return s.Store.Heartbeat(ctx, runID, sessionID)
+}
+
+func (s *heartbeatRecordingStore) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+// TestRoundPersistence_ClosedRoundsLandDuringTurn verifies the
+// refactor-message-storage round semantics end to end with a slow tooled
+// turn: (a) a round closes (and lands as a final batch) only once the NEXT
+// round's first token arrives; (b) the still-streaming round is NEVER
+// persisted early; (c) the terminal batch is a pure suffix; (d) no token
+// event rows exist at all.
+func TestRoundPersistence_ClosedRoundsLandDuringTurn(t *testing.T) {
+	oldEvery := turnexec.SetIncrementalPersistEvery(20 * time.Millisecond)
+	t.Cleanup(func() { turnexec.SetIncrementalPersistEvery(oldEvery) })
+
+	stub := &stubOrchestrator{
+		interEventDelay: 150 * time.Millisecond,
+		eventsToEmit: []stream.StreamEvent{
+			stream.AgentStartEvent(stream.AgentConfucius),
+			stream.TokenEvent(stream.AgentConfucius, "Hel"), // round 1 grows…
+			stream.ToolCallEvent(stream.AgentConfucius, "c1", "grep", map[string]any{}),
+			stream.ToolResultEvent(stream.AgentConfucius, "c1", "out"),
+			stream.TokenEvent(stream.AgentConfucius, "done"), // round 2 opens → round 1 closes
+			stream.AgentEndEvent(stream.AgentConfucius),
+			stream.DoneEvent(map[string]any{
+				"total":    map[string]any{"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
+				"by_agent": map[string]any{"Confucius": map[string]any{"total_tokens": 10}},
+				"meta":     map[string]any{"sub_agent_invocations": []string{}, "parallel": false},
+			}),
+		},
+	}
+	env := newSessionHandlerEnv(t, stub)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess-1/messages",
+		strings.NewReader(`{"content":"slow turn"}`))
+	req.Header.Set("Content-Type", "application/json")
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	batches := env.redis.dualBatchSnapshot()
+	require.GreaterOrEqual(t, len(batches), 3, "send-time + ≥1 round + terminal batches; got %d", len(batches))
+
+	// Batch 0 is the send-time user row.
+	require.Len(t, batches[0], 1)
+	require.Equal(t, "trace-1:0", batches[0][0].ClientMsgID)
+
+	// The mid-turn batch is round 1's rows: the final (full content) plus its
+	// tool placeholder.
+	var mid []model.Message
+	for _, b := range batches[1:] {
+		if len(b) > 0 && b[0].EventType == model.EventTypeMessage && b[0].Content == "Hel" {
+			mid = b
+			break
+		}
+	}
+	require.NotNil(t, mid, "a closed round must land mid-turn as a final row")
+	require.Len(t, mid, 2, "final row + tool placeholder")
+	require.Equal(t, "c1", mid[1].ToolCallID)
+
+	// No token event rows anywhere: new data is final-content only.
+	for _, b := range batches {
+		for _, m := range b {
+			require.NotEqual(t, model.EventTypeToken, m.EventType)
+			require.NotEqual(t, model.EventTypeReasoning, m.EventType)
+		}
+	}
+}

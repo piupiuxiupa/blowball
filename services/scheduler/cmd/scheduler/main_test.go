@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	mainconfig "github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/rpcx"
+	mainconfig "github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/rpcx"
 	"github.com/lush/blowball/services/scheduler/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

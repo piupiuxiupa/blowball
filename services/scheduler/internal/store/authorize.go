@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/lush/blowball/internal/model"
+	"github.com/lush/blowball/pkg/model"
 )
 
 var (

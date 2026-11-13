@@ -22,8 +22,8 @@ import (
 
 	scheduledruntimev1 "github.com/lush/blowball/api/gen/go/scheduledruntime/v1"
 	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
-	"github.com/lush/blowball/internal/pkg/logger"
-	"github.com/lush/blowball/internal/rpcx"
+	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/rpcx"
 	"github.com/lush/blowball/services/scheduler/internal/config"
 	"github.com/lush/blowball/services/scheduler/internal/rpc"
 	"github.com/lush/blowball/services/scheduler/internal/rpcclient"

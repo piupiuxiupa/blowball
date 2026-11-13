@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/stream"
-	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/stream"
+	"github.com/lush/blowball/pkg/tool"
 )
 
 // TestMessageFlow_DirectAnswer_PersistsAllTiers exercises the full happy path:

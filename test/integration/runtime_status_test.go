@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/tool"
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/tool"
 )
 
 func TestRuntimeStatus_CrossTurnReplayAndCacheMiss(t *testing.T) {

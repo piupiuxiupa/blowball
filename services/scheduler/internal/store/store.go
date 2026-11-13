@@ -13,8 +13,8 @@ import (
 	_ "github.com/go-sql-driver/mysql" // register the mysql driver
 	"github.com/jmoiron/sqlx"
 
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/scheduledcontract"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/scheduledcontract"
 )
 
 // Store wraps the Scheduler-owned tables only.

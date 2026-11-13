@@ -14,9 +14,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/model"
-	mysqlstore "github.com/lush/blowball/internal/store/mysql"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/model"
+	mysqlstore "github.com/lush/blowball/pkg/store/mysql"
 )
 
 // seedCmd is the `seed` subcommand, a one-shot tool for inserting a user row with a properly bcrypt-hashed password. This is the supported path for "manual 入库" since the API deliberately exposes no user-creation endpoint. The config path comes from the shared -f flag; the password is read from a hidden terminal prompt when --password is omitted so it does not end up in shell history.

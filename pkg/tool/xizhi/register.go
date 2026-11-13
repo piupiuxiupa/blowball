@@ -1,0 +1,567 @@
+package xizhi
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/tool"
+	"github.com/lush/blowball/pkg/tool/skill"
+)
+
+// PathGuard enforces the managed `.cron` write rules for the file tools. It is
+// implemented by internal/resource.Guard; the interface lives here so xizhi
+// stays free of resource/store dependencies. A nil guard preserves the
+// pre-resource behavior (tests, deployments without the guard wired).
+type PathGuard interface {
+	CheckWrite(ctx context.Context, userID, relPath, kind string) error
+}
+
+// Registered tool names. These are the strings agents reference in their
+// config `tools:` lists and what the registry indexes.
+const (
+	NameReadFile   = "xizhi_read_file"
+	NameWriteFile  = "xizhi_write_file"
+	NameModifyFile = "xizhi_modify_file"
+	NameListFiles  = "xizhi_list_files"
+	NameTree       = "xizhi_tree"
+	NameFind       = "xizhi_find"
+	NameGrep       = "xizhi_grep"
+	NameDeleteFile = "xizhi_delete"
+	NameViewImage  = "xizhi_view_image"
+)
+
+// Per-tool parameter JSON Schemas. They are JSON objects (not wrapped in an
+// array) so they can be emitted verbatim under OpenAI's "parameters" key.
+var (
+	schemaRead = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file to read, relative to the workspace root."
+    },
+    "offset": {
+      "type": "integer",
+      "description": "1-based line number to start reading from. Only provide if the file is too large to read at once. Defaults to 1."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of lines to return. Only provide if the file is too large to read at once. Defaults to 2000; when the file has more lines, truncated is set and total_lines lets you request the next page."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
+
+	schemaWrite = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Destination path relative to the workspace root. Parent directories are created automatically."
+    },
+    "content": {
+      "type": "string",
+      "description": "Text content to write. Default (mode \"write\"): full content, overwrites any existing file. mode \"append\": content is appended to the end of the file (created when missing)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["write", "append"],
+      "description": "\"write\" (default): create or overwrite the file with content. \"append\": append content to the file, creating it when missing — use for chunked multi-part writes of large content."
+    }
+  },
+  "required": ["path", "content"],
+  "additionalProperties": false
+}`)
+
+	schemaModify = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file to modify, relative to the workspace root."
+    },
+    "old_content": {
+      "type": "string",
+      "description": "Exact text to replace. Must occur exactly once in the file."
+    },
+    "new_content": {
+      "type": "string",
+      "description": "Replacement text."
+    }
+  },
+  "required": ["path", "old_content", "new_content"],
+  "additionalProperties": false
+}`)
+
+	schemaList = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path relative to the workspace root. Defaults to the workspace root."
+    },
+    "include_hidden": {
+      "type": "boolean",
+      "description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
+
+	schemaTree = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path relative to the workspace root. Defaults to the workspace root."
+    },
+    "depth": {
+      "type": "integer",
+      "description": "Maximum recursion depth. Defaults to 3, maximum 10."
+    },
+    "include_hidden": {
+      "type": "boolean",
+      "description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
+
+	schemaFind = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path relative to the workspace root to search within. Defaults to the workspace root. Must be a directory."
+    },
+    "pattern": {
+      "type": "string",
+      "description": "RE2 regular expression matched against entry NAMES (the base name, not the full path), e.g. '\\.go$' or 'test_'. NOT a glob: '*.go' is invalid regex — write '\\.go$' instead. Empty or omitted matches every entry."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["file", "directory", "any"],
+      "description": "Restrict matches to files or directories. Defaults to 'any' (both)."
+    },
+    "max_depth": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum recursion depth below the search root (1 = immediate children only). Defaults to unlimited."
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "description": "Whether to match the pattern case-insensitively. Defaults to false."
+    },
+    "include_hidden": {
+      "type": "boolean",
+      "description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+    },
+    "head_limit": {
+      "type": "integer",
+      "description": "Maximum entries to return. Defaults to 200; pass a larger value to retrieve more in one call."
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Number of entries to skip before applying head_limit, for paginating large result sets. Defaults to 0. When truncated is true, request the next page with offset = offset + head_limit."
+    }
+  },
+  "additionalProperties": false
+}`)
+
+	schemaGrep = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Required. Path relative to the workspace root to search: a directory (searched recursively) or a single file (only that file is searched). Use \".\" to search the whole workspace root; omitting path or passing an empty/blank string is an error."
+    },
+    "pattern": {
+      "type": "string",
+      "description": "RE2 regular expression to match against file contents (e.g. 'func Foo\\(' or 'TODO')."
+    },
+    "glob": {
+      "type": "string",
+      "description": "Optional doublestar file-name filter such as '*.go' or '*.py'; only files whose base name matches are searched."
+    },
+    "output_mode": {
+      "type": "string",
+      "enum": ["content", "files_with_matches", "count"],
+      "description": "What to return. 'content' (default): each match with file/line_number/line and optional context. 'files_with_matches': just the file paths that contain a match (cheapest — use to locate files, then read them). 'count': per-file match tallies."
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "description": "Whether to match case-insensitively. Defaults to false."
+    },
+    "include_hidden": {
+      "type": "boolean",
+      "description": "Whether to include hidden files and directories (names starting with '.'). Defaults to false."
+    },
+    "context_before": {
+      "type": "integer",
+      "description": "Number of lines to include before each match (content mode only). Defaults to 0."
+    },
+    "context_after": {
+      "type": "integer",
+      "description": "Number of lines to include after each match (content mode only). Defaults to 0."
+    },
+    "head_limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (content: matches; files_with_matches: file paths; count: count entries). Defaults to 200; pass a larger value to retrieve more in one call."
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Number of entries to skip before applying head_limit, for paginating large result sets. Defaults to 0. When truncated is true, request the next page with offset = offset + head_limit."
+    }
+  },
+  "required": ["path", "pattern"],
+  "additionalProperties": false
+}`)
+
+	schemaDelete = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file or directory to delete, relative to the workspace root."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
+
+	schemaViewImage = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the image file, relative to the workspace root."
+    },
+    "question": {
+      "type": "string",
+      "description": "What to look for in the image. Ask something specific (e.g. the error stack in a screenshot, the values in a chart, the visible UI elements) — targeted questions get far better answers than an open-ended request."
+    },
+    "reasoning_effort": {
+      "type": "string",
+      "enum": ["none", "low", "medium", "high", "xhigh", "max"],
+      "description": "Thinking effort for the vision model. Omit or use \"none\" for routine lookups; raise it ONLY for genuinely hard images (dense charts, cluttered UI screenshots, fine-grained OCR). Requires a reasoning-capable vision model — on deployments whose vision model does not reason, non-\"none\" values return an error you should retry without the parameter."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}`)
+)
+
+// readArgs / writeArgs / modifyArgs decode the model-supplied tool arguments.
+type readArgs struct {
+	Path   string `json:"path"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
+}
+type writeArgs struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	// Mode selects write semantics (llm-length-continuation prevention
+	// side): "" / "write" = create-or-overwrite (the pre-mode behavior,
+	// byte-for-byte); "append" = create-if-missing / append-to-end. Any
+	// other value is rejected at parse time.
+	Mode string `json:"mode"`
+}
+type modifyArgs struct {
+	Path       string `json:"path"`
+	OldContent string `json:"old_content"`
+	NewContent string `json:"new_content"`
+}
+
+// listArgs / treeArgs / findArgs decode arguments for the discovery tools.
+type listArgs struct {
+	Path          string `json:"path"`
+	IncludeHidden bool   `json:"include_hidden"`
+}
+type treeArgs struct {
+	Path          string `json:"path"`
+	Depth         int    `json:"depth"`
+	IncludeHidden bool   `json:"include_hidden"`
+}
+
+// findArgs decodes arguments for xizhi_find. MaxDepth is a *int so an explicit
+// max_depth: 0 (invalid — it must be a positive integer) is distinguishable
+// from omission (unlimited).
+type findArgs struct {
+	Path          string `json:"path"`
+	Pattern       string `json:"pattern"`
+	Type          string `json:"type"`
+	MaxDepth      *int   `json:"max_depth"`
+	IgnoreCase    bool   `json:"ignore_case"`
+	IncludeHidden bool   `json:"include_hidden"`
+	HeadLimit     int    `json:"head_limit"`
+	Offset        int    `json:"offset"`
+}
+
+// grepArgs decodes arguments for xizhi_grep.
+type grepArgs struct {
+	Path          string `json:"path"`
+	Pattern       string `json:"pattern"`
+	Glob          string `json:"glob"`
+	IgnoreCase    bool   `json:"ignore_case"`
+	IncludeHidden bool   `json:"include_hidden"`
+	ContextBefore int    `json:"context_before"`
+	ContextAfter  int    `json:"context_after"`
+	OutputMode    string `json:"output_mode"`
+	HeadLimit     int    `json:"head_limit"`
+	Offset        int    `json:"offset"`
+}
+
+type deleteArgs struct {
+	Path string `json:"path"`
+}
+
+type viewImageArgs struct {
+	Path            string `json:"path"`
+	Question        string `json:"question"`
+	ReasoningEffort string `json:"reasoning_effort"`
+}
+
+// RegisterAll registers the enabled Xizhi file tools against r, scoping every
+// operation at workspaceRoot. It is called once per request so each user gets a
+// registry bound to their own workspace. A duplicate-name registration indicates
+// a programming error and panics here rather than silently masking an earlier
+// registration. vision is the production VisionClient for xizhi_view_image
+// (nil disables that one tool — callers that have not wired vision pass nil;
+// enabling view_image in cfg while passing nil is a wiring bug and panics).
+func RegisterAll(r *tool.Registry, workspaceRoot string, cfg config.XizhiConfig, vision VisionClient, guards ...PathGuard) {
+	var guard PathGuard
+	if len(guards) > 0 {
+		guard = guards[0]
+	}
+	checkWrite := func(ctx context.Context, relPath, kind string) error {
+		if guard == nil {
+			return nil
+		}
+		return guard.CheckWrite(ctx, skill.UserIDFromContext(ctx), relPath, kind)
+	}
+	var tools []*tool.ToolSpec
+
+	// The original three file tools are always registered for backward
+	// compatibility; deployments that want to disable them can do so via the
+	// config by leaving them out of agent tool lists.
+	tools = append(tools, &tool.ToolSpec{
+		Name: NameReadFile,
+		Description: "Reads a workspace file and returns `{path, content, start_line, total_lines, size, truncated}`. " +
+			"`content` is cat -n line-numbered text (`<lineNo>\\t<line>`, one row per line) so you can cite results as " +
+			"`file:line`. By default up to 2000 lines are read from the start; pass `offset`/`limit` to page larger " +
+			"files (when more lines remain, `truncated` is true and `total_lines` gives the full count). Binary files " +
+			"are rejected with an error. **`path` MUST be relative to the workspace root** (absolute paths, `..` and " +
+			"symlink escapes are rejected); a missing file returns an error. **DO NOT read files with `bash`/`python` " +
+			"(`cat`) — use this tool.**",
+		ParametersJSON: schemaRead,
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var a readArgs
+			if err := json.Unmarshal(args, &a); err != nil {
+				return nil, fmt.Errorf("xizhi_read_file: parse args: %w", err)
+			}
+			return ReadFile(workspaceRoot, a.Path, a.Offset, a.Limit)
+		},
+	})
+
+	tools = append(tools, &tool.ToolSpec{
+		Name: NameWriteFile,
+		Description: "Creates or overwrites a workspace file with the given text content and returns `{path, size, absolute, appended}`. " +
+			"Parent directories are created automatically. **IMPORTANT: by default (mode \"write\" or omitted) an existing file at `path` is overwritten.** " +
+			"Use `mode: \"append\"` to append to an existing file (created when missing) — the intended shape for writing large content in multiple smaller chunks: " +
+			"write the first part, then append the rest, keeping EACH call's content small rather than emitting one huge output. " +
+			"**DO NOT write files with `bash`/`python` (`echo`/redirects) — use this tool.**",
+		ParametersJSON: schemaWrite,
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var a writeArgs
+			if err := json.Unmarshal(args, &a); err != nil {
+				return nil, fmt.Errorf("xizhi_write_file: parse args: %w", err)
+			}
+			switch a.Mode {
+			case "", "write", "append":
+			default:
+				return nil, fmt.Errorf("xizhi_write_file: invalid mode %q (must be \"write\" or \"append\")", a.Mode)
+			}
+			if err := checkWrite(ctx, a.Path, "modify"); err != nil {
+				return nil, err
+			}
+			return WriteFile(workspaceRoot, a.Path, a.Content, a.Mode == "append")
+		},
+	})
+
+	tools = append(tools, &tool.ToolSpec{
+		Name: NameModifyFile,
+		Description: "Performs an exact string replacement in a workspace file and returns `{path, old_size, new_size}`. " +
+			"**`old_content` MUST match exactly one location** — the call fails if the match is missing or appears more " +
+			"than once. **DO NOT rewrite the whole file** — use this for targeted edits and `xizhi_write_file` for full " +
+			"rewrites.",
+		ParametersJSON: schemaModify,
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var a modifyArgs
+			if err := json.Unmarshal(args, &a); err != nil {
+				return nil, fmt.Errorf("xizhi_modify_file: parse args: %w", err)
+			}
+			if err := checkWrite(ctx, a.Path, "modify"); err != nil {
+				return nil, err
+			}
+			return ModifyFile(workspaceRoot, a.Path, a.OldContent, a.NewContent)
+		},
+	})
+
+	if cfg.ListFiles.Enabled {
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameListFiles,
+			Description: "Lists the immediate children of a workspace directory and returns `{path, entries[]}` where each " +
+				"entry carries `name`, `type` (`file`/`directory`) and `size`. **`path` MUST be relative to the workspace " +
+				"root.** **This lists one level only — DO NOT expect recursion; use `xizhi_tree` for nested listings.** " +
+				"Hidden entries (names starting with `.`) are excluded unless `include_hidden` is true.",
+			ParametersJSON: schemaList,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a listArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_list_files: parse args: %w", err)
+				}
+				return ListFiles(workspaceRoot, a.Path, a.IncludeHidden)
+			},
+		})
+	}
+
+	if cfg.Tree.Enabled {
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameTree,
+			Description: "Returns `{path, depth, tree[]}`, a nested representation of a workspace directory. **`path` MUST " +
+				"be relative to the workspace root.** **`depth` defaults to 3 and MUST NOT exceed 10.** Hidden entries are " +
+				"excluded unless `include_hidden` is true.",
+			ParametersJSON: schemaTree,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a treeArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_tree: parse args: %w", err)
+				}
+				return Tree(workspaceRoot, a.Path, a.Depth, a.IncludeHidden)
+			},
+		})
+	}
+
+	if cfg.Find.Enabled {
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameFind,
+			Description: "Finds files AND directories in the workspace by name and returns `{path, pattern, type, total, " +
+				"truncated, applied_limit, applied_offset, entries[]}` where each entry carries its `path` (relative to the " +
+				"search root) and `type` (`file`/`directory`). **`pattern` is an RE2 regex matched against the entry NAME " +
+				"(basename) only — NOT a glob and NOT the full path**: `\\.go$` finds Go files, `test` finds anything with " +
+				"'test' in its name, but `src/` matches nothing (path fragments are not matched — narrow with `path` " +
+				"instead). Omit `pattern` to match everything. Use `type` to restrict to files or directories, `max_depth` " +
+				"to bound recursion, and paginate large results with `head_limit`/`offset` (defaults 200/0; next page via " +
+				"`offset = offset + head_limit` when `truncated` is true). `path` defaults to the workspace root, MUST be a " +
+				"directory and MUST be relative to the workspace root (absolute paths, `..` and the `.blowball` namespace " +
+				"are rejected). Hidden entries are excluded unless `include_hidden` is true. **DO NOT use `find` or " +
+				"`ls -R` via `bash` — use this tool.**",
+			ParametersJSON: schemaFind,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a findArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_find: parse args: %w", err)
+				}
+				maxDepth := 0
+				if a.MaxDepth != nil {
+					if *a.MaxDepth <= 0 {
+						return nil, fmt.Errorf("xizhi_find: max_depth must be a positive integer (got %d)", *a.MaxDepth)
+					}
+					maxDepth = *a.MaxDepth
+				}
+				return FindEntries(workspaceRoot, a.Path, a.Pattern, a.Type, maxDepth, a.IgnoreCase, a.IncludeHidden, a.HeadLimit, a.Offset)
+			},
+		})
+	}
+
+	if cfg.Grep.Enabled {
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameGrep,
+			Description: "Searches workspace file contents with an RE2 regex. `output_mode` selects the result: " +
+				"`content` (default) returns `matches[]` where each match carries `file`, `line_number`, `line` and " +
+				"(when requested) `context_before`/`context_after`; `files_with_matches` returns `files[]` of just the " +
+				"matching paths (cheapest — use it to locate files, then read them); `count` returns per-file " +
+				"`counts[]`. Every result carries `mode`, `applied_limit`, `applied_offset`, `total_files` and " +
+				"`truncated`, so paginate large results with `head_limit`/`offset` (defaults: 200 / 0; request the " +
+				"next page with `offset = offset + head_limit` when `truncated` is true). **`path` is REQUIRED and " +
+				"MUST be relative to the workspace root** — it may be a directory (searched recursively) or a single " +
+				"file (only that file is searched, e.g. a large result spilled under `tmp/`) (absolute paths, `..` and " +
+				"the `.blowball` namespace are rejected); use `\".\"` to search the whole workspace root explicitly. " +
+				"**DO NOT grep via `bash` — use " +
+				"this tool** (it is cheaper and returns line numbers). Binary files are skipped; long lines are truncated. Use " +
+				"`glob` to filter by file name (e.g. `*.go`).",
+			ParametersJSON: schemaGrep,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, fmt.Errorf("xizhi_grep: %w", err)
+				}
+				var a grepArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_grep: parse args: %w", err)
+				}
+				return GrepSearchCtx(ctx, workspaceRoot, a.Path, a.Pattern, a.Glob, a.IgnoreCase, a.IncludeHidden, a.ContextBefore, a.ContextAfter, a.OutputMode, a.HeadLimit, a.Offset)
+			},
+		})
+	}
+
+	if cfg.Delete.Enabled {
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameDeleteFile,
+			Description: "Deletes a workspace file or directory and returns `{path, deleted, type}` (type is \"file\", " +
+				"\"directory\", or \"none\"). A directory is removed recursively; a path that does not exist is a " +
+				"successful no-op (`deleted: false`, `type: \"none\"`). **`path` MUST be relative to the workspace root** " +
+				"(absolute paths, `..` and symlink escapes are rejected). Use this to clean up scratch/intermediate files " +
+				"under `tmp/` once they have served their purpose.",
+			ParametersJSON: schemaDelete,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a deleteArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_delete: parse args: %w", err)
+				}
+				if err := checkWrite(ctx, a.Path, "delete"); err != nil {
+					return nil, err
+				}
+				return DeletePath(workspaceRoot, a.Path)
+			},
+		})
+	}
+
+	if cfg.ViewImage.Enabled {
+		if vision == nil {
+			panic("xizhi register xizhi_view_image: enabled in config but vision client is nil")
+		}
+		resolved := cfg.ViewImage.Resolve()
+		tools = append(tools, &tool.ToolSpec{
+			Name: NameViewImage,
+			Description: "Understands an image in YOUR workspace (screenshots, charts, photos, UI captures) by asking a " +
+				"dedicated vision model, and returns `{path, mime_type, size, model, description}` where `description` is " +
+				"that model's TEXT account of the image — the main model does NOT see the image itself. **Always pass a " +
+				"specific `question`** (e.g. \"what is the error stack in this screenshot?\", \"what values does this chart " +
+				"show?\", \"which UI elements are visible?\") — targeted questions get far better answers. Supported " +
+				"formats: png / jpeg / webp / gif (detected by content, not extension); oversized files are rejected. " +
+				"**`path` MUST be relative to the workspace root** (absolute paths, `..` and symlink escapes are " +
+				"rejected). For precision-critical details, ask focused follow-up questions in separate calls, and pass a " +
+				"higher `reasoning_effort` only for genuinely hard images (dense charts, cluttered UI screenshots, " +
+				"fine-grained OCR) on reasoning-capable vision models — routine lookups should omit it.",
+			ParametersJSON: schemaViewImage,
+			Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+				var a viewImageArgs
+				if err := json.Unmarshal(args, &a); err != nil {
+					return nil, fmt.Errorf("xizhi_view_image: parse args: %w", err)
+				}
+				return ViewImage(ctx, workspaceRoot, a.Path, a.Question, a.ReasoningEffort, resolved, cfg.ViewImage.Model, vision)
+			},
+		})
+	}
+
+	for _, spec := range tools {
+		if err := r.Register(spec); err != nil {
+			panic(fmt.Sprintf("xizhi register %q: %v", spec.Name, err))
+		}
+	}
+}

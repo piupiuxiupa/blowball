@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lush/blowball/internal/pkg/logger"
-	"github.com/lush/blowball/internal/rpcx"
+	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/rpcx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

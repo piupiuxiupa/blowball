@@ -19,10 +19,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/run"
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/run"
 )
 
 // queueCatalogConfig is a two-model catalog so each queued message can carry

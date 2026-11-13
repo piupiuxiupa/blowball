@@ -15,9 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/stream"
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/stream"
 )
 
 const visionChatModel = "vision-chat-model"

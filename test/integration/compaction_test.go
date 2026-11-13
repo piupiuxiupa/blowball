@@ -17,17 +17,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/lush/blowball/internal/agent"
-	"github.com/lush/blowball/internal/config"
-	"github.com/lush/blowball/internal/handler"
-	"github.com/lush/blowball/internal/middleware"
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/run"
-	"github.com/lush/blowball/internal/service"
-	"github.com/lush/blowball/internal/store/fs"
-	redisstore "github.com/lush/blowball/internal/store/redis"
-	"github.com/lush/blowball/internal/tool"
-	"github.com/lush/blowball/internal/tool/skill"
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/handler"
+	"github.com/lush/blowball/pkg/middleware"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/run"
+	"github.com/lush/blowball/pkg/service"
+	"github.com/lush/blowball/pkg/store/fs"
+	redisstore "github.com/lush/blowball/pkg/store/redis"
+	"github.com/lush/blowball/pkg/tool"
+	"github.com/lush/blowball/pkg/tool/skill"
 )
 
 type compactionBudgetLLM struct {

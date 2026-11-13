@@ -1,0 +1,340 @@
+package turn
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/lush/blowball/pkg/agent"
+	"github.com/lush/blowball/pkg/stream"
+)
+
+// OrchestratorRunner is the agent-execution contract the MessageStreamHandler
+// depends on. It runs one chat turn, streaming events to hub, and returns the
+// raw event slice so the handler can persist the full assistant event stream,
+// plus the turn's usage object (extracted from the terminal done event) so the
+// handler can persist per-agent cost into turn_usage.
+//
+// Defining this locally lets the handler tests substitute a stub that writes
+// canned events instead of driving the real agent loop. The production
+// *agent.Orchestrator does not directly satisfy this interface (its Handle
+// returns only error); wrap it with NewOrchestratorAdapter at wiring time.
+type OrchestratorRunner interface {
+	// Handle executes one full chat turn against workspaceRoot for userID,
+	// streaming lifecycle and token events to hub. `messages` is the complete
+	// conversation history including all prior turns and the current user
+	// message. It returns when the turn is complete (terminal stop, error, or
+	// context cancellation) and yields every event produced during the turn, in
+	// order. The EventDone terminal event is forwarded to hub for the SSE wire
+	// but is NOT included in the returned slice (it is not chat content);
+	// instead its Meta.usage object is returned separately so the handler can
+	// persist per-agent token cost without re-deriving it. The caller owns hub
+	// and closes it after Handle returns.
+	//
+	// hooks carries the per-turn optional seams (context-compaction
+	// capability): the between-rounds Round hook installed on the agent loop
+	// and the event tap serving synchronized mid-turn snapshots. A zero
+	// TurnHooks runs the turn hook-free (the pre-capability behavior).
+	//
+	// override (per-request-model-selection, model-effort-v2) is the
+	// request-resolved turn config — (model, wire-family, effort) — injected
+	// uniformly into all three agents. It is always non-zero: the handler
+	// resolves every request against the mandatory catalog, and a
+	// parameter-less request resolves to the default entry + deployment
+	// default effort.
+	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) (events []stream.StreamEvent, usage map[string]any, err error)
+}
+
+// TurnHooks bundles the per-turn optional seams handed to OrchestratorRunner.
+// Round and Tap are nil unless context compaction is configured;
+// FinalizeTurn is nil unless the turn-artifacts capability is wired.
+type TurnHooks struct {
+	// Round is the between-rounds mid-turn compaction hook (agent.RoundHook),
+	// installed on the freshly-built Confucius for this turn.
+	Round agent.RoundHook
+	// Estimate projects the next LLM request size (context-request-budgeting).
+	// Nil keeps the legacy round-hook-only behavior.
+	Estimate agent.RoundRequestEstimator
+	// BudgetedRound is the expanded preflight hook: it receives the rendered
+	// request estimate and may compact before an over-budget request is sent.
+	BudgetedRound agent.BudgetedRoundHook
+	// Tap is served by the adapter's event-collection goroutine so Round can
+	// take complete, synchronized snapshots of the collected event stream —
+	// the source the mid-turn flush persists.
+	Tap *TurnEventTap
+	// FinalizeTurn runs at turn end, just before the done event goes on the
+	// wire (turn-artifacts capability): it snapshots the deliverables linked
+	// in assistantText and returns them in path order. The adapter emits one
+	// artifact event per entry (persisted) and attaches the same list to the
+	// done event's Meta[MetaArtifacts] (live-stream convenience copy). A nil
+	// hook skips the capability entirely. The hook receives a
+	// cancel-detached, bounded context: client disconnect must not abort
+	// snapshotting, because the returned events feed persistence, not just
+	// the live wire.
+	FinalizeTurn func(ctx context.Context, assistantText string) []stream.ArtifactInfo
+}
+
+// TurnEventTap synchronizes mid-turn flushes with the orchestrator adapter's
+// event-collection goroutine (context-compaction capability). The collection
+// goroutine owns the accumulated event slice and serves Snapshot requests
+// inside its select loop; before replying it drains the hub's event channel
+// to empty, so a snapshot taken while the agent loop is paused inside the
+// round hook includes EVERY event emitted so far. That completeness matters:
+// the flush persists rows under deterministic client_msg_ids keyed to the
+// merged-event ordinal, and a snapshot that cut a token run mid-merge would
+// store a truncated row that the turn-end save could never correct (the
+// UNIQUE index keeps the first write).
+type TurnEventTap struct {
+	reqCh     chan chan []stream.StreamEvent
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// NewTurnEventTap constructs a tap. Exactly one collection goroutine serves
+// it for the lifetime of one turn; close is called when that goroutine exits.
+func NewTurnEventTap() *TurnEventTap {
+	return &TurnEventTap{
+		reqCh: make(chan chan []stream.StreamEvent, 1),
+		done:  make(chan struct{}),
+	}
+}
+
+// Snapshot returns a complete copy of the events collected so far, or nil
+// when the context is cancelled or the collection goroutine has exited (turn
+// over). Callers treat nil as "abort the flush".
+func (t *TurnEventTap) Snapshot(ctx context.Context) []stream.StreamEvent {
+	reply := make(chan []stream.StreamEvent, 1)
+	select {
+	case t.reqCh <- reply:
+	case <-ctx.Done():
+		return nil
+	case <-t.done:
+		return nil
+	}
+	select {
+	case events := <-reply:
+		return events
+	case <-ctx.Done():
+		return nil
+	case <-t.done:
+		return nil
+	}
+}
+
+// serve replies to one snapshot request with a copy of the collected events.
+// Called by the collection goroutine after it drained the hub channel, so the
+// copy is complete for the turn so far. The reply channel is buffered: an
+// requester that gave up (ctx cancelled) leaves the value harmlessly.
+func (t *TurnEventTap) serve(reply chan []stream.StreamEvent, events []stream.StreamEvent) {
+	out := make([]stream.StreamEvent, len(events))
+	copy(out, events)
+	reply <- out
+}
+
+// Serve replies to one snapshot request from an adapter implementation.
+func (t *TurnEventTap) Serve(reply chan []stream.StreamEvent, events []stream.StreamEvent) {
+	t.serve(reply, events)
+}
+
+// Done closes when the event-collection goroutine exits.
+func (t *TurnEventTap) Done() <-chan struct{} { return t.done }
+
+// close marks the tap dead; pending and future Snapshots return nil.
+func (t *TurnEventTap) close() {
+	t.closeOnce.Do(func() { close(t.done) })
+}
+
+// requests exposes the request channel for the collection goroutine's select
+// loop; a nil-channel return lets a tap-free turn skip the case entirely.
+func (t *TurnEventTap) requests() chan chan []stream.StreamEvent {
+	if t == nil {
+		return nil
+	}
+	return t.reqCh
+}
+
+// Close exposes tap teardown to transport-adapter test doubles.
+func (t *TurnEventTap) Close() { t.close() }
+
+// Requests exposes the snapshot request channel to adapter implementations.
+func (t *TurnEventTap) Requests() chan chan []stream.StreamEvent { return t.requests() }
+
+// orchestratorAdapter wraps a *agent.Orchestrator to satisfy OrchestratorRunner.
+// The underlying orchestrator's Handle returns only an error; we recover the
+// full event stream by tapping the hub's events channel from a side goroutine
+// while the orchestrator runs. The hub's events channel is a single-consumer
+// channel, but Send/SendCtx push into it and the SSE writer is the consumer —
+// so we cannot also read from it without stealing events.
+//
+// Instead, the adapter installs a *second* hub that the orchestrator writes
+// to, fans every event out to the caller's hub (so the SSE writer still sees
+// them) AND accumulates every event into a slice that becomes the returned
+// event stream.
+// innerRunner is the adapter's seam around the concrete orchestrator: exactly
+// the (*agent.Orchestrator).Handle signature. Tests substitute a fake that
+// writes canned events instead of driving the real agent loop.
+type InnerRunner interface {
+	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, override agent.ModelOverride) error
+}
+
+type innerRunner = InnerRunner
+
+// budgetedInnerRunner is the optional extension used when a turn installs the
+// request estimator. Keeping it separate from innerRunner preserves every
+// existing test double and pre-budgeting caller.
+type budgetedInnerRunner interface {
+	HandleWithBudget(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, override agent.ModelOverride) error
+}
+
+type budgetedHookRunner interface {
+	HandleWithSeams(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, budgetedHook agent.BudgetedRoundHook, override agent.ModelOverride) error
+}
+
+type orchestratorAdapter struct {
+	inner innerRunner
+}
+
+// NewOrchestratorAdapter wraps a *agent.Orchestrator as an OrchestratorRunner.
+// The agent-role bootstrap should pass the result to NewMessageStreamHandler.
+func NewOrchestratorAdapter(o *agent.Orchestrator) OrchestratorRunner {
+	return &orchestratorAdapter{inner: o}
+}
+
+// NewOrchestratorAdapterFromRunner wraps the small runner seam directly.
+func NewOrchestratorAdapterFromRunner(inner InnerRunner) OrchestratorRunner {
+	return &orchestratorAdapter{inner: inner}
+}
+
+// Handle implements OrchestratorRunner.
+func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
+	// Tap side: drain innerHub.Events() in a goroutine, forwarding to the
+	// caller's hub, accumulating the raw event stream, and capturing the done
+	// event's usage object (without adding the done event to the persisted
+	// stream).
+	innerHub := stream.NewHub(stream.DefaultHubBufferSize)
+	eventsCh := make(chan adapterResult, 1)
+	tap := hooks.Tap
+	tapReqs := tap.requests() // nil when no tap: the select case never fires
+
+	go func() {
+		if tap != nil {
+			defer tap.close()
+		}
+		var events []stream.StreamEvent
+		var usage map[string]any
+		eventsDrain := innerHub.Events()
+		done := innerHub.Done()
+		process := func(e stream.StreamEvent) {
+			if e.Type == stream.EventDone {
+				// Turn-artifacts capability: announce the turn's deliverables
+				// BEFORE done goes on the wire, so consumers can treat done as
+				// "stream complete, artifact list final". The artifact events
+				// join the returned (persisted) stream; done only carries a
+				// summary copy in Meta and is still excluded from persistence.
+				if hooks.FinalizeTurn != nil {
+					finCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), artifactFinalizeBudget)
+					artifacts := hooks.FinalizeTurn(finCtx, topLevelAssistantText(MergeEvents(events)))
+					cancel()
+					for _, ai := range artifacts {
+						ev := stream.ArtifactEvent("", ai)
+						hub.SendCtx(ctx, ev)
+						events = append(events, ev)
+					}
+					if e.Meta == nil {
+						e.Meta = map[string]any{}
+					}
+					summary := make([]stream.ArtifactInfo, len(artifacts))
+					copy(summary, artifacts)
+					e.Meta[stream.MetaArtifacts] = summary
+				}
+				// Mirror to the caller's hub. SendCtx blocks on a full buffer
+				// until the SSE writer drains it; on ctx cancel or hub close
+				// the event is dropped (the SSE writer is also observing ctx).
+				hub.SendCtx(ctx, e)
+				// Extract the usage object from the terminal done event so the
+				// handler can persist per-agent cost. The done event itself is
+				// still excluded from the returned event stream (it carries
+				// usage metadata, not chat content).
+				if u, ok := e.Meta[stream.MetaUsage].(map[string]any); ok {
+					usage = u
+				}
+				return
+			}
+			// Mirror to the caller's hub (same SendCtx semantics as above).
+			hub.SendCtx(ctx, e)
+			events = append(events, e)
+		}
+		for {
+			select {
+			case e := <-eventsDrain:
+				process(e)
+			case req := <-tapReqs:
+				// Mid-turn snapshot request (context-compaction capability):
+				// priority-drain every event already enqueued on the hub so
+				// the reply is complete for the turn so far. The agent loop
+				// is paused inside the round hook while this runs, so no new
+				// events can arrive mid-drain.
+			snapshotDrain:
+				for {
+					select {
+					case e := <-eventsDrain:
+						process(e)
+					default:
+						break snapshotDrain
+					}
+				}
+				tap.serve(req, events)
+			case <-done:
+				// Final drain: the orchestrator may have buffered agent_end /
+				// done events into innerHub just before Close fired. Without
+				// this drain, a Go select that lands on `done` while events
+				// are still queued would silently drop them — observed in
+				// Phase 11 integration tests as missing terminal events.
+			drain:
+				for {
+					select {
+					case e := <-eventsDrain:
+						process(e)
+					default:
+						break drain
+					}
+				}
+				eventsCh <- adapterResult{events: events, usage: usage}
+				return
+			case <-ctx.Done():
+				eventsCh <- adapterResult{events: events, usage: usage}
+				return
+			}
+		}
+	}()
+
+	var err error
+	if hooks.Estimate != nil {
+		if budgeted, ok := a.inner.(budgetedHookRunner); ok && hooks.BudgetedRound != nil {
+			err = budgeted.HandleWithSeams(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, hooks.Estimate, hooks.BudgetedRound, override)
+		} else if budgeted, ok := a.inner.(budgetedInnerRunner); ok {
+			err = budgeted.HandleWithBudget(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, hooks.Estimate, override)
+		} else {
+			err = fmt.Errorf("handler: orchestrator does not support request budgeting")
+		}
+	} else {
+		err = a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, override)
+	}
+	innerHub.Close()
+	res := <-eventsCh
+	return res.events, res.usage, err
+}
+
+// adapterResult bundles the drained event stream and the done event's usage
+// object captured by the adapter's tap goroutine.
+type adapterResult struct {
+	events []stream.StreamEvent
+	usage  map[string]any
+}
+
+// artifactFinalizeBudget bounds the turn-end artifact finalization (detect +
+// snapshot) so a slow filesystem or database can never hold the done event
+// hostage. Over budget, FinalizeTurn returns whatever it has and the done
+// event still goes out.
+const artifactFinalizeBudget = 30 * time.Second

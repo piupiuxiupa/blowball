@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/lush/blowball/internal/rpcx"
+	"github.com/lush/blowball/pkg/rpcx"
 	"github.com/lush/blowball/services/scheduler/internal/store"
 	"github.com/lush/blowball/services/scheduler/internal/task"
 )

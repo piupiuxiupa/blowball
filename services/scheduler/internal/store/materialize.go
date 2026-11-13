@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
-	"github.com/lush/blowball/internal/model"
-	"github.com/lush/blowball/internal/schedule"
+	"github.com/lush/blowball/pkg/model"
+	"github.com/lush/blowball/pkg/schedule"
 )
 
 // MaterializeTasks atomically claims due tasks, inserts one occurrence per
