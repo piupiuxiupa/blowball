@@ -1,5 +1,13 @@
 schema: spec-driven
 
+context: |
+  officevers (services/officevers, merged from the former standalone
+  office-version-service repo): a thin Go/Gin HTTP service wrapping MinIO S3
+  Object Versioning for file history, version download, and rollback. Namespace
+  model: "{uuid}/{filename}" keys in a single versioned bucket; stateless
+  (MinIO is the source of truth, no database); no auth for MVP. Specs:
+  version-rollback, versioned-file-storage.
+
 # Project context (optional)
 # This is shown to AI when creating artifacts.
 # Add your tech stack, conventions, style guides, domain knowledge, etc.

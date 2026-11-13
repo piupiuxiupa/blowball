@@ -1,0 +1,459 @@
+openapi: 3.0.3
+info:
+  title: Office Version Service API
+  version: 2.0.0
+  description: |
+    Versioned file storage for Office (and arbitrary) documents on top of MinIO
+    (or any S3-compatible object store) using native S3 Object Versioning.
+
+    Clients address each file by a **logical path** (which may include
+    `/`-separated directory segments, e.g. `财务/2024/年报.docx`). The service
+    hashes the full path (SHA-256, including its extension) into the flat
+    storage key `{uuid}/{<sha256-hex>}{<ext>}`, so the directory structure is
+    opaque to storage and every upload to the same logical path becomes a new
+    version of the same object. A non-destructive rollback promotes a prior
+    version's content to the new latest version without discarding any history.
+
+    - No database — MinIO is the single source of truth.
+    - No authentication in the MVP.
+    - **v2 (breaking):** file operations are addressed by logical path under
+      `/documents/{uuid}/{filepath}`, and the operation is selected by the HTTP
+      method plus an `?action=` query parameter (`versions`, `version`,
+      `rollback`). Logical paths may freely include segments named `versions` or
+      `rollback`. The previous `GET /documents/{uuid}` (list files) endpoint was
+      removed.
+    - Logical paths may not be empty, may not contain empty segments (`a//b`),
+      `.` / `..` segments, backslashes, or NUL/control characters. No Unicode
+      normalization or case-folding is applied — the exact bytes sent are hashed.
+
+  contact:
+    name: office-version-service
+  license:
+    name: MIT
+    url: https://opensource.org/license/mit
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+# The MVP intentionally has no authentication. This declaration documents that
+# the API is unsecured and satisfies tooling that requires a security statement.
+security: []
+
+tags:
+  - name: Documents
+    description: File-level versioned operations (upload, download, versions, rollback, delete)
+  - name: Directories
+    description: Directory listing operations
+  - name: System
+    description: Health and operational endpoints
+
+paths:
+  # ---------------------------------------------------------------------------
+  # File-level operations
+  #
+  # The {filepath} segment is a catch-all that may itself contain "/"
+  # -separated directory segments (the logical path). OpenAPI 3.0 path
+  # templates cannot natively express a multi-segment capture, so it is
+  # documented as a single parameter with that caveat. The operation is
+  # selected by the HTTP method together with the ?action= query parameter;
+  # OpenAPI cannot split query-dispatched behaviors into separate operations,
+  # so each method documents its action matrix.
+  # ---------------------------------------------------------------------------
+  /documents/{uuid}/{filepath}:
+    parameters:
+      - $ref: '#/components/parameters/Uuid'
+      - $ref: '#/components/parameters/Filepath'
+
+    get:
+      tags: [Documents]
+      summary: Download latest / specific version, or list version history
+      description: |
+        Selects an action via the `action` query parameter:
+
+        | `action`    | Behavior                                         |
+        | ----------- | ------------------------------------------------ |
+        | *(absent)*  | Stream the current latest version's content.     |
+        | `versions`  | Return the file's version history (JSON).        |
+        | `version`   | Stream a specific version (requires `versionId`).|
+
+        The file is addressed by its logical path (`{filepath}`), which the
+        service hashes into a flat storage key; the path's directory segments
+        are opaque to storage and may include `versions` or `rollback`.
+      operationId: readFile
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: |
+            Selects the read operation. Omit to download the latest version;
+            `versions` to list history; `version` to download a specific
+            version (then `versionId` is required).
+          schema:
+            type: string
+            enum: [versions, version]
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '200':
+          description: |
+            Either the requested content stream (when downloading the latest or
+            a specific version) or the version history (when `action=versions`).
+            The `X-Version-Id` / `Last-Modified` / `Content-Type` headers apply
+            to the stream representations.
+          headers:
+            X-Version-Id:
+              $ref: '#/components/headers/VersionId'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
+            Content-Type:
+              $ref: '#/components/headers/ContentType'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionsResponse'
+              example:
+                uuid: abc
+                path: 财务/2024/年报.docx
+                versions:
+                  - versionId: 063807c3-09cb-449c-b889-6872c77c7a76
+                    lastModified: '2026-08-02T06:41:08.568Z'
+                    size: 10
+                    isLatest: true
+                  - versionId: 7a099e4a-c79b-4d3b-a93f-b09394b43809
+                    lastModified: '2026-08-02T06:41:08.552Z'
+                    size: 10
+                    isLatest: false
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+    post:
+      tags: [Documents]
+      summary: Upload a new version, or roll back to a prior version
+      description: |
+        Selects an action via the `action` query parameter:
+
+        | `action`    | Behavior                                                      |
+        | ----------- | ------------------------------------------------------------- |
+        | *(absent)*  | Store the request body as a new version of the logical path.  |
+        | `rollback`  | Non-destructively promote a prior version to the new latest.  |
+
+        For upload, the request body is the raw file bytes; the stored object's
+        content type is derived from the logical path's extension. For rollback,
+        supply the target version id as a JSON body or as `?versionId=`; **all
+        existing versions remain**, including those newer than the target.
+      operationId: modifyFile
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: Omit to upload a new version; `rollback` to roll back.
+          schema:
+            type: string
+            enum: [rollback]
+        - $ref: '#/components/parameters/VersionId'
+      requestBody:
+        required: false
+        description: |
+          For upload: the raw file bytes. For rollback: an optional JSON body
+          `{"versionId":"..."}` (alternative to the `?versionId=` query).
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+            schema:
+              type: string
+              format: binary
+          application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+            schema:
+              type: string
+              format: binary
+          application/vnd.openxmlformats-officedocument.presentationml.presentation:
+            schema:
+              type: string
+              format: binary
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackRequest'
+            example:
+              versionId: 7a604dc7-719f-426f-88c4-642313fd2860
+      responses:
+        '201':
+          description: New version created (upload).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+              example:
+                versionId: 7a604dc7-719f-426f-88c4-642313fd2860
+                lastModified: '2026-08-02T06:42:15Z'
+        '200':
+          description: Rollback completed; a new latest version was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollbackResponse'
+              example:
+                versionId: 755f7c99-bcd8-4eb7-9b31-300ade4b0280
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+    delete:
+      tags: [Documents]
+      summary: Delete a file and all its versions
+      description: |
+        Removes the object at the logical path's derived storage key together
+        with **every** historical version (and any delete markers). Idempotent —
+        deleting a non-existent object succeeds.
+      operationId: deleteFile
+      responses:
+        '204':
+          description: File and all versions deleted (or did not exist).
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ---------------------------------------------------------------------------
+  # Directory operations
+  # ---------------------------------------------------------------------------
+  /documents:
+    get:
+      tags: [Directories]
+      summary: List UUID directories
+      description: |
+        Returns the top-level UUID directories (prefixes) that contain at least
+        one file.
+      operationId: listDirectories
+      responses:
+        '200':
+          description: UUID directories.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectoriesResponse'
+              example:
+                directories: [abc, xyz]
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ---------------------------------------------------------------------------
+  # System
+  # ---------------------------------------------------------------------------
+  /healthz:
+    get:
+      tags: [System]
+      summary: Health check
+      description: Liveness probe.
+      operationId: healthz
+      responses:
+        '200':
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+
+components:
+  parameters:
+    Uuid:
+      name: uuid
+      in: path
+      description: Caller-supplied directory UUID used to namespace files.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: '^[^/\\]+$'
+      example: abc
+
+    Filepath:
+      name: filepath
+      in: path
+      description: |
+        The file's **logical path** — a catch-all that may itself contain
+        `/`-separated directory segments (e.g. `财务/2024/年报.docx`). The
+        service hashes the full path (SHA-256, including its extension) into the
+        flat storage key `{uuid}/{<sha256-hex>}{<ext>}`; the path is not stored
+        verbatim.
+
+        May not be empty, may not contain empty segments (`a//b`), `.` / `..`
+        segments, backslashes, or NUL/control characters. No Unicode
+        normalization or case-folding is applied — the exact bytes sent are
+        hashed, so upload and download must use byte-identical paths.
+
+        (OpenAPI 3.0 path templates cannot natively express a multi-segment
+        capture; this single parameter represents the whole logical path.)
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 1024
+      example: 财务/2024/年报.docx
+
+    VersionId:
+      name: versionId
+      in: query
+      description: |
+        The MinIO/S3 object version id. Required when downloading a specific
+        version (`GET ?action=version`); also accepted by rollback as an
+        alternative to the JSON body.
+      required: false
+      schema:
+        type: string
+      example: 7a604dc7-719f-426f-88c4-642313fd2860
+
+  headers:
+    VersionId:
+      description: The version id of the version being streamed.
+      schema:
+        type: string
+      example: 063807c3-09cb-449c-b889-6872c77c7a76
+
+    LastModified:
+      description: RFC 1123 last-modified timestamp of the version.
+      schema:
+        type: string
+      example: Sat, 02 Aug 2026 06:42:15 GMT
+
+    ContentType:
+      description: MIME type of the file (derived from the logical path's extension).
+      schema:
+        type: string
+      example: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+
+  responses:
+    BadRequest:
+      description: Invalid input (bad logical path, missing version id, ...).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error:
+              message: logical path contains invalid segments or characters
+
+    NotFound:
+      description: File or version not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error:
+              message: not found
+
+    InternalError:
+      description: Unexpected or MinIO error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error:
+              message: connection refused
+
+  schemas:
+    UploadResponse:
+      type: object
+      description: The new version id and timestamp returned after an upload.
+      properties:
+        versionId:
+          type: string
+          description: The version id MinIO assigned to the new version.
+        lastModified:
+          type: string
+          format: date-time
+          description: The server-recorded last-modified timestamp of the new version.
+      required: [versionId, lastModified]
+
+    VersionEntry:
+      type: object
+      description: A single version of a file.
+      properties:
+        versionId:
+          type: string
+        lastModified:
+          type: string
+          format: date-time
+        size:
+          type: integer
+          format: int64
+          description: Size in bytes.
+          minimum: 0
+        isLatest:
+          type: boolean
+          description: Whether this is the current latest version.
+        isDeleteMarker:
+          type: boolean
+          description: Whether this entry is a delete marker (optional, omitted when false).
+      required: [versionId, lastModified, size, isLatest]
+
+    VersionsResponse:
+      type: object
+      properties:
+        uuid:
+          type: string
+        path:
+          type: string
+          description: The logical path the history belongs to.
+        versions:
+          type: array
+          description: Version history, ordered newest-first. Exactly one entry is `isLatest`.
+          items:
+            $ref: '#/components/schemas/VersionEntry'
+      required: [uuid, path, versions]
+
+    DirectoriesResponse:
+      type: object
+      properties:
+        directories:
+          type: array
+          description: Top-level UUID directories that contain at least one file.
+          items:
+            type: string
+      required: [directories]
+
+    RollbackRequest:
+      type: object
+      description: Target version to roll back to.
+      properties:
+        versionId:
+          type: string
+          description: The version id to promote to the new latest version.
+      required: [versionId]
+
+    RollbackResponse:
+      type: object
+      description: The new latest version id created by the rollback.
+      properties:
+        versionId:
+          type: string
+      required: [versionId]
+
+    ApiError:
+      type: object
+      description: Standard error body for all error responses.
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+          required: [message]
+      required: [error]
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+      required: [status]
