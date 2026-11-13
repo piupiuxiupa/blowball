@@ -1490,44 +1490,6 @@ components:
           items: {$ref: '#/components/schemas/ScheduledTaskRun'}
         limit: {type: integer}
         offset: {type: integer}
-  responses:
-    BadRequest:
-      description: Malformed request body or missing field.
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/Error'}
-    Unauthorized:
-      description: Missing or invalid credentials.
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/Error'}
-    Forbidden:
-      description: Operation not permitted (e.g. path outside workspace).
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/Error'}
-    NotFound:
-      description: Resource not found.
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/Error'}
-    AlreadyExists:
-      description: Target resource already exists.
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/Error'}
-    PayloadTooLarge:
-      description: Uploaded file exceeds the size limit.
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/Error'}
-    Internal:
-      description: Unexpected server error.
-      content:
-        application/json:
-          schema: {$ref: '#/components/schemas/Error'}
-security:
-  - BearerAuth: []
     ScheduledResourceFile:
       type: object
       required: [path, size]
@@ -1613,6 +1575,44 @@ security:
           items: {$ref: '#/components/schemas/ScheduledSession'}
         limit: {type: integer}
         offset: {type: integer}
+  responses:
+    BadRequest:
+      description: Malformed request body or missing field.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: Operation not permitted (e.g. path outside workspace).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    AlreadyExists:
+      description: Target resource already exists.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    PayloadTooLarge:
+      description: Uploaded file exceeds the size limit.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Internal:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+security:
+  - BearerAuth: []
 
 paths:
   /healthz:
