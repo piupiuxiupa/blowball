@@ -22,6 +22,7 @@ import (
 
 	scheduledruntimev1 "github.com/lush/blowball/api/gen/go/scheduledruntime/v1"
 	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
+	"github.com/lush/blowball/pkg/boot"
 	"github.com/lush/blowball/pkg/logger"
 	"github.com/lush/blowball/pkg/rpcx"
 	"github.com/lush/blowball/services/scheduler/internal/config"
@@ -33,6 +34,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(boot.VersionString())
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "scheduler: %v\n", err)
 		os.Exit(1)

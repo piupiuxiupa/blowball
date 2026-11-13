@@ -1,0 +1,154 @@
+# 全家桶 compose:apiserver + agent + scheduler + officevers + mysql + redis
+# (+ minio,office-vers 的对象存储后端)。一键拉起整个 monorepo 的服务拓扑:
+#
+#   docker compose -f deploy/compose/all-in-one.yaml up -d --build
+#
+# 拓扑要点(见 openspec service-deployment spec):
+#   - apiserver 与 agent 挂同一命名卷 blowball_data(workspace 文件双向可见:
+#     api 分区的文件 CRUD 与 agent turn 内的 xizhi 工具读写同一数据)。
+#   - apiserver 暴露 server.port(8080,CRUD);agent 暴露 server.agent_port
+#     (8081,SSE/turn/MCP);officevers 暴露 8088;mysql/redis 仅内网。
+#   - mysql 首次启动以仓库根 migrations/ 初始化(与 deploy/compose/mysql-redis.yaml
+#     同一约定:仅 FRESH volume 生效)。
+#   - internal_rpc 默认关闭(与 config.example.yaml 默认一致):scheduler 以
+#     待机形态运行,任务 HTTP 端点 503。开启需 INTERNAL_RPC_ENABLED=true 并
+#     提供 mTLS 证书或 plaintext token(仅闭环网络)——见 docs/scheduled-tasks.md。
+#   - openai 镜像 base(golang:1.26-alpine)需可拉取;本机若走镜像加速,
+#     在 daemon 配置 registry mirror 或先 docker pull 后再 up。
+#
+# 需要提供的环境变量:
+#   JWT_SECRET        签发 JWT 的共享密钥(api 与 agent 必须一致)
+#   OPENAI_API_KEY    agent 角色的 LLM 网关密钥(api 角色可缺省,仅告警)
+
+name: blowball-all
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: blowball
+      MYSQL_USER: blowball
+      MYSQL_PASSWORD: blowballpassword
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../../migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # AOF 对齐生产红线(见 deploy/compose/mysql-redis.yaml 注释)。
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  apiserver:
+    build:
+      context: ../..
+      dockerfile: deploy/apiserver/Dockerfile
+    image: blowball-api:local
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MYSQL_DSN: "blowball:blowballpassword@tcp(mysql:3306)/blowball?charset=utf8mb4&parseTime=true&loc=Local"
+      REDIS_ADDR: "redis:6379"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (shared by apiserver and agent)}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ONLYOFFICE_VERSION_SERVICE_URL: "http://officevers:8088"
+    ports:
+      - "8080:8080"
+    volumes:
+      # 同一数据卷与 agent 共享:api 文件 CRUD ⇄ agent turn 工具读写。
+      - blowball_data:/opt/cowork
+      - ../../config.example.yaml:/opt/cowork/config.yaml:ro
+    command: ["serve", "-f", "/opt/cowork/config.yaml", "-d", "/opt/cowork"]
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: deploy/agent/Dockerfile
+    image: blowball-agent:local
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MYSQL_DSN: "blowball:blowballpassword@tcp(mysql:3306)/blowball?charset=utf8mb4&parseTime=true&loc=Local"
+      REDIS_ADDR: "redis:6379"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (shared by apiserver and agent)}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY (the agent role drives the LLM)}
+      ONLYOFFICE_VERSION_SERVICE_URL: "http://officevers:8088"
+    ports:
+      - "8081:8081"
+    volumes:
+      - blowball_data:/opt/cowork
+      - ../../config.example.yaml:/opt/cowork/config.yaml:ro
+    command: ["serve", "-f", "/opt/cowork/config.yaml", "-d", "/opt/cowork"]
+
+  scheduler:
+    build:
+      context: ../..
+      dockerfile: deploy/scheduler/Dockerfile
+    image: blowball-scheduler:local
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SCHEDULER_MYSQL_DSN: "blowball:blowballpassword@tcp(mysql:3306)/blowball?parseTime=true&loc=UTC"
+      MAIN_API_RPC_ENDPOINT: "apiserver:9092"
+      MAIN_AGENT_RPC_ENDPOINT: "agent:9092"
+    volumes:
+      - ../../services/scheduler/config.example.yaml:/opt/cowork/config.yaml:ro
+      - sched_data:/opt/cowork
+    command: ["-f", "/opt/cowork/config.yaml", "-d", "/opt/cowork"]
+
+  officevers:
+    build:
+      context: ../..
+      dockerfile: deploy/officevers/Dockerfile
+    image: officevers:local
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      LISTEN_ADDR: ":8088"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: blowball-versions
+    ports:
+      - "8088:8088"
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  blowball_data:
+  sched_data:

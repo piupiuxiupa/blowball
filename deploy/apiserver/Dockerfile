@@ -1,9 +1,13 @@
+# blowball-api 独立薄镜像:api 角色固定,静态二进制 + 最小运行时。
+# 不含 agent 执行依赖(bubblewrap/python/node/npm/git 等)——那些只属于
+# deploy/agent/Dockerfile 的厚镜像。
+# 构建命令(仓库根为 context):
+#   docker build -f deploy/apiserver/Dockerfile -t blowball-api .
 
+ARG GO_BASE_IMAGE=golang:1.26-alpine
 
-# 一个镜像同时承载 api 与 agent 两个角色，运行时用 `serve --role <api|agent>` 区分。
-
-# ---- Stage 1: build the blowball binary (serve + seed 子命令共用同一个二进制) ----
-FROM golang:1.26-alpine AS builder
+# ---- Stage 1: build the blowball-api binary ----
+FROM ${GO_BASE_IMAGE} AS builder
 
 WORKDIR /src
 
@@ -11,49 +15,41 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# 拷源码并构建静态二进制。
-#   CGO_ENABLED=0  纯 Go 静态构建（mysql/redis 驱动都是纯 Go），
-#                  在 musl 的 alpine 运行时镜像上跑得干净，也利于 Landlock/bwrap。
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/blowball ./cmd/blowball/
+
+# 版本注入(未传时安全默认值;链接器忽略未声明变量)。
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/lush/blowball/pkg/boot.Version=${VERSION} \
+        -X github.com/lush/blowball/pkg/boot.Commit=${COMMIT} \
+        -X github.com/lush/blowball/pkg/boot.BuildTime=${BUILD_TIME}" \
+      -o /out/blowball-api ./services/apiserver/cmd/blowball-api/
 
 # ---- Stage 2: minimal runtime ----
 FROM alpine:3.22.4
 
 RUN echo "http://mirrors.aliyun.com/alpine/v3.22/main" > /etc/apk/repositories && \
-    echo "http://mirrors.aliyun.com/alpine/v3.22/community" >> /etc/apk/repositories 
+    echo "http://mirrors.aliyun.com/alpine/v3.22/community" >> /etc/apk/repositories
 
-# 运行期依赖：
-#   ca-certificates   OpenAI / MCP / webfetch / luban 的 git clone 走 HTTPS
-#   tzdata            日志时间戳正确
-#   git               luban_install_skill 运行时 `git clone`
-#   bash              bash 执行器工具与沙箱默认 shell（Alpine 出厂仅 busybox ash）
-#   python3, py3-pip  python / pip 执行器工具
-#   bubblewrap        执行器工具的 bwrap 沙箱（仅 agent 角色使用）
-#   nodejs, npm       沙箱内经 bash 调用 node/npm（apk 源里的版本）
+# 运行期依赖:TLS 证书链(office-vers/artifact 通道)、时区、curl(健康探针)。
 RUN apk add --no-cache \
-        curl \
         ca-certificates \
         tzdata \
-        git \
-        bash \
-        python3 \
-        py3-pip \
-        bubblewrap \
-        nodejs \
-        npm \
-        fd \
-        ripgrep \
+        curl \
         && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
         && echo "Asia/Shanghai" > /etc/timezone
 
 ENV TZ=Asia/Shanghai
 
-COPY --from=builder /out/blowball /usr/local/bin/blowball
+COPY --from=builder /out/blowball-api /usr/local/bin/blowball-api
 
-# 共享挂载点：宿主 /opt/cowork（含 config.yaml 与 meta-data/ 数据根）。
+# 共享挂载点:宿主数据根(workspace 文件与 agent 服务共享同一卷)。
 RUN mkdir -p /opt/cowork
 VOLUME ["/opt/cowork"]
 
-ENTRYPOINT ["blowball"]
-# 角色与 -f/-d 由 `docker run` 传入，镜像本身不绑定角色。
+ENTRYPOINT ["blowball-api"]
+# serve 子命令与 -f/-d 由 `docker run` 传入。

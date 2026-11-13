@@ -1,9 +1,17 @@
 
 
-# 一个镜像同时承载 api 与 agent 两个角色，运行时用 `serve --role <api|agent>` 区分。
+# blowball-agent 独立厚镜像:agent 角色固定,承载全部 agent 执行依赖
+# (bubblewrap 沙箱、python/pip、node/npm、git、rg/fd、bash)。镜像同时构建
+# 开发单体 `blowball`(serve --role all|api|agent)作为回滚/过渡路径——
+# 厚镜像本就具备单体所需的一切运行时依赖,生产可继续以本镜像跑单体,
+# 切换到独立二进制只改入口。
+# 构建命令(仓库根为 context):
+#   docker build -f deploy/agent/Dockerfile -t blowball-agent .
 
-# ---- Stage 1: build the blowball binary (serve + seed 子命令共用同一个二进制) ----
-FROM golang:1.26-alpine AS builder
+ARG GO_BASE_IMAGE=golang:1.26-alpine
+
+# ---- Stage 1: build the binaries ----
+FROM ${GO_BASE_IMAGE} AS builder
 
 WORKDIR /src
 
@@ -11,21 +19,32 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# 拷源码并构建静态二进制。
-#   CGO_ENABLED=0  纯 Go 静态构建（mysql/redis 驱动都是纯 Go），
-#                  在 musl 的 alpine 运行时镜像上跑得干净，也利于 Landlock/bwrap。
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/blowball ./cmd/blowball/
 
-# ---- Stage 2: minimal runtime ----
+# 版本注入(未传时安全默认值;链接器忽略未声明变量)。
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/lush/blowball/pkg/boot.Version=${VERSION} \
+        -X github.com/lush/blowball/pkg/boot.Commit=${COMMIT} \
+        -X github.com/lush/blowball/pkg/boot.BuildTime=${BUILD_TIME}" \
+      -o /out/blowball-agent ./services/agent/cmd/blowball-agent/ && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+      -o /out/blowball ./cmd/blowball/
+
+# ---- Stage 2: full agent runtime ----
 FROM alpine:3.22.4
 
 RUN echo "http://mirrors.aliyun.com/alpine/v3.22/main" > /etc/apk/repositories && \
-    echo "http://mirrors.aliyun.com/alpine/v3.22/community" >> /etc/apk/repositories 
+    echo "http://mirrors.aliyun.com/alpine/v3.22/community" >> /etc/apk/repositories
 
 # 运行期依赖：
 #   ca-certificates   OpenAI / MCP / webfetch / luban 的 git clone 走 HTTPS
 #   tzdata            日志时间戳正确
+#   curl              健康探针
 #   git               luban_install_skill 运行时 `git clone`
 #   bash              bash 执行器工具与沙箱默认 shell（Alpine 出厂仅 busybox ash）
 #   python3, py3-pip  python / pip 执行器工具
@@ -49,11 +68,14 @@ RUN apk add --no-cache \
 
 ENV TZ=Asia/Shanghai
 
+COPY --from=builder /out/blowball-agent /usr/local/bin/blowball-agent
+# 开发单体(回滚路径):docker run --entrypoint blowball ... serve --role all
 COPY --from=builder /out/blowball /usr/local/bin/blowball
 
-# 共享挂载点：宿主 /opt/cowork（含 config.yaml 与 meta-data/ 数据根）。
+# 共享挂载点：宿主 /opt/cowork（含 config.yaml 与 meta-data/ 数据根,
+# 与 apiserver 服务共享同一卷——workspace 文件双向可见）。
 RUN mkdir -p /opt/cowork
 VOLUME ["/opt/cowork"]
 
-ENTRYPOINT ["blowball"]
-# 角色与 -f/-d 由 `docker run` 传入，镜像本身不绑定角色。
+ENTRYPOINT ["blowball-agent"]
+# serve 子命令与 -f/-d 由 `docker run` 传入。

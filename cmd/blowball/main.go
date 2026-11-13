@@ -14,6 +14,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/lush/blowball/pkg/boot"
 )
 
 func main() {
@@ -28,6 +30,8 @@ func main() {
 		err = serveCmd(os.Args[2:])
 	case "seed":
 		err = seedCmd(os.Args[2:])
+	case "version":
+		fmt.Println(boot.VersionString())
 	case "-h", "--help", "help":
 		usage()
 	default:

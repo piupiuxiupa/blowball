@@ -13,6 +13,8 @@ import (
 
 	apiserver "github.com/lush/blowball/services/apiserver"
 	apiserverrun "github.com/lush/blowball/services/apiserver/internal/run"
+
+	"github.com/lush/blowball/pkg/boot"
 )
 
 func main() {
@@ -27,6 +29,8 @@ func main() {
 		err = serveCmd(os.Args[2:])
 	case "seed":
 		err = apiserver.RunSeed("blowball-api", os.Args[2:])
+	case "version":
+		fmt.Println(boot.VersionString())
 	case "-h", "--help", "help":
 		usage()
 	default:

@@ -30,9 +30,9 @@
 ## 5. P2:服务装配拆分与独立二进制
 
 - [x] 5.1 将 serve.go 集中 wiring 按角色拆入 `services/apiserver/server` 与 `services/agent/server` 导出装配包(构造依赖 + 路由注册 + 生命周期),根 cmd/blowball 改为纯组合,行为不变(以现集成测试为对照)
-- [ ] 5.2 新增 `cmd/blowball-api`(固定 api 角色 + seed 子命令)与 `cmd/blowball-agent`(固定 agent 角色)薄 main:接受 -f/-d,拒绝 --role(非零退出);`make build-api`/`make build-agent` 目标
-- [ ] 5.3 scheduler 入口更名产出 `blowball-scheduler`,更新 `deploy/scheduler/blowball-scheduler.service` 与 Makefile
-- [ ] 5.4 验证门槛:全量测试绿;blowball-api/blowball-agent 与单体 --role api/--role agent 的路由集合、端口、错误行为逐项对照一致;blowball-api seed 与单体 seed 行为一致
+- [x] 5.2 新增 `cmd/blowball-api`(固定 api 角色 + seed 子命令)与 `cmd/blowball-agent`(固定 agent 角色)薄 main:接受 -f/-d,拒绝 --role(非零退出);`make build-api`/`make build-agent` 目标
+- [x] 5.3 scheduler 入口更名产出 `blowball-scheduler`,更新 `deploy/scheduler/blowball-scheduler.service` 与 Makefile
+- [x] 5.4 验证门槛:全量测试绿;blowball-api/blowball-agent 与单体 --role api/--role agent 的路由集合、端口、错误行为逐项对照一致;blowball-api seed 与单体 seed 行为一致
 
 ## 6. P2:镜像定型与全家桶 compose
 

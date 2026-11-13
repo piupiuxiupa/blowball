@@ -19,7 +19,18 @@ import (
 	"github.com/lush/blowball/services/officevers/internal/router"
 )
 
+// Build metadata, injected via ldflags by deploy/officevers/Dockerfile.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		log.Printf("office-version-service version %s (commit %s, built %s)", version, commit, buildTime)
+		return
+	}
 	cfg, err := config.Load(nil)
 	if err != nil {
 		// --help / -h: usage was already printed; exit cleanly.

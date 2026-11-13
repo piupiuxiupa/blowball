@@ -124,7 +124,7 @@ mysql:
   dbname: blowball
 
 redis:
-  addr: 127.0.0.1:6379
+  addr: ${REDIS_ADDR:127.0.0.1:6379}
   password: ""
   db: 0
 
@@ -221,7 +221,7 @@ scheduled_tasks:
 # blowball-main / blowball-api / blowball-agent on this side, blowball-scheduler
 # on the Scheduler side.
 internal_rpc:
-  enabled: false
+  enabled: ${INTERNAL_RPC_ENABLED:false}
   security_mode: mtls               # omitted = mtls; plaintext_token is explicit, never automatic
   listen: ":9092"                  # main-service internal listener (control and/or runtime)
   timeout: 5s

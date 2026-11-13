@@ -13,8 +13,18 @@ RUN go mod download
 
 # 拷源码并构建静态二进制（Scheduler 只依赖任务/调度组件与传输契约，纯 Go）。
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-    -o /out/blowball-scheduler ./services/scheduler/cmd/blowball-scheduler/
+
+# 版本注入(未传时安全默认值;链接器忽略未声明变量)。
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/lush/blowball/pkg/boot.Version=${VERSION} \
+        -X github.com/lush/blowball/pkg/boot.Commit=${COMMIT} \
+        -X github.com/lush/blowball/pkg/boot.BuildTime=${BUILD_TIME}" \
+      -o /out/blowball-scheduler ./services/scheduler/cmd/blowball-scheduler/
 
 # ---- Stage 2: minimal runtime ----
 FROM alpine:3.22.4
