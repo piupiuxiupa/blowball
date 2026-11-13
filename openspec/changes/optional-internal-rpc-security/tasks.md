@@ -100,3 +100,11 @@
 - [x] 7.2 运行 `make lint`，确认 `go vet ./...` 无问题；不提交 `make build`/`make build-scheduler` 的 `bin/` 产物。
 - [x] 7.3 运行 `openspec validate optional-internal-rpc-security --strict` 和 `git diff --check`，逐项核对两份 delta 的场景覆盖、配置字段/接口名一致性和实际实现；最终提交仅包含本次相关源代码、测试、文档与任务状态。
 - [x] 7.4 用户要求同步/归档时先确认前置规格已经同步，再处理本变更；不覆盖或丢失原 actor/执行归属、角色隔离、无本地 fallback 场景，不在用户未要求时自动归档任一变更。
+
+## 8. 审查修复
+
+保留 `Health.Watch`，不通过删除健康订阅规避认证；RPC Token 必须按字符串原值展开，其他配置字段继续保持既有展开、类型和校验语义。两项修复在当前分支原位执行，分别经过 red → green → scoped commit，不包含已有 `.gitignore` 修改。
+
+- [x] 8.1 在 `internal/rpcx/token_test.go` 添加 `TestPlaintextHealthWatchAuthorization`，验证无 deadline 的合法 Token、缺失/错误/重复 Token；确认失败后，在 `internal/rpcx/server.go` 为流式与 unary 调用共享认证、方法权限、deadline 和 panic 处理，更新健康检查规格及设计，运行 `go test -race ./internal/rpcx -count=1` 并提交 `fix(rpcx): authenticate streaming health checks`。
+- [ ] 8.2 在两侧配置测试覆盖双引号、反斜杠、字面 `${VAR}`、YAML 别名及非法字符的 Token，先确认主服务复现失败；仅修正 RPC Token 的安全展开，保持其他字段语义和不回显秘密，更新配置规格及设计，运行两侧配置和入口 race 测试并提交 `fix(config): preserve literal rpc token environment values`。
+- [ ] 8.3 运行 `make test`、`make lint`、`openspec validate optional-internal-rpc-security --strict` 和 `git diff --check`；如无独立 `MYSQL_TEST_DSN`，明确记录跨服务数据库场景为 SKIP，不自动创建/清理运行数据库，不执行规格同步或归档。

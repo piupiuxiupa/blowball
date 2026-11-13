@@ -152,6 +152,49 @@ func TestPlaintextHealthAuthorization(t *testing.T) {
 	}
 }
 
+func TestPlaintextHealthWatchAuthorization(t *testing.T) {
+	t.Parallel()
+	srv, err := NewServer(plaintextServerOptions())
+	require.NoError(t, err)
+	conn := rawPlaintextTestConn(t, serveSecurityTestRPC(t, srv))
+	tests := []struct {
+		name    string
+		headers []string
+		want    codes.Code
+	}{
+		{name: "main without deadline", headers: []string{"Bearer " + mainTestToken}, want: codes.OK},
+		{name: "scheduler without deadline", headers: []string{"Bearer " + schedulerTestToken}, want: codes.OK},
+		{name: "anonymous", want: codes.Unauthenticated},
+		{name: "wrong token", headers: []string{"Bearer MAY_LEAK_SECRET_wrong"}, want: codes.Unauthenticated},
+		{name: "duplicate authorization", headers: []string{"Bearer " + mainTestToken, "Bearer " + schedulerTestToken}, want: codes.Unauthenticated},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			timer := time.AfterFunc(2*time.Second, cancel)
+			defer timer.Stop()
+			_, hasDeadline := ctx.Deadline()
+			require.False(t, hasDeadline)
+			ctx = metadata.NewOutgoingContext(ctx, metadata.MD{"authorization": tt.headers})
+			stream, err := healthpb.NewHealthClient(conn).Watch(ctx, &healthpb.HealthCheckRequest{})
+			var resp *healthpb.HealthCheckResponse
+			if err == nil {
+				resp, err = stream.Recv()
+			}
+			assert.Equal(t, tt.want, status.Code(err))
+			if tt.want == codes.OK {
+				require.NoError(t, err)
+				assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.GetStatus())
+			} else if err != nil {
+				assert.NotContains(t, err.Error(), "MAY_LEAK_SECRET")
+				assert.NotContains(t, err.Error(), mainTestToken)
+				assert.NotContains(t, err.Error(), schedulerTestToken)
+			}
+		})
+	}
+}
+
 func TestPlaintextDialAndServerIgnoreTLSFiles(t *testing.T) {
 	t.Parallel()
 	opts := plaintextServerOptions()

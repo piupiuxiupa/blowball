@@ -56,7 +56,7 @@
 
 ### Requirement: Authenticated internal health and bounded calls
 
-内部 gRPC 健康检查 SHALL 通过所选模式的认证：mTLS SHALL 保留握手验证客户端证书的要求，明文模式 SHALL 先验证有效服务 Token。认证后的健康检查 SHALL 继续豁免 deadline 和业务方法权限。普通 RPC SHALL 继续要求 deadline，复用既有错误码和调用超时；本变更 SHALL NOT 改变公共 HTTP `/healthz` 的行为。
+内部 gRPC 健康检查，包括 unary `Check` 与服务端流式 `Watch`，SHALL 通过所选模式的认证：mTLS SHALL 保留握手验证客户端证书的要求，明文模式 SHALL 先验证有效服务 Token。认证后的健康检查 SHALL 继续豁免 deadline 和业务方法权限。普通 RPC SHALL 继续要求 deadline，复用既有错误码和调用超时；本变更 SHALL NOT 改变公共 HTTP `/healthz` 的行为。
 
 #### Scenario: Authenticated plaintext health probe
 - **WHEN** 有效 Token 的明文健康检查不携带 deadline
@@ -65,6 +65,10 @@
 #### Scenario: Anonymous plaintext health probe
 - **WHEN** 明文健康检查缺失或携带错误 Token
 - **THEN** 返回 `UNAUTHENTICATED`
+
+#### Scenario: Authenticate streaming plaintext health subscriptions
+- **WHEN** 明文客户端调用 `Health.Watch`
+- **THEN** 无 deadline 的有效服务 Token 可以订阅健康状态；缺失、错误或重复的认证值返回 `UNAUTHENTICATED`，不进入订阅 handler
 
 #### Scenario: Keep mutual TLS health verification
 - **WHEN** mTLS 健康检查没有有效客户端证书

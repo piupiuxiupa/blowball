@@ -88,7 +88,7 @@ func (a MethodAuthorizer) Allowed(fullMethod, identity string) bool {
 	return slices.Contains(a[fullMethod], identity)
 }
 
-// ServerOptions configures the unary server interceptor.
+// ServerOptions configures the internal RPC server and its interceptors.
 type ServerOptions struct {
 	SecurityMode SecurityMode
 	TLS          TLSFiles
@@ -117,7 +117,10 @@ func NewServer(opts ServerOptions) (*grpc.Server, error) {
 	} else if err := ValidatePeerTokens(opts.PeerTokens); err != nil {
 		return nil, err
 	}
-	serverOpts = append(serverOpts, grpc.UnaryInterceptor(UnaryServerInterceptor(opts)))
+	serverOpts = append(serverOpts,
+		grpc.UnaryInterceptor(UnaryServerInterceptor(opts)),
+		grpc.StreamInterceptor(StreamServerInterceptor(opts)),
+	)
 	return grpc.NewServer(serverOpts...), nil
 }
 
@@ -126,6 +129,40 @@ func NewServer(opts ServerOptions) (*grpc.Server, error) {
 // handler, so an unauthorized request can never read user data or start an
 // agent.
 func UnaryServerInterceptor(opts ServerOptions) grpc.UnaryServerInterceptor {
+	authorize := serverAuthorization(opts)
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				resp, err = nil, status.Error(codes.Internal, CodeInternal+": internal rpc panic")
+			}
+		}()
+
+		if err := authorize(ctx, info.FullMethod); err != nil {
+			return nil, err
+		}
+		return handler(ctx, req)
+	}
+}
+
+// StreamServerInterceptor applies the same authorization and panic containment
+// to streaming RPCs, including the health service's Watch method.
+func StreamServerInterceptor(opts ServerOptions) grpc.StreamServerInterceptor {
+	authorize := serverAuthorization(opts)
+	return func(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = status.Error(codes.Internal, CodeInternal+": internal rpc panic")
+			}
+		}()
+
+		if err := authorize(stream.Context(), info.FullMethod); err != nil {
+			return err
+		}
+		return handler(srv, stream)
+	}
+}
+
+func serverAuthorization(opts ServerOptions) func(context.Context, string) error {
 	mode, modeErr := NormalizeSecurityMode(opts.SecurityMode)
 	if modeErr == nil && mode == SecurityModePlaintextToken {
 		modeErr = ValidatePeerTokens(opts.PeerTokens)
@@ -135,35 +172,29 @@ func UnaryServerInterceptor(opts ServerOptions) grpc.UnaryServerInterceptor {
 	if authorizer == nil {
 		authorizer = DefaultAuthorizer()
 	}
-	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				resp, err = nil, status.Error(codes.Internal, CodeInternal+": internal rpc panic")
-			}
-		}()
-
+	return func(ctx context.Context, fullMethod string) error {
 		if modeErr != nil {
-			return nil, status.Error(codes.Unauthenticated, CodeUnauthenticated+": invalid rpc security configuration")
+			return status.Error(codes.Unauthenticated, CodeUnauthenticated+": invalid rpc security configuration")
 		}
 		var identity string
 		if mode == SecurityModePlaintextToken {
 			var ok bool
 			identity, ok = tokenIdentity(ctx, opts.PeerTokens)
 			if !ok {
-				return nil, status.Error(codes.Unauthenticated, CodeUnauthenticated+": service token required")
+				return status.Error(codes.Unauthenticated, CodeUnauthenticated+": service token required")
 			}
 		}
 
 		// Health checks still require mTLS at the transport or a verified token,
 		// are exempt from the deadline and per-method policy so an orchestrator
 		// can probe liveness cheaply.
-		if strings.HasPrefix(info.FullMethod, healthServicePrefix) {
-			return handler(ctx, req)
+		if strings.HasPrefix(fullMethod, healthServicePrefix) {
+			return nil
 		}
 
 		if opts.RequireDeadline {
 			if _, ok := ctx.Deadline(); !ok {
-				return nil, status.Error(codes.InvalidArgument, CodeInvalidArgument+": deadline required")
+				return status.Error(codes.InvalidArgument, CodeInvalidArgument+": deadline required")
 			}
 		}
 
@@ -171,13 +202,13 @@ func UnaryServerInterceptor(opts ServerOptions) grpc.UnaryServerInterceptor {
 			var ok bool
 			identity, ok = PeerIdentity(ctx)
 			if !ok || identity == "" {
-				return nil, status.Error(codes.Unauthenticated, CodeUnauthenticated+": client certificate identity required")
+				return status.Error(codes.Unauthenticated, CodeUnauthenticated+": client certificate identity required")
 			}
 		}
-		if !authorizer.Allowed(info.FullMethod, identity) {
-			return nil, status.Error(codes.PermissionDenied, CodePermissionDenied+": service identity not authorized for method")
+		if !authorizer.Allowed(fullMethod, identity) {
+			return status.Error(codes.PermissionDenied, CodePermissionDenied+": service identity not authorized for method")
 		}
-		return handler(ctx, req)
+		return nil
 	}
 }
 

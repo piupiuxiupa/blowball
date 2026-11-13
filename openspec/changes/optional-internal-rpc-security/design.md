@@ -109,9 +109,9 @@ API/Agent 分开部署时，接收方分别配置实际对端身份；每个进�
 
 保持 `Dial(opts DialOptions) (*grpc.ClientConn, error)` 的接口；`DialOptions` 新增 `SecurityMode` 和 `ClientToken`。mTLS 分支复用 `ClientTLS`；明文分支使用 gRPC insecure transport credentials 和专用调用凭据。既有连接复用、默认 deadline、lazy connection 和 `Extra` 测试选项不变。
 
-`ServerOptions` 在原 Authorizer/RequireDeadline 基础上增加 `SecurityMode`、`TLS`、`PeerTokens`，公共 `NewServer(opts ServerOptions) (*grpc.Server, error)` 校验配置并选择传输凭据、安装现有 unary 中间件。两个启动入口只传配置、注册原有服务，不复制 Token 认证逻辑。
+`ServerOptions` 在原 Authorizer/RequireDeadline 基础上增加 `SecurityMode`、`TLS`、`PeerTokens`，公共 `NewServer(opts ServerOptions) (*grpc.Server, error)` 校验配置并选择传输凭据、安装 unary 与 stream 中间件。两种中间件共享认证、方法权限和 deadline 检查，并分别包含 panic 处理。两个启动入口只传配置、注册原有服务，不复制 Token 认证逻辑。
 
-保留 `PeerIdentity` 的 mTLS 含义；在中间件中按模式选择证书身份或 Token 身份。未识别模式、无凭证或空身份均 fail closed，不能把错误分支视为跳过授权。当前契约均为 unary，不增加 stream 认证实现。
+保留 `PeerIdentity` 的 mTLS 含义；在中间件中按模式选择证书身份或 Token 身份。未识别模式、无凭证或空身份均 fail closed，不能把错误分支视为跳过授权。业务契约仍为 unary，但已注册的标准健康服务包含服务端流式 `Watch`，因此其认证也必须经过 stream 中间件；不新增业务流式契约。
 
 ### D5. 健康检查、错误和凭证边界
 
