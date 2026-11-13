@@ -85,7 +85,7 @@ You will be prompted for a password. The tool stores a bcrypt hash and prints th
 make run        # = ./bin/blowball serve
 ```
 
-The server listens on the port configured in `config.yaml` (default `8080`). It is a single cobra binary with two subcommands (`serve`, `seed`) sharing the persistent flags `-f`/`--config` (config path, default `config.yaml`) and `-d`/`--data-dir` (runtime root, default `.`):
+The server listens on the port configured in `config.yaml` (default `8080`). The dev monolith `blowball` has two subcommands (`serve`, `seed`) sharing the flags `-f`/`--config` (config path, default `config.yaml`) and `-d`/`--data-dir` (runtime root, default `.`):
 
 ```bash
 ./bin/blowball serve                                     # reads ./config.yaml, writes ./data, ./logs
@@ -94,7 +94,7 @@ The server listens on the port configured in `config.yaml` (default `8080`). It 
 
 The runtime root holds `data/` (per-user workspaces, attachments, per-user skills), `logs/` (the rotated structured log), `skills/` (global skills), `tools/` (operator CLIs exposed inside the bash sandbox), `skills-market/` and `mcp-market/` (operator-synced market payloads). Missing directories are created on startup.
 
-For production you can split the process into independent roles (see [Deployment roles](#deployment-roles)), and run the standalone scheduler if you use scheduled tasks (see [Scheduled agent tasks](#scheduled-agent-tasks)).
+For production you can split the process into independent services (see [Deployment roles](#deployment-roles)) — `blowball-api` and `blowball-agent` are the standalone role-pinned binaries — and run `blowball-scheduler` if you use scheduled tasks (see [Scheduled agent tasks](#scheduled-agent-tasks)). The full stack also comes up as one compose file: `docker compose -f deploy/compose/all-in-one.yaml up -d --build`.
 
 ### 6. Run the frontend (optional)
 
@@ -117,7 +117,7 @@ Both roles must run against the **same** `-d` runtime root and MySQL/Redis so th
 Scheduling is **not embedded** in the main service. Deploy the standalone scheduler binary:
 
 ```bash
-make build-scheduler        # ./bin/scheduler
+make build-scheduler        # ./bin/blowball-scheduler
 make run-scheduler          # runs it with services/scheduler/config.yaml
 ```
 
@@ -128,11 +128,11 @@ The scheduler owns task definitions, cron materialization, claims and leases; th
 ## Development
 
 ```bash
-# Build the unified blowball binary (serve + seed subcommands)
+# Build the dev monolith (serve + seed subcommands)
 make build
 
-# Build the standalone scheduler
-make build-scheduler
+# Build the standalone service binaries
+make build-api build-agent build-scheduler
 
 # Run all tests with race detection
 make test
@@ -166,8 +166,12 @@ See [`CLAUDE.md`](CLAUDE.md) for the full architecture and conventions, and [`AG
 │   ├── openapi.yaml          # OpenAPI 3 spec (the HTTP contract)
 │   ├── proto/                # internal gRPC contracts (scheduler, scheduledruntime)
 │   └── gen/go/               # generated Go bindings (make proto)
-├── cmd/blowball/             # the cobra binary: main, serve, seed
-├── services/scheduler/       # the standalone Scheduler binary
+├── cmd/blowball/             # the dev monolith binary: serve (--role all|api|agent) + seed
+├── services/
+│   ├── apiserver/            # blowball-api: standalone api-role service (+ seed)
+│   ├── agent/                # blowball-agent: standalone agent-role service
+│   ├── scheduler/            # blowball-scheduler: the standalone Scheduler
+│   └── officevers/           # office file version service (former office-vers repo)
 ├── pkg/
 │   ├── agent/                # Agents, orchestrator, OpenAI client, sub-agents
 │   ├── config/               # YAML config loader
@@ -184,8 +188,9 @@ See [`CLAUDE.md`](CLAUDE.md) for the full architecture and conventions, and [`AG
 │   ├── store/                # MySQL, Redis, filesystem stores
 │   ├── stream/               # SSE event stream types and hub
 │   ├── tool/                 # Tool registry and tool implementations
+│   ├── boot/                 # shared process bootstrap (Runtime + Setup + version vars)
 │   └── ...
-├── migrations/               # SQL schema migrations
+├── migrations/               # SQL schema migrations (server + scheduler share one MySQL)
 ├── docs/                     # Runbooks (scheduled-tasks, shared-storage, ...)
 ├── openspec/                 # Per-capability behavior specs and change proposals
 ├── test/integration/         # Integration tests

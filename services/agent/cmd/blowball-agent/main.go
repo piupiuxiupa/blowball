@@ -13,7 +13,7 @@ import (
 
 	agentrun "github.com/lush/blowball/services/agent/internal/run"
 
-	"github.com/lush/blowball/pkg/boot"
+	"github.com/lush/blowball/pkg/buildinfo"
 )
 
 func main() {
@@ -27,7 +27,7 @@ func main() {
 	case "serve":
 		err = serveCmd(os.Args[2:])
 	case "version":
-		fmt.Println(boot.VersionString())
+		fmt.Println(buildinfo.VersionString())
 	case "-h", "--help", "help":
 		usage()
 	default:

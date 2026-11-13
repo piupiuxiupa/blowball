@@ -28,9 +28,9 @@ ARG BUILD_TIME=unknown
 
 RUN CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w \
-        -X github.com/lush/blowball/pkg/boot.Version=${VERSION} \
-        -X github.com/lush/blowball/pkg/boot.Commit=${COMMIT} \
-        -X github.com/lush/blowball/pkg/boot.BuildTime=${BUILD_TIME}" \
+        -X github.com/lush/blowball/pkg/buildinfo.Version=${VERSION} \
+        -X github.com/lush/blowball/pkg/buildinfo.Commit=${COMMIT} \
+        -X github.com/lush/blowball/pkg/buildinfo.BuildTime=${BUILD_TIME}" \
       -o /out/blowball-agent ./services/agent/cmd/blowball-agent/ && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
       -o /out/blowball ./cmd/blowball/

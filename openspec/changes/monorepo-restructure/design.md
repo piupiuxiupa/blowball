@@ -44,7 +44,7 @@ api/agent 拆为独立二进制与镜像,但 MySQL、Redis、`data/` 数据目�
 
 ### D4. 服务装配:导出装配包 + 薄 main + 单体组合
 
-每个服务提供导出的装配包(`services/apiserver/server`、`services/agent/server`),封装本服务的依赖构造与路由注册;`cmd/blowball-api`、`cmd/blowball-agent` 是 role 固定的薄 main(复用装配包,不重复 wiring);根 `cmd/blowball` 单体组合两个装配包实现 `--role all|api|agent` 与 seed。这解决了 Go internal 可见性规则下"单体不能导入两个服务的 internal"的问题——单体只依赖导出的装配包。现有 `serve.go` 的集中 wiring 按角色拆归各服务装配包。
+每个服务提供导出的装配包——位于服务目录根部的 `services/apiserver`(package apiserver)与 `services/agent`(package agentserver)——封装本服务的依赖构造与路由注册;`services/*/cmd/blowball-api|blowball-agent` 是 role 固定的薄 main,服务私有的 serve 生命周期在 `services/*/internal/run`;根 `cmd/blowball` 单体组合两个装配包实现 `--role all|api|agent` 与 seed。共享启动层为 `pkg/boot`(Runtime+Setup),版本元数据在无依赖叶子包 `pkg/buildinfo`(scheduler 边界不许主服务包,boot 会被边界测试拒绝)。这解决了 Go internal 可见性规则下"单体不能导入两个服务的 internal"的问题——单体只依赖导出的装配包。现有 `serve.go` 的集中 wiring 按角色拆归各服务装配包。
 
 新二进制的 CLI 约定:接受与单体一致的 `-f/--config`、`-d/--data-dir`;不提供 `--role`(传入即非零退出,防误配);`blowball-api` 附带 `seed` 子命令(用户管理属 api 职责)。
 

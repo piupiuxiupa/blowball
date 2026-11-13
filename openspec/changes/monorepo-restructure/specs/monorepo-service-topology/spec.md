@@ -4,11 +4,11 @@
 
 ### Requirement: Four-service monorepo layout
 
-仓库 SHALL 以 `services/` 为服务根,提供四个一等服务目录:`services/apiserver`(API 服务)、`services/agent`(Agent 服务)、`services/scheduler`(Scheduler)、`services/officevers`(office 版本服务)。每个服务目录 SHALL 拥有自己的 `cmd/` 入口与私有 `internal/`,并 SHALL 提供一个导出的装配包用于被外部(开发单体)组合。
+仓库 SHALL 以 `services/` 为服务根,提供四个一等服务目录:`services/apiserver`(API 服务)、`services/agent`(Agent 服务)、`services/scheduler`(Scheduler)、`services/officevers`(office 版本服务)。每个服务目录 SHALL 拥有自己的 `cmd/` 入口与私有 `internal/`。api 与 agent 服务 SHALL 额外在服务目录根部提供导出的装配包(`services/apiserver`、`services/agent`)用于被开发单体组合;scheduler 与 officevers 为自足的 `cmd/`+`internal/` 服务,无需装配包。
 
 #### Scenario: 服务目录结构完整
 - **WHEN** 检查 services/ 目录
-- **THEN** 存在 apiserver、agent、scheduler、officevers 四个服务目录,各自含 cmd 入口与 internal 私有包,且各自暴露导出装配包
+- **THEN** 存在 apiserver、agent、scheduler、officevers 四个服务目录,各自含 cmd 入口与 internal 私有包;apiserver 与 agent 暴露导出装配包
 
 #### Scenario: 主服务代码不再位于仓库根
 - **WHEN** 检查仓库根目录

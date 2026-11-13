@@ -1,0 +1,70 @@
+// =============================================================================
+// blowball-api 服务(api 角色,薄镜像) Jenkins 流水线(monorepo 统一模板:测试 → 根 context 构建 → 推送)。
+// 四个服务的 Jenkinsfile 结构一致,仅 SERVICE/IMAGE 不同;同 commit 触发多
+// 服务构建时 TAG 取自 GIT_COMMIT,天然同源(共享 schema 的版本一致性)。
+//
+// 环境要求(Jenkins 节点):docker、go 1.26。
+// 可配置项(节点/文件夹级环境变量或 Jenkins 全局):
+//   REGISTRY       目标 registry(含命名空间,如 harbor.example.com/blowball);
+//                  留空 = 跳过推送,仅本地构建
+//   REGISTRY_CREDS Jenkins 凭据 ID(docker-registry 类型);REGISTRY 为空时忽略
+// =============================================================================
+
+pipeline {
+    agent any
+
+    environment {
+        SERVICE      = 'apiserver'
+        IMAGE_NAME   = 'blowball-api'
+        DOCKERFILE   = 'deploy/apiserver/Dockerfile'
+    }
+
+    stages {
+        // 单 module 红利:任一服务构建前跑全仓测试,四个流水线同一门槛。
+        stage('Test') {
+            steps {
+                sh 'go vet ./... && go test -race ./...'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    env.TAG = sh(returnStdout: true, script: 'git describe --tags --always --dirty 2>/dev/null || echo dev').trim()
+                    env.IMAGE = env.REGISTRY ? "${env.REGISTRY}/${env.IMAGE_NAME}:${env.TAG}" : "${env.IMAGE_NAME}:${env.TAG}"
+                    sh '''
+                        docker build -f "$DOCKERFILE" \
+                          --build-arg VERSION="$TAG" \
+                          --build-arg COMMIT="$(git rev-parse --short HEAD)" \
+                          --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                          -t "$IMAGE" .
+                    '''
+                }
+            }
+        }
+
+        stage('Push') {
+            when { expression { env.REGISTRY?.trim() } }
+            steps {
+                script {
+                    if (env.REGISTRY_CREDS) {
+                        withCredentials([usernamePassword(credentialsId: env.REGISTRY_CREDS,
+                                usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+                            sh 'echo "$REG_PASS" | docker login "${REGISTRY%%/*}" -u "$REG_USER" --password-stdin'
+                            sh 'docker push "$IMAGE"'
+                            sh 'docker logout "${REGISTRY%%/*}"'
+                        }
+                    } else {
+                        sh 'docker push "$IMAGE"'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker image prune -f >/dev/null 2>&1 || true'
+        }
+    }
+}

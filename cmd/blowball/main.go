@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lush/blowball/pkg/boot"
+	"github.com/lush/blowball/pkg/buildinfo"
 )
 
 func main() {
@@ -31,7 +31,7 @@ func main() {
 	case "seed":
 		err = seedCmd(os.Args[2:])
 	case "version":
-		fmt.Println(boot.VersionString())
+		fmt.Println(buildinfo.VersionString())
 	case "-h", "--help", "help":
 		usage()
 	default:

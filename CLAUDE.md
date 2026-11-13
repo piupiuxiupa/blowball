@@ -14,20 +14,23 @@ Prefer these sources over re-deriving from code:
 ## Commands
 
 ```bash
-make build                # ./bin/blowball (cobra binary: `serve` + `seed` subcommands)
-make run                  # build + `serve` (--role all: full route set on server.port, default 8080)
-make run-api              # `serve --role api`  — CRUD partition on server.port
-make run-agent            # `serve --role agent` — streaming partition on server.agent_port (default 8081)
-make build-scheduler      # ./bin/scheduler — the standalone Scheduler (scheduling is never embedded)
+make build                # ./bin/blowball — dev monolith (`serve` --role all|api|agent + `seed`)
+make run                  # monolith serve (--role all: full route set on server.port, default 8080)
+make build-api            # ./bin/blowball-api — standalone api-role service (also carries `seed`)
+make build-agent          # ./bin/blowball-agent — standalone agent-role service
+make run-api              # blowball-api serve — CRUD partition on server.port
+make run-agent            # blowball-agent serve — streaming partition on server.agent_port (default 8081)
+make build-scheduler      # ./bin/blowball-scheduler — the standalone Scheduler (scheduling is never embedded)
 make run-scheduler        # run it with services/scheduler/config.yaml
 make test                 # go test -race ./...
 go test ./pkg/agent/ -run TestName    # single test
 go test ./test/integration/...             # integration (fake MySQL/Redis/LLM, real handlers+orchestrator)
 make lint                 # go vet ./...
 make proto                # regenerate api/gen/go from api/proto (needs protoc)
-./bin/blowball seed --username alice [--password pw] [--dry-run]   # create a user
+./bin/blowball seed --username alice [--password pw] [--dry-run]   # create a user (blowball-api seed is identical)
 
-docker compose -f deploy/compose/mysql-redis.yaml up -d   # MySQL + Redis; migrations/ auto-run on a FRESH volume only
+docker compose -f deploy/compose/mysql-redis.yaml up -d   # MySQL + Redis only; migrations/ auto-run on a FRESH volume only
+docker compose -f deploy/compose/all-in-one.yaml up -d --build   # full stack: apiserver+agent+scheduler+officevers+mysql+redis+minio
 cp config.example.yaml config.yaml    # then set openai.api_key, jwt.secret, mysql/redis creds
 ```
 
@@ -37,9 +40,20 @@ The `bash` executor tool is Linux-only (bubblewrap/`bwrap` + unprivileged user n
 
 ## Architecture
 
+### Monorepo layout
+
+One Go module (`github.com/lush/blowball`) builds four services, each with its own directory, thin `cmd/` entry, and private `internal/`:
+
+- `services/apiserver/` → `blowball-api` (api role pinned; exports the `apiserver` assembly package + `seed`).
+- `services/agent/` → `blowball-agent` (agent role pinned; exports the `agentserver` assembly package whose `Assembly` owns the ordered shutdown drain).
+- `services/scheduler/` → `blowball-scheduler`.
+- `services/officevers/` → office 文件版本服务, merged from the former standalone `office-vers` repo (specs `version-rollback`/`versioned-file-storage` are in the root openspec).
+
+All cross-service/cross-role code lives in root `pkg/` (the pre-split `internal/` tree moved wholesale — package-level role exclusivity does not exist; the api/agent split is at wiring level: `apiserver.Wire` vs `agentserver.Wire` over the shared `pkg/boot.Runtime`). `cmd/blowball` at the repo root stays as the dev monolith (`serve --role all|api|agent` + `seed`), composing the same assembly packages — behavior identical to the standalone binaries per role. `migrations/` and `api/` remain at the root (shared DB schema and cross-service contracts). Deployment artifacts live in `deploy/<svc>/` (per-service Dockerfile + Jenkinsfile, scheduler systemd unit) and `deploy/compose/` (`mysql-redis.yaml` base, `all-in-one.yaml` full stack with the shared `blowball_data` volume across apiserver/agent).
+
 ### Process roles and the Scheduler split
 
-- `blowball serve --role all|api|agent` (default `all` = the monolith). The `api` role registers CRUD/history/scheduled-task-management routes and never constructs an orchestrator, OpenAI client, or tool registry (a missing `openai.api_key` is only a warning). The `agent` role registers the streaming message endpoint, turn lifecycle, and `/api/v1/mcp/tools`, and owns the full turn pipeline. Route partitioning lives in `pkg/handler/router.go` (`RegisterAPIRoutes` / `RegisterAgentRoutes` / `RegisterRoutes`). Both roles share the same `-d` data plane (MySQL/Redis/local FS).
+- `blowball serve --role all|api|agent` (default `all` = the dev monolith) and the standalone binaries `blowball-api` / `blowball-agent` (role pinned, no `--role` flag, same routes/ports/config as the monolith's corresponding role). The `api` role registers CRUD/history/scheduled-task-management routes and never constructs an orchestrator, OpenAI client, or tool registry (a missing `openai.api_key` is only a warning). The `agent` role registers the streaming message endpoint, turn lifecycle, and `/api/v1/mcp/tools`, and owns the full turn pipeline. Route partitioning lives in `pkg/handler/router.go` (`RegisterAPIRoutes` / `RegisterAgentRoutes` / `RegisterRoutes`). All roles share the same `-d` data plane (MySQL/Redis/local FS) — in split deployments apiserver and agent containers must mount the same data volume.
 - Scheduling is a separate binary: `services/scheduler/` owns `scheduled_tasks`/`scheduled_task_runs` (materialization, claims, leases) and never constructs an Agent or loads an LLM key. The main service keeps the turn engine (`pkg/turn`), task conversations, `.cron` resource versions (`pkg/resource`), and the execution Runtime `pkg/scheduledruntime` (idempotent `SubmitScheduledRun` receipts, CAS/lease prep, start grants, watchdog, terminal facts, conservative reconciliation — unknown ⇒ `uncertain`, never replayed).
 - They talk over authenticated internal gRPC: contracts in `api/proto/{scheduler,scheduledruntime}/v1`, generated code in `api/gen/go`, shared error codes / mTLS / service-identity authz in `pkg/rpcx`. Service identities are certificate CNs: `blowball-scheduler` and `blowball-main`/`blowball-api`/`blowball-agent`.
 - `internal_rpc:` configures that link and is OFF by default: task HTTP endpoints then return 503 (no local fallback), scheduled-task agent tools are not registered, and `.cron` writes fail closed. `security_mode: mtls` (default) or explicit `plaintext_token` (loopback dev only; no anonymous mode, no TLS-error fallback).
