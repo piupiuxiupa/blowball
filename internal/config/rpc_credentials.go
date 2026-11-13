@@ -176,8 +176,8 @@ properties:
 		return start, start + len(node.Value), nil
 	}
 	// Ask YAML to identify the scalar's end rather than re-encode its document.
-	// Block scalars may inherit indentation from a key on a preceding line.
-	lineIndent := len(source[lineStart:]) - len(strings.TrimLeft(source[lineStart:], " "))
+	// Block scalars may follow their key on another line or in a compact
+	// sequence mapping. The scalar's source column bounds the parent indents.
 	for end := start + len(node.Value); end <= len(source); end++ {
 		if end < len(source) {
 			r, _ := utf8.DecodeRuneInString(source[end:])
@@ -185,7 +185,7 @@ properties:
 				continue
 			}
 		}
-		for indent := 0; indent <= lineIndent; indent++ {
+		for indent := range node.Column {
 			var fragment yaml.Node
 			if err := yaml.Unmarshal([]byte(strings.Repeat(" ", indent)+"value: "+source[start:end]), &fragment); err != nil {
 				continue

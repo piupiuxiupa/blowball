@@ -114,3 +114,7 @@
 - [x] 8.4 修复 Token 保护中整文档重编码改变多行环境值层级的回归：先覆盖未额外缩进、常规及宽缩进列表与启用/关闭 RPC 的失败场景，再仅替换源文本中的 Token 标量；验证前缀、引号、标签、锚点、注释、块标量、行内映射及不同换行/BOM 仍保留 Token 原值，运行相关非缓存 race 测试、`make test`、`make lint`、严格规格校验及 `git diff --check`，只提交本次代码、测试和设计/任务更新。
 
 2026-11-13 8.4 验证：新增缩进回归测试已确认 red → green，全量 race、vet、严格规格校验及全部原审查 overlay 用例通过。未配置 `MYSQL_TEST_DSN`，本轮未执行跨服务数据库场景；未同步或归档规格，既有 `.gitignore` 修改未纳入修复。
+
+- [x] 8.5 修复列表项中显式块缩进的 Token 别名定位：在 `internal/config/rpc_credentials_test.go` 添加 `TestInternalRPCTokenEnvironmentSequenceBlockAliases`，覆盖未额外缩进、常规及嵌套列表中的 `|-`、`>-`、`|2-`、`>2-` 和 RPC 启用/关闭状态，运行针对性测试确认失败；在 `internal/config/rpc_credentials.go` 仅调整 `yamlScalarRange` 的候选父缩进上界，保持原 YAML 布局和 Token 原值；运行相关非缓存 race 测试、`make test`、`make lint`、严格规格校验及 `git diff --check`，同步设计/验证记录并创建独立修复提交，不包含已有 `.gitignore` 修改。
+
+2026-11-13 8.5 验证：新增 24 个组合用例已确认 red → green，修复前 12 个显式块缩进用例失败，修复后全部通过。全量无缓存 race 测试、vet、严格规格校验及全部原审查 overlay 用例通过。未配置 `MYSQL_TEST_DSN`，本轮未执行跨服务数据库场景；未同步或归档规格，既有 `.gitignore` 修改未纳入修复。

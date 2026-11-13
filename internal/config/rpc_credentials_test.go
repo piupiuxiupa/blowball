@@ -82,6 +82,67 @@ func TestInternalRPCTokenEnvironmentAliases(t *testing.T) {
 	}
 }
 
+func TestInternalRPCTokenEnvironmentSequenceBlockAliases(t *testing.T) {
+	token := `test_"\credential`
+	t.Setenv("RPC_TOKEN_SEQUENCE_ALIAS", token)
+	layouts := []struct {
+		name         string
+		anchorPrefix string
+		tokenIndent  string
+	}{
+		{
+			name:         "indentless sequence",
+			anchorPrefix: "rpc_token_defaults:\n- token: &rpc_token ",
+			tokenIndent:  "    ",
+		},
+		{
+			name:         "indented sequence",
+			anchorPrefix: "rpc_token_defaults:\n  - token: &rpc_token ",
+			tokenIndent:  "      ",
+		},
+		{
+			name:         "nested sequence",
+			anchorPrefix: "rpc_token_defaults:\n  roles:\n    - token: &rpc_token ",
+			tokenIndent:  "        ",
+		},
+	}
+	styles := []struct {
+		name  string
+		value string
+	}{
+		{name: "literal", value: "|-"},
+		{name: "folded", value: ">-"},
+		{name: "explicit literal", value: "|2-"},
+		{name: "explicit folded", value: ">2-"},
+	}
+	for _, layout := range layouts {
+		t.Run(layout.name, func(t *testing.T) {
+			for _, style := range styles {
+				t.Run(style.name, func(t *testing.T) {
+					for _, enabled := range []bool{true, false} {
+						name := "enabled"
+						if !enabled {
+							name = "disabled"
+						}
+						t.Run(name, func(t *testing.T) {
+							body := layout.anchorPrefix + style.value + "\n" +
+								layout.tokenIndent + "${RPC_TOKEN_SEQUENCE_ALIAS}\n" +
+								strings.Replace(plaintextInternalRPCYAML, "main_config_test_token", "*rpc_token", 1)
+							if !enabled {
+								body = strings.Replace(body, "enabled: true", "enabled: false", 1)
+							}
+							cfg, err := Load(writeTempYAML(t, body))
+							require.NoError(t, err)
+							assert.Equal(t, token, cfg.InternalRPC.ClientToken)
+							assert.Equal(t, enabled, cfg.InternalRPC.Enabled)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestInternalRPCTokenInvalidEnvironmentDoesNotLeak(t *testing.T) {
 	tests := []struct {
 		name  string
