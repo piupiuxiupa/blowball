@@ -58,6 +58,10 @@ Token 环境引用 SHALL 作为字符串值只展开一次，SHALL 保留引号�
 - **WHEN** Token 占位符使用 YAML 别名或合并配置，其他字段仍使用未加引号的数值/布尔或多行 YAML 环境值
 - **THEN** Token 按原值解析，其他字段继续保持其既有类型、层级和校验结果
 
+#### Scenario: Tagged token placeholder is rejected without echoing the credential
+- **WHEN** 入站或出站 Token 占位符标量携带非字符串 YAML 标签（如 `!!int`、`!!bool`）并引用环境变量
+- **THEN** 配置加载在恢复凭证前拒绝，错误指明字段与行号，不包含 Token 值
+
 #### Scenario: Unknown enabled security mode
 - **WHEN** 已启用 RPC 的 `security_mode` 为不支持的值
 - **THEN** 启动失败，不默认明文或跳过授权

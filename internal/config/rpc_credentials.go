@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,17 +78,23 @@ func expandRPCCredentialEnv(data []byte) (string, error) {
 	}
 	var edits []scalarEdit
 	seen := make(map[*yaml.Node]bool)
-	protect := func(node *yaml.Node) error {
+	protect := func(field string, node *yaml.Node) error {
 		if node != nil && node.Kind == yaml.AliasNode {
 			node = node.Alias
 		}
-		if node == nil || node.Kind != yaml.ScalarNode || node.Tag != "!!str" || seen[node] {
+		if node == nil || node.Kind != yaml.ScalarNode || seen[node] {
 			return nil
 		}
 		seen[node] = true
 		value := restoreEnv(node.Value)
 		if value == node.Value {
 			return nil
+		}
+		// Reject before restoring: a tag other than !!str re-types the
+		// credential when the document is parsed again, and a type mismatch
+		// would echo the whole token in yaml's own decode error.
+		if node.Tag != "!!str" {
+			return fmt.Errorf("%s: credential scalar at line %d must not carry a non-string YAML tag (%s); drop the tag so the expanded token stays out of parse errors", field, node.Line, node.Tag)
 		}
 		start, end, err := yamlScalarRange(masked, node)
 		if err != nil {
@@ -100,7 +107,7 @@ func expandRPCCredentialEnv(data []byte) (string, error) {
 		edits = append(edits, scalarEdit{start: start, end: end, placeholder: placeholder})
 		return nil
 	}
-	if err := protect(yamlMappingValue(rpc, "client_token", restoreEnv)); err != nil {
+	if err := protect("internal_rpc.client_token", yamlMappingValue(rpc, "client_token", restoreEnv)); err != nil {
 		return "", err
 	}
 	peers := yamlMappingValue(rpc, "peer_tokens", restoreEnv)
@@ -109,7 +116,7 @@ func expandRPCCredentialEnv(data []byte) (string, error) {
 	}
 	if peers != nil && peers.Kind == yaml.MappingNode {
 		for i := 1; i < len(peers.Content); i += 2 {
-			if err := protect(peers.Content[i]); err != nil {
+			if err := protect("internal_rpc.peer_tokens."+peers.Content[i-1].Value, peers.Content[i]); err != nil {
 				return "", err
 			}
 		}

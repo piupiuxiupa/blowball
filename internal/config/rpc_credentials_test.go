@@ -173,6 +173,28 @@ func TestInternalRPCTokenInvalidEnvironmentDoesNotLeak(t *testing.T) {
 	}
 }
 
+func TestInternalRPCTokenTaggedScalarDoesNotLeak(t *testing.T) {
+	t.Setenv("RPC_TOKEN_TAG_TEST", "MAY_LEAK_SECRET_tagged")
+	tags := []string{"!!int", "!!bool", "!!float", "!!null", "!!timestamp"}
+	for _, field := range []string{"inbound", "outbound"} {
+		t.Run(field, func(t *testing.T) {
+			for _, tag := range tags {
+				t.Run(tag, func(t *testing.T) {
+					original, want := "scheduler_config_test_token", "internal_rpc.peer_tokens"
+					if field == "outbound" {
+						original, want = "main_config_test_token", "internal_rpc.client_token"
+					}
+					body := strings.Replace(plaintextInternalRPCYAML, original, tag+` "${RPC_TOKEN_TAG_TEST}"`, 1)
+					_, err := Load(writeTempYAML(t, body))
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), want)
+					assert.NotContains(t, err.Error(), "MAY_LEAK")
+				})
+			}
+		})
+	}
+}
+
 func TestInternalRPCTokenEnvironmentPreservesLegacyScalarTypes(t *testing.T) {
 	t.Setenv("RPC_TOKEN_ENV_TEST", `MAY_LEAK_SECRET_"\opaque`)
 	t.Setenv("RPC_TOKEN_LEGACY_PORT", "8789")
