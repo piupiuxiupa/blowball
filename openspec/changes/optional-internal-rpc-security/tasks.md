@@ -110,3 +110,7 @@
 - [x] 8.3 运行 `make test`、`make lint`、`openspec validate optional-internal-rpc-security --strict` 和 `git diff --check`；如无独立 `MYSQL_TEST_DSN`，明确记录跨服务数据库场景为 SKIP，不自动创建/清理运行数据库，不执行规格同步或归档。
 
 2026-11-13 修复验证：全量 race 测试、vet、严格规格校验及原审查 overlay 复现用例均通过。`TestScheduledRPCSecurityLifecycle` 的两种模式因未配置 `MYSQL_TEST_DSN` 均为 SKIP，不计为数据库集成验收。
+
+- [x] 8.4 修复 Token 保护中整文档重编码改变多行环境值层级的回归：先覆盖未额外缩进、常规及宽缩进列表与启用/关闭 RPC 的失败场景，再仅替换源文本中的 Token 标量；验证前缀、引号、标签、锚点、注释、块标量、行内映射及不同换行/BOM 仍保留 Token 原值，运行相关非缓存 race 测试、`make test`、`make lint`、严格规格校验及 `git diff --check`，只提交本次代码、测试和设计/任务更新。
+
+2026-11-13 8.4 验证：新增缩进回归测试已确认 red → green，全量 race、vet、严格规格校验及全部原审查 overlay 用例通过。未配置 `MYSQL_TEST_DSN`，本轮未执行跨服务数据库场景；未同步或归档规格，既有 `.gitignore` 修改未纳入修复。

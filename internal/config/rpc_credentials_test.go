@@ -130,3 +130,139 @@ func TestInternalRPCTokenEnvironmentPreservesLegacyScalarTypes(t *testing.T) {
 	assert.Equal(t, 10000, cfg.OpenAI.Models[0].MaxContextTokens)
 	assert.Equal(t, 17, cfg.Logging.File.MaxSizeMB)
 }
+
+func TestInternalRPCTokenEnvironmentPreservesLegacyIndentation(t *testing.T) {
+	token := `test_"\credential`
+	t.Setenv("RPC_TOKEN_INDENT_TOKEN", token)
+	layouts := []struct {
+		name   string
+		model  string
+		limits string
+	}{
+		{
+			name:   "indentless sequence",
+			model:  "  - name: gpt-test\n    max_context_tokens: ${RPC_TOKEN_INDENT_LIMITS}",
+			limits: "10000\n    max_completion_tokens: 1000",
+		},
+		{
+			name:   "indented sequence",
+			model:  "    - name: gpt-test\n      max_context_tokens: ${RPC_TOKEN_INDENT_LIMITS}",
+			limits: "10000\n      max_completion_tokens: 1000",
+		},
+		{
+			name:   "wide sequence indentation",
+			model:  "      - name: gpt-test\n        max_context_tokens: ${RPC_TOKEN_INDENT_LIMITS}",
+			limits: "10000\n        max_completion_tokens: 1000",
+		},
+	}
+	profiles := []struct {
+		name     string
+		enabled  bool
+		tokenEnv bool
+	}{
+		{name: "enabled literal tokens", enabled: true},
+		{name: "enabled environment token", enabled: true, tokenEnv: true},
+		{name: "disabled literal tokens"},
+		{name: "disabled environment token", tokenEnv: true},
+	}
+	for _, layout := range layouts {
+		t.Run(layout.name, func(t *testing.T) {
+			t.Setenv("RPC_TOKEN_INDENT_LIMITS", layout.limits)
+			for _, profile := range profiles {
+				t.Run(profile.name, func(t *testing.T) {
+					body := strings.Replace(plaintextInternalRPCYAML,
+						"    - {name: gpt-test, max_context_tokens: 10000, max_completion_tokens: 1000}",
+						layout.model, 1)
+					wantToken := "main_config_test_token"
+					if profile.tokenEnv {
+						body = strings.Replace(body, wantToken, `"${RPC_TOKEN_INDENT_TOKEN}"`, 1)
+						wantToken = token
+					}
+					if !profile.enabled {
+						body = strings.Replace(body, "enabled: true", "enabled: false", 1)
+					}
+					cfg, err := Load(writeTempYAML(t, body))
+					require.NoError(t, err)
+					assert.Equal(t, profile.enabled, cfg.InternalRPC.Enabled)
+					assert.Equal(t, wantToken, cfg.InternalRPC.ClientToken)
+					assert.Equal(t, 10000, cfg.OpenAI.Models[0].MaxContextTokens)
+					assert.Equal(t, 1000, cfg.OpenAI.Models[0].MaxCompletionTokens)
+				})
+			}
+		})
+	}
+}
+
+func TestInternalRPCTokenEnvironmentScalarForms(t *testing.T) {
+	token := `test_"\credential`
+	t.Setenv("RPC_TOKEN_SCALAR_FORM", token)
+	tests := []struct {
+		name      string
+		reference string
+		prefix    string
+		suffix    string
+		flow      bool
+	}{
+		{name: "plain prefix and suffix", reference: "prefix_${RPC_TOKEN_SCALAR_FORM}_suffix", prefix: "prefix_", suffix: "_suffix"},
+		{name: "quoted prefix and suffix", reference: `"prefix_${RPC_TOKEN_SCALAR_FORM}_suffix"`, prefix: "prefix_", suffix: "_suffix"},
+		{name: "single quoted prefix and suffix", reference: "'prefix_${RPC_TOKEN_SCALAR_FORM}_suffix'", prefix: "prefix_", suffix: "_suffix"},
+		{name: "tagged string", reference: `!!str "${RPC_TOKEN_SCALAR_FORM}"`},
+		{name: "anchor before tag", reference: `&rpc_token !!str "${RPC_TOKEN_SCALAR_FORM}"`},
+		{name: "tag before anchor", reference: `!!str &rpc_token "${RPC_TOKEN_SCALAR_FORM}"`},
+		{name: "anchor with comment", reference: "&rpc_token # credential\n    \"${RPC_TOKEN_SCALAR_FORM}\""},
+		{name: "literal block", reference: "|-\n    ${RPC_TOKEN_SCALAR_FORM}"},
+		{name: "folded block", reference: ">-\n    ${RPC_TOKEN_SCALAR_FORM}"},
+		{name: "explicit literal indentation", reference: "|2-\n    ${RPC_TOKEN_SCALAR_FORM}"},
+		{name: "explicit folded indentation", reference: ">2-\n    ${RPC_TOKEN_SCALAR_FORM}"},
+		{name: "block on next line", reference: "\n    |2-\n    ${RPC_TOKEN_SCALAR_FORM}"},
+		{name: "flow mapping with unicode", reference: "${RPC_TOKEN_SCALAR_FORM}", flow: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := strings.Replace(plaintextInternalRPCYAML, "main_config_test_token", tt.reference, 1)
+			if tt.flow {
+				body = strings.Split(plaintextInternalRPCYAML, "\ninternal_rpc:")[0] + `
+internal_rpc: {enabled: true, security_mode: plaintext_token, listen: "127.0.0.1:9092", scheduler_endpoint: "127.0.0.1:9091", peer_tokens: {blowball-scheduler: scheduler_config_test_token}, 说明: 示例, client_token: ` + tt.reference + `}
+`
+			}
+			cfg, err := Load(writeTempYAML(t, body))
+			require.NoError(t, err)
+			assert.Equal(t, tt.prefix+token+tt.suffix, cfg.InternalRPC.ClientToken)
+		})
+	}
+}
+
+func TestInternalRPCTokenEnvironmentLineBreaks(t *testing.T) {
+	token := `test_"\credential`
+	t.Setenv("RPC_TOKEN_LINE_BREAK", token)
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "CRLF", value: "\r\n"},
+		{name: "CR", value: "\r"},
+		{name: "next line", value: "\u0085"},
+		{name: "line separator", value: "\u2028"},
+		{name: "paragraph separator", value: "\u2029"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := strings.Replace(plaintextInternalRPCYAML, "main_config_test_token", `"${RPC_TOKEN_LINE_BREAK}"`, 1)
+			body = strings.ReplaceAll(body, "\n", tt.value)
+			cfg, err := Load(writeTempYAML(t, body))
+			require.NoError(t, err)
+			assert.Equal(t, token, cfg.InternalRPC.ClientToken)
+		})
+	}
+}
+
+func TestInternalRPCTokenEnvironmentLeadingBOM(t *testing.T) {
+	token := `test_"\credential`
+	t.Setenv("RPC_TOKEN_BOM", token)
+	body := "\ufeffrpc_token: &rpc_token \"${RPC_TOKEN_BOM}\"\n" +
+		strings.TrimPrefix(plaintextInternalRPCYAML, "\n")
+	body = strings.Replace(body, "main_config_test_token", "*rpc_token", 1)
+	cfg, err := Load(writeTempYAML(t, body))
+	require.NoError(t, err)
+	assert.Equal(t, token, cfg.InternalRPC.ClientToken)
+}

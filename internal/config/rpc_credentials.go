@@ -1,11 +1,13 @@
 package config
 
 import (
-	"bytes"
+	"cmp"
 	"crypto/rand"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -69,47 +71,135 @@ func expandRPCCredentialEnv(data []byte) (string, error) {
 	}
 	rpc := yamlMappingValue(document.Content[0], "internal_rpc", restoreEnv)
 	var tokenPairs []string
+	type scalarEdit struct {
+		start, end  int
+		placeholder string
+	}
+	var edits []scalarEdit
 	seen := make(map[*yaml.Node]bool)
-	protect := func(node *yaml.Node) {
+	protect := func(node *yaml.Node) error {
 		if node != nil && node.Kind == yaml.AliasNode {
 			node = node.Alias
 		}
 		if node == nil || node.Kind != yaml.ScalarNode || node.Tag != "!!str" || seen[node] {
-			return
+			return nil
 		}
 		seen[node] = true
 		value := restoreEnv(node.Value)
+		if value == node.Value {
+			return nil
+		}
+		start, end, err := yamlScalarRange(masked, node)
+		if err != nil {
+			return err
+		}
 		// A unique, quoted placeholder prevents aliases or literal ${...} in a
 		// credential from being expanded again with the rest of the document.
-		marker := "rpc-env-placeholder-" + rand.Text()
-		tokenPairs = append(tokenPairs, strconv.Quote(marker), strconv.Quote(value))
-		node.Value = marker
-		node.Style = yaml.DoubleQuotedStyle
+		placeholder := strconv.Quote("rpc-env-placeholder-" + rand.Text())
+		tokenPairs = append(tokenPairs, placeholder, strconv.Quote(value))
+		edits = append(edits, scalarEdit{start: start, end: end, placeholder: placeholder})
+		return nil
 	}
-	protect(yamlMappingValue(rpc, "client_token", restoreEnv))
+	if err := protect(yamlMappingValue(rpc, "client_token", restoreEnv)); err != nil {
+		return "", err
+	}
 	peers := yamlMappingValue(rpc, "peer_tokens", restoreEnv)
 	if peers != nil && peers.Kind == yaml.AliasNode {
 		peers = peers.Alias
 	}
 	if peers != nil && peers.Kind == yaml.MappingNode {
 		for i := 1; i < len(peers.Content); i += 2 {
-			protect(peers.Content[i])
+			if err := protect(peers.Content[i]); err != nil {
+				return "", err
+			}
 		}
 	}
 	if len(tokenPairs) == 0 {
 		return expandEnv(string(data)), nil
 	}
-	var encoded bytes.Buffer
-	encoder := yaml.NewEncoder(&encoded)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&document); err != nil {
-		return "", err
+	// Edit only token scalars, from the end, so other fields retain the exact
+	// source layout expected by their multiline environment values.
+	slices.SortFunc(edits, func(a, b scalarEdit) int { return cmp.Compare(b.start, a.start) })
+	for _, edit := range edits {
+		masked = masked[:edit.start] + edit.placeholder + masked[edit.end:]
 	}
-	if err := encoder.Close(); err != nil {
-		return "", err
-	}
-	expanded := restoreEnv(encoded.String())
+	expanded := restoreEnv(masked)
 	return strings.NewReplacer(tokenPairs...).Replace(expanded), nil
+}
+
+func yamlScalarRange(source string, node *yaml.Node) (int, int, error) {
+	const lineBreaks = "\r\n\u0085\u2028\u2029"
+	const whitespace = " \t" + lineBreaks
+	lineStart := 0
+	for line := 1; line < node.Line; line++ {
+		offset := lineStart + strings.IndexAny(source[lineStart:], lineBreaks)
+		r, size := utf8.DecodeRuneInString(source[offset:])
+		lineStart = offset + size
+		if r == '\r' && lineStart < len(source) && source[lineStart] == '\n' {
+			lineStart++
+		}
+	}
+	start := lineStart
+	for column := 1; column < node.Column; column++ {
+		_, size := utf8.DecodeRuneInString(source[start:])
+		start += size
+	}
+	// Keep tag/anchor properties and their comments outside the replacement.
+properties:
+	for start < len(source) {
+		r, size := utf8.DecodeRuneInString(source[start:])
+		switch r {
+		case ' ', '\t', '\r', '\n', '\u0085', '\u2028', '\u2029':
+			start += size
+		case '&', '!':
+			for start < len(source) {
+				r, size = utf8.DecodeRuneInString(source[start:])
+				if strings.ContainsRune(whitespace, r) {
+					break
+				}
+				start += size
+			}
+		case '#':
+			for start < len(source) {
+				r, size = utf8.DecodeRuneInString(source[start:])
+				if strings.ContainsRune(lineBreaks, r) {
+					break
+				}
+				start += size
+			}
+		default:
+			break properties
+		}
+	}
+	if node.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle) == 0 &&
+		strings.HasPrefix(source[start:], node.Value) {
+		return start, start + len(node.Value), nil
+	}
+	// Ask YAML to identify the scalar's end rather than re-encode its document.
+	// Block scalars may inherit indentation from a key on a preceding line.
+	lineIndent := len(source[lineStart:]) - len(strings.TrimLeft(source[lineStart:], " "))
+	for end := start + len(node.Value); end <= len(source); end++ {
+		if end < len(source) {
+			r, _ := utf8.DecodeRuneInString(source[end:])
+			if !strings.ContainsRune(whitespace+",]}:#", r) {
+				continue
+			}
+		}
+		for indent := 0; indent <= lineIndent; indent++ {
+			var fragment yaml.Node
+			if err := yaml.Unmarshal([]byte(strings.Repeat(" ", indent)+"value: "+source[start:end]), &fragment); err != nil {
+				continue
+			}
+			if len(fragment.Content) == 1 {
+				mapping := fragment.Content[0]
+				if mapping.Kind == yaml.MappingNode && len(mapping.Content) == 2 &&
+					mapping.Content[1].Kind == yaml.ScalarNode && mapping.Content[1].Value == node.Value {
+					return start, end, nil
+				}
+			}
+		}
+	}
+	return 0, 0, errors.New("rpc token scalar could not be located")
 }
 
 func yamlMappingValue(node *yaml.Node, key string, expand func(string) string) *yaml.Node {
