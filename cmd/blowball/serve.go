@@ -2,7 +2,9 @@
 //
 // The binary exposes `serve` and `seed` subcommands with shared `-f`/`--config` and
 // `-d`/`--data-dir` flags. See main.go for the command wiring; this file holds the
-// `serve` subcommand (HTTP server bootstrap) and seed.go holds the `seed` subcommand.
+// `serve` subcommand — a thin composition over pkg/boot (shared bootstrap) and the
+// per-role assemblies in services/apiserver and services/agent. seed.go holds the
+// `seed` subcommand.
 package main
 
 import (
@@ -14,89 +16,22 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	scheduledruntimev1 "github.com/lush/blowball/api/gen/go/scheduledruntime/v1"
-	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
-	"github.com/lush/blowball/pkg/agent"
-	"github.com/lush/blowball/pkg/artifact"
-	"github.com/lush/blowball/pkg/config"
+	"github.com/lush/blowball/pkg/boot"
 	"github.com/lush/blowball/pkg/handler"
-	"github.com/lush/blowball/pkg/llmraw"
-	"github.com/lush/blowball/pkg/mcpmarket"
-	"github.com/lush/blowball/pkg/memory"
-	"github.com/lush/blowball/pkg/middleware"
-	"github.com/lush/blowball/pkg/model"
-	"github.com/lush/blowball/pkg/modelselect"
-	"github.com/lush/blowball/pkg/logger"
-	"github.com/lush/blowball/pkg/resource"
-	"github.com/lush/blowball/pkg/rpcx"
-	"github.com/lush/blowball/pkg/run"
-	"github.com/lush/blowball/pkg/scheduledcontrol"
-	"github.com/lush/blowball/pkg/scheduledruntime"
-	"github.com/lush/blowball/pkg/service"
-	"github.com/lush/blowball/pkg/skillmarket"
-	"github.com/lush/blowball/pkg/storage"
-	"github.com/lush/blowball/pkg/store/fs"
-	"github.com/lush/blowball/pkg/store/mysql"
-	"github.com/lush/blowball/pkg/store/redis"
-	"github.com/lush/blowball/pkg/tool"
-	"github.com/lush/blowball/pkg/tool/executor"
-	"github.com/lush/blowball/pkg/tool/luban"
-	"github.com/lush/blowball/pkg/tool/mcpclient"
-	"github.com/lush/blowball/pkg/tool/scheduledtask"
-	"github.com/lush/blowball/pkg/tool/skill"
-	"github.com/lush/blowball/pkg/tool/webfetch"
-	"github.com/lush/blowball/pkg/tool/xizhi"
-	"github.com/lush/blowball/pkg/turn"
+	agentserver "github.com/lush/blowball/services/agent"
+	apiserver "github.com/lush/blowball/services/apiserver"
 )
 
-// RedisCacheTTL is the expiration applied to every session-level cache write.
-// The spec defaults to 24h; if the deployment wants a different value it can be surfaced
-// through config later without touching this constant.
-const RedisCacheTTL = 24 * time.Hour
-
-func internalRPCOptions(cfg config.InternalRPCConfig) (rpcx.ServerOptions, rpcx.DialOptions) {
-	if !cfg.Enabled {
-		return rpcx.ServerOptions{}, rpcx.DialOptions{}
-	}
-	return rpcx.ServerOptions{
-		SecurityMode: cfg.SecurityMode, TLS: cfg.TLS.ToRPCX(), PeerTokens: cfg.PeerTokens, RequireDeadline: true,
-	}, rpcx.DialOptions{
-		Target: cfg.SchedulerEndpoint, SecurityMode: cfg.SecurityMode, TLS: cfg.SchedulerTLS.ToRPCX(),
-		ClientToken: cfg.ClientToken, Timeout: cfg.Timeout,
-	}
-}
-
-func logInternalRPCSecurity(log *zap.Logger, cfg config.InternalRPCConfig) {
-	if cfg.Enabled && cfg.SecurityMode == rpcx.SecurityModePlaintextToken {
-		log.Warn("internal rpc plaintext mode enabled: traffic is unencrypted and server identity is not verified",
-			zap.String("security_mode", string(cfg.SecurityMode)), zap.String("listen", cfg.Listen),
-			zap.String("scheduler_endpoint", cfg.SchedulerEndpoint))
-	}
-}
-
-// MaxUploadBytes caps a single multipart upload at 50 MiB. Larger uploads are rejected with 413 before they reach disk.
-const MaxUploadBytes = 50 << 20
-
-// ShutdownTimeout is the upper bound on draining in-flight requests after a SIGINT/SIGTERM,
-// per the api-server spec's graceful-shutdown requirement.
-const ShutdownTimeout = 10 * time.Second
-
 // validRoles is the set of accepted --role values. "all" is the default and
-// preserves the pre-split single-process behavior; "api" and "agent" select the
-// partitioned process roles (see the service-roles spec).
+// preserves the pre-split single-process behavior; "api" and "agent" select
+// the partitioned process roles (see the service-roles spec).
 var validRoles = []string{"all", "api", "agent"}
 
 // serveCmd parses the serve flags and runs the server bootstrap. --role
@@ -118,55 +53,46 @@ func serveCmd(args []string) error {
 	return serve(*configPath, *dataRoot, *role)
 }
 
-// serve is the server bootstrap. Bootstrap order (see design.md D3):
+// serve is the monolith bootstrap, composing the shared setup with the two
+// role assemblies:
 //
-//  1. shared setup (setupRuntime): config → runtime dirs → logger (role-aware
+//  1. shared setup (boot.Setup): config → runtime dirs → logger (role-aware
 //     filename) → MySQL/Redis/FS → skills/tools dirs → Landlock. Plus the
 //     role-aware openai.api_key requirement.
 //  2. build the shared (store-only) SessionService both roles need
 //  3. build the engine (Recovery → Trace → CORS) and mount /healthz
-//  4. register routes by role: wireAPI (CRUD) and/or wireAgent (streaming + MCP)
+//  4. register routes by role: apiserver.Wire (CRUD) and/or agentserver.Wire
+//     (streaming + MCP)
 //  5. per-role HTTP listener + graceful shutdown
 func serve(configPath, dataRoot, role string) error {
 	// 1. Shared setup (runs for every role).
-	rt, err := setupRuntime(configPath, dataRoot, role)
+	rt, err := boot.Setup(configPath, dataRoot, role)
 	if err != nil {
 		return err
 	}
-	log := rt.log
+	log := rt.Log
 	defer func() { _ = log.Sync() }()
 	defer func() {
-		if cerr := rt.mysqlStore.Close(); cerr != nil {
+		if cerr := rt.MySQLStore.Close(); cerr != nil {
 			log.Warn("mysql close failed", zap.Error(cerr))
 		}
 	}()
 	defer func() {
-		if cerr := rt.redisStore.Close(); cerr != nil {
+		if cerr := rt.RedisStore.Close(); cerr != nil {
 			log.Warn("redis close failed", zap.Error(cerr))
 		}
 	}()
-	if rt.schedulerConn != nil {
-		defer func() { _ = rt.schedulerConn.Close() }()
+	if rt.SchedulerConn != nil {
+		defer func() { _ = rt.SchedulerConn.Close() }()
 	}
 
-	// 2. Shared session service. Store-only, so it carries no agent-layer
-	// dependency; both the api CRUD handlers and the agent streaming handler use it.
-	// (The write-behind drain and flusher hooks are retired with the ingest
-	// queue — refactor-message-storage: persistence is a direct
-	// transactional MySQL write.)
-	sessDeps := service.SessionDeps{
-		MySQL: rt.mysqlStore,
-		Redis: rt.redisStore,
-		FS:    rt.fsStore,
-	}
-	sessSvc := service.NewSessionService(sessDeps).
-		WithAttachmentDir(rt.fsStore.UserAttachmentDir).
-		WithQueueClearer(rt.redisStore.RunStore().ClearQueue)
+	// 2. Shared session service.
+	sessSvc := boot.NewSessionService(rt)
 
 	// 3. Engine + health check. Each role gets its own engine with the standard
 	// middleware chain (Recovery → Trace → CORS); auth is applied per-route-group
 	// inside the registration functions.
-	engine := newEngine()
+	engine := boot.NewEngine()
 	handler.RegisterHealthz(engine)
 
 	// Authenticated internal gRPC listener (extract-scheduler-service). The api partition
@@ -175,54 +101,34 @@ func serve(configPath, dataRoot, role string) error {
 	// listener. The Scheduler calls these with its own service identity.
 	var internalSrv *grpc.Server
 	var internalLis net.Listener
-	if rt.cfg.InternalRPC.Enabled {
-		serverOpts, _ := internalRPCOptions(rt.cfg.InternalRPC)
+	if rt.Cfg.InternalRPC.Enabled {
 		var terr error
-		internalSrv, terr = rpcx.NewServer(serverOpts)
+		internalSrv, internalLis, terr = boot.NewInternalRPCServer(rt.Cfg.InternalRPC)
 		if terr != nil {
-			return fmt.Errorf("internal rpc server security: %w", terr)
+			return terr
 		}
 		if role != "agent" {
-			schedulerv1.RegisterSchedulerControlServiceServer(internalSrv, rt.controlSvc)
+			apiserver.RegisterControlService(internalSrv, rt)
 		}
-		healthSrv := health.NewServer()
-		healthpb.RegisterHealthServer(internalSrv, healthSrv)
-		healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-		internalLis, terr = net.Listen("tcp", rt.cfg.InternalRPC.Listen)
-		if terr != nil {
-			return fmt.Errorf("internal rpc listen %s: %w", rt.cfg.InternalRPC.Listen, terr)
-		}
-		logInternalRPCSecurity(log, rt.cfg.InternalRPC)
+		boot.LogInternalRPCSecurity(log, rt.Cfg.InternalRPC)
 	}
 
-	// 4. Register routes by role. wireAPI/wireAgent each construct only the
-	// handlers their partition needs, so the api role never instantiates the
-	// orchestrator, OpenAI client, tool registry, or MCP manager.
-	var mcpMgr *mcpclient.Manager
-	var rawFlusher *llmraw.Flusher
-	var runReg *run.Registry
-	var memSvc *memory.Service
-	var queueStop func()
+	// 4. Register routes by role. Each Wire constructs only the handlers its
+	// partition needs, so the api role never instantiates the orchestrator,
+	// OpenAI client, tool registry, or MCP manager.
+	var asm *agentserver.Assembly
 	switch role {
 	case "all":
-		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
-		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc, internalSrv)
-		mcpMgr = mgr
-		rawFlusher = fl
-		runReg = reg
-		memSvc = mem
-		queueStop = stopQueue
-		handler.RegisterAgentRoutes(engine, agentDeps)
+		handler.RegisterAPIRoutes(engine, apiserver.Wire(rt, sessSvc))
+		asm = agentserver.Wire(rt, sessSvc, internalSrv)
+		defer asm.Close(log)
+		handler.RegisterAgentRoutes(engine, asm.Routes)
 	case "api":
-		handler.RegisterAPIRoutes(engine, wireAPI(rt, sessSvc))
+		handler.RegisterAPIRoutes(engine, apiserver.Wire(rt, sessSvc))
 	case "agent":
-		agentDeps, mgr, fl, reg, mem, stopQueue := wireAgent(rt, sessSvc, internalSrv)
-		mcpMgr = mgr
-		rawFlusher = fl
-		runReg = reg
-		memSvc = mem
-		queueStop = stopQueue
-		handler.RegisterAgentRoutes(engine, agentDeps)
+		asm = agentserver.Wire(rt, sessSvc, internalSrv)
+		defer asm.Close(log)
+		handler.RegisterAgentRoutes(engine, asm.Routes)
 	}
 	if internalSrv != nil {
 		go func() {
@@ -232,14 +138,7 @@ func serve(configPath, dataRoot, role string) error {
 		}()
 		log.Info("internal rpc listening",
 			zap.String("role", role),
-			zap.String("addr", rt.cfg.InternalRPC.Listen))
-	}
-	if mcpMgr != nil {
-		defer func() {
-			if cerr := mcpMgr.Close(); cerr != nil {
-				log.Warn("mcp client close failed", zap.Error(cerr))
-			}
-		}()
+			zap.String("addr", rt.Cfg.InternalRPC.Listen))
 	}
 
 	// Staged-attachment orphan sweeper (add-staged-attachment-upload): staged
@@ -248,24 +147,23 @@ func serve(configPath, dataRoot, role string) error {
 	// deployment exactly one api node owns the sweep. Best-effort: the loop
 	// logs and survives its own failures.
 	if role != "agent" {
-		sweepCtx, sweepCancel := context.WithCancel(context.Background())
-		defer sweepCancel()
-		go service.NewAttachmentSweeper(rt.mysqlStore, rt.fsStore.UserAttachmentStagingDir).Start(sweepCtx)
+		stopSweep := apiserver.StartAttachmentSweeper(rt)
+		defer stopSweep()
 		log.Info("staged attachment sweeper started", zap.String("role", role))
 	}
 
 	// 5. Per-role listener. all and api listen on server.port; agent listens on
 	// server.agent_port. D2: all keeps a single listener on server.port so any
 	// existing caller (tests, dev proxy, monitoring) keeps working unchanged.
-	port := rt.cfg.Server.Port
+	port := rt.Cfg.Server.Port
 	if role == "agent" {
-		port = rt.cfg.Server.AgentPort
+		port = rt.Cfg.Server.AgentPort
 	}
 
 	log.Info("server starting",
 		zap.String("role", role),
 		zap.Int("port", port),
-		zap.Strings("route_groups", routeGroups(role)))
+		zap.Strings("route_groups", boot.RouteGroups(role)))
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -285,18 +183,18 @@ func serve(configPath, dataRoot, role string) error {
 	// Session message queue: gate new turns (and park the reconciler) before
 	// anything else drains, so the shutdown-bound turn cancels never pump the
 	// queued heads — entries survive in Redis for the post-restart reconciler.
-	if queueStop != nil {
-		queueStop()
+	if asm != nil {
+		asm.StopAdmission()
 		log.Info("agent turn admission and scheduler stopped", zap.String("role", role))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), boot.ShutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("server shutdown error", zap.Error(err))
 	}
 	if internalSrv != nil {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), boot.ShutdownTimeout)
 		stopped := make(chan struct{})
 		go func() {
 			internalSrv.GracefulStop()
@@ -311,784 +209,13 @@ func serve(configPath, dataRoot, role string) error {
 	}
 	log.Info("server stopped", zap.String("role", role))
 
-	// Cancel every running turn (turn-detach-resume) so graceful shutdown is
-	// bounded: each cancelled turn persists its partial output through the
-	// ordinary interrupted-turn path and finalizes its run state. Since
-	// harden-turn-persistence the terminal message batch (bounded retry +
-	// pre-release drain) runs ON the turn goroutine before Finish, so
-	// WaitAll below covers persistence completion directly — no detached
-	// goroutine grace-period heuristic is needed. RunKeyTTL still backstops
-	// anything that misses the shutdown window.
-	if runReg != nil {
-		if n := runReg.CancelAll(); n > 0 {
-			log.Info("cancelling running turns for shutdown", zap.Int("turns", n))
-			wctx, wcancel := context.WithTimeout(context.Background(), ShutdownTimeout)
-			if err := runReg.WaitAll(wctx); err != nil {
-				log.Warn("shutdown turn wait timed out; proceeding", zap.Error(err))
-			}
-			wcancel()
-		}
-	}
-
-	// Drain the raw-capture write-behind buffer before the deferred store
-	// closes release Redis/MySQL, so a graceful restart does not leave the
-	// tail of the buffer unflushed (nil on the api role, which never captures).
-	if rawFlusher != nil {
-		rawFlusher.Close()
-		log.Info("llm raw flusher stopped", zap.String("role", role))
-	}
-	// Release the memory client's idle keep-alive connections last (nil on a
-	// disabled config). In-flight captures are not aborted: whatever landed
-	// on the OpenViking session stays pending and the session's next turn
-	// commits it — at-least-once.
-	if memSvc != nil {
-		memSvc.Close()
+	// Ordered agent drain: cancel/wait running turns (each persists its
+	// partial output through the ordinary interrupted-turn path), drain the
+	// raw-capture buffer, release the memory client. Nil asm (api role) skips.
+	if asm != nil {
+		asm.Finalize(log)
 	}
 	return nil
-}
-
-// runtime bundles everything the shared setup produces and both role builders
-// consume: the parsed config, the selected role, the derived runtime
-// directories, the zap logger, and the three shared stores. Stores are concrete
-// because they are constructed once at startup and closed via deferred Close in
-// serveRun.
-type appRuntime struct {
-	cfg          *config.Config
-	role         string
-	dataDir      string
-	logDir       string
-	skillsDir    string
-	toolsDir     string
-	marketDir    string
-	mcpMarketDir string
-	log          *zap.Logger
-	mysqlStore   *mysql.Store
-	redisStore   *redis.Store
-	fsStore      *fs.Store
-	// market is the skill-market client (skill-market capability), nil when
-	// the skill_market config block is off. Constructed here in the shared
-	// setup because BOTH roles consume it: the api role for the skills list
-	// endpoint, the agent role for the luban tools and the bash sandbox's
-	// per-skill market mounts.
-	market *skillmarket.Client
-	// mcpMarket is the MCP-market client (mcp-market capability), nil when
-	// the mcp_market config block is off. Both roles consume it: the api role
-	// for the MCP tools endpoint merge, the agent role for the mcp_* tools,
-	// the prompt advertisement, and manager connections.
-	mcpMarket *mcpmarket.Client
-	// Standalone-scheduler integration (extract-scheduler-service). The
-	// client is nil when internal_rpc is disabled; the resource guard then
-	// fails closed for managed-path writes while ordinary workspace behavior
-	// is unchanged.
-	schedulerConn     *grpc.ClientConn
-	schedulerClient   schedulerv1.SchedulerServiceClient
-	resourceSvc       *resource.Service
-	resourceGuard     *resource.Guard
-	scheduledSessions *service.ScheduledSessions
-	controlSvc        *scheduledcontrol.Service
-}
-
-// setupRuntime performs the shared bootstrap that runs for every role: load
-// config, derive the four runtime directories, init the role-aware logger,
-// enforce the role-aware openai.api_key requirement, connect MySQL/Redis, open
-// the FS store, ensure the skills/tools dirs exist, and apply Landlock. It
-// matches the pre-split bootstrap step-for-step; the only additions are the
-// role-scoped log filename and the relaxed openai-key check for the api role.
-//
-// Store-init failures use log.Fatal (as before) so a bad DSN or unreachable
-// Redis aborts startup with a clear message rather than a generic CLI error.
-func setupRuntime(configPath, dataRoot, role string) (*appRuntime, error) {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("load config %q: %w", configPath, err)
-	}
-
-	// Derive the six runtime locations from the single -d root (D2/D3/D6): data, logs, skills, tools, skills-market, mcp-market.
-	dataDir := filepath.Join(dataRoot, "data")
-	logDir := filepath.Join(dataRoot, "logs")
-	skillsDir := filepath.Join(dataRoot, "skills")
-	toolsDir := filepath.Join(dataRoot, "tools")
-	marketDir := filepath.Join(dataRoot, "skills-market")
-	mcpMarketDir := filepath.Join(dataRoot, "mcp-market")
-
-	// Ensure the log directory exists before the logger opens a file in it (D8 fail-fast is enforced inside logger.Init too).
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create log dir %q: %w", logDir, err)
-	}
-
-	// Init the zap logger with a role-scoped filename so two role processes on
-	// the same host do not contend on one lumberjack-managed file.
-	log, err := logger.InitForRole(cfg.Logging, logDir, role)
-	if err != nil {
-		return nil, fmt.Errorf("init logger: %w", err)
-	}
-
-	// Role-aware openai.api_key requirement. The api role never drives the LLM,
-	// so a missing key is downgraded to a warning; the all and agent roles
-	// construct the orchestrator/title service and therefore require it.
-	if strings.TrimSpace(cfg.OpenAI.APIKey) == "" {
-		if openAIKeyRequired(role) {
-			log.Fatal("openai.api_key must be non-empty for this role",
-				zap.String("role", role))
-		}
-		log.Warn("openai.api_key is empty; allowed because this role never calls the LLM",
-			zap.String("role", role))
-	}
-
-	rt := &appRuntime{
-		cfg:          cfg,
-		role:         role,
-		dataDir:      dataDir,
-		logDir:       logDir,
-		skillsDir:    skillsDir,
-		toolsDir:     toolsDir,
-		marketDir:    marketDir,
-		mcpMarketDir: mcpMarketDir,
-		log:          log,
-	}
-
-	// Skill-market client (skill-market capability): nil for a disabled
-	// config, constructed here in the shared setup because both roles consume
-	// it. Pure HTTP client holder — no store dependencies, no startup probe
-	// (failures degrade per call, never gate boot).
-	rt.market = skillmarket.New(cfg.SkillMarket, marketDir)
-	// MCP-market client (mcp-market capability): the same shared-setup shape.
-	rt.mcpMarket = mcpmarket.New(cfg.MCPMarket, mcpMarketDir)
-
-	log.Info("runtime layout",
-		zap.String("role", role),
-		zap.String("config", configPath),
-		zap.String("data_root", dataRoot),
-		zap.String("data_dir", dataDir),
-		zap.String("log_dir", logDir),
-		zap.String("skills_dir", skillsDir),
-		zap.String("tools_dir", toolsDir),
-		zap.String("skills_market_dir", marketDir),
-		zap.Bool("skill_market_enabled", rt.market.Enabled()))
-	log.Info("mcp market layout",
-		zap.String("mcp_market_dir", mcpMarketDir),
-		zap.Bool("mcp_market_enabled", rt.mcpMarket.Enabled()))
-
-	// MySQL. sqlx.Connect pings on construction so a bad DSN fails fast.
-	mysqlStore, err := mysql.New(cfg.MySQL.DSN)
-	if err != nil {
-		log.Fatal("mysql init failed", zap.Error(err))
-	}
-	rt.mysqlStore = mysqlStore
-
-	// Redis. The shared TTL is applied to session-level cache keys.
-	redisStore, err := redis.New(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB, RedisCacheTTL)
-	if err != nil {
-		log.Fatal("redis init failed", zap.Error(err))
-	}
-	rt.redisStore = redisStore
-
-	// FS store for per-user session files, workspace and skills directories. fs.New creates dataDir.
-	fsStore, err := fs.New(dataDir)
-	if err != nil {
-		log.Fatal("fs store init failed", zap.Error(err))
-	}
-	rt.fsStore = fsStore
-
-	// Standalone Scheduler client (extract-scheduler-service). A Scheduler that
-	// is temporarily offline must not block normal startup: the gRPC client is
-	// lazy and per-call failures surface as UNAVAILABLE (HTTP 503) with no
-	// local fallback. A TLS material/config error is fatal.
-	if cfg.InternalRPC.Enabled {
-		_, clientOpts := internalRPCOptions(cfg.InternalRPC)
-		conn, derr := rpcx.Dial(clientOpts)
-		if derr != nil {
-			log.Fatal("scheduler rpc client init failed", zap.Error(derr))
-		}
-		rt.schedulerConn = conn
-		rt.schedulerClient = schedulerv1.NewSchedulerServiceClient(conn)
-	}
-	var owner resource.TaskOwner = unavailableTaskOwner{}
-	if rt.schedulerClient != nil {
-		owner = resource.NewSchedulerTaskOwner(rt.schedulerClient)
-	}
-	resLimits := resource.Limits{
-		MaxFiles:        cfg.ScheduledResources.MaxFiles,
-		MaxTotalBytes:   cfg.ScheduledResources.MaxTotalBytes,
-		MaxFileBytes:    cfg.ScheduledResources.MaxFileBytes,
-		MaxContextFiles: cfg.ScheduledResources.MaxContextFiles,
-		MaxContextBytes: cfg.ScheduledResources.MaxContextBytes,
-	}
-	rt.resourceSvc = resource.New(rt.mysqlStore, owner, fsStore.UserWorkspace, resLimits)
-	rt.resourceGuard = resource.NewGuard(rt.resourceSvc)
-	rt.controlSvc = scheduledcontrol.New(rt.mysqlStore, rt.resourceSvc, modelselect.NewConfig(cfg))
-	rt.scheduledSessions = service.NewScheduledSessions(rt.mysqlStore.ForSource(model.SessionSourceScheduled), rt.redisStore).
-		WithDeletionGuard(func(ctx context.Context, sessionID string) (string, error) {
-			rec, gerr := rt.mysqlStore.GetScheduledExecutionBySession(ctx, sessionID)
-			if gerr != nil {
-				return "", gerr
-			}
-			// Any non-terminal execution fact means a stop proof is still
-			// missing (accepted/preparing may start any moment; start_intent/
-			// running/uncertain may be side-effecting).
-			if rec != nil && !rec.Terminal() {
-				return rec.Status + ":" + rec.Reason, nil
-			}
-			return "", nil
-		})
-
-	// Shared POSIX filesystem backend startup health check (see the
-	// workspace-shared-storage spec). When storage.workspace.backend == "shared",
-	// {data-dir}/data MUST be the operator-mounted shared FS (MinIO-backed
-	// JuiceFS). The check runs BEFORE Landlock for every role (the api role does
-	// workspace CRUD on the shared data plane too) and fatals on a missing/wrong
-	// mount so a node can never silently degrade to local disk and diverge from
-	// the cluster. When executor tools are configured and this role runs them
-	// (agent/all), an extra bwrap probe catches a missing JuiceFS --allow-other.
-	if cfg.Storage.Workspace.IsShared() {
-		log.Info("shared workspace backend enabled; running mount health check",
-			zap.String("data_dir", dataDir))
-		if err := storage.CheckSharedBackend(storage.CheckOptions{DataDir: dataDir, Log: log}); err != nil {
-			log.Fatal("shared workspace backend health check failed; refusing to start",
-				zap.Error(err),
-				zap.String("remediation", "mount JuiceFS onto {data-dir}/data (see docs/shared-storage.md) before starting blowball"))
-		}
-		if executorConfigured(cfg) && role != "api" {
-			if err := executor.ProbeFUSEWorkspace(dataDir); err != nil {
-				log.Fatal("executor shared-workspace self-check failed; refusing to start", zap.Error(err))
-			}
-		}
-	}
-
-	// Ensure the global skills directory exists (the loader does not create it) so per-subdir landlock below resolves cleanly.
-	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
-		log.Fatal("create skills dir failed", zap.Error(err))
-	}
-
-	// Ensure the operator tools directory exists (always created, even when empty) so the landlock rule and the in-sandbox --ro-bind always resolve. Operators place CLI binaries here to expose them inside the bash sandbox at $HOME/.local/bin.
-	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
-		log.Fatal("create tools dir failed", zap.Error(err))
-	}
-
-	// Ensure the skills-market directory exists (skill-market capability), in
-	// the same always-create-even-empty sequence as tools: operators sync
-	// market skill payloads into {market_uid}/{skill_name}/ here; an empty
-	// directory is harmless (no mounts, no allowlist entries — visibility
-	// comes only from the market API). Like tools, it lives directly under -d
-	// (NOT inside data/), so it never participates in the shared-storage
-	// health check or the FUSE anchor; multi-host deployments sync it per
-	// host.
-	if err := os.MkdirAll(marketDir, 0o755); err != nil {
-		log.Fatal("create skills-market dir failed", zap.Error(err))
-	}
-	if err := os.MkdirAll(mcpMarketDir, 0o755); err != nil {
-		log.Fatal("create mcp-market dir failed", zap.Error(err))
-	}
-
-	// go-landlock (D5/D6). The runtime subdirs the process writes to (data/logs/skills) are restricted read-write — covering logs for lumberjack's post-rotation reopen — plus operator extra_read_write; the operator tools dir and the skills-market dir are restricted read-only (the agent never writes market payloads — operators sync them), plus operator extra_read_only; the configurable system_read_only baseline is restricted read-only too. Best-effort: a no-op on non-Linux platforms and logged at warn rather than fatal so macOS dev workflows keep running. The application-layer path validation in xizhi still enforces per-user workspace isolation regardless. landlock.enabled: false skips ApplyLandlock entirely (warning-only). All defaults reproduce the pre-configurability literals.
-	rwDirs := append([]string{dataDir, logDir, skillsDir}, cfg.Landlock.ExtraReadWrite...)
-	roDirs := append([]string{toolsDir, marketDir, mcpMarketDir}, cfg.Landlock.ExtraReadOnly...)
-	log.Info("landlock policy",
-		zap.Bool("enabled", cfg.Landlock.IsEnabled()),
-		zap.Strings("rw_dirs", rwDirs),
-		zap.Strings("ro_dirs", roDirs),
-		zap.Strings("system_read_only", cfg.Landlock.SystemReadOnly),
-		zap.Strings("extra_read_only_mounts", sandboxMountTargets(cfg.Tools.Executor.Sandbox.ExtraReadOnlyMounts)),
-		zap.Strings("extra_read_write_mounts", sandboxMountTargets(cfg.Tools.Executor.Sandbox.ExtraReadWriteMounts)))
-	if cfg.Landlock.IsEnabled() {
-		// Guard 2.1 (≥1 effective RW dir) is a config-invalid condition → refuse to
-		// start, distinct from a kernel landlock failure below which is best-effort.
-		if err := config.ValidateLandlockRW(true, []string{dataDir, logDir, skillsDir}, cfg.Landlock.ExtraReadWrite); err != nil {
-			log.Fatal("landlock config invalid; refusing to start", zap.Error(err))
-		}
-		if err := xizhi.ApplyLandlock(rwDirs, roDirs, cfg.Landlock.SystemReadOnly); err != nil {
-			log.Warn("landlock not applied; relying on application-layer validation only",
-				zap.Error(err))
-		}
-	} else {
-		log.Warn("landlock disabled by config (landlock.enabled: false); relying on application-layer validation only")
-	}
-
-	return rt, nil
-}
-
-// runCanceller adapts the shared run Manager to the scheduled runtime's
-// cancellation port: in-process registry first, then the cross-replica flag.
-type runCanceller struct{ mgr *run.Manager }
-
-func (c runCanceller) RequestCancel(ctx context.Context, runID string) error {
-	if c.mgr.Registry != nil && c.mgr.Registry.Cancel(runID) {
-		return nil
-	}
-	return c.mgr.Store.SetCancelFlag(ctx, runID)
-}
-
-// runObserver adapts the shared run Manager to the runtime liveness port.
-type runObserver struct{ mgr *run.Manager }
-
-func (o runObserver) Alive(ctx context.Context, runID string) (bool, error) {
-	return o.mgr.Store.Alive(ctx, runID)
-}
-
-func (o runObserver) InProcess(runID string) bool {
-	_, ok := o.mgr.Registry.Get(runID)
-	return ok
-}
-
-// unavailableTaskOwner fails closed when no Scheduler is configured: managed
-// `.cron` writes cannot be authorized without the authoritative task owner.
-type unavailableTaskOwner struct{}
-
-func (unavailableTaskOwner) OwnsTask(context.Context, string, string) (bool, error) {
-	return false, fmt.Errorf("scheduler is not configured")
-}
-
-// sandboxMountTargets returns the in-sandbox target paths of the given extra
-// mounts for the startup audit log. It lives here (rather than on the config
-// type) to keep the parsed MountSpec export minimal.
-func sandboxMountTargets(mounts []config.MountSpec) []string {
-	out := make([]string, 0, len(mounts))
-	for _, m := range mounts {
-		out = append(out, m.Host+":"+m.Target)
-	}
-	return out
-}
-
-// wireAPI builds the CRUD services/handlers for the api role (and contributes
-// them in the all role): auth, session CRUD, message-history read, manual title
-// update, workspace file CRUD, and the skills list. It returns a RouteDeps
-// populated with only the API-route handlers plus the auth middleware; the
-// agent-partition fields (SendMessage, MCPTools) are left nil.
-//
-// newArtifactService builds the turn-artifacts service: office-vers
-// (onlyoffice.version_service_url) as the version store plus the MySQL
-// version index. An empty version_service_url leaves the store nil —
-// artifacts are then announced without version pins (degraded but live).
-func newArtifactService(rt *appRuntime) *artifact.Service {
-	var store artifact.VersionStore
-	if u := rt.cfg.OnlyOffice.VersionServiceURL; u != "" {
-		store = artifact.NewOfficeVersStore(u)
-	}
-	return artifact.NewService(store, rt.mysqlStore, rt.cfg.Artifact.MaxSnapshotBytes)
-}
-
-// Fault isolation: wireAPI does NOT construct the orchestrator, OpenAI client,
-// tool registry, or MCP manager. The api role's TitleService is built with a
-// nil LLM client — SetManualTitle never calls the LLM, so the api role needs no
-// OpenAI dependency.
-func wireAPI(rt *appRuntime, sessSvc *service.SessionService) handler.RouteDeps {
-	cfg := rt.cfg
-
-	jwtExpire, err := cfg.JWT.ParseDuration()
-	if err != nil {
-		rt.log.Fatal("parse jwt.expire failed", zap.Error(err))
-	}
-	authSvc := service.NewAuthService(rt.mysqlStore, cfg.JWT.Secret, jwtExpire, cfg.Auth.IsPasswordRequired())
-	authHandler := handler.NewAuthHandler(authSvc)
-
-	// The api role never calls the LLM; a nil client is safe because
-	// SetManualTitle only touches MySQL (see TitleService.SetManualTitle).
-	// The title config carries the wiring-resolved title model (title_model
-	// or the default catalog entry) — see TitleModelName.
-	titleCfg := cfg.OpenAI
-	titleCfg.TitleModel = cfg.TitleModelName()
-	titleSvc := service.NewTitleService(nil, rt.mysqlStore, titleCfg)
-	// The run store feeds the session list's generating flag; the api role
-	// reads the shared Redis claims but never constructs a run registry.
-	sessionHandler := handler.NewSessionHandler(sessSvc, titleSvc, rt.redisStore.RunStore())
-	// Session message queue (session-message-queue): the queue read endpoint
-	// and the additive queued_count markers ride the same Store-only view —
-	// both stay off (byte-for-byte responses) when the queue is disabled.
-	queueHandler := handler.NewQueueHandler(sessSvc, run.NewManager(rt.redisStore.RunStore(), nil))
-	if cfg.Messages.Queue.Enabled {
-		sessionHandler.EnableQueueInfo()
-	}
-	subAgentService := service.NewSubAgentService(rt.mysqlStore)
-	subAgentHandler := handler.NewSubAgentHandler(subAgentService)
-	workspaceHandler := handler.NewWorkspaceHandler(rt.fsStore, MaxUploadBytes, handler.OnlyOfficeSettings{
-		Secret:            cfg.OnlyOffice.Secret,
-		ServerURL:         cfg.OnlyOffice.ServerURL,
-		InternalBackend:   cfg.OnlyOffice.InternalBackend,
-		VersionServiceURL: cfg.OnlyOffice.VersionServiceURL,
-	}).WithResourceGuard(rt.resourceGuard)
-	skillHandler := handler.NewSkillHandler(rt.fsStore, rt.market)
-	modelListHandler := handler.NewModelListHandler(cfg.ModelCatalog(), cfg.DefaultModelName(), cfg.OpenAI.DefaultReasoningEffort)
-	llmTokenHandler := handler.NewLLMTokenHandler(service.NewLLMTokenService(rt.mysqlStore))
-	var taskRPC handler.ScheduledTaskRPC = scheduledcontrol.UnavailableScheduledTaskRPC{}
-	var occurrenceLookup handler.ScheduledOccurrenceLookup
-	if rt.schedulerClient != nil {
-		adapter := scheduledcontrol.NewSchedulerManagementClient(rt.schedulerClient)
-		taskRPC = adapter
-		occurrenceLookup = adapter
-	}
-	scheduledTaskHandler := handler.NewScheduledTaskHandler(taskRPC, cfg.DefaultModelName()).
-		WithContentExistence(func(ctx context.Context, source, sessionID string) (bool, error) {
-			return rt.mysqlStore.SessionContentExists(ctx, model.SessionSource(source), sessionID)
-		})
-	scheduledSessionHandler := handler.NewScheduledSessionHandler(rt.scheduledSessions, occurrenceLookup, cfg.DefaultModelName())
-	resourceHandler := handler.NewScheduledResourceHandler(rt.resourceSvc)
-	artifactHandler := handler.NewArtifactHandler(newArtifactService(rt))
-	attachmentHandler := handler.NewAttachmentHandler(rt.mysqlStore, sessSvc, rt.fsStore)
-
-	return handler.RouteDeps{
-		AuthMW:                           middleware.AuthMiddleware(cfg.JWT.Secret),
-		QueryTokenAuthMW:                 middleware.QueryTokenAuthMiddleware(cfg.JWT.Secret),
-		Login:                            authHandler.Login,
-		SessionList:                      sessionHandler.ListSessions,
-		SessionCreate:                    sessionHandler.CreateSession,
-		SessionGet:                       sessionHandler.GetSession,
-		SessionQueue:                     queueHandler.ListQueue,
-		SessionMessages:                  sessionHandler.GetSessionMessages,
-		AttachmentUpload:                 attachmentHandler.Upload,
-		AttachmentStagedUpload:           attachmentHandler.UploadStaged,
-		AttachmentContent:                attachmentHandler.Content,
-		SubAgentRuns:                     subAgentHandler.ListRuns,
-		SubAgentRunDetail:                subAgentHandler.GetRun,
-		SessionDelete:                    sessionHandler.DeleteSession,
-		ScheduledTaskCreate:              scheduledTaskHandler.Create,
-		ScheduledTaskList:                scheduledTaskHandler.List,
-		ScheduledTaskGet:                 scheduledTaskHandler.Get,
-		ScheduledTaskUpdate:              scheduledTaskHandler.Update,
-		ScheduledTaskDelete:              scheduledTaskHandler.Delete,
-		ScheduledTaskRuns:                scheduledTaskHandler.Runs,
-		ScheduledResourceGet:             resourceHandler.Get,
-		ScheduledResourcePublish:         resourceHandler.Publish,
-		ScheduledSessionList:             scheduledSessionHandler.List,
-		ScheduledSessionGet:              scheduledSessionHandler.Get,
-		ScheduledSessionMessages:         scheduledSessionHandler.Messages,
-		ScheduledSessionDelete:           scheduledSessionHandler.Delete,
-		SessionUpdateTitle:               sessionHandler.UpdateTitle,
-		WorkspaceList:                    workspaceHandler.List,
-		WorkspaceUpload:                  workspaceHandler.Upload,
-		WorkspaceSearch:                  workspaceHandler.Search,
-		WorkspaceDownload:                workspaceHandler.Download,
-		WorkspaceTokenDownload:           workspaceHandler.TokenDownload,
-		WorkspaceContent:                 workspaceHandler.Content,
-		WorkspaceWriteContent:            workspaceHandler.WriteContent,
-		WorkspaceDelete:                  workspaceHandler.Delete,
-		WorkspaceRename:                  workspaceHandler.Rename,
-		WorkspaceCreate:                  workspaceHandler.Create,
-		WorkspaceOnlyOfficeConfig:        workspaceHandler.OnlyOfficeConfig,
-		WorkspaceOnlyOfficeVersionConfig: workspaceHandler.OnlyOfficeVersionConfig,
-		WorkspaceOnlyOfficeCallback:      workspaceHandler.OnlyOfficeCallback,
-		ArtifactResolve:                  artifactHandler.Resolve,
-		ArtifactVersionContent:           artifactHandler.VersionContent,
-		SkillsList:                       skillHandler.List,
-		ModelsList:                       modelListHandler.List,
-		LLMTokenGet:                      llmTokenHandler.Get,
-		LLMTokenPut:                      llmTokenHandler.Put,
-		LLMTokenDelete:                   llmTokenHandler.Delete,
-	}
-}
-
-// newScheduledTurnServices binds every persistence surface of a scheduled turn
-// to the same table group while retaining the shared cache, filesystem and LLM.
-func newScheduledTurnServices(rt *appRuntime, llmClient agent.LLMClient, titleCfg config.OpenAIConfig, defaultMaxContext int) *turn.ScheduledServices {
-	scheduledStore := rt.mysqlStore.ForSource(model.SessionSourceScheduled)
-	deps := service.SessionDeps{MySQL: scheduledStore, Redis: rt.redisStore, FS: rt.fsStore}
-	sessions := service.NewSessionService(deps)
-	return &turn.ScheduledServices{
-		Sessions:   sessions,
-		Messages:   service.NewMessageService(deps, sessions.SaveMessage),
-		Titles:     service.NewTitleService(llmClient, scheduledStore, titleCfg),
-		Compaction: service.NewCompactionService(deps, llmClient, rt.cfg.DefaultModelName(), defaultMaxContext),
-		Snapshots:  scheduledStore,
-	}
-}
-
-// wireAgent builds the agent layer for the agent role (and contributes it in
-// the all role): the tool registry, the external MCP manager, the OpenAI
-// client (with raw-capture sink attached), the orchestrator, the title
-// service, and the streaming + MCP-tool handlers. It returns a RouteDeps
-// populated with only the agent-route handlers (SendMessage, MCPTools) plus
-// the auth middleware, the MCP manager so serveRun can defer its Close, and
-// the raw-capture flusher so serveRun can drain it on shutdown.
-func wireAgent(rt *appRuntime, sessSvc *service.SessionService, internalSrv *grpc.Server) (handler.RouteDeps, *mcpclient.Manager, *llmraw.Flusher, *run.Registry, *memory.Service, func()) {
-	cfg := rt.cfg
-	dataDir := rt.dataDir
-	fsStore := rt.fsStore
-	log := rt.log
-
-	// Tool registry. The main registry backs the MCP tools-listing endpoint. Real tool execution during orchestration uses a per-request registry the orchestrator's factory rebuilds scoped to the user's workspace root.
-	reg := tool.NewRegistry()
-	reg.SetTimeouts(cfg.Tools.Timeouts)
-
-	// Sandboxed bash execution. Only registered on Linux where bwrap is available; on other platforms the enabled tool is ignored. If bash is explicitly enabled but bwrap is missing on Linux, startup fails fast. (The dedicated python/pip_install executors were removed; Python code and pip installs run via bash.)
-	if executorConfigured(cfg) {
-		if !executor.IsAvailable() {
-			log.Fatal("executor tools enabled but bubblewrap (bwrap) is not available",
-				zap.String("platform", runtime.GOOS))
-		}
-		// cfg.Tools.Executor carries the parsed bwrap sandbox policy (Sandbox:
-		// stat-guarded system baseline + extra RO/RW mounts), so it threads
-		// straight into NewTools → buildBwrapArgs. Per-user skills live under
-		// the workspace at .blowball/skills and reach the sandbox via the
-		// /workspace bind, so only the workspace resolver is needed here.
-		executorTools := executor.NewTools(cfg.Tools.Executor, func(userID string) string {
-			return fsStore.UserWorkspace(userID)
-		}, rt.skillsDir, rt.toolsDir).WithMarket(rt.market)
-		if err := executor.RegisterAll(reg, executorTools); err != nil {
-			log.Fatal("register executor tools failed", zap.Error(err))
-		}
-	}
-
-	// Skill loader. Discover skills from the global skills directory and per-user data/{userID}/skills/ directories. Register the luban skill tools globally when at least one agent lists them.
-	skillLoader := skill.NewLoader(rt.skillsDir, func(userID string) string {
-		return fsStore.UserSkills(userID)
-	})
-	if needsLubanTools(cfg.Agents) {
-		lubanTools := luban.NewTools(skillLoader, func(userID string) string {
-			return fsStore.UserSkills(userID)
-		}).WithMarket(rt.market)
-		if err := luban.RegisterAll(reg, lubanTools); err != nil {
-			log.Fatal("register luban tools failed", zap.Error(err))
-		}
-	}
-
-	// Per-user mcp_* tools (mcp_list_servers / mcp_add_server / mcp_remove_server /
-	// mcp_call) are NOT registered into this process-wide registry. Unlike luban,
-	// they hold per-turn, per-user connection state (the turn-scoped MCP
-	// connection manager), so the orchestrator's per-request AgentFactory builds
-	// and binds them fresh for each turn against the requesting user's workspace.
-	// Only the agent/all role builds the orchestrator, so the api role never
-	// surfaces these tools (its SessionHandler is CRUD-only). The family activates
-	// automatically when any agent lists an mcp_* tool in config.
-
-	// External MCP servers. Connect, discover tools, and register proxy specs into the process-wide registry. Startup fails fast on connection or tool-list errors.
-	mcpManager, err := mcpclient.RegisterAllWithManager(context.Background(), reg, cfg.MCP)
-	if err != nil {
-		log.Fatal("mcp client registration failed", zap.Error(err))
-	}
-
-	// Validate agent MCP tool references against the discovered remote tools.
-	serverTools := mcpManager.ServerTools()
-	if err := cfg.ValidateAgentMCPTools(toServerToolSet(serverTools)); err != nil {
-		log.Fatal("agent mcp tool validation failed", zap.Error(err))
-	}
-
-	// Validate agent skill references against global skills. Per-user skills are validated at request time when the userID is known.
-	if err := cfg.ValidateAgentSkills("", skillLoader.HasSkill); err != nil {
-		log.Fatal("agent skill validation failed", zap.Error(err))
-	}
-
-	// Message service delegates saves back to SessionService.SaveMessage so writes stay in one place.
-	msgSvc := service.NewMessageService(service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: fsStore}, sessSvc.SaveMessage)
-
-	// Raw LLM capture (llm-raw-capture capability): the sink stages captured
-	// request/response/error payloads in the Redis write-behind buffer and the
-	// flusher batch-inserts them into llm_raw_log. Zero-config, always on for
-	// agent/all roles; serveRun closes the flusher after the HTTP shutdown so
-	// the buffer drains before the stores are released.
-	rawNotify := make(chan struct{}, 1)
-	rawSink := llmraw.NewSink(rt.redisStore, rawNotify)
-	rawFlusher := llmraw.NewFlusher(rt.redisStore, rt.mysqlStore, rawNotify)
-	rawFlusher.Start()
-
-	openAIClient := agent.NewOpenAIClientWithSink(cfg.OpenAI, rawSink)
-	// Per-user LLM credentials (user-llm-token): every LLM call attributed to
-	// a user — the turn's whole spawn tree, title generation, compaction
-	// summaries and webfetch digestion — flows through this resolver. A user
-	// with a stored token hits the shared openai.base_url with their own
-	// credential; everyone else (and any call without a user identity) uses
-	// the global openai.api_key client unchanged. Credential resolution
-	// failures fail the call explicitly — never a silent global-key retry.
-	llmClient := agent.NewClientResolver(openAIClient, cfg.OpenAI, rawSink, rt.mysqlStore)
-	var webfetchDigester webfetch.ContentDigester
-	if cfg.Tools.Webfetch.Digest.Enabled {
-		promptClient, err := agent.NewWebfetchPromptClient(llmClient, cfg.OpenAI, cfg.Tools.Webfetch.Digest.Model)
-		if err != nil {
-			log.Fatal("webfetch digest model resolution failed", zap.Error(err))
-		}
-		webfetchDigester = webfetch.NewDigester(
-			promptClient,
-			cfg.Tools.Webfetch.Digest,
-			cfg.DefaultModelName(),
-			func(userID string) string { return fsStore.UserWorkspace(userID) },
-		)
-	}
-	webfetch.RegisterAllWithDigester(reg, cfg.Tools.Webfetch, webfetchDigester)
-
-	// Workspace image understanding sidecar (xizhi-view-image). Registered
-	// into the base registry for the MCP tools-list endpoint; the real
-	// execution path re-registers it per request against the user's workspace
-	// inside the orchestrator factory. The vision model was validated against
-	// the catalog at config load, so resolution here cannot fail.
-	var visionClient xizhi.VisionClient
-	if cfg.Tools.Xizhi.ViewImage.Enabled {
-		vc, err := agent.NewVisionClient(llmClient, cfg.OpenAI, cfg.Tools.Xizhi.ViewImage.Model, cfg.Tools.Xizhi.ViewImage.Resolve().MaxOutputTokens)
-		if err != nil {
-			log.Fatal("xizhi view_image model resolution failed", zap.Error(err))
-		}
-		visionClient = vc
-	}
-	xizhi.RegisterAll(reg, dataDir, cfg.Tools.Xizhi, visionClient, rt.resourceGuard)
-
-	// Title generation runs on its own resolved model (openai.title_model or
-	// the default catalog entry) over the shared resolver-wrapped client, so
-	// the title call bills to the triggering user's token.
-	titleCfg := cfg.OpenAI
-	titleCfg.TitleModel = cfg.TitleModelName()
-	titleSvc := service.NewTitleService(llmClient, rt.mysqlStore, titleCfg)
-
-	// Context-compaction service (context-compaction capability): reuses the
-	// shared OpenAI client (summary calls land in llm_raw_log). The summary
-	// fallback is the deployment default model; the max-context argument is
-	// the FALLBACK limit — the default catalog entry's window (the catalog is
-	// mandatory, so compaction is always armed). The handler substitutes the
-	// request-resolved model's window per turn.
-	defaultMaxContext := 0
-	if e, ok := cfg.OpenAI.FindModelCatalogEntry(cfg.DefaultModelName()); ok {
-		defaultMaxContext = e.MaxContextTokens
-	}
-	compSvc := service.NewCompactionService(
-		service.SessionDeps{MySQL: rt.mysqlStore, Redis: rt.redisStore, FS: fsStore},
-		llmClient,
-		cfg.DefaultModelName(),
-		defaultMaxContext,
-	)
-
-	// Cross-session memory (cross-session-memory capability): default OFF —
-	// NewService returns nil for a disabled config and the streaming handler's
-	// nil-safe Enabled() gate makes that byte-for-byte pre-capability
-	// behavior. The api role never constructs this. The startup health probe
-	// is best-effort by contract (memory degrades per turn, it never gates
-	// boot — contrast the MCP manager's fail-fast above).
-	memSvc := memory.NewService(cfg.Memory)
-	if memSvc != nil {
-		probeCtx, probeCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		ok, herr := memSvc.Health(probeCtx)
-		probeCancel()
-		if herr != nil || !ok {
-			log.Warn("openviking memory server not reachable at startup; recall/capture will retry per turn",
-				zap.String("base_url", cfg.Memory.BaseURL),
-				zap.Bool("healthy", ok),
-				zap.Error(herr))
-		} else {
-			log.Info("openviking memory server healthy",
-				zap.String("base_url", cfg.Memory.BaseURL),
-				zap.String("account", cfg.Memory.Account))
-		}
-	}
-
-	// The workspace-root closure maps the authenticated user id to its workspace directory under the data root; the orchestrator's per-request AgentFactory uses the workspace_root passed to Handle, so the closure here is only a convenience accessor for handlers that need it.
-	wsFn := func(userID string) string {
-		return fsStore.UserWorkspace(userID)
-	}
-	orch, err := agent.NewOrchestrator(llmClient, cfg, reg, serverTools, skillLoader, wsFn, rt.mysqlStore)
-	if err != nil {
-		log.Fatal("orchestrator init failed", zap.Error(err))
-	}
-	orch.WithMCPMarket(rt.mcpMarket)
-	orch.SetResourceGuard(rt.resourceGuard)
-	if rt.schedulerClient != nil {
-		management := scheduledcontrol.NewSchedulerManagementClient(rt.schedulerClient)
-		taskTools := scheduledtask.NewTools(management, rt.resourceSvc, cfg.DefaultModelName())
-		if rerr := scheduledtask.RegisterAll(reg, taskTools); rerr != nil {
-			log.Fatal("register scheduled task tools failed", zap.Error(rerr))
-		}
-		orch.EnableScheduledTaskTools([]string{
-			scheduledtask.NameCreate, scheduledtask.NameList, scheduledtask.NameGet,
-			scheduledtask.NameUpdate, scheduledtask.NamePause, scheduledtask.NameResume,
-			scheduledtask.NameDelete, scheduledtask.NameResourcesGet, scheduledtask.NameResourcesPublish,
-		})
-	}
-
-	orchAdapter := handler.NewOrchestratorAdapter(orch)
-
-	// Turn-run lifecycle (turn-detach-resume): the Redis run state (event
-	// log, meta, session claim) is shared across agent processes; the
-	// registry is process-local and holds every running turn's cancel. The
-	// registry is returned so serveRun can cancel all running turns within
-	// the bounded graceful-shutdown window.
-	runMgr := run.NewManager(rt.redisStore.RunStore(), run.NewRegistry())
-	streamHandler := handler.NewMessageStreamHandler(
-		sessSvc, msgSvc, titleSvc, compSvc, memSvc, orchAdapter, dataDir, runMgr,
-		handler.NewModelSelectionConfig(cfg), cfg.Messages.MaxInputTokensLimit(),
-		newScheduledTurnServices(rt, llmClient, titleCfg, defaultMaxContext),
-	).
-		WithRuntimeStatusStore(rt.redisStore).
-		WithAttachmentStore(rt.mysqlStore).
-		WithArtifactService(newArtifactService(rt))
-	turnRunHandler := handler.NewTurnRunHandler(runMgr)
-	mcpHandler := handler.NewMCPHandler(reg, serverTools, wsFn, rt.mcpMarket)
-
-	// Standalone-scheduler Runtime (extract-scheduler-service): the agent/all
-	// role accepts scheduled executions over the internal RPC and drives them
-	// through the SAME turn executor and run registry as interactive chat. The
-	// Scheduler process is never embedded; when it is unconfigured this block
-	// is inert.
-	var scheduledRuntimeStop func(context.Context) error
-	if rt.schedulerClient != nil && internalSrv != nil {
-		poll, lease, concurrent, attempts, scan := cfg.ScheduledRuntime.Values()
-		runtimeV2, rerr := scheduledruntime.New(scheduledruntime.Dependencies{
-			Store:       rt.mysqlStore,
-			Occurrences: scheduledruntime.NewSchedulerClient(rt.schedulerClient),
-			Users:       rt.mysqlStore,
-			Turns:       streamHandler.TurnExecutor(),
-			Canceller:   runCanceller{mgr: runMgr},
-			Observer:    runObserver{mgr: runMgr},
-			Resources:   rt.resourceSvc,
-			Tokens:      service.NewExecutionTokenIssuer(cfg.JWT.Secret, time.Hour),
-			Selection:   handler.NewModelSelectionConfig(cfg),
-			Config: scheduledruntime.Config{
-				PollInterval: poll, LeaseDuration: lease, MaxConcurrent: concurrent,
-				MaxPrepareAttempts: attempts, ScanBatch: scan, DefaultRunDuration: 10 * time.Minute,
-			},
-		})
-		if rerr != nil {
-			log.Fatal("scheduled runtime init failed", zap.Error(rerr))
-		}
-		runtimeV2.Start()
-		scheduledruntimev1.RegisterScheduledRuntimeServiceServer(internalSrv, scheduledruntime.NewService(runtimeV2))
-		scheduledRuntimeStop = runtimeV2.Shutdown
-		log.Info("scheduled execution runtime started", zap.String("role", rt.role))
-	}
-
-	// Session message queue (session-message-queue, messages.queue): default
-	// OFF — enablement is confined to this opt-in block. The stop closure is
-	// always present because the scheduler shares the same shutdown gate even
-	// when the interactive FIFO is disabled.
-	var queueReconciler *handler.QueueReconciler
-	if cfg.Messages.Queue.Enabled {
-		streamHandler.EnableMessageQueue(cfg.Messages.QueueMaxDepthLimit())
-		queueReconciler = handler.NewQueueReconciler(streamHandler, 0)
-		queueReconciler.Start()
-	}
-	var queueStop func()
-	queueStop = func() {
-		// Gate new interactive/background turns FIRST so no new turn can cross
-		// a startup fence while shutdown drains existing work.
-		streamHandler.StopNewTurns()
-		if scheduledRuntimeStop != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
-			if err := scheduledRuntimeStop(ctx); err != nil {
-				log.Warn("scheduled runtime shutdown wait timed out; proceeding", zap.Error(err))
-			}
-			cancel()
-		}
-		if queueReconciler != nil {
-			queueReconciler.Close()
-			if !streamHandler.WaitForStartupPumps(15 * time.Second) {
-				log.Warn("queue pump startups still in flight at shutdown bound; entries may requeue after exit",
-					zap.String("role", rt.role))
-			}
-		}
-	}
-
-	return handler.RouteDeps{
-		AuthMW:      middleware.AuthMiddleware(cfg.JWT.Secret),
-		SendMessage: streamHandler.SendMessage,
-		TurnCancel:  turnRunHandler.CancelTurn,
-		TurnEvents:  turnRunHandler.TurnEvents,
-		MCPTools:    mcpHandler.Tools,
-	}, mcpManager, rawFlusher, runMgr.Registry, memSvc, queueStop
-}
-
-// newEngine builds a gin.Engine with the standard middleware chain shared by
-// every role: Recovery (panic safety) → Trace (per-request trace_id) → CORS.
-// Auth is applied per-route-group inside RegisterAPIRoutes / RegisterAgentRoutes
-// so it stays the final middleware before the handler.
-func newEngine() *gin.Engine {
-	engine := gin.New()
-	engine.Use(gin.Recovery())
-	engine.Use(middleware.TraceMiddleware())
-	engine.Use(middleware.CORS())
-	return engine
 }
 
 // resolveRole reads and validates the --role flag, rejecting unknown values
@@ -1098,58 +225,4 @@ func validateRole(role string) error {
 		return fmt.Errorf("invalid --role %q (want %s)", role, strings.Join(validRoles, "|"))
 	}
 	return nil
-}
-
-// openAIKeyRequired reports whether the role needs a configured openai.api_key
-// at startup. The api role never drives the LLM, so it does not require one;
-// the all and agent roles construct the orchestrator and title service, which do.
-func openAIKeyRequired(role string) bool {
-	return role != "api"
-}
-
-// routeGroups returns the human-readable names of the route partitions a role
-// registers, for the startup log line.
-func routeGroups(role string) []string {
-	switch role {
-	case "api":
-		return []string{"api"}
-	case "agent":
-		return []string{"agent"}
-	default:
-		return []string{"api", "agent"}
-	}
-}
-
-// executorConfigured reports whether the sandboxed bash executor tool is
-// enabled in config. It gates both executor registration in wireAgent and the
-// shared-mode bwrap self-check in setupRuntime. (The dedicated python/pip_install
-// executors were removed; Python and pip run via bash.)
-func executorConfigured(cfg *config.Config) bool {
-	return cfg.Tools.Executor.Bash.Enabled
-}
-
-// needsLubanTools reports whether any agent explicitly lists one of the luban skill tools in its tools list.
-func needsLubanTools(agents config.AgentsConfig) bool {
-	lubanTools := []string{luban.ToolListSkills, luban.ToolReadSkill, luban.ToolInstallSkill, luban.ToolListSkillFiles, luban.ToolTreeSkill}
-	for _, cfg := range []config.AgentConfig{agents.Confucius, agents.Subagent.AgentConfig} {
-		for _, name := range lubanTools {
-			if slices.Contains(cfg.Tools, name) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// toServerToolSet converts the server-name -> tool-names mapping into the map[string]map[string]struct{} shape expected by Config.ValidateAgentMCPTools.
-func toServerToolSet(serverTools map[string][]string) map[string]map[string]struct{} {
-	out := make(map[string]map[string]struct{}, len(serverTools))
-	for serverName, names := range serverTools {
-		set := make(map[string]struct{}, len(names))
-		for _, n := range names {
-			set[n] = struct{}{}
-		}
-		out[serverName] = set
-	}
-	return out
 }

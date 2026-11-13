@@ -23,9 +23,9 @@
 
 ## 4. P1:deploy/ 骨架与根部部署文件迁移
 
-- [ ] 4.1 建 `deploy/{apiserver,agent,scheduler,officevers,compose}` 目录;根 Dockerfile 拆迁:暂以现有单镜像 Dockerfile 迁至 `deploy/agent/`(厚镜像,内容暂不变)并为其余服务放置占位 Dockerfile(与现行为等价),根 docker-compose.yaml 内容并入 `deploy/compose/`(暂为 mysql+redis),根部部署文件删除
-- [ ] 4.2 `.dockerignore` 补齐 data/、logs/、tmp/、bin/、.git、config.yaml;验证四个 `docker build -f deploy/<svc>/Dockerfile .` 根 context 构建成功
-- [ ] 4.3 全量验证 + P1 收尾提交;更新 CLAUDE.md、AGENTS.md、README(含 openapi.yaml 同步到 blowball-frontend 的路径指引)、docs/ 与 openspec specs 中的路径引用
+- [x] 4.1 建 `deploy/{apiserver,agent,scheduler,officevers,compose}` 目录;根 Dockerfile 拆迁:暂以现有单镜像 Dockerfile 迁至 `deploy/agent/`(厚镜像,内容暂不变)并为其余服务放置占位 Dockerfile(与现行为等价),根 docker-compose.yaml 内容并入 `deploy/compose/`(暂为 mysql+redis),根部部署文件删除
+- [x] 4.2 `.dockerignore` 补齐 data/、logs/、tmp/、bin/、.git、config.yaml;验证四个 `docker build -f deploy/<svc>/Dockerfile .` 根 context 构建成功
+- [x] 4.3 全量验证 + P1 收尾提交;更新 CLAUDE.md、AGENTS.md、README(含 openapi.yaml 同步到 blowball-frontend 的路径指引)、docs/ 与 openspec specs 中的路径引用
 
 ## 5. P2:服务装配拆分与独立二进制
 

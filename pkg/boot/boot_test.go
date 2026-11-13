@@ -1,4 +1,4 @@
-package main
+package boot
 
 import (
 	"testing"
@@ -10,10 +10,57 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/lush/blowball/pkg/config"
-	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/rpcx"
-	"github.com/lush/blowball/pkg/store/mysql"
 )
+
+// TestOpenAIKeyRequired verifies the role-aware openai.api_key requirement.
+// Only the api role is exempt: it never constructs the OpenAI client or
+// orchestrator, so it must not be gated on an LLM key at startup. The all and
+// agent roles build the agent layer and therefore require the key. This is the
+// decision-level enforcement of the service-roles spec's fault-isolation
+// requirement that "the api role does not depend on the agent layer".
+func TestOpenAIKeyRequired(t *testing.T) {
+	cases := []struct {
+		role string
+		want bool
+	}{
+		{"api", false},
+		{"all", true},
+		{"agent", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			if got := OpenAIKeyRequired(tc.role); got != tc.want {
+				t.Errorf("OpenAIKeyRequired(%q) = %v, want %v", tc.role, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRouteGroups verifies the startup-log route partition names per role.
+func TestRouteGroups(t *testing.T) {
+	cases := []struct {
+		role string
+		want []string
+	}{
+		{"api", []string{"api"}},
+		{"agent", []string{"agent"}},
+		{"all", []string{"api", "agent"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			got := RouteGroups(tc.role)
+			if len(got) != len(tc.want) {
+				t.Fatalf("RouteGroups(%q) = %v, want %v", tc.role, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("RouteGroups(%q)[%d] = %q, want %q", tc.role, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
 
 func TestInternalRPCOptionsPreserveSecurityMode(t *testing.T) {
 	for _, mode := range []rpcx.SecurityMode{rpcx.SecurityModeMTLS, rpcx.SecurityModePlaintextToken} {
@@ -24,7 +71,7 @@ func TestInternalRPCOptionsPreserveSecurityMode(t *testing.T) {
 				SchedulerTLS: config.TLSFilesConfig{CertFile: "/client.crt", KeyFile: "/client.key", CAFile: "/ca.crt"},
 				PeerTokens:   config.RPCPeerTokens{rpcx.IdentityScheduler: "peer_test_credential"}, ClientToken: "client_test_credential",
 			}
-			server, client := internalRPCOptions(cfg)
+			server, client := InternalRPCOptions(cfg)
 			assert.Equal(t, mode, server.SecurityMode)
 			assert.Equal(t, mode, client.SecurityMode)
 			assert.Equal(t, cfg.TLS.ToRPCX(), server.TLS)
@@ -44,7 +91,7 @@ func TestInternalRPCSecurityWarning(t *testing.T) {
 		Listen: "127.0.0.1:9092", SchedulerEndpoint: "127.0.0.1:9091", ClientToken: "MAY_LEAK_SECRET_outbound",
 		PeerTokens: config.RPCPeerTokens{rpcx.IdentityScheduler: "MAY_LEAK_SECRET_inbound"},
 	}
-	logInternalRPCSecurity(log, cfg)
+	LogInternalRPCSecurity(log, cfg)
 	require.Equal(t, 1, entries.Len())
 	entry := entries.All()[0]
 	assert.Equal(t, zapcore.WarnLevel, entry.Level)
@@ -54,35 +101,16 @@ func TestInternalRPCSecurityWarning(t *testing.T) {
 	assert.Equal(t, cfg.Listen, entry.ContextMap()["listen"])
 	assert.Equal(t, cfg.SchedulerEndpoint, entry.ContextMap()["scheduler_endpoint"])
 	cfg.SecurityMode = rpcx.SecurityModeMTLS
-	logInternalRPCSecurity(log, cfg)
+	LogInternalRPCSecurity(log, cfg)
 	cfg.SecurityMode, cfg.Enabled = rpcx.SecurityModePlaintextToken, false
-	logInternalRPCSecurity(log, cfg)
+	LogInternalRPCSecurity(log, cfg)
 	assert.Equal(t, 1, entries.Len(), "mutual TLS and disabled RPC must not be labeled plaintext")
 }
 
 func TestInternalRPCOptionsDisabled(t *testing.T) {
-	server, client := internalRPCOptions(config.InternalRPCConfig{
+	server, client := InternalRPCOptions(config.InternalRPCConfig{
 		SecurityMode: rpcx.SecurityModePlaintextToken, SchedulerEndpoint: "unused:9091", ClientToken: "unused_test_credential",
 	})
 	assert.Empty(t, server)
 	assert.Empty(t, client)
-}
-
-func TestScheduledTurnServicesUseScheduledTableGroup(t *testing.T) {
-	cfg := &config.Config{OpenAI: config.OpenAIConfig{Models: []config.ModelCatalogEntry{
-		{Name: "test-model", MaxContextTokens: 128000, MaxCompletionTokens: 4096},
-	}}}
-	rt := &appRuntime{cfg: cfg, mysqlStore: &mysql.Store{}}
-	services := newScheduledTurnServices(rt, nil, config.OpenAIConfig{}, 128000)
-
-	require.NotNil(t, services.Sessions)
-	require.NotNil(t, services.Messages)
-	require.NotNil(t, services.Titles)
-	require.NotNil(t, services.Compaction)
-	require.NotNil(t, services.Snapshots)
-	assert.Equal(t, 128000, services.Compaction.FallbackMaxContext())
-
-	snapshots, ok := services.Snapshots.(*mysql.SessionStore)
-	require.True(t, ok)
-	assert.Equal(t, model.SessionSourceScheduled, snapshots.Source())
 }
