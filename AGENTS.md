@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Blowball is a Go backend for a multi-agent chat workspace. The executable CLI lives in `cmd/blowball/`; keep entrypoint wiring there and place reusable logic under `internal/`. Major backend layers include `internal/agent` (orchestration and OpenAI integration), `internal/turn` (transport-independent full-turn execution shared by HTTP, queue continuation, and scheduled tasks), `services/scheduler/` (the standalone Scheduler binary: task CRUD, materialization, claims, start authorization, reconciliation), `internal/scheduledruntime/` (the agent/all execution Runtime: receipts, start grants, watchdog, terminal facts), `internal/resource/` (the `.cron` draft/publication/guard service), `internal/rpcx/` (shared gRPC error codes, mTLS and service-identity middleware), `internal/schedule` (pure at/cron rules), `internal/modelselect` (neutral model-catalog resolution), `handler` (Gin routes), `service` (business logic), `model`, `store` (MySQL, Redis, and filesystem persistence), `middleware`, `config`, `run`, `stream`, and `tool`. Internal gRPC contracts live in `api/proto/` with generated code in `api/gen/go/` (regenerate with `make proto`). Cross-cutting helpers belong in focused `internal/pkg/` packages. HTTP contracts are documented in `api/openapi.yaml`; SQL migrations use sequential names in `migrations/`. Unit tests are colocated with packages, while end-to-end scenarios live in `test/integration/`. Deployment material is under `deploy/` and `scripts/`; scheduled-task rollout/rollback is documented in `docs/scheduled-tasks.md`.
+Blowball is a Go backend for a multi-agent chat workspace. The executable CLI lives in `cmd/blowball/`; keep entrypoint wiring there and place reusable logic under `pkg/`. Major backend layers include `pkg/agent` (orchestration and OpenAI integration), `pkg/turn` (transport-independent full-turn execution shared by HTTP, queue continuation, and scheduled tasks), `services/scheduler/` (the standalone Scheduler binary: task CRUD, materialization, claims, start authorization, reconciliation), `pkg/scheduledruntime/` (the agent/all execution Runtime: receipts, start grants, watchdog, terminal facts), `pkg/resource/` (the `.cron` draft/publication/guard service), `pkg/rpcx/` (shared gRPC error codes, mTLS and service-identity middleware), `pkg/schedule` (pure at/cron rules), `pkg/modelselect` (neutral model-catalog resolution), `handler` (Gin routes), `service` (business logic), `model`, `store` (MySQL, Redis, and filesystem persistence), `middleware`, `config`, `run`, `stream`, and `tool`. Internal gRPC contracts live in `api/proto/` with generated code in `api/gen/go/` (regenerate with `make proto`). Cross-cutting helpers belong in focused `pkg/` packages. HTTP contracts are documented in `api/openapi.yaml`; SQL migrations use sequential names in `migrations/`. Unit tests are colocated with packages, while end-to-end scenarios live in `test/integration/`. Deployment material is under `deploy/` and `scripts/`; scheduled-task rollout/rollback is documented in `docs/scheduled-tasks.md`.
 
 OpenSpec change proposals live under `openspec/changes/`. Keep each change's proposal, design, delta specs, and task list synchronized with the implemented behavior; update `api/openapi.yaml` when implementation work introduces or changes a client-visible HTTP contract.
 
@@ -17,14 +17,14 @@ Compaction Tool Activity keeps the parent `mcp_call` count and nested per-`(serv
 ## Build, Test, and Development Commands
 
 ```bash
-docker compose up -d       # Start MySQL and Redis; initializes migrations on a fresh volume
+docker compose -f deploy/compose/mysql-redis.yaml up -d   # Start MySQL and Redis; initializes migrations on a fresh volume
 cp config.example.yaml config.yaml
 make build                 # Build ./bin/blowball
 make build-scheduler       # Build ./bin/scheduler (standalone Scheduler; never embedded)
 make run                   # Rebuild and run the server
 make test                  # Run all Go tests with race detection
 make lint                  # Run go vet ./...
-go test ./internal/agent/ -run TestName
+go test ./pkg/agent/ -run TestName
 go test ./test/integration/...
 ```
 

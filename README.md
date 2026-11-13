@@ -35,7 +35,7 @@ A Go backend for a multi-agent chat workspace. It exposes a JWT-secured HTTP API
 ### 2. Start dependencies
 
 ```bash
-docker compose up -d
+docker compose -f deploy/compose/mysql-redis.yaml up -d
 ```
 
 This starts MySQL on `3306` and Redis on `6379`, and auto-runs the SQL migrations in [`migrations/`](migrations/) on a fresh volume (existing databases apply new migrations manually).
@@ -138,10 +138,10 @@ make build-scheduler
 make test
 
 # Run a single package's tests
-go test ./internal/agent/...
+go test ./pkg/agent/...
 
 # Run a single test
-go test ./internal/agent/ -run TestConfucius_CallsSubAgent_ThenSummarizes
+go test ./pkg/agent/ -run TestConfucius_CallsSubAgent_ThenSummarizes
 
 # Run integration tests (fakes for MySQL/LLM, real orchestrator + handlers)
 go test ./test/integration/...
@@ -168,7 +168,7 @@ See [`CLAUDE.md`](CLAUDE.md) for the full architecture and conventions, and [`AG
 │   └── gen/go/               # generated Go bindings (make proto)
 ├── cmd/blowball/             # the cobra binary: main, serve, seed
 ├── services/scheduler/       # the standalone Scheduler binary
-├── internal/
+├── pkg/
 │   ├── agent/                # Agents, orchestrator, OpenAI client, sub-agents
 │   ├── config/               # YAML config loader
 │   ├── handler/              # HTTP handlers and router
@@ -190,7 +190,7 @@ See [`CLAUDE.md`](CLAUDE.md) for the full architecture and conventions, and [`AG
 ├── openspec/                 # Per-capability behavior specs and change proposals
 ├── test/integration/         # Integration tests
 ├── config.example.yaml       # Example configuration (heavily commented)
-├── docker-compose.yaml       # MySQL + Redis
+├── deploy/                  # 部署工件:每服务 Dockerfile/Jenkinsfile + compose(MySQL+Redis 基础)
 └── Makefile                  # Common tasks
 ```
 

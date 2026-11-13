@@ -18,7 +18,7 @@ config.*.yaml
 # 与镜像运行无关的仓库元数据 / 文档 / 测试 / 迁移（迁移由外部 MySQL 在 init 时执行）
 .claude/
 .codegraph/
-api/
+deploy/
 docs/
 openspec/
 test/

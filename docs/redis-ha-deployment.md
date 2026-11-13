@@ -24,7 +24,7 @@ sentinel.conf、两个 systemd 单元、docker-compose.ha.yml 演练环境)。
   丢一秒 = 数据块与索引可能不一致);`maxmemory-policy noeviction`
   (blowball 队列是业务数据,JuiceFS 也硬性要求 noeviction)。
 - blowball 当前是单地址直连客户端(`redis.addr`,
-  `internal/store/redis/redis.go:43`)。要吃满"自动故障转移",需要一次约 30
+  `pkg/store/redis/redis.go:43`)。要吃满"自动故障转移",需要一次约 30
   行的客户端改造(§5 路线 A)或前置 VIP(§5 路线 B)。**不做这一步,
   哨兵集群仍然提供"数据不丢 + 可手工切换",但主从切换后写路径会持续报错,
   直到人工干预。**
@@ -36,9 +36,9 @@ key 散列到 16384 个槽,一条命令/事务里的 key 跨槽即报 `CROSSSLOT
 
 | 代码位置 | 操作 | 分片下的结果 |
 |---|---|---|
-| `internal/store/redis/msgqueue.go:56` `AppendMessagesDual` | MULTI/EXEC 事务同时写 `msgs:{session_id}`(读缓存)+ `msgs:buffer`(全局 ingest 队列) | 两个 key 几乎必然落在不同槽 → CROSSSLOT,**每条消息写入直接失败** |
-| `internal/store/redis/msgqueue.go:89` `MoveMessageToProcessing` | `LMOVE msgs:buffer msgs:processing` 原子认领(flusher 消费) | 两 key 不同槽 → CROSSSLOT,队列永远无法消费 |
-| `internal/store/redis/msgqueue.go:158` `RecoverProcessingToBuffer` | `LMOVE msgs:processing msgs:buffer`(进程崩溃恢复) | 同上 |
+| `pkg/store/redis/msgqueue.go:56` `AppendMessagesDual` | MULTI/EXEC 事务同时写 `msgs:{session_id}`(读缓存)+ `msgs:buffer`(全局 ingest 队列) | 两个 key 几乎必然落在不同槽 → CROSSSLOT,**每条消息写入直接失败** |
+| `pkg/store/redis/msgqueue.go:89` `MoveMessageToProcessing` | `LMOVE msgs:buffer msgs:processing` 原子认领(flusher 消费) | 两 key 不同槽 → CROSSSLOT,队列永远无法消费 |
+| `pkg/store/redis/msgqueue.go:158` `RecoverProcessingToBuffer` | `LMOVE msgs:processing msgs:buffer`(进程崩溃恢复) | 同上 |
 
 理论上可以给队列 key 加 hash tag(如 `msgs:{q}:buffer` / `msgs:{q}:processing`)
 修掉 LMOVE 的跨槽问题,但双写事务无法这样修:`msgs:{session_id}` 是按会话
@@ -212,7 +212,7 @@ redis://:<REDIS_PASSWORD>@juicefs-master,10.0.0.11,10.0.0.12,10.0.0.13:26379/5
 
 ### 5.1 现状
 
-`internal/store/redis/redis.go:43` 用 go-redis 的单地址客户端
+`pkg/store/redis/redis.go:43` 用 go-redis 的单地址客户端
 (`redis.NewClient`,由 `cmd/blowball/serve.go:337` 以 `cfg.Redis.Addr`
 装配)。把 `redis.addr` 指向初始主节点:**数据面协议完全兼容**,但主从
 切换后,旧主被降级为只读副本,写命令持续返回
@@ -223,10 +223,10 @@ redis://:<REDIS_PASSWORD>@juicefs-master,10.0.0.11,10.0.0.12,10.0.0.13:26379/5
 go-redis v9 原生自带 `redis.NewFailoverClient`:启动时通过哨兵查询当前主,
 并订阅 `+switch-master` 事件自动跟随切换。改造点约 30 行:
 
-1. `internal/config/config.go` 的 `RedisConfig` 增加可选 `sentinel` 块
+1. `pkg/config/config.go` 的 `RedisConfig` 增加可选 `sentinel` 块
    (`master_name` / `addrs` / 可选哨兵自身密码),校验 `addr` 与
    `sentinel` 二选一;
-2. `internal/store/redis/redis.go` 的 `New()` 分流:配置了 sentinel 就改用
+2. `pkg/store/redis/redis.go` 的 `New()` 分流:配置了 sentinel 就改用
    `redis.NewFailoverClient(&redis.FailoverOptions{ MasterName, SentinelAddrs,
    Password: <数据面密码>, DB: cfg.Redis.DB, ... })`;
 3. 其余零改动:AOF 探测(`CONFIG GET` 会路由到当前主)、队列协议、缓存

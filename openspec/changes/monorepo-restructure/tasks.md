@@ -17,9 +17,9 @@
 
 ## 3. P1:office-vers 纳入
 
-- [ ] 3.1 将 office-vers 源码(cmd/、internal/、docs/、scripts/)复制入 `services/officevers/`,import 路径重写为 `github.com/lush/blowball/services/officevers/...`(9 处),删除其 go.mod/go.sum,依赖并入根 go.mod,`go mod tidy` + 构建通过
-- [ ] 3.2 office-vers 的 openspec specs(version-rollback、versioned-file-storage)原名义并入根 `openspec/specs/`,处理其 changes/archive 残留;根 `openspec list` 正常
-- [ ] 3.3 在 services/officevers/README(或根 README 相应章节)注明来源仓库与截至 commit(99ef6c2)
+- [x] 3.1 将 office-vers 源码(cmd/、internal/、docs/、scripts/)复制入 `services/officevers/`,import 路径重写为 `github.com/lush/blowball/services/officevers/...`(9 处),删除其 go.mod/go.sum,依赖并入根 go.mod,`go mod tidy` + 构建通过
+- [x] 3.2 office-vers 的 openspec specs(version-rollback、versioned-file-storage)原名义并入根 `openspec/specs/`,处理其 changes/archive 残留;根 `openspec list` 正常
+- [x] 3.3 在 services/officevers/README(或根 README 相应章节)注明来源仓库与截至 commit(99ef6c2)
 
 ## 4. P1:deploy/ 骨架与根部部署文件迁移
 

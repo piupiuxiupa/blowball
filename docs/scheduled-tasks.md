@@ -130,7 +130,7 @@ startup. `max_run_duration` becomes the grant deadline enforced by the Runtime.
 Internal service identities are certificate CommonNames: `blowball-scheduler`
 on the Scheduler side and `blowball-main` / `blowball-api` / `blowball-agent` on
 the main side. Per-method allowlists and deadline enforcement are in
-`internal/rpcx`; external clients cannot forge an actor.
+`pkg/rpcx`; external clients cannot forge an actor.
 
 ### Explicit RPC security modes
 

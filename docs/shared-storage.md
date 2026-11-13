@@ -24,18 +24,18 @@ surfaces require **no code change** in shared mode (audit checklist for review):
 
 | Surface | Why it is transparent |
 |---|---|
-| `internal/store/fs/*` (`UserWorkspace`, `sessionPath`, `EnsureUserDirs`, `UserSkills`) | All paths derived via `filepath.Join(root, ...)`. The root is `{data-dir}/data`; whatever is mounted there is used verbatim. |
-| `internal/handler/workspace.go` (upload/download/content/delete/rename/OnlyOffice) | Plain `os.*` calls scoped by `xizhi.ValidatePath`. |
-| `internal/handler/message_stream.go:151` (`workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")`) | Derives the workspace from `dataDir`; follows the mount. |
-| `internal/tool/xizhi/*` (6 tools + `ValidatePath` symlink defense) | Real POSIX paths; `EvalSymlinks` + `os.SameFile` work on JuiceFS. |
-| `internal/tool/executor/*` (`bwrap --bind {workspace} /workspace`, `runner.go`) | Binds a real directory; rename atomicity, random write, dir listing all hold on JuiceFS. |
+| `pkg/store/fs/*` (`UserWorkspace`, `sessionPath`, `EnsureUserDirs`, `UserSkills`) | All paths derived via `filepath.Join(root, ...)`. The root is `{data-dir}/data`; whatever is mounted there is used verbatim. |
+| `pkg/handler/workspace.go` (upload/download/content/delete/rename/OnlyOffice) | Plain `os.*` calls scoped by `xizhi.ValidatePath`. |
+| `pkg/handler/message_stream.go:151` (`workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")`) | Derives the workspace from `dataDir`; follows the mount. |
+| `pkg/tool/xizhi/*` (6 tools + `ValidatePath` symlink defense) | Real POSIX paths; `EvalSymlinks` + `os.SameFile` work on JuiceFS. |
+| `pkg/tool/executor/*` (`bwrap --bind {workspace} /workspace`, `runner.go`) | Binds a real directory; rename atomicity, random write, dir listing all hold on JuiceFS. |
 | `onlyOfficePersist` atomic `os.Rename` (`workspace.go:806`) | JuiceFS `rename` is atomic (s3fs is NOT — that is why s3fs was rejected). |
 
 The only code added by the `add-minio-workspace-storage` change is:
 
-- `internal/config/config.go` — the `storage.workspace.backend` knob + validation.
-- `internal/storage/` — the shared-mode startup mount health check.
-- `internal/tool/executor/probe.go` — the shared-mode bwrap `--allow-other` self-check.
+- `pkg/config/config.go` — the `storage.workspace.backend` knob + validation.
+- `pkg/storage/` — the shared-mode startup mount health check.
+- `pkg/tool/executor/probe.go` — the shared-mode bwrap `--allow-other` self-check.
 - `cmd/blowball/serve.go` — wiring those two checks into `setupRuntime`.
 
 ---

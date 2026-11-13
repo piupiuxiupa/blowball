@@ -7,7 +7,7 @@ TBD — System prompt rendering for the prompt package, providing clean separati
 ## Requirements
 
 ### Requirement: Prompt package provides system prompt rendering
-`internal/prompt` SHALL provide a function `RenderSystemPrompt` that renders a complete system prompt from plain input data.
+`pkg/prompt` SHALL provide a function `RenderSystemPrompt` that renders a complete system prompt from plain input data.
 
 #### Scenario: Render with environment only
 - **WHEN** `RenderSystemPrompt` is called with `BasePrompt`, `Workspace`, `UserID`, `Platform`, `OS`, and `Cutoff`
@@ -26,7 +26,7 @@ TBD — System prompt rendering for the prompt package, providing clean separati
 - **THEN** the output does not contain empty `## Built-in Tools`, `## MCP Tools`, or `## Skills` sections
 
 ### Requirement: Prompt package does not depend on tool or skill registries
-`internal/prompt` SHALL NOT import `internal/tool`, `internal/tool/skill`, or any registry/loader type. It SHALL render only the data passed via `RenderInput`.
+`pkg/prompt` SHALL NOT import `pkg/tool`, `pkg/tool/skill`, or any registry/loader type. It SHALL render only the data passed via `RenderInput`.
 
 #### Scenario: Unit test without registry
 - **WHEN** a test renders a system prompt using `RenderInput` with hand-crafted `ToolInfo` and `SkillInfo` values

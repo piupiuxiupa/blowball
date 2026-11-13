@@ -27,12 +27,12 @@ Correlate logs across a turn's handler, orchestration, agent, model, and tool-ca
 
 ### Requirement: session-id context key 的共享归宿
 
-`session_id` 的 context key 与读写函数 SHALL 定义于共享叶子包（`internal/pkg/reqctx`），使 `internal/pkg/logger` 与 `internal/tool` 无需依赖 `internal/agent` 即可读取。`internal/agent` 既有的 `WithSessionID`/`SessionIDFromContext` SHALL 保留为委托别名，公开 API 与既有注入点（`MessageStreamHandler`、`TitleService`、raw capture attribution）SHALL NOT 变更行为。
+`session_id` 的 context key 与读写函数 SHALL 定义于共享叶子包（`pkg/reqctx`），使 `pkg/logger` 与 `pkg/tool` 无需依赖 `pkg/agent` 即可读取。`pkg/agent` 既有的 `WithSessionID`/`SessionIDFromContext` SHALL 保留为委托别名，公开 API 与既有注入点（`MessageStreamHandler`、`TitleService`、raw capture attribution）SHALL NOT 变更行为。
 
 #### Scenario: 依赖方向
 
-- **WHEN** `internal/tool` 或 `internal/pkg/logger` 需要读取 ctx 中的 `session_id`
-- **THEN** 通过共享包完成，不产生对 `internal/agent` 的 import（无环）
+- **WHEN** `pkg/tool` 或 `pkg/logger` 需要读取 ctx 中的 `session_id`
+- **THEN** 通过共享包完成，不产生对 `pkg/agent` 的 import（无环）
 
 #### Scenario: 注入点兼容
 

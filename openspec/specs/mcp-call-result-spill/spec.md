@@ -15,7 +15,7 @@
 - **THEN** 系统对 marshal 后的完整 `callResult` JSON（含信封化开销）估算 token 数，用于阈值判定
 
 #### Scenario: Shared estimator package preserves input-limit behavior
-- **WHEN** 估算器从 `internal/handler/tokens.go` 提取到共享包后
+- **WHEN** 估算器从 `pkg/handler/tokens.go` 提取到共享包后
 - **THEN** `messages.max_input_tokens` 的既有估算行为 byte-for-byte 不变（同一实现、两个调用点）
 
 ### Requirement: Configurable inline threshold with default
