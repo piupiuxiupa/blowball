@@ -222,7 +222,7 @@ scheduled_tasks:
 # on the Scheduler side.
 internal_rpc:
   enabled: ${INTERNAL_RPC_ENABLED:false}
-  security_mode: mtls               # omitted = mtls; plaintext_token is explicit, never automatic
+  security_mode: ${MAIN_RPC_SECURITY_MODE:mtls}  # omitted = mtls; plaintext_token is explicit, never automatic
   listen: ":9092"                  # main-service internal listener (control and/or runtime)
   timeout: 5s
   tls:
@@ -238,9 +238,11 @@ internal_rpc:
   # Controlled plaintext development only: set security_mode: plaintext_token,
   # use a loopback/isolated listener, and configure distinct service tokens.
   # TLS files are then unused. There is no anonymous mode or TLS-error fallback.
-  # peer_tokens:
-  #   blowball-scheduler: "${SCHEDULER_RPC_TOKEN}"
-  # client_token: "${MAIN_RPC_TOKEN}"
+  # Tokens carry empty defaults (no default secret): inert under mTLS, and
+  # plaintext_token mode rejects empty values.
+  peer_tokens:
+    blowball-scheduler: "${SCHEDULER_RPC_TOKEN:}"
+  client_token: "${MAIN_RPC_TOKEN:}"
   # Never forward these token variables to executor/MCP environments.
 
 # Scheduled-execution admission on this main-service instance (agent/all).
@@ -450,15 +452,20 @@ agents:
       # - mcp_call
 
 
-    # Optional: declare MCP servers and tools this agent may use.
+    # Optional: declare MCP servers and tools this agent may use. Names must
+    # reference operator `mcp.servers` entries (validated fail-fast at startup):
+    #   mcp:
+    #     servers:
+    #       - name: remote_search
+    #         tools:
+    #           - "*"
     mcp:
-      servers:
-        - name: remote_search
-          tools:
-            - "*"
-    # Optional: declare skills this agent may use.
-    skills:
-      - coding-style
+      servers: []
+    # Optional: declare skills this agent may use. Names must resolve against
+    # the global skills directory or per-user skills (validated fail-fast):
+    #   skills:
+    #     - coding-style
+    skills: []
 
   subagent:
     name: Subagent
@@ -741,34 +748,38 @@ tools:
 #   reconnect    - optional, attempt reconnect/restart on failure.
 #   prefix       - optional prefix applied to every discovered tool name.
 mcp:
-  servers:
-    - name: remote_search
-      transport: sse
-      url: http://localhost:3001/sse
-      headers:
-        Authorization: Bearer ${MCP_TOKEN}
-      timeout: 30s
-      call_timeout: 30s
-      reconnect: true
-
-    - name: local_calculator
-      transport: stdio
-      command: ./calculator-mcp-server
-      args: ["--stdio"]
-      env:
-        API_KEY: ${LOCAL_API_KEY}
-      timeout: 30s
-      call_timeout: 30s
-      reconnect: true
-
-    - name: remote_http_search
-      transport: http
-      url: http://localhost:3002/mcp
-      headers:
-        Authorization: Bearer ${MCP_TOKEN}
-      timeout: 30s
-      call_timeout: 30s
-      reconnect: true
+  # Startup connects every listed server and registers its tools (fail-fast on
+  # connection/tool-list errors), so the example ships an EMPTY active list —
+  # uncomment and adapt when real operator servers exist:
+  #   servers:
+  #     - name: remote_search
+  #       transport: sse
+  #       url: http://localhost:3001/sse
+  #       headers:
+  #         Authorization: Bearer ${MCP_TOKEN}
+  #       timeout: 30s
+  #       call_timeout: 30s
+  #       reconnect: true
+  #
+  #     - name: local_calculator
+  #       transport: stdio
+  #       command: ./calculator-mcp-server
+  #       args: ["--stdio"]
+  #       env:
+  #         API_KEY: ${LOCAL_API_KEY}
+  #       timeout: 30s
+  #       call_timeout: 30s
+  #       reconnect: true
+  #
+  #     - name: remote_http_search
+  #       transport: http
+  #       url: http://localhost:3002/mcp
+  #       headers:
+  #         Authorization: Bearer ${MCP_TOKEN}
+  #       timeout: 30s
+  #       call_timeout: 30s
+  #       reconnect: true
+  servers: []
 
 logging:
   level: info

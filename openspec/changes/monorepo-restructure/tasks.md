@@ -39,10 +39,10 @@
 - [x] 6.1 apiserver Dockerfile 瘦身定型:静态二进制 + ca-certificates + tzdata(不含 python/node/bubblewrap/git);agent Dockerfile 维持厚依赖并从 `services/` 新路径构建;scheduler、officevers Dockerfile 定型(alpine 最小运行时)
 - [x] 6.2 四个 Dockerfile 统一接入 `--build-arg VERSION/COMMIT/BUILD_TIME` → ldflags(含安全默认值)
 - [x] 6.3 编写 `deploy/compose/all-in-one.yaml`:四服务 + mysql(migrations 挂载)+ redis;apiserver 与 agent 挂同一共享数据卷;端口按角色暴露
-- [ ] 6.4 全家桶冒烟(受阻:本机无 registry 访问,镜像无法拉取/构建;需在有镜像源的服务器或 Jenkins 节点执行 `docker compose -f deploy/compose/all-in-one.yaml up -d --build` 后验收):一键拉起四服务健康;验证共享卷链路(apiserver 上传 → agent turn 内 xizhi 读取/写入 → apiserver 读回、artifact 版本解析);与单体形态 HTTP 契约对照一致
+- [x] 6.4 全家桶冒烟(已验收:四镜像构建成功;全家桶一键拉起;api/agent/officevers 健康;路由分区 401/404 对照一致;共享卷双向可见(api 写→agent 读、agent 写→api 读);scheduled-tasks 经 gRPC 真实返回 []):一键拉起四服务健康;验证共享卷链路(apiserver 上传 → agent turn 内 xizhi 读取/写入 → apiserver 读回、artifact 版本解析);与单体形态 HTTP 契约对照一致
 
 ## 7. P2:Jenkinsfile 与收尾
 
 - [x] 7.1 四份结构一致的 Jenkinsfile(测试 → 根 context 构建 → 版本注入 → 推送),服务名/镜像名/registry/凭据参数化,同 commit 同 tag
 - [x] 7.2 更新 docs/(scheduled-tasks.md 等含路径/二进制名引用)与 CLAUDE.md/AGENTS.md 至终态布局;迁移说明记录 scheduler 更名与生产切换路径(单体镜像可继续过渡)
-- [ ] 7.3 终验(部分完成:vet/全量 race 测试/四二进制原生构建/compose config/openspec 校验全绿;镜像构建与 compose 冒烟待 registry 环境后与 6.4 一并验收)
+- [x] 7.3 终验(全量完成:vet/全量 race 测试/四镜像构建/全家桶 compose 冒烟/openspec 校验全绿;准备归档)

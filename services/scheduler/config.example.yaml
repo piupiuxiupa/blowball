@@ -23,17 +23,22 @@ mysql:
 # The Scheduler's own mTLS listener. Only the main-service client identities
 # (blowball-api / blowball-agent / blowball-main) may call its methods.
 rpc:
-  security_mode: mtls               # applies to this listener AND main-service clients
+  security_mode: ${SCHEDULER_RPC_SECURITY_MODE:mtls}  # applies to this listener AND main-service clients
   listen: ":9091"
   timeout: 5s
   tls:
     cert_file: "${SCHEDULER_TLS_CERT:/etc/blowball/tls/scheduler.crt}"
     key_file: "${SCHEDULER_TLS_KEY:/etc/blowball/tls/scheduler.key}"
     ca_file: "${SCHEDULER_TLS_CA:/etc/blowball/tls/ca.crt}"
-  # Controlled plaintext development only; use a loopback/isolated listener.
-  # security_mode: plaintext_token
-  # peer_tokens:
-  #   blowball-main: "${MAIN_RPC_TOKEN}"
+  # Controlled plaintext development only; use a loopback/isolated listener:
+  # security_mode: plaintext_token (or SCHEDULER_RPC_SECURITY_MODE=plaintext_token).
+  # Tokens carry empty defaults (no default secret): inert under mTLS;
+  # plaintext_token mode rejects empty values. Split services present
+  # blowball-api / blowball-agent identities; the dev monolith is blowball-main.
+  peer_tokens:
+    blowball-main: "${MAIN_RPC_TOKEN:}"
+    blowball-api: "${MAIN_API_RPC_TOKEN:}"
+    blowball-agent: "${MAIN_AGENT_RPC_TOKEN:}"
 
 # Main-service endpoints. Point both at the same address when the main service
 # runs the combined `all` role. The client certificate must carry the
@@ -48,8 +53,9 @@ main_service:
     key_file: "${SCHEDULER_CLIENT_TLS_KEY:/etc/blowball/tls/scheduler-client.key}"
     ca_file: "${SCHEDULER_CLIENT_TLS_CA:/etc/blowball/tls/ca.crt}"
     server_name: "${MAIN_RPC_SERVER_NAME:blowball-main}"
-  # Required only for plaintext_token; TLS files are then unused.
-  # client_token: "${SCHEDULER_RPC_TOKEN}"
+  # Required only for plaintext_token; TLS files are then unused. Empty
+  # default (no default secret) — inert under mTLS.
+  client_token: "${SCHEDULER_RPC_TOKEN:}"
   # Use a distinct token for each service identity, with no default secret.
   # Never forward RPC token variables to executor/MCP environments.
 

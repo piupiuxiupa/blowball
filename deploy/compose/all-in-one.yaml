@@ -52,13 +52,17 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio:latest
-    command: ["server", "/data", "--console-address", ":9001"]
+    # 官方 minio/minio 已从 Docker Hub 下架(MinIO 迁移至自有渠道)。默认
+    # 按官方镜像的 CMD(server /data --console-address :9001)启动;镜像可
+    # 经 MINIO_IMAGE 覆盖,如 bitnamilegacy/minio:latest(数据路径
+    # /bitnami/minio/data,同一卷双挂载兼容)或企业内网镜像。
+    image: ${MINIO_IMAGE:-minio/minio:latest}
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
       - minio_data:/data
+      - minio_data:/bitnami/minio/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
       interval: 5s
@@ -81,6 +85,14 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (shared by apiserver and agent)}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ONLYOFFICE_VERSION_SERVICE_URL: "http://officevers:8088"
+      # Dev bundle: internal RPC enabled with plaintext tokens (closed bridge
+      # network). Production uses mTLS (default security_mode) — see
+      # docs/scheduled-tasks.md.
+      INTERNAL_RPC_ENABLED: "true"
+      MAIN_RPC_SECURITY_MODE: "plaintext_token"
+      MAIN_RPC_TOKEN: "dev-all-in-one-token"
+      SCHEDULER_RPC_TOKEN: "dev-all-in-one-token"
+      SCHEDULER_RPC_ENDPOINT: "scheduler:9091"
     ports:
       - "8080:8080"
     volumes:
@@ -105,6 +117,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (shared by apiserver and agent)}
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY (the agent role drives the LLM)}
       ONLYOFFICE_VERSION_SERVICE_URL: "http://officevers:8088"
+      INTERNAL_RPC_ENABLED: "true"
+      MAIN_RPC_SECURITY_MODE: "plaintext_token"
+      MAIN_RPC_TOKEN: "dev-all-in-one-token"
+      SCHEDULER_RPC_TOKEN: "dev-all-in-one-token"
+      SCHEDULER_RPC_ENDPOINT: "scheduler:9091"
     ports:
       - "8081:8081"
     volumes:
@@ -124,6 +141,11 @@ services:
       SCHEDULER_MYSQL_DSN: "blowball:blowballpassword@tcp(mysql:3306)/blowball?parseTime=true&loc=UTC"
       MAIN_API_RPC_ENDPOINT: "apiserver:9092"
       MAIN_AGENT_RPC_ENDPOINT: "agent:9092"
+      SCHEDULER_RPC_SECURITY_MODE: "plaintext_token"
+      SCHEDULER_RPC_TOKEN: "dev-all-in-one-token"
+      MAIN_RPC_TOKEN: "dev-all-in-one-token"
+      MAIN_API_RPC_TOKEN: "dev-all-in-one-api-token"
+      MAIN_AGENT_RPC_TOKEN: "dev-all-in-one-agent-token"
     volumes:
       - ../../services/scheduler/config.example.yaml:/opt/cowork/config.yaml:ro
       - sched_data:/opt/cowork
