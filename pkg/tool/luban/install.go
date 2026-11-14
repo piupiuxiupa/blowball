@@ -110,7 +110,7 @@ func (ins *installer) installSkill(ctx context.Context, urlStr, name, skillArg, 
 	overwrite := dirExists(filepath.Join(userSkillsDir, name))
 
 	if isSingleSkillURL(u.Path) {
-		return ins.installSingleFile(ctx, urlStr, userSkillsDir, name, overwrite, explicit, skillArg)
+		return ins.installSingleFile(ctx, urlStr, userSkillsDir, name, explicit, skillArg)
 	}
 
 	if skillArg != "" {
@@ -134,7 +134,7 @@ func isSingleSkillURL(path string) bool {
 // install document rather than erroring, so the agent can read it and install
 // the real source. If skillArg is set, the install proceeds normally and the
 // result notes that skill does not apply to single-file sources.
-func (ins *installer) installSingleFile(ctx context.Context, urlStr, userSkillsDir, name string, overwrite, explicit bool, skillArg string) (installResult, error) {
+func (ins *installer) installSingleFile(ctx context.Context, urlStr, userSkillsDir, name string, explicit bool, skillArg string) (installResult, error) {
 	body, err := ins.download(ctx, urlStr)
 	if err != nil {
 		return installResult{}, err
@@ -162,7 +162,8 @@ func (ins *installer) installSingleFile(ctx context.Context, urlStr, userSkillsD
 	}
 
 	targetDir := filepath.Join(userSkillsDir, installedName)
-	overwrite = dirExists(targetDir) // recompute against the final name
+	// Recompute against the final name (the frontmatter may have overridden it).
+	overwrite := dirExists(targetDir)
 	path := filepath.Join(targetDir, "SKILL.md")
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return installResult{}, fmt.Errorf("luban_install_skill: mkdir %q: %w", targetDir, err)

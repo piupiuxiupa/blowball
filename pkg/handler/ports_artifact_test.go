@@ -19,7 +19,7 @@ type fakeInnerRunner struct {
 	emit []stream.StreamEvent
 }
 
-func (f *fakeInnerRunner) Handle(_ context.Context, _, _, _ string, _ []agent.Message, hub *stream.Hub, _ agent.RoundHook, _ agent.ModelOverride) error {
+func (f *fakeInnerRunner) Handle(_ context.Context, _, _ string, _ []agent.Message, hub *stream.Hub, _ agent.RoundHook, _ agent.ModelOverride) error {
 	for _, e := range f.emit {
 		hub.Send(e)
 	}
@@ -68,7 +68,7 @@ func TestAdapter_EmitsArtifactEventsBeforeDone(t *testing.T) {
 			}
 		},
 	}
-	events, usage, err := adapter.Handle(context.Background(), "/ws", "/skills", "u1", nil, hub, hooks, agent.ModelOverride{})
+	events, usage, err := adapter.Handle(context.Background(), "/ws", "u1", nil, hub, hooks, agent.ModelOverride{})
 	hub.Close()
 	require.NoError(t, err)
 	require.NotNil(t, usage)
@@ -117,7 +117,7 @@ func TestAdapter_FinalizeTurnExcludesSubAgentText(t *testing.T) {
 		return nil
 	}}
 
-	_, _, err := adapter.Handle(context.Background(), "/ws", "/skills", "u1", nil, hub, hooks, agent.ModelOverride{})
+	_, _, err := adapter.Handle(context.Background(), "/ws", "u1", nil, hub, hooks, agent.ModelOverride{})
 	require.NoError(t, err)
 	assert.Equal(t, "[top](blowball://workspace/top.md)", got)
 }
@@ -132,7 +132,7 @@ func TestAdapter_NoFinalizeHookIsZeroChange(t *testing.T) {
 	received := make(chan []stream.StreamEvent, 1)
 	go func() { received <- collectHub(hub) }()
 
-	events, _, err := adapter.Handle(context.Background(), "/ws", "/skills", "u1", nil, hub, TurnHooks{}, agent.ModelOverride{})
+	events, _, err := adapter.Handle(context.Background(), "/ws", "u1", nil, hub, TurnHooks{}, agent.ModelOverride{})
 	hub.Close()
 	require.NoError(t, err)
 
@@ -154,7 +154,7 @@ func TestAdapter_EmptyArtifactsStillTagDone(t *testing.T) {
 	go func() { received <- collectHub(hub) }()
 
 	hooks := TurnHooks{FinalizeTurn: func(ctx context.Context, assistantText string) []stream.ArtifactInfo { return nil }}
-	events, _, err := adapter.Handle(context.Background(), "/ws", "/skills", "u1", nil, hub, hooks, agent.ModelOverride{})
+	events, _, err := adapter.Handle(context.Background(), "/ws", "u1", nil, hub, hooks, agent.ModelOverride{})
 	hub.Close()
 	require.NoError(t, err)
 

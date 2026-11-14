@@ -123,13 +123,6 @@ const (
 	maxPageSize     = 5000
 )
 
-// getSessionMessagesResponse is the body for
-// GET /api/v1/sessions/:session_id/messages.
-type getSessionMessagesResponse struct {
-	Messages      []model.Message `json:"messages"`
-	NextPageToken string          `json:"next_page_token,omitempty"`
-}
-
 // sessionMessageItem is one history row with its tool interactions attached
 // (refactor-message-storage): assistant final rows join their tool_calls by
 // (trace_id, round_no); legacy event rows carry none.

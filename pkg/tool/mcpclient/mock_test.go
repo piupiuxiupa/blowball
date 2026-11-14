@@ -54,16 +54,4 @@ func mustMarshal(t any) json.RawMessage {
 	return b
 }
 
-// errTransport always returns errors.
-type errTransport struct{ err error }
-
-func (e *errTransport) Initialize(ctx context.Context, params InitializeParams) (*InitializeResult, error) {
-	return nil, e.err
-}
-func (e *errTransport) ListTools(ctx context.Context) (*ToolsListResult, error) { return nil, e.err }
-func (e *errTransport) CallTool(ctx context.Context, params ToolsCallParams) (*ToolsCallResult, error) {
-	return nil, e.err
-}
-func (e *errTransport) Close() error { return nil }
-
 var _ = errors.New

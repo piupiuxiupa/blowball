@@ -34,7 +34,6 @@ import (
 type stubOrchestrator struct {
 	mu            sync.Mutex
 	gotWorkspace  string
-	gotSkillsDir  string
 	gotMessages   []agent.Message
 	eventsToEmit  []stream.StreamEvent
 	returnErr     error
@@ -44,10 +43,9 @@ type stubOrchestrator struct {
 	interEventDelay time.Duration
 }
 
-func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
+func (s *stubOrchestrator) Handle(ctx context.Context, workspaceRoot, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	s.mu.Lock()
 	s.gotWorkspace = workspaceRoot
-	s.gotSkillsDir = skillsDir
 	s.gotMessages = messages
 	s.mu.Unlock()
 

@@ -89,10 +89,6 @@ func computeBackoff(policy config.AgentRetryConfig, attempt int) time.Duration {
 	return d
 }
 
-// errRetryBudgetExceeded is returned internally when the per-turn retry token
-// budget has been consumed; it stops further retries.
-var errRetryBudgetExceeded = errors.New("retry budget exceeded")
-
 // retryBudget bounds the total tokens spent on retries within one Confucius
 // turn (capability C; llm-round-retry widens the pool from "sub-agent dispatch
 // retries" to every retry of the turn — round-level and dispatch-level alike).

@@ -95,9 +95,6 @@ func RenderSystemPrompt(input RenderInput) (string, error) {
 		b.WriteString("\n\n")
 	}
 
-	// b.WriteString(renderGetTimePrompt())
-	// b.WriteString("\n\n")
-
 	builtIn, mcpByServer := classifyTools(input.Tools)
 
 	if len(builtIn) > 0 {
@@ -342,36 +339,6 @@ If you are UNSURE whether to generate a document, PREFER generating a Markdown d
 	`
 }
 
-func renderGetTimePrompt() string {
-	return `
-## Time and Timeliness Confirmation Rule
-
-When the user's query involves any of the following, you **MUST** obtain the current system time by executing a ` + "`bash`" + `command—**never** rely on your internal knowledge or guesswork:
-
-- Current time (e.g., "What time is it now?")
-- Current date (e.g., "What's the date today?", "What day is it?")
-- Timezone information (e.g., "What's the UTC time?")
-- Timeliness checks (e.g., "Is this task overdue?", "How much time is left?")
-- Any relative time calculation that requires "now" as a reference (e.g., "yesterday", "tomorrow", "in 3 hours")
-
-### Execution Method
-- Use the ` + "**`bash`**" + ` tool to run the "date" command.
-- Choose appropriate formatting, for example:
-- Default: "date"
-- Custom format: ` + "`date \"+%Y-%m-%d %H:%M:%S\"`" + `
-- Unix timestamp: ` + "`date +%s`" + `
-- Day of week: ` + "`date \"+%A\"`" + `
-- If the user does not specify a format, return a human‑readable full date‑time with timezone.
-
-### Using the Result
-- Parse the output of ` + "`date`" + ` as the actual current time, and use it to answer any timeliness questions.
-- If the command fails (e.g., system time unavailable), report the error to the user—**DO NOT** fabricate a time.
-
-### Examples
-- User: "How long until I get off work?" → First run ` + "`date`" + ` to get current time, then calculate the difference.
-- User: "What day is today?" → Run ` + "`date \"+%A\"`" + ` and return the weekday.
-	`
-}
 
 // ContextUsage contains the conservative token budget values shown to the model.
 type ContextUsage struct {

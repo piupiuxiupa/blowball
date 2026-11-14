@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -417,7 +416,6 @@ type treeBudget struct {
 	total    atomic.Int64
 	maxTotal int64
 	wait     time.Duration
-	waitMu   sync.Mutex
 }
 
 func newTreeBudget(depth, concurrent, total int, wait time.Duration) *treeBudget {

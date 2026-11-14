@@ -22,14 +22,6 @@ INSERT INTO attachments (id, user_id, session_id, filename, mime, size)
 VALUES (:id, :user_id, :session_id, :filename, :mime, :size)
 `
 
-// getAttachmentSQL resolves the ownership triple (id + user + session) in one
-// query — the send-time validation primitive. A miss returns (nil, nil).
-const getAttachmentSQL = `
-SELECT id, user_id, session_id, filename, mime, size, message_id, create_time
-FROM attachments
-WHERE id = ? AND user_id = ? AND session_id = ?
-`
-
 // InsertAttachment registers a in this view's attachment table.
 func (s *SessionStore) InsertAttachment(ctx context.Context, a model.Attachment) error {
 	query := `INSERT INTO ` + s.tables.Attachments + ` (id, user_id, session_id, filename, mime, size)

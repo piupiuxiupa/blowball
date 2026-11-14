@@ -187,7 +187,7 @@ func newQueueStub() *queueStubOrchestrator {
 	return &queueStubOrchestrator{release: make(chan struct{})}
 }
 
-func (s *queueStubOrchestrator) Handle(ctx context.Context, _, _, _ string, _ []agent.Message, hub *stream.Hub, _ TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
+func (s *queueStubOrchestrator) Handle(ctx context.Context, _, _ string, _ []agent.Message, hub *stream.Hub, _ TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	s.started.Add(1)
 	hub.Send(stream.AgentStartEvent(stream.AgentConfucius))
 	hub.Send(stream.TokenEvent(stream.AgentConfucius, "partial"))

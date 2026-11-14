@@ -157,15 +157,6 @@ func buildBwrapArgs(workspaceRoot, workspaceTmp, globalSkillsDir, toolsDir, cron
 	return args
 }
 
-// bwrapError describes why bubblewrap is unavailable.
-type bwrapError struct {
-	msg string
-}
-
-func (e *bwrapError) Error() string {
-	return e.msg
-}
-
 // existingDirs returns the subset of dirs that exist on the host (os.Stat
 // succeeds), preserving order and skipping empty entries. It is the stat guard
 // for the configurable system read-only baseline: a missing path (e.g. /lib64

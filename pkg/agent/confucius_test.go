@@ -743,16 +743,12 @@ func TestConfucius_ReasoningRequest(t *testing.T) {
 // force a mid-stream cancellation) and returns ctx.Err().
 type blockingClient struct {
 	unblock chan struct{}
-	once    sync.Once
 }
 
 func (b *blockingClient) StreamChat(ctx context.Context, _ LLMRequest, _ func(string) error, _ func(string) error) (LLMResponse, error) {
 	<-b.unblock
 	return LLMResponse{}, ctx.Err()
 }
-
-func (b *blockingClient) requestCount() int       { return 0 }
-func (b *blockingClient) lastRequest() LLMRequest { return LLMRequest{} }
 
 func eventTypes(events []stream.StreamEvent) []string {
 	out := make([]string, 0, len(events))

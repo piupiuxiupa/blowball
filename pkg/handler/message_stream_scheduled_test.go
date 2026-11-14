@@ -45,9 +45,9 @@ type scheduledOrchestrator struct {
 	snapshots agent.SubAgentSnapshotStore
 }
 
-func (s *scheduledOrchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
+func (s *scheduledOrchestrator) Handle(ctx context.Context, workspaceRoot, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	s.snapshots = agent.SubAgentSnapshotStoreFromContext(ctx)
-	return s.stubOrchestrator.Handle(ctx, workspaceRoot, skillsDir, userID, messages, hub, hooks, override)
+	return s.stubOrchestrator.Handle(ctx, workspaceRoot, userID, messages, hub, hooks, override)
 }
 
 type scheduledTitleClient struct {

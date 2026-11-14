@@ -17,9 +17,6 @@ type jsonFieldError struct {
 
 func (e *jsonFieldError) Error() string { return fmt.Sprintf("%s: %s", e.Path, e.Msg) }
 
-// errMissing is the sentinel for a missing required value.
-var errMissing = fmt.Errorf("missing required field")
-
 // validateArgs validates args (a JSON object as raw bytes) against schema (a
 // JSON Schema subset). It implements the subset that meaningfully catches
 // agent-constructed bad args before a round trip: object `required`, `type`

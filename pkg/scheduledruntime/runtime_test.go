@@ -23,9 +23,7 @@ import (
 type fakeReceiptStore struct {
 	mu       sync.Mutex
 	receipts map[string]*model.ScheduledExecutionReceipt
-	sessions map[string]model.Session
-	failMark bool
-}
+	sessions map[string]model.Session}
 
 func newFakeReceiptStore() *fakeReceiptStore {
 	return &fakeReceiptStore{
@@ -416,7 +414,6 @@ func (f *fakeResources) ValidatePinned(context.Context, string, string, uint64, 
 type fakeTurns struct {
 	mu            sync.Mutex
 	requests      []*turn.Request
-	beforeErr     error
 	terminal      turn.TerminalResult
 	callTerminal  bool
 	terminalCalls int

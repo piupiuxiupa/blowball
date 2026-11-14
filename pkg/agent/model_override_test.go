@@ -113,7 +113,7 @@ func runTurn(t *testing.T, o *Orchestrator, override ModelOverride) {
 			}
 		}
 	}()
-	err := o.Handle(ctx, t.TempDir(), t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, override)
+	err := o.Handle(ctx, t.TempDir(), "user-1", []Message{{Role: "user", Content: "hi"}}, hub, nil, override)
 	hub.Close()
 	<-consumerDone
 	require.NoError(t, err)

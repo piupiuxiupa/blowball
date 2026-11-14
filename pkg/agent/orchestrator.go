@@ -44,7 +44,7 @@ type AgentFactory interface {
 	// ctx is the turn context: construction-time log sites (per-user MCP
 	// config read failures) emit through logger.FromContext(ctx) so they carry
 	// the turn's session_id/trace_id (tool-call-log-correlation capability).
-	Build(ctx context.Context, workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error)
+	Build(ctx context.Context, workspaceRoot, userID string, override ModelOverride) (Agent, TurnCloser, error)
 }
 
 // TurnCloser releases per-turn resources created by AgentFactory.Build (the
@@ -70,7 +70,7 @@ type orchestratorFactory struct {
 }
 
 // Build implements AgentFactory.
-func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDir, userID string, override ModelOverride) (Agent, TurnCloser, error) {
+func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, userID string, override ModelOverride) (Agent, TurnCloser, error) {
 	// agent.skills must reference global skills only; user skills are discovered
 	// at runtime via luban tools.
 	if err := f.cfg.ValidateAgentSkills(userID, func(name, _ string) bool {
@@ -78,8 +78,6 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 	}); err != nil {
 		return nil, nil, fmt.Errorf("agent factory: validate skills: %w", err)
 	}
-
-	globalSkillsDir := f.skillLoader.GlobalDir()
 
 	// Per-turn model selection (per-request-model-selection, model-effort-v2):
 	// the handler ALWAYS resolves a turn config (model + wire family + effort
@@ -114,12 +112,12 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 		MaxTotalPerTurn: subagentCfg.MaxTotalPerTurn,
 		MaxDepth:        subagentCfg.MaxDepth,
 	}
-	rootReg, rootCfg, err := f.buildAgentRegistry(ctx, confuciusCfg, subagentLimits, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+	rootReg, rootCfg, err := f.buildAgentRegistry(ctx, confuciusCfg, subagentLimits, workspaceRoot, userID, mcpMgr)
 	if err != nil {
 		closeTurn(closer)
 		return nil, nil, fmt.Errorf("agent factory: build confucius registry: %w", err)
 	}
-	subReg, renderedSubCfg, err := f.buildAgentRegistry(ctx, subagentCfg.AgentConfig, nil, workspaceRoot, globalSkillsDir, skillsDir, userID, mcpMgr)
+	subReg, renderedSubCfg, err := f.buildAgentRegistry(ctx, subagentCfg.AgentConfig, nil, workspaceRoot, userID, mcpMgr)
 	if err != nil {
 		closeTurn(closer)
 		return nil, nil, fmt.Errorf("agent factory: build subagent registry: %w", err)
@@ -139,7 +137,7 @@ func (f *orchestratorFactory) Build(ctx context.Context, workspaceRoot, skillsDi
 		cfg.MaxRounds = spec.MaxRounds
 		cfg.OutputSchema = spec.OutputSchema
 		cfg.Retry = spec.Retry
-		rendered, err := f.renderSystemPrompt(ctx, cfg, nil, workspaceRoot, globalSkillsDir, skillsDir, userID, spec.ToolRegistry, mcpMgr)
+		rendered, err := f.renderSystemPrompt(ctx, cfg, nil, workspaceRoot, userID, spec.ToolRegistry, mcpMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +197,7 @@ func unionToolNames(groups ...[]string) []string {
 // allowed by cfg.MCP, luban skill tools when they are configured, and the
 // per-user mcp_* tools when the agent lists one and a turn-scoped manager is
 // available.
-func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config.AgentConfig, subagentLimits *prompt.SubagentDispatchLimits, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
+func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config.AgentConfig, subagentLimits *prompt.SubagentDispatchLimits, workspaceRoot, userID string, mcpMgr *mcp.Manager) (*tool.Registry, config.AgentConfig, error) {
 	mcpToolNames := f.allowedMCPTools(cfg.MCP)
 	fullToolNames := append([]string(nil), cfg.Tools...)
 	fullToolNames = append(fullToolNames, f.scheduledTaskTools...)
@@ -249,7 +247,7 @@ func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config
 		}
 	}
 
-	rendered, err := f.renderSystemPrompt(ctx, cfg, subagentLimits, workspaceRoot, globalSkillsDir, userSkillsDir, userID, reg, mcpMgr)
+	rendered, err := f.renderSystemPrompt(ctx, cfg, subagentLimits, workspaceRoot, userID, reg, mcpMgr)
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -304,7 +302,7 @@ func isLubanTool(name string) bool {
 }
 
 // renderSystemPrompt builds the complete system prompt for an agent.
-func (f *orchestratorFactory) renderSystemPrompt(ctx context.Context, cfg config.AgentConfig, subagentLimits *prompt.SubagentDispatchLimits, workspaceRoot, globalSkillsDir, userSkillsDir, userID string, reg *tool.Registry, mcpMgr *mcp.Manager) (string, error) {
+func (f *orchestratorFactory) renderSystemPrompt(ctx context.Context, cfg config.AgentConfig, subagentLimits *prompt.SubagentDispatchLimits, workspaceRoot, userID string, reg *tool.Registry, mcpMgr *mcp.Manager) (string, error) {
 	tools := f.collectTools(cfg)
 	// Per-user mcp_* tools are registered per-turn (not in the base registry),
 	// so surface them from the per-agent registry so the prompt advertises the
@@ -473,19 +471,19 @@ func (o *Orchestrator) EnableScheduledTaskTools(names []string) {
 // HandleWithBudget installs the optional per-turn request estimator alongside
 // the round hook. The original Handle entry point remains for callers that do
 // not need budgeting (including tests and pre-compaction paths).
-func (o *Orchestrator) HandleWithBudget(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, override ModelOverride) error {
-	return o.handleWithSeams(ctx, workspaceRoot, skillsDir, userID, messages, hub, roundHook, estimator, nil, override)
+func (o *Orchestrator) HandleWithBudget(ctx context.Context, workspaceRoot, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, override ModelOverride) error {
+	return o.handleWithSeams(ctx, workspaceRoot, userID, messages, hub, roundHook, estimator, nil, override)
 }
 
 // HandleWithSeams installs both the next-request estimator and the expanded
 // budgeted hook, preserving Handle's original signature for unaffected callers.
-func (o *Orchestrator) HandleWithSeams(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, budgetedHook BudgetedRoundHook, override ModelOverride) error {
-	return o.handleWithSeams(ctx, workspaceRoot, skillsDir, userID, messages, hub, roundHook, estimator, budgetedHook, override)
+func (o *Orchestrator) HandleWithSeams(ctx context.Context, workspaceRoot, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, budgetedHook BudgetedRoundHook, override ModelOverride) error {
+	return o.handleWithSeams(ctx, workspaceRoot, userID, messages, hub, roundHook, estimator, budgetedHook, override)
 }
 
-func (o *Orchestrator) handleWithSeams(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, budgetedHook BudgetedRoundHook, override ModelOverride) error {
+func (o *Orchestrator) handleWithSeams(ctx context.Context, workspaceRoot, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, estimator RoundRequestEstimator, budgetedHook BudgetedRoundHook, override ModelOverride) error {
 	ctx = skill.WithUserID(ctx, userID)
-	confucius, closer, err := o.factory.Build(ctx, workspaceRoot, skillsDir, userID, override)
+	confucius, closer, err := o.factory.Build(ctx, workspaceRoot, userID, override)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}
@@ -583,9 +581,9 @@ type WorkspaceRootForUser = func(userID string) string
 // workspaceRoot is the absolute path to the requesting user's workspace
 // directory (data/{user_uuid}/workspace). userID identifies the caller so the
 // factory can load user-specific skills and validate skill permissions.
-func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, override ModelOverride) error {
+func (o *Orchestrator) Handle(ctx context.Context, workspaceRoot, userID string, messages []Message, hub *stream.Hub, roundHook RoundHook, override ModelOverride) error {
 	ctx = skill.WithUserID(ctx, userID)
-	confucius, closer, err := o.factory.Build(ctx, workspaceRoot, skillsDir, userID, override)
+	confucius, closer, err := o.factory.Build(ctx, workspaceRoot, userID, override)
 	if err != nil {
 		return fmt.Errorf("orchestrator: build agents: %w", err)
 	}

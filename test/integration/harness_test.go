@@ -572,14 +572,6 @@ func (m *memoryMySQL) ListToolCalls(_ context.Context, sessionID string) ([]mode
 	return out, nil
 }
 
-// insertAttemptCount returns the total number of rows handed to AppendMessages
-// (including ignored duplicates). Test helper.
-func (m *memoryMySQL) insertAttemptCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.insertAttempts
-}
-
 func (m *memoryMySQL) ListMessages(_ context.Context, sessionID string) ([]model.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1340,14 +1332,6 @@ func newTestEnvWithConfig(t *testing.T, llm agent.LLMClient, cfg *config.Config)
 		turnRunH:  turnRunH,
 		sessH:     sessH,
 	}
-}
-
-// mustMarshal JSON-encodes v, failing the test on error.
-func mustMarshal(t *testing.T, v any) []byte {
-	t.Helper()
-	raw, err := json.Marshal(v)
-	require.NoError(t, err)
-	return raw
 }
 
 // authToken returns a Bearer JWT for the default test user that the real auth

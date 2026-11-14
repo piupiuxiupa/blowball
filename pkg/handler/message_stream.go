@@ -390,40 +390,6 @@ func (h *MessageStreamHandler) rollbackNewAttachmentClaims(ctx context.Context, 
 	}
 }
 
-// loadCurrentTurnImages reads the live turn's attachment files into in-memory
-// payloads for the orchestrator (add-image-attachments). Reading happens once
-// per turn on the handler goroutine; the OpenAI client re-encodes the bytes
-// per call (deterministic for identical bytes). A file that cannot be read —
-// deleted or corrupted underneath the registry — degrades to the same
-// deterministic placeholder history uses, with an ERROR log: the turn must
-// not fail because an old upload vanished.
-func (h *MessageStreamHandler) loadCurrentTurnImages(
-	ctx context.Context, userID, sessionID, content string, refs []model.MessageAttachmentRef,
-) ([]agent.MessageImage, string) {
-	images := make([]agent.MessageImage, 0, len(refs))
-	var missing []string
-	for _, ref := range refs {
-		ext, ok := attachmentMimeExt[ref.MIME]
-		if !ok {
-			missing = append(missing, ref.Filename)
-			continue
-		}
-		path := filepath.Join(h.dataDir, userID, "attachments", sessionID, ref.ID+ext)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			logger.FromContext(ctx).Error("current-turn attachment read failed; degrading to placeholder",
-				zap.String("op", "handler.send_message"),
-				zap.String("attachment_id", ref.ID),
-				zap.String("path", path),
-				zap.Error(err))
-			missing = append(missing, ref.Filename)
-			continue
-		}
-		images = append(images, agent.MessageImage{AttachmentID: ref.ID, Filename: ref.Filename, MIMEType: ref.MIME, Data: data})
-	}
-	return images, renderAttachmentPlaceholders(content, missing)
-}
-
 // sendMessageRequest is the JSON body for POST /api/v1/sessions/:session_id/messages.
 type sendMessageRequest struct {
 	Content string `json:"content"`
@@ -455,31 +421,6 @@ type sendMessageRequest struct {
 // is deliberately a constant, not config — a backstop nobody should tune (the
 // semantic cap lives in messages.max_input_tokens).
 const maxMessageBodyBytes = 1 << 20
-
-// Turn-end persistence retry bounds (harden-turn-persistence D4). Deliberately
-// constants, not config — they are reliability backstops nobody should tune at
-// runtime (mirroring internal/msgflush's errorBackoff/finalDrainTimeout). The
-// budget bounds how long a dual-tier outage may delay the session claim
-// release; attempts × backoff normally stays far below it.
-const (
-	// turnPersistBudget is the wall-clock ceiling for the turn-end message
-	// batch, including retries. After it the batch is declared not durable
-	// (ERROR) and Finalize proceeds so the session cannot lock up forever.
-	turnPersistBudget = 30 * time.Second
-	// turnPersistAttempts is the maximum number of SaveMessagesBatch calls
-	// for one terminal batch; deterministic client_msg_ids make redelivery
-	// idempotent.
-	turnPersistAttempts = 3
-	// turnPersistRetryBackoff parks between attempts so a dead dependency is
-	// retried at a calm pace instead of hot-looping.
-	turnPersistRetryBackoff = 1 * time.Second
-)
-
-// incrementalPersistEvery is the cadence of the mid-turn round persister
-// (refactor-message-storage): a polling window that picks up newly closed
-// rounds. A var (not const) so tests can shrink it; production never touches
-// it.
-var incrementalPersistEvery = 1 * time.Second
 
 // SendMessage handles POST /api/v1/sessions/:session_id/messages.
 //
@@ -1185,69 +1126,3 @@ func startPersistHeartbeat(saveCtx context.Context, store run.Store, runID, sess
 	}
 }
 
-// startIncrementalPersister arms the mid-turn round persister
-// (refactor-message-storage): every incrementalPersistEvery it snapshots the
-// turn's collected event stream through the TurnEventTap and persists CLOSED
-// ROUNDS as final batches — a round closes when the next round's first token
-// arrives, so the trailing (still-streaming) round never lands half-baked.
-// The persisted range continues the shared flushed cursor: identical round
-// ordinals, identical deterministic client_msg_ids as the terminal view, and
-// strictly non-overlapping ranges — the msgs:{sid} read cache has no dedup.
-//
-// Failure policy: best-effort. A failed SaveMessagesBatch logs a WARN and does
-// NOT advance the cursor; the next tick retries the same range and the
-// terminal batch is the completeness backstop (it runs strictly after stop()).
-// The persister therefore never blocks or fails the turn.
-func (h *MessageStreamHandler) startIncrementalPersister(
-	saveCtx context.Context,
-	tap *TurnEventTap,
-	persist turnPersistInfo,
-	flushed *turnFlushState,
-) (stop func()) {
-	stopCh := make(chan struct{})
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		ticker := time.NewTicker(incrementalPersistEvery)
-		defer ticker.Stop()
-		log := logger.FromContext(saveCtx).With(
-			zap.String("op", "handler.incremental_persist"),
-			zap.String("run_id", persist.traceID),
-		)
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				// Bound the snapshot wait: a wedged collection goroutine must
-				// never wedge the persister (and stop()) along with it.
-				snapCtx, snapCancel := context.WithTimeout(saveCtx, incrementalPersistEvery)
-				events := tap.Snapshot(snapCtx)
-				snapCancel()
-				if events == nil {
-					continue // turn over (tap closed) or ctx done
-				}
-				merged := MergeEvents(events)
-				flushed.persistMu.Lock()
-				batch, consumed := persist.buildRoundFinalBatch(merged, flushed.count(), flushed.userPersisted(),
-					time.Now().UTC(), roundRenderOptions{})
-				if len(batch.msgs) == 0 && len(batch.calls) == 0 {
-					flushed.persistMu.Unlock()
-					continue
-				}
-				if err := h.sessSvc.SaveFinalMessages(saveCtx, persist.userID, batch.msgs, batch.calls); err != nil {
-					flushed.persistMu.Unlock()
-					log.Warn("round persist failed; will retry next tick",
-						zap.Int("rows", len(batch.msgs)), zap.Error(err))
-					continue
-				}
-				flushed.mark(consumed)
-				flushed.persistMu.Unlock()
-			}
-		}
-	}()
-	return func() {
-		close(stopCh)
-		<-doneCh
-	}
-}

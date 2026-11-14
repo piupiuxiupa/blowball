@@ -36,9 +36,7 @@ type Service struct {
 	schedulerv1.UnimplementedSchedulerControlServiceServer
 	users     UserLookup
 	resources ResourceService
-	selection modelselect.Config
-	limits    resource.Limits
-}
+	selection modelselect.Config}
 
 // New wires the control service.
 func New(users UserLookup, resources ResourceService, selection modelselect.Config) *Service {

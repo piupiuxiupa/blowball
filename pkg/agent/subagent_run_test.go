@@ -54,11 +54,6 @@ type concurrentSubAgent struct {
 	runCalls     int
 }
 
-const (
-	concurrentExecutorTask = "collect from source A"
-	concurrentWaiterTask   = "collect from source B"
-)
-
 func (a *concurrentSubAgent) Name() string                         { return a.name }
 func (a *concurrentSubAgent) SystemPrompt() string                 { return "" }
 func (a *concurrentSubAgent) RetryPolicy() config.AgentRetryConfig { return a.policy }

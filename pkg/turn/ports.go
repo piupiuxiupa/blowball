@@ -43,7 +43,7 @@ type OrchestratorRunner interface {
 	// resolves every request against the mandatory catalog, and a
 	// parameter-less request resolves to the default entry + deployment
 	// default effort.
-	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) (events []stream.StreamEvent, usage map[string]any, err error)
+	Handle(ctx context.Context, workspaceRoot, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) (events []stream.StreamEvent, usage map[string]any, err error)
 }
 
 // TurnHooks bundles the per-turn optional seams handed to OrchestratorRunner.
@@ -175,7 +175,7 @@ func (t *TurnEventTap) Requests() chan chan []stream.StreamEvent { return t.requ
 // the (*agent.Orchestrator).Handle signature. Tests substitute a fake that
 // writes canned events instead of driving the real agent loop.
 type InnerRunner interface {
-	Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, override agent.ModelOverride) error
+	Handle(ctx context.Context, workspaceRoot, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, override agent.ModelOverride) error
 }
 
 type innerRunner = InnerRunner
@@ -184,11 +184,11 @@ type innerRunner = InnerRunner
 // request estimator. Keeping it separate from innerRunner preserves every
 // existing test double and pre-budgeting caller.
 type budgetedInnerRunner interface {
-	HandleWithBudget(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, override agent.ModelOverride) error
+	HandleWithBudget(ctx context.Context, workspaceRoot, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, override agent.ModelOverride) error
 }
 
 type budgetedHookRunner interface {
-	HandleWithSeams(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, budgetedHook agent.BudgetedRoundHook, override agent.ModelOverride) error
+	HandleWithSeams(ctx context.Context, workspaceRoot, userID string, messages []agent.Message, hub *stream.Hub, roundHook agent.RoundHook, estimator agent.RoundRequestEstimator, budgetedHook agent.BudgetedRoundHook, override agent.ModelOverride) error
 }
 
 type orchestratorAdapter struct {
@@ -207,7 +207,7 @@ func NewOrchestratorAdapterFromRunner(inner InnerRunner) OrchestratorRunner {
 }
 
 // Handle implements OrchestratorRunner.
-func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsDir, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
+func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, userID string, messages []agent.Message, hub *stream.Hub, hooks TurnHooks, override agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	// Tap side: drain innerHub.Events() in a goroutine, forwarding to the
 	// caller's hub, accumulating the raw event stream, and capturing the done
 	// event's usage object (without adding the done event to the persisted
@@ -312,14 +312,14 @@ func (a *orchestratorAdapter) Handle(ctx context.Context, workspaceRoot, skillsD
 	var err error
 	if hooks.Estimate != nil {
 		if budgeted, ok := a.inner.(budgetedHookRunner); ok && hooks.BudgetedRound != nil {
-			err = budgeted.HandleWithSeams(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, hooks.Estimate, hooks.BudgetedRound, override)
+			err = budgeted.HandleWithSeams(ctx, workspaceRoot, userID, messages, innerHub, hooks.Round, hooks.Estimate, hooks.BudgetedRound, override)
 		} else if budgeted, ok := a.inner.(budgetedInnerRunner); ok {
-			err = budgeted.HandleWithBudget(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, hooks.Estimate, override)
+			err = budgeted.HandleWithBudget(ctx, workspaceRoot, userID, messages, innerHub, hooks.Round, hooks.Estimate, override)
 		} else {
 			err = fmt.Errorf("handler: orchestrator does not support request budgeting")
 		}
 	} else {
-		err = a.inner.Handle(ctx, workspaceRoot, skillsDir, userID, messages, innerHub, hooks.Round, override)
+		err = a.inner.Handle(ctx, workspaceRoot, userID, messages, innerHub, hooks.Round, override)
 	}
 	innerHub.Close()
 	res := <-eventsCh

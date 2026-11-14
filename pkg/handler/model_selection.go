@@ -48,7 +48,3 @@ func resolveModelSelection(msc ModelSelectionConfig, model, effort string) (mode
 		LengthContinue:      sel.LengthContinue,
 	}, code, msg
 }
-
-func findEntry(catalog []config.ModelCatalogEntry, name string) (config.ModelCatalogEntry, bool) {
-	return modelselect.FindEntry(catalog, name)
-}

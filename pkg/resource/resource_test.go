@@ -255,10 +255,10 @@ func TestBuildStagingRejectsSymlinkAndLimits(t *testing.T) {
 
 	require.NoError(t, os.Remove(filepath.Join(draft, "link.txt")))
 	limits := DefaultLimits()
-	limits.MaxFiles = 0 // zero means "no file allowed" for the limit check
+	limits.MaxFiles = 0
 	_, err = BuildStaging(draft, filepath.Join(dir, "stage2"), 1, limits)
-	// BuildStaging treats a non-positive MaxFiles as unbounded by contract; the
-	// service always passes resolved positive limits. Verify the explicit cap.
+	assert.ErrorIs(t, err, ErrLimit, "zero MaxFiles means no file allowed")
+	// The service always passes resolved positive limits. Verify the explicit cap.
 	limits.MaxFiles = 1
 	require.NoError(t, os.WriteFile(filepath.Join(draft, "second.txt"), []byte("y"), 0o644))
 	_, err = BuildStaging(draft, filepath.Join(dir, "stage3"), 1, limits)

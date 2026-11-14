@@ -409,7 +409,6 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 	regRun := e.runs.Registry.Register(tid, turnCancel)
 
 	workspaceRoot := filepath.Join(e.dataDir, userID, "workspace")
-	skillsDir := filepath.Join(e.dataDir, userID, "skills")
 
 	// Turn-artifacts capability: the turn-end finalization closure. The
 	// adapter invokes it with this turn's top-level assistant text just
@@ -597,7 +596,7 @@ func (e *Executor) Start(ctx context.Context, req *Request) (*Started, error) {
 		// WaitAll) happens while the entry still resolves.
 		defer e.runs.Registry.Unregister(tid)
 		defer regRun.Finish()
-		events, usage, err := e.orch.Handle(turnCtx, workspaceRoot, skillsDir, userID, messages, hub, hooks, sel.Override())
+		events, usage, err := e.orch.Handle(turnCtx, workspaceRoot, userID, messages, hub, hooks, sel.Override())
 		hub.Close()
 		// Wait for the drainer to flush the final events into the log BEFORE
 		// flipping the run terminal: the status write must never precede the

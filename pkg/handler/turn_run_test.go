@@ -43,7 +43,7 @@ func newBlockingStub() *blockingStubOrchestrator {
 	return &blockingStubOrchestrator{release: make(chan struct{}), done: make(chan struct{})}
 }
 
-func (s *blockingStubOrchestrator) Handle(ctx context.Context, _, _, _ string, _ []agent.Message, hub *stream.Hub, _ TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
+func (s *blockingStubOrchestrator) Handle(ctx context.Context, _, _ string, _ []agent.Message, hub *stream.Hub, _ TurnHooks, _ agent.ModelOverride) ([]stream.StreamEvent, map[string]any, error) {
 	defer close(s.done)
 	hub.Send(stream.AgentStartEvent(stream.AgentConfucius))
 	hub.Send(stream.TokenEvent(stream.AgentConfucius, "partial"))

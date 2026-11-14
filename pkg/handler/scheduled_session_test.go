@@ -192,6 +192,4 @@ func TestScheduledResourceHandlerErrors(t *testing.T) {
 	engine = resourceEnv(true, fakeResources{err: resource.ErrUnavailable})
 	w = scheduledTaskRequest(engine, http.MethodGet, "/api/v1/scheduled-tasks/task-1/resources", "")
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
-
-	engine = resourceEnv(true, fakeResources{})
 }
