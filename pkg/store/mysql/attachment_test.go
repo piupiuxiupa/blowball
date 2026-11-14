@@ -46,17 +46,13 @@ func setupAttachmentStore(t *testing.T) (*Store, func()) {
 	require.NoError(t, err)
 	return store, cleanup
 }
-
-// strptr returns a *string for test fixtures (nullable session_id).
-func strptr(s string) *string { return &s }
-
 func TestAttachment_InsertAndGet_OwnershipTriple(t *testing.T) {
 	store, cleanup := setupAttachmentStore(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	a := model.Attachment{
-		ID: "01953c5e-7f9e-7cc8-8db5-2f4a5b6c7d8e", UserID: "u-1", SessionID: strptr("s-1"),
+		ID: "01953c5e-7f9e-7cc8-8db5-2f4a5b6c7d8e", UserID: "u-1", SessionID: new("s-1"),
 		Filename: "shot.png", MIME: "image/png", Size: 1234,
 	}
 	require.NoError(t, store.InsertAttachment(ctx, a))
@@ -167,7 +163,7 @@ func TestAttachment_StagedLifecycle(t *testing.T) {
 
 	// A claimed row must survive DeleteStagedAttachment (claim-vs-sweep race).
 	bound := model.Attachment{
-		ID: "01953c5e-8000-7000-8000-000000000002", UserID: "u-1", SessionID: strptr("s-9"),
+		ID: "01953c5e-8000-7000-8000-000000000002", UserID: "u-1", SessionID: new("s-9"),
 		Filename: "bound.png", MIME: "image/png", Size: 50,
 	}
 	require.NoError(t, store.InsertAttachment(ctx, bound))
@@ -185,7 +181,7 @@ func TestInsertStagedAttachment_ConcurrentQuota(t *testing.T) {
 	ctx := context.Background()
 	const userID = "u-quota"
 
-	for i := 0; i < 19; i++ {
+	for i := range 19 {
 		require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
 			ID:       fmt.Sprintf("existing-%02d", i),
 			UserID:   userID,
@@ -202,7 +198,7 @@ func TestInsertStagedAttachment_ConcurrentQuota(t *testing.T) {
 	start := make(chan struct{})
 	results := make(chan result, 12)
 	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -240,7 +236,7 @@ func TestRestoreStagedAttachment_RecoveryIsNeverQuotaRejected(t *testing.T) {
 	ctx := context.Background()
 	const userID = "u-restore-full"
 
-	for i := 0; i < model.MaxStagedAttachmentsPerUser; i++ {
+	for i := range model.MaxStagedAttachmentsPerUser {
 		require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
 			ID: fmt.Sprintf("restore-full-%02d", i), UserID: userID,
 			Filename: "staged.png", MIME: "image/png", Size: 1,
@@ -277,14 +273,14 @@ func TestStagedQuotaLock_CoversUnclaimAndRestore(t *testing.T) {
 
 	t.Run("unclaim", func(t *testing.T) {
 		const userID = "u-unclaim"
-		for i := 0; i < 19; i++ {
+		for i := range 19 {
 			require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
 				ID: fmt.Sprintf("unclaim-%02d", i), UserID: userID,
 				Filename: "x.png", MIME: "image/png", Size: 1,
 			}))
 		}
 		bound := model.Attachment{
-			ID: "unclaim-bound", UserID: userID, SessionID: strptr("s-1"),
+			ID: "unclaim-bound", UserID: userID, SessionID: new("s-1"),
 			Filename: "bound.png", MIME: "image/png", Size: 1,
 		}
 		require.NoError(t, store.InsertAttachment(ctx, bound))
@@ -323,7 +319,7 @@ func TestStagedQuotaLock_CoversUnclaimAndRestore(t *testing.T) {
 
 	t.Run("restore", func(t *testing.T) {
 		const userID = "u-restore"
-		for i := 0; i < 19; i++ {
+		for i := range 19 {
 			require.NoError(t, store.InsertAttachment(ctx, model.Attachment{
 				ID: fmt.Sprintf("restore-%02d", i), UserID: userID,
 				Filename: "x.png", MIME: "image/png", Size: 1,

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1804,12 +1805,7 @@ func sliceEq(a, b []string) bool {
 
 // containsStr reports whether s contains v.
 func containsStr(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s, v)
 }
 
 func TestLoad_MessagesDefaults(t *testing.T) {

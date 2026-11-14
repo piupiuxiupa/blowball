@@ -128,7 +128,7 @@ func TestRenderToolActivity_recompactionMergedLedgerIsBounded(t *testing.T) {
 	// only the bounded aggregate/examples are rendered.
 	var calls []agent.ToolCall
 	results := map[string]string{}
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		id := "call-" + string(rune('A'+i%26))
 		calls = append(calls, agent.ToolCall{ID: id, Function: agent.ToolCallFunction{Name: "grep"}})
 		results[id] = `{"status":0,"result":{"path":"a.go","total":1}}`

@@ -187,7 +187,7 @@ func TestRecall_TokenBudget(t *testing.T) {
 		"score":    0.9,
 	}
 	many := make([]map[string]any, 0, 5)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		many = append(many, map[string]any{
 			"uri":      fmt.Sprintf("viking://user/alice/memories/m%d", i),
 			"abstract": strings.Repeat("次级条目", 100), // 400 tokens each after entry cap

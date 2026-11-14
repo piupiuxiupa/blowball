@@ -354,7 +354,6 @@ func (s *SubAgent) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub 
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tc := range calls {
-		tc := tc
 		if _, exists := eventFailed[tc.ID]; exists {
 			continue // its call event could not be sent; do not execute it
 		}

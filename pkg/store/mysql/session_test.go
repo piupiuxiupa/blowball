@@ -160,7 +160,7 @@ func seedSession(t *testing.T, s *Store, sessionID, userID string, title string,
 	}
 	ids := make([]int64, 0, msgCount)
 	base := time.Unix(1_700_000_000, 0).UTC()
-	for i := 0; i < msgCount; i++ {
+	for i := range msgCount {
 		res, err := s.db.ExecContext(ctx,
 			"INSERT INTO messages (session_id, msg_time, agent, msg_index, role, event_type, content, trace_id) VALUES (?, ?, 'user', ?, 'user', 'message', ?, 'trace-seed')",
 			sessionID, base.Add(time.Duration(i)*time.Second), i, "body")

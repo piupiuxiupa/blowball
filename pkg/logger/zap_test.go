@@ -255,7 +255,7 @@ func TestInit_RotationTriggersOnSize(t *testing.T) {
 	// First write establishes a non-zero file size; subsequent writes that
 	// cross 1 MiB force lumberjack to rotate.
 	blob := strings.Repeat("a", 600*1024) // 600 KiB per line
-	for i := 0; i < 4; i++ {              // 4 * 600 KiB > 1 MiB
+	for range 4 {                         // 4 * 600 KiB > 1 MiB
 		l.Info("fill", zap.String("blob", blob))
 	}
 	_ = l.Sync()
@@ -377,7 +377,7 @@ func TestInit_FileSinkFailsFastOnUnwritableDir(t *testing.T) {
 // decoding of a possibly multi-line log file.
 func jsonLinesFirst(t *testing.T, data []byte) []byte {
 	t.Helper()
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.TrimSpace(line) != "" {
 			return []byte(line)
 		}

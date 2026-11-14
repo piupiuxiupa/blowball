@@ -10,10 +10,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lush/blowball/pkg/agent"
-	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/logger"
-	"github.com/lush/blowball/pkg/trace"
+	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/tokens"
+	"github.com/lush/blowball/pkg/trace"
 )
 
 // Fixed context-compaction parameters (context-compaction capability). The
@@ -439,10 +439,8 @@ func (s *CompactionService) summarize(ctx context.Context, log *zap.Logger, prio
 		MaxCompletionTokens: compactionSummaryMaxTokens,
 	}
 
-	budget := inputBudget
-	if budget <= 0 {
-		budget = 0 // unlimited / legacy
-	}
+	// inputBudget <= 0 means unlimited / legacy.
+	budget := max(inputBudget, 0)
 	content, usage, err := s.summarizeChunked(ctx, log, agentCtx, req, budget)
 	if err != nil {
 		log.Warn("compaction summary llm call failed; continuing with original context", zap.Error(err))
@@ -486,10 +484,7 @@ func (s *CompactionService) summarizeChunked(ctx context.Context, log *zap.Logge
 		if chunkRunes <= 0 {
 			return "", total, fmt.Errorf("summary input budget leaves no room for a transcript chunk")
 		}
-		end := start + chunkRunes
-		if end > len(runes) {
-			end = len(runes)
-		}
+		end := min(start+chunkRunes, len(runes))
 		part := string(runes[start:end])
 		prompt := part
 		if accumulated != "" {
@@ -666,10 +661,7 @@ type compactionTailPlan struct {
 // counted at full size when a budget is present.
 func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudget int) compactionTailPlan {
 	if inputBudget <= 0 {
-		start := len(msgs) - legacyLimit
-		if start < 0 {
-			start = 0
-		}
+		start := max(len(msgs)-legacyLimit, 0)
 		start = alignTailToUnitStart(msgs, scopeStart, start)
 		if start <= scopeStart {
 			return compactionTailPlan{
@@ -684,10 +676,7 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 	// Keep the tail bounded, but do not let a tiny synthetic window collapse
 	// the compressible middle to one message. Production windows are far
 	// larger; this floor also preserves the legacy small-window test shape.
-	budget := inputBudget / 4
-	if budget < 512 {
-		budget = 512
-	}
+	budget := max(inputBudget/4, 512)
 	if inputBudget <= 1000 {
 		// The legacy test/fallback window uses the five-message selector; the
 		// budget planner is enforced for production-sized budgets.
@@ -696,10 +685,7 @@ func planCompactionTail(msgs []agent.Message, scopeStart, legacyLimit, inputBudg
 	// The legacy tail is a MINIMUM retention window for real compaction:
 	// never summarize messages that would have remained under the old
 	// five-message policy. The budget may retain more, not fewer.
-	legacyStart := len(msgs) - legacyLimit
-	if legacyStart < scopeStart {
-		legacyStart = scopeStart
-	}
+	legacyStart := max(len(msgs)-legacyLimit, scopeStart)
 	if legacyStart >= len(msgs) {
 		return compactionTailPlan{TailStart: len(msgs), Strategy: "token_budgeted", Reason: "no_compressible_middle"}
 	}
@@ -855,13 +841,7 @@ func buildCompactedProjection(anchor agent.Message, msgs []agent.Message, tailSt
 // model-facing excerpt and a stable retrieval note.
 func boundedCompactionAnchor(anchor agent.Message, inputBudget int) (agent.Message, bool) {
 	fullTokens := agent.EstimateRenderedRequest("", []agent.Message{anchor}, nil).Tokens
-	budget := inputBudget / 8
-	if budget > compactionAnchorMaxTokens {
-		budget = compactionAnchorMaxTokens
-	}
-	if budget < 64 {
-		budget = 64
-	}
+	budget := max(min(inputBudget/8, compactionAnchorMaxTokens), 64)
 	if fullTokens <= budget {
 		return anchor, false
 	}
@@ -870,10 +850,7 @@ func boundedCompactionAnchor(anchor agent.Message, inputBudget int) (agent.Messa
 		fullTokens,
 	)
 	noticeTokens := tokens.Estimate(notice)
-	bodyBudget := budget - noticeTokens
-	if bodyBudget < 16 {
-		bodyBudget = 16
-	}
+	bodyBudget := max(budget-noticeTokens, 16)
 
 	projection := anchor
 	projection.Images = nil
@@ -924,10 +901,7 @@ func boundedRunesToTokens(s string, maxTokens int) string {
 		return s
 	}
 	runes := []rune(s)
-	keep := len(runes)
-	if maxTokens*2 < keep {
-		keep = maxTokens * 2
-	}
+	keep := min(maxTokens*2, len(runes))
 	for keep > 2 {
 		head := keep * 2 / 3
 		tail := keep - head

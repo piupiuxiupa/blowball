@@ -461,21 +461,21 @@ func dispatchWorkspaceFile(deps RouteDeps) gin.HandlerFunc {
 			deps.WorkspaceTokenDownload(c)
 			return
 		}
-		if strings.HasSuffix(raw, contentRouteSuffix) {
-			trimmed := strings.TrimSuffix(raw, contentRouteSuffix)
+		if before, ok := strings.CutSuffix(raw, contentRouteSuffix); ok {
+			trimmed := before
 			// Re-set the param so WorkspaceContent reads the trimmed value.
 			c.Params = stripContentSuffix(c.Params, trimmed)
 			deps.WorkspaceContent(c)
 			return
 		}
-		if strings.HasSuffix(raw, onlyOfficeConfigSuffix) {
-			trimmed := strings.TrimSuffix(raw, onlyOfficeConfigSuffix)
+		if before, ok := strings.CutSuffix(raw, onlyOfficeConfigSuffix); ok {
+			trimmed := before
 			c.Params = setPathParam(c.Params, trimmed)
 			deps.WorkspaceOnlyOfficeConfig(c)
 			return
 		}
-		if strings.HasSuffix(raw, onlyOfficeVersionConfigSuffix) {
-			trimmed := strings.TrimSuffix(raw, onlyOfficeVersionConfigSuffix)
+		if before, ok := strings.CutSuffix(raw, onlyOfficeVersionConfigSuffix); ok {
+			trimmed := before
 			c.Params = setPathParam(c.Params, trimmed)
 			deps.WorkspaceOnlyOfficeVersionConfig(c)
 			return
@@ -494,8 +494,8 @@ func dispatchWorkspaceFile(deps RouteDeps) gin.HandlerFunc {
 func dispatchWorkspacePut(deps RouteDeps) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := strings.TrimPrefix(c.Param("path"), "/")
-		if strings.HasSuffix(raw, contentRouteSuffix) {
-			trimmed := strings.TrimSuffix(raw, contentRouteSuffix)
+		if before, ok := strings.CutSuffix(raw, contentRouteSuffix); ok {
+			trimmed := before
 			// Re-set the param so WriteContent reads the trimmed value, exactly
 			// as the GET side does for WorkspaceContent.
 			c.Params = stripContentSuffix(c.Params, trimmed)

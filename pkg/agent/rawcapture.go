@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -13,8 +14,8 @@ import (
 
 	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/reqctx"
-	"github.com/lush/blowball/pkg/trace"
 	"github.com/lush/blowball/pkg/tool/skill"
+	"github.com/lush/blowball/pkg/trace"
 )
 
 // captureTextPart is the text content part inside a redacted user message.
@@ -75,8 +76,8 @@ func captureRequestJSON(req LLMRequest, params openai.ChatCompletionNewParams) (
 	// in params (withVisionImage appends one when no user message exists).
 	visionTarget := -1
 	if req.vision != nil {
-		for i := len(params.Messages) - 1; i >= 0; i-- {
-			if params.Messages[i].OfUser != nil {
+		for i, v := range slices.Backward(params.Messages) {
+			if v.OfUser != nil {
 				visionTarget = i
 				break
 			}

@@ -19,7 +19,6 @@ func TestValidate_PathTraversal_Blocked(t *testing.T) {
 		"..",
 	}
 	for _, rel := range cases {
-		rel := rel
 		t.Run(rel, func(t *testing.T) {
 			_, err := validatePath(root, rel)
 			if err == nil {
@@ -53,7 +52,6 @@ func TestValidate_ReservedNamespace_Blocked(t *testing.T) {
 		".blowball",
 	}
 	for _, rel := range cases {
-		rel := rel
 		t.Run(rel, func(t *testing.T) {
 			_, err := validatePath(root, rel)
 			if err == nil {

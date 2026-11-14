@@ -111,7 +111,7 @@ func TestRunLifecycleTTLConstantsAndJitter(t *testing.T) {
 		maxTTL = 66 * time.Minute
 	)
 	seen := make(map[time.Duration]struct{})
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		got := RunKeyTTLWithJitter()
 		if got < minTTL || got > maxTTL {
 			t.Fatalf("RunKeyTTLWithJitter sample %d = %s, want [%s,%s]", i, got, minTTL, maxTTL)

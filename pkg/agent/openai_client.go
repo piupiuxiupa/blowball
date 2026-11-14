@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -400,8 +401,7 @@ func (c *OpenAIClient) StreamChat(ctx context.Context, req LLMRequest, onToken f
 		}
 		httpStatus := 0
 		rawBody := err.Error()
-		var apiErr *openai.Error
-		if errors.As(err, &apiErr) {
+		if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 			httpStatus = apiErr.StatusCode
 			if body := apiErr.RawJSON(); body != "" {
 				rawBody = body
@@ -608,8 +608,8 @@ func toOpenAIMessage(m Message) openai.ChatCompletionMessageParamUnion {
 func withVisionImage(msgs []openai.ChatCompletionMessageParamUnion, img *visionImage) []openai.ChatCompletionMessageParamUnion {
 	imagePart := imageContentPart(img.MIMEType, img.Data)
 	idx := -1
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].OfUser != nil {
+	for i, msg := range slices.Backward(msgs) {
+		if msg.OfUser != nil {
 			idx = i
 			break
 		}

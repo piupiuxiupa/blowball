@@ -254,7 +254,7 @@ func TestSplitDigestContent_RespectsBoundariesAndUTF8(t *testing.T) {
 }
 
 func promptChunkIndex(prompt string) int {
-	for _, line := range strings.Split(prompt, "\n") {
+	for line := range strings.SplitSeq(prompt, "\n") {
 		if !strings.HasPrefix(line, "Chunk: ") {
 			continue
 		}

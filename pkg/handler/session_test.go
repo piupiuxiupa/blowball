@@ -18,9 +18,9 @@ import (
 
 	"github.com/lush/blowball/pkg/agent"
 	"github.com/lush/blowball/pkg/config"
+	cursorpkg "github.com/lush/blowball/pkg/cursor"
 	"github.com/lush/blowball/pkg/middleware"
 	"github.com/lush/blowball/pkg/model"
-	cursorpkg "github.com/lush/blowball/pkg/cursor"
 	"github.com/lush/blowball/pkg/run"
 	"github.com/lush/blowball/pkg/service"
 	mysqlstore "github.com/lush/blowball/pkg/store/mysql"
@@ -373,7 +373,7 @@ func (m *handlerFakeMySQL) ListMessagesPaged(_ context.Context, _, cursorStr str
 		}
 		return rows[i].MsgTime.Before(rows[j].MsgTime)
 	}
-	for i := 0; i < len(rows); i++ {
+	for i := range rows {
 		for j := i + 1; j < len(rows); j++ {
 			if !less(i, j) {
 				rows[i], rows[j] = rows[j], rows[i]
@@ -399,10 +399,7 @@ func (m *handlerFakeMySQL) ListMessagesPaged(_ context.Context, _, cursorStr str
 			}
 		}
 	}
-	end := start + pageSize
-	if end > len(rows) {
-		end = len(rows)
-	}
+	end := min(start+pageSize, len(rows))
 	page := rows[start:end]
 	if len(page) == 0 {
 		return page, "", nil
@@ -1429,7 +1426,7 @@ func TestSendMessage_TitleInputIsFirstPlusCurrentMessage(t *testing.T) {
 	// Three prior user rows → the request is n=4, which fires; the first
 	// anchor must come from the FIRST prior row, not the latest one.
 	raws := make([][]byte, 0, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		raw, err := json.Marshal(model.Message{
 			SessionID: "sess-1",
 			Agent:     model.AgentUser,

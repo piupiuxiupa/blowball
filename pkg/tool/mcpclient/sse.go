@@ -212,10 +212,10 @@ func (t *SSETransport) readLoop(body io.ReadCloser) {
 		if line == "" {
 			t.dispatchEvent(current)
 			current = sseEvent{}
-		} else if strings.HasPrefix(line, "event:") {
-			current.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "data:") {
-			current.data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		} else if after, ok := strings.CutPrefix(line, "event:"); ok {
+			current.event = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "data:"); ok {
+			current.data = strings.TrimSpace(after)
 		}
 		// io.EOF with a final partial line has been handled above; stop reading.
 		if err != nil {

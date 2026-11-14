@@ -229,8 +229,7 @@ func isNotFoundErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	var resp miniogo.ErrorResponse
-	if errors.As(err, &resp) {
+	if resp, ok := errors.AsType[miniogo.ErrorResponse](err); ok {
 		switch resp.Code {
 		case "NoSuchKey", "NoSuchVersion", "NotFound":
 			return true

@@ -18,7 +18,7 @@ func defaultSandbox() config.ExecutorSandboxConfig {
 
 func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 	cfg := config.ExecutorToolConfig{
-		Network:            config.BoolPtr(false),
+		Network:            new(false),
 		AllowedEnvPatterns: []string{"PATH"},
 	}
 	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", "/ws/.cron", defaultSandbox(), cfg)
@@ -61,7 +61,7 @@ func TestBuildBwrapArgsIncludesRequiredFlags(t *testing.T) {
 
 func TestBuildBwrapArgsNetworkEnabled(t *testing.T) {
 	cfg := config.ExecutorToolConfig{
-		Network:            config.BoolPtr(true),
+		Network:            new(true),
 		AllowedEnvPatterns: []string{"PATH"},
 	}
 	args := buildBwrapArgs("/data/u1/workspace", "/data/u1/workspace/tmp", "/skills/global", "/data/tools", "/ws/.cron", defaultSandbox(), cfg)

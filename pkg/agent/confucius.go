@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -484,10 +485,7 @@ func (c *Confucius) Run(ctx context.Context, messages []Message, hub stream.Even
 			})
 		if errors.Is(wrapErr, ErrContextOverflow) && c.roundHook != nil {
 			wrapEstimate = EstimateRenderedRequest("", append(withSystem(c.cfg.SystemPrompt, round), Message{Role: "user", Content: wrapUpInstruction}), nil)
-			overflowEstimate := wrapEstimate.Tokens
-			if overflowEstimate < c.lastRequestEstimate.Tokens {
-				overflowEstimate = c.lastRequestEstimate.Tokens
-			}
+			overflowEstimate := max(wrapEstimate.Tokens, c.lastRequestEstimate.Tokens)
 			hookCtx := WithLiveMessages(WithForcedCompactionEstimate(
 				WithRequestEnvelope(ctx, c.cfg.SystemPrompt, nil),
 				"wrap_up_overflow",
@@ -606,7 +604,6 @@ func (c *Confucius) dispatchToolCalls(ctx context.Context, calls []ToolCall, hub
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tc := range executionCalls {
-		tc := tc // capture for goroutine
 		if _, exists := eventFailed[tc.ID]; exists {
 			continue // its call event could not be sent; do not execute it
 		}
@@ -892,9 +889,7 @@ func buildBreakdown(byAgent map[string]Usage, tmeta *turnMeta) *TurnBreakdown {
 	invokes, parallel, roundCapped, lastRoundContext := tmeta.snapshot()
 	nested := tmeta.snapshotNestedUsage()
 	out := make(map[string]Usage, len(byAgent)+len(nested))
-	for k, v := range byAgent {
-		out[k] = v
-	}
+	maps.Copy(out, byAgent)
 	for k, v := range nested {
 		out[k] = addUsage(out[k], v)
 	}
@@ -982,9 +977,7 @@ func (t *turnMeta) snapshotNestedUsage() map[string]Usage {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make(map[string]Usage, len(t.nestedUsage))
-	for k, v := range t.nestedUsage {
-		out[k] = v
-	}
+	maps.Copy(out, t.nestedUsage)
 	return out
 }
 

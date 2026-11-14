@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -289,9 +290,7 @@ func TestAuthMiddleware_PublishesNoRawToken(t *testing.T) {
 	var keys map[any]any
 	r.GET("/secure", AuthMiddleware(mwTestSecret), func(c *gin.Context) {
 		keys = map[any]any{}
-		for k, v := range c.Keys {
-			keys[k] = v
-		}
+		maps.Copy(keys, c.Keys)
 		c.JSON(http.StatusOK, nil)
 	})
 	w := doGet(t, r, "Bearer "+tok)

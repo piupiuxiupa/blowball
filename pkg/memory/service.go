@@ -197,13 +197,13 @@ func (s *Service) CaptureTurn(ctx context.Context, tc TurnCapture) error {
 	}
 	msgs := []openviking.Message{{
 		Role:      "user",
-		Content:   openviking.String(truncateCapture(tc.UserContent, s.cfg.MaxCaptureBytes)),
+		Content:   new(truncateCapture(tc.UserContent, s.cfg.MaxCaptureBytes)),
 		CreatedAt: tc.UserAt.UTC().Format(time.RFC3339),
 	}}
 	if strings.TrimSpace(tc.AssistantText) != "" {
 		msgs = append(msgs, openviking.Message{
 			Role:      "assistant",
-			Content:   openviking.String(truncateCapture(tc.AssistantText, s.cfg.MaxCaptureBytes)),
+			Content:   new(truncateCapture(tc.AssistantText, s.cfg.MaxCaptureBytes)),
 			CreatedAt: tc.TurnEndAt.UTC().Format(time.RFC3339),
 		})
 	}

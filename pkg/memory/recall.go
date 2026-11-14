@@ -116,12 +116,5 @@ func recallEntryKey(uri, text string) string {
 // against gateway quirks (a score outside [0,1] should not print as "137%"
 // or "-3%").
 func scorePercent(score float64) int {
-	p := int(score*100 + 0.5)
-	if p < 0 {
-		p = 0
-	}
-	if p > 100 {
-		p = 100
-	}
-	return p
+	return min(max(int(score*100+0.5), 0), 100)
 }

@@ -100,7 +100,7 @@ func ValidateLogicalPath(p string) error {
 	if strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
 		return ErrInvalidPath
 	}
-	for _, seg := range strings.Split(p, "/") {
+	for seg := range strings.SplitSeq(p, "/") {
 		if seg == "" || seg == "." || seg == ".." {
 			return ErrInvalidPath
 		}

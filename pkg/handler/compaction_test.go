@@ -29,7 +29,7 @@ import (
 func compactionRows(n int) []model.Message {
 	base := time.Unix(1_700_000_000, 0).UTC()
 	rows := make([]model.Message, 0, 2*n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		rows = append(rows, model.Message{
 			ID:        int64(2*i + 1),
 			MsgTime:   base.Add(time.Duration(2*i) * time.Minute),

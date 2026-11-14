@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,15 +18,15 @@ import (
 
 	"github.com/lush/blowball/pkg/agent"
 	"github.com/lush/blowball/pkg/artifact"
+	"github.com/lush/blowball/pkg/logger"
 	"github.com/lush/blowball/pkg/memory"
 	"github.com/lush/blowball/pkg/middleware"
 	"github.com/lush/blowball/pkg/model"
-	"github.com/lush/blowball/pkg/logger"
-	"github.com/lush/blowball/pkg/trace"
 	"github.com/lush/blowball/pkg/run"
 	"github.com/lush/blowball/pkg/service"
 	"github.com/lush/blowball/pkg/skillmarket"
 	"github.com/lush/blowball/pkg/store/fs"
+	"github.com/lush/blowball/pkg/trace"
 	turnexec "github.com/lush/blowball/pkg/turn"
 )
 
@@ -339,8 +340,8 @@ func (h *MessageStreamHandler) rollbackNewAttachmentClaims(ctx context.Context, 
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	ctx = rollbackCtx
-	for i := len(ids) - 1; i >= 0; i-- {
-		id := ids[i]
+	for _, id := range slices.Backward(ids) {
+
 		att, err := h.attachments.GetAttachmentByUser(ctx, id, userID)
 		if err != nil || att == nil || att.SessionID == nil || *att.SessionID != sessionID {
 			continue
@@ -485,8 +486,7 @@ func (h *MessageStreamHandler) SendMessage(c *gin.Context) {
 
 	var req sendMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			c.JSON(http.StatusRequestEntityTooLarge, errorBody("REQUEST_TOO_LARGE",
 				"request body exceeds the 1MB limit"))
 			return
@@ -1125,4 +1125,3 @@ func startPersistHeartbeat(saveCtx context.Context, store run.Store, runID, sess
 		<-hbDone
 	}
 }
-

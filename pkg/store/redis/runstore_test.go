@@ -57,7 +57,7 @@ func TestRunStore_RunKeyTTLJitter(t *testing.T) {
 
 	const runs = 16
 	metaTTLs := make([]time.Duration, 0, runs)
-	for i := 0; i < runs; i++ {
+	for i := range runs {
 		runID := fmt.Sprintf("run-%02d", i)
 		sessionID := fmt.Sprintf("sess-%02d", i)
 		meta := run.RunMeta{SessionID: sessionID, Status: run.StatusRunning}

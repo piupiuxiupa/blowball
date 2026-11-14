@@ -134,7 +134,7 @@ type Server struct {
 	Name      string `json:"-"`
 	URL       string `json:"url"`
 	Transport string `json:"transport"`
-	Auth      Auth   `json:"auth,omitempty"`
+	Auth      Auth   `json:"auth"`
 	// Headers are optional NON-SECRET custom request headers injected into every
 	// outbound request to this server (tenant id, routing/gateway params, a
 	// proprietary token used together with auth.type "none", …). They are the

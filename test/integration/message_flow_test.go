@@ -455,7 +455,8 @@ func TestMessageFlow_TwoTurns_PromptContainsHistory(t *testing.T) {
 	// assistant reply, and the current user message.
 	var prompt strings.Builder
 	for _, m := range secondTurn.Messages {
-		prompt.WriteString(m.Content + "\n")
+		prompt.WriteString(m.Content)
+		prompt.WriteString("\n")
 	}
 	assert.Contains(t, prompt.String(), "first message")
 	assert.Contains(t, prompt.String(), "first reply")

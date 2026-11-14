@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -209,10 +210,8 @@ func TestImageAttachments_EndToEnd(t *testing.T) {
 func findLLMRequest(t *testing.T, llm *scriptedLLMClient, pred func(agent.Message) bool) agent.LLMRequest {
 	t.Helper()
 	for _, req := range llm.requests() {
-		for _, m := range req.Messages {
-			if pred(m) {
-				return req
-			}
+		if slices.ContainsFunc(req.Messages, pred) {
+			return req
 		}
 	}
 	t.Fatalf("no recorded LLM request matches the predicate among %d calls", len(llm.requests()))

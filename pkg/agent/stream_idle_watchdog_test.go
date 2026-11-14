@@ -41,7 +41,7 @@ func newStallingSrv(t *testing.T, n int) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		for i := 0; i < n; i++ {
+		for range n {
 			_, _ = w.Write([]byte(idleFrame("chatcmpl-watch", "x")))
 			w.(http.Flusher).Flush()
 		}
@@ -125,7 +125,7 @@ func TestStreamIdleWatchdog_LongButAliveStreamNeverAborted(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			_, _ = w.Write([]byte(idleFrame("chatcmpl-watch", fmt.Sprintf("%d", i))))
 			w.(http.Flusher).Flush()
 			time.Sleep(40 * time.Millisecond) // 10 frames ≈ 400ms total ≫ 250ms idle

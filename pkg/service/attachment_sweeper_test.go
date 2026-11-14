@@ -56,7 +56,7 @@ func TestAttachmentSweeper_ExpiredStagedReaped(t *testing.T) {
 	store := &fakeSweepStore{rows: map[string]model.Attachment{
 		"expired": {ID: "expired", UserID: "u-1", MIME: "image/png", CreateTime: old},
 		"fresh":   {ID: "fresh", UserID: "u-1", MIME: "image/png", CreateTime: time.Now()},
-		"bound":   {ID: "bound", UserID: "u-1", SessionID: ptr("s-1"), MIME: "image/png", CreateTime: old},
+		"bound":   {ID: "bound", UserID: "u-1", SessionID: new("s-1"), MIME: "image/png", CreateTime: old},
 	}}
 	require.NoError(t, os.MkdirAll(staging("u-1"), 0o755))
 	for _, id := range []string{"expired", "fresh", "bound"} {
@@ -158,9 +158,7 @@ type claimRacingStore struct{ *fakeSweepStore }
 
 func (c *claimRacingStore) DeleteStagedAttachment(ctx context.Context, id string) (bool, error) {
 	a := c.rows[id]
-	a.SessionID = ptr("s-1")
+	a.SessionID = new("s-1")
 	c.rows[id] = a
 	return c.fakeSweepStore.DeleteStagedAttachment(ctx, id)
 }
-
-func ptr(s string) *string { return &s }

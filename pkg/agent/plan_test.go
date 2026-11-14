@@ -80,15 +80,13 @@ func TestPlanLedger_IsConcurrencySafe(t *testing.T) {
 	const updates = 32
 
 	var wg sync.WaitGroup
-	for i := 0; i < updates; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range updates {
+		wg.Go(func() {
 			_, err := ledger.update(updatePlanArgs{
 				Steps: []PlanStep{{Step: "step", Status: PlanStatusPending}},
 			})
 			assert.NoError(t, err)
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -80,15 +80,13 @@ func TestResourceLockSerializesBumps(t *testing.T) {
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 5 {
+		wg.Go(func() {
 			_ = store.WithinTaskResourceLock(ctx, "task-lock", func() error {
 				_, berr := store.BumpResourceDraft(ctx, "user-1", "task-lock")
 				return berr
 			})
-		}()
+		})
 	}
 	wg.Wait()
 	draft, err := store.GetResourceDraft(ctx, "user-1", "task-lock")

@@ -88,8 +88,7 @@ func (t *Tools) run(ctx context.Context, toolName string, cfg config.ExecutorToo
 	result.Output, result.Truncated = truncateOutput(output, cfg.MaxOutputBytes)
 
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			result.ExitCode = exitErr.ExitCode()
 		} else {
 			logAudit(ctx, toolName, sandboxArgs, -1, len(output), duration, runErr)

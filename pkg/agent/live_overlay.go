@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 )
 
@@ -183,7 +184,7 @@ func userContentMatches(candidateContent string, live Message) bool {
 	if !strings.HasPrefix(remainder, "\n") {
 		return false
 	}
-	for _, line := range strings.Split(strings.TrimPrefix(remainder, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimPrefix(remainder, "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -250,8 +251,8 @@ func equalToolCalls(a, b []ToolCall) bool {
 
 func collectLiveMessages(original []Message) []Message {
 	currentUser := -1
-	for i := len(original) - 1; i >= 0; i-- {
-		if original[i].Role == "user" && !isCompactedSummary(original[i].Content) {
+	for i, o := range slices.Backward(original) {
+		if o.Role == "user" && !isCompactedSummary(o.Content) {
 			currentUser = i
 			break
 		}

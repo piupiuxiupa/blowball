@@ -10,9 +10,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/lush/blowball/pkg/logger"
 	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/modelselect"
-	"github.com/lush/blowball/pkg/logger"
 )
 
 // Config bounds the Runtime's scheduling loops and admitted concurrency.
@@ -186,12 +186,10 @@ func (r *Runtime) cycle(ctx context.Context) {
 			break
 		}
 		rec := rec
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
+		r.wg.Go(func() {
 			defer r.release()
 			r.execute(ctx, rec)
-		}()
+		})
 	}
 	r.reconcile(ctx)
 }

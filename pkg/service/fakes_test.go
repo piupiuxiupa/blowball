@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/lush/blowball/pkg/agent"
-	"github.com/lush/blowball/pkg/model"
 	cursorpkg "github.com/lush/blowball/pkg/cursor"
+	"github.com/lush/blowball/pkg/model"
 	mysqlstore "github.com/lush/blowball/pkg/store/mysql"
 )
 
@@ -254,7 +254,7 @@ func (f *fakeMySQLStore) ListMessagesPaged(_ context.Context, sessionID, cursor 
 			return rows[i].MsgTime.Before(rows[j].MsgTime)
 		}
 		// Bubble sort is fine for test data.
-		for i := 0; i < len(rows); i++ {
+		for i := range rows {
 			for j := i + 1; j < len(rows); j++ {
 				if !less(i, j) {
 					rows[i], rows[j] = rows[j], rows[i]
@@ -277,10 +277,7 @@ func (f *fakeMySQLStore) ListMessagesPaged(_ context.Context, sessionID, cursor 
 			}
 		}
 	}
-	end := start + pageSize
-	if end > len(rows) {
-		end = len(rows)
-	}
+	end := min(start+pageSize, len(rows))
 	page := rows[start:end]
 	if len(page) == 0 {
 		return page, "", nil

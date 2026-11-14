@@ -25,7 +25,7 @@ func compactionFixture(n int) ([]model.Message, []agent.Message, []int) {
 	rows := make([]model.Message, n)
 	msgs := make([]agent.Message, n)
 	lastRow := make([]int, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		rows[i] = model.Message{
 			ID:        int64(i + 1),
 			MsgTime:   base.Add(time.Duration(i) * time.Minute),
@@ -345,7 +345,7 @@ func TestChooseTailForReservedBudget_IncludesPriorToolActivity(t *testing.T) {
 		InputBudget: 18000,
 	}
 	prior := make([]ToolActivity, 0, 1000)
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		prior = append(prior, ToolActivity{
 			ToolName: fmt.Sprintf("tool-%04d", i),
 			Calls:    10,

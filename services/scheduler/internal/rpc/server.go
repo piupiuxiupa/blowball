@@ -12,8 +12,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	schedulerv1 "github.com/lush/blowball/api/gen/go/scheduler/v1"
-	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/rpcx"
 	"github.com/lush/blowball/pkg/schedule"
 	"github.com/lush/blowball/services/scheduler/internal/scheduler"
@@ -51,7 +51,7 @@ func (s *Server) CreateTask(ctx context.Context, req *schedulerv1.CreateTaskRequ
 		Schedule:         rule,
 		Model:            cfg.GetModel(),
 		ReasoningEffort:  cfg.GetReasoningEffort(),
-		Enabled:          boolPtr(cfg.GetEnabled()),
+		Enabled:          new(cfg.GetEnabled()),
 		ResourceRevision: cfg.GetResourceRevision(),
 		ManifestHash:     cfg.GetManifestHash(),
 	})
@@ -219,8 +219,6 @@ func actorOf(actor *schedulerv1.Actor) (string, error) {
 	return actor.GetUserId(), nil
 }
 
-func boolPtr(v bool) *bool { return &v }
-
 func ruleFromProto(s *schedulerv1.Schedule) (schedule.Rule, error) {
 	if s == nil {
 		return schedule.Rule{}, rpcx.ToStatus(rpcx.Errorf(rpcx.CodeInvalidArgument, "schedule is required"))
@@ -323,8 +321,7 @@ func rpcErr(err error) error {
 	if _, ok := rpcx.AsError(err); ok {
 		return rpcx.ToStatus(err)
 	}
-	var ve *task.ValidationError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*task.ValidationError](err); ok {
 		return rpcx.ToStatus(rpcx.Errorf(rpcx.CodeInvalidArgument, "%s", ve.Message))
 	}
 	switch {

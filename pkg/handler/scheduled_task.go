@@ -425,8 +425,7 @@ func decodeScheduledTaskBody(c *gin.Context, dst any) bool {
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			c.JSON(http.StatusRequestEntityTooLarge, errorBody("REQUEST_TOO_LARGE", "request body exceeds 1MB"))
 			return false
 		}

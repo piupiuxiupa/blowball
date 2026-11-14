@@ -15,12 +15,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/lush/blowball/pkg/logger"
 	"github.com/lush/blowball/pkg/middleware"
 	"github.com/lush/blowball/pkg/model"
-	"github.com/lush/blowball/pkg/logger"
-	"github.com/lush/blowball/pkg/trace"
 	"github.com/lush/blowball/pkg/store/fs"
 	"github.com/lush/blowball/pkg/tool/xizhi"
+	"github.com/lush/blowball/pkg/trace"
 	"go.uber.org/zap"
 )
 
@@ -219,8 +219,7 @@ func (h *AttachmentHandler) readUploadedImage(c *gin.Context) (filename string, 
 	// multipart framing overhead around the 8 MiB payload.
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAttachmentBytes+(1<<20))
 	if err := c.Request.ParseMultipartForm(8 << 20); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
 			return "", nil, "", false
 		}

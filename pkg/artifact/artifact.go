@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/model"
 
 	"go.uber.org/zap"
 )
@@ -92,7 +92,7 @@ func NewService(store VersionStore, index Index, maxBytes int64) *Service {
 // starts with "." (covering .blowball/, .pip/, .git/ and dotfiles at any
 // depth). The root "." itself is not hidden.
 func isHiddenPath(rel string) bool {
-	for _, seg := range strings.Split(rel, "/") {
+	for seg := range strings.SplitSeq(rel, "/") {
 		if strings.HasPrefix(seg, ".") && seg != "." {
 			return true
 		}
@@ -134,7 +134,7 @@ func workspacePath(raw string) (string, error) {
 	}
 
 	rel := strings.TrimPrefix(u.Path, "/")
-	for _, seg := range strings.Split(rel, "/") {
+	for seg := range strings.SplitSeq(rel, "/") {
 		if seg == ".." {
 			return "", fmt.Errorf("path traversal is not allowed")
 		}

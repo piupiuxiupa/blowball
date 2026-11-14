@@ -53,7 +53,7 @@ func TestRunStore_ClaimBackgroundSessionConcurrentSingleWinner(t *testing.T) {
 	var winners atomic.Int32
 	var wg sync.WaitGroup
 	wg.Add(contenders)
-	for i := 0; i < contenders; i++ {
+	for range contenders {
 		go func() {
 			defer wg.Done()
 			_, claimed, err := rs.ClaimBackgroundSession(ctx, "sess-race", "scheduled-race")

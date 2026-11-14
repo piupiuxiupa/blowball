@@ -26,12 +26,12 @@ import (
 
 	"github.com/lush/blowball/pkg/agent"
 	"github.com/lush/blowball/pkg/config"
-	"github.com/lush/blowball/pkg/handler"
-	"github.com/lush/blowball/pkg/middleware"
-	"github.com/lush/blowball/pkg/model"
 	cursorpkg "github.com/lush/blowball/pkg/cursor"
+	"github.com/lush/blowball/pkg/handler"
 	"github.com/lush/blowball/pkg/jwt"
 	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/middleware"
+	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/run"
 	"github.com/lush/blowball/pkg/service"
 	"github.com/lush/blowball/pkg/store/fs"
@@ -764,10 +764,7 @@ func (m *memoryMySQL) ListMessagesPaged(_ context.Context, sessionID, cursorStr 
 			}
 		}
 	}
-	end := start + pageSize
-	if end > len(rows) {
-		end = len(rows)
-	}
+	end := min(start+pageSize, len(rows))
 	page := rows[start:end]
 	if len(page) == 0 {
 		return page, "", nil

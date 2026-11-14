@@ -166,14 +166,14 @@ func TestHub_SendConcurrent(t *testing.T) {
 
 	const producers = 16
 	const perProducer = 100
-	var sent int64
+	var sent atomic.Int64
 	ready := make(chan struct{})
-	for i := 0; i < producers; i++ {
+	for range producers {
 		go func() {
 			<-ready
-			for j := 0; j < perProducer; j++ {
+			for range perProducer {
 				if h.Send(TokenEvent(AgentConfucius, "x")) {
-					atomic.AddInt64(&sent, 1)
+					sent.Add(1)
 				}
 			}
 		}()
@@ -182,13 +182,13 @@ func TestHub_SendConcurrent(t *testing.T) {
 
 	// Drain until Done or timeout. We give producers time to finish by waiting
 	// on a quiet channel rather than a fixed target.
-	var received int64
+	var received atomic.Int64
 	quiet := make(chan struct{})
 	go func() {
 		var last int64
 		for {
 			time.Sleep(20 * time.Millisecond)
-			cur := atomic.LoadInt64(&received)
+			cur := received.Load()
 			if cur == last && cur > 0 {
 				close(quiet)
 				return
@@ -202,16 +202,16 @@ drain:
 		select {
 		case e := <-h.Events():
 			_ = e
-			atomic.AddInt64(&received, 1)
+			received.Add(1)
 		case <-quiet:
 			break drain
 		case <-time.After(3 * time.Second):
-			t.Fatalf("drain timed out: received=%d sent=%d", atomic.LoadInt64(&received), atomic.LoadInt64(&sent))
+			t.Fatalf("drain timed out: received=%d sent=%d", received.Load(), sent.Load())
 		}
 	}
 
-	sentFinal := atomic.LoadInt64(&sent)
-	receivedFinal := atomic.LoadInt64(&received)
+	sentFinal := sent.Load()
+	receivedFinal := received.Load()
 	assert.Greater(t, sentFinal, int64(0), "no sends succeeded")
 	assert.LessOrEqual(t, receivedFinal, sentFinal, "received more than sent")
 	// With a 4096-buffer and bursty sends we expect negligible loss. Allow a

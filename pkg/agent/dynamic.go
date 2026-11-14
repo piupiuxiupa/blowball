@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/lush/blowball/pkg/config"
-	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/stream"
 	"github.com/lush/blowball/pkg/tool"
 	"go.uber.org/zap"
@@ -219,7 +219,7 @@ func (c *spawnCoordinator) dispatch(ctx context.Context, tc ToolCall, hub stream
 	body = appendSpawnResult(body, status)
 	return toolResult{
 		content: body, isError: err != nil, subUsage: &usage,
-		subOwnUsage:  ptrToUsage(ownUsageForSub(sub, usage)),
+		subOwnUsage:  new(ownUsageForSub(sub, usage)),
 		subAgentName: label, subAgentID: instanceID, subParentID: parentID,
 		subCapped: status == SubAgentStatusCapped, subStatus: status,
 	}
@@ -231,8 +231,6 @@ func ownUsageForSub(sub Agent, subtree Usage) Usage {
 	}
 	return subtree
 }
-
-func ptrToUsage(u Usage) *Usage { return &u }
 
 func parseSpawnArgs(tc ToolCall) (SpawnToolArgs, toolResult) {
 	dec := json.NewDecoder(strings.NewReader(tc.Function.Arguments))

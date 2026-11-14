@@ -173,7 +173,9 @@ func RenderAttachmentPlaceholders(content string, filenames []string) string {
 		if b.Len() > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString("[图片: " + f + "]")
+		b.WriteString("[图片: ")
+		b.WriteString(f)
+		b.WriteString("]")
 	}
 	return b.String()
 }

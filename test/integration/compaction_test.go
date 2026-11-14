@@ -89,7 +89,7 @@ func (c *compactionBudgetLLM) snapshot() (main, summary int, requests []agent.LL
 func seedHistory(t *testing.T, m *memoryMySQL, sessionID string, n int) {
 	t.Helper()
 	base := time.Unix(1_700_000_000, 0).UTC()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m.nextID++
 		userID := m.nextID
 		m.messages[sessionID] = append(m.messages[sessionID], model.Message{

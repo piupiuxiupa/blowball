@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,8 +24,8 @@ type flushRecorder struct {
 	buf     bytes.Buffer
 	header  http.Header
 	status  int
-	flushes int64
-	written int64
+	flushes atomic.Int64
+	written atomic.Int64
 }
 
 func newFlushRecorder() *flushRecorder {
@@ -38,7 +37,7 @@ func (f *flushRecorder) Header() http.Header { return f.header }
 func (f *flushRecorder) Write(b []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	atomic.AddInt64(&f.written, int64(len(b)))
+	f.written.Add(int64(len(b)))
 	return f.buf.Write(b)
 }
 
@@ -48,7 +47,7 @@ func (f *flushRecorder) WriteHeader(code int) {
 	f.status = code
 }
 
-func (f *flushRecorder) Flush() { atomic.AddInt64(&f.flushes, 1) }
+func (f *flushRecorder) Flush() { f.flushes.Add(1) }
 
 func (f *flushRecorder) Bytes() []byte {
 	f.mu.Lock()
@@ -59,7 +58,7 @@ func (f *flushRecorder) Bytes() []byte {
 	return out
 }
 
-func (f *flushRecorder) Flushes() int64 { return atomic.LoadInt64(&f.flushes) }
+func (f *flushRecorder) Flushes() int64 { return f.flushes.Load() }
 
 // nonFlusherWriter intentionally does NOT implement http.Flusher.
 type nonFlusherWriter struct{}
@@ -119,7 +118,7 @@ func TestWriteSSE_EventFormat(t *testing.T) {
 	require.True(t, h.Send(orig))
 
 	// Drain + close so WriteSSE returns and we can inspect the buffer.
-	require.Eventually(t, func() bool { return atomic.LoadInt64(&rec.written) > 0 },
+	require.Eventually(t, func() bool { return rec.written.Load() > 0 },
 		time.Second, 5*time.Millisecond)
 	h.Close()
 
@@ -145,8 +144,8 @@ func TestWriteSSE_EventFormat(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	var dataLine string
 	for _, l := range lines {
-		if strings.HasPrefix(l, "data: ") {
-			dataLine = strings.TrimPrefix(l, "data: ")
+		if after, ok := strings.CutPrefix(l, "data: "); ok {
+			dataLine = after
 			break
 		}
 	}
@@ -293,6 +292,6 @@ func TestWriteSSE_DoneEventJSON(t *testing.T) {
 
 	out := string(rec.Bytes())
 	assert.Contains(t, out, "event: done")
-	assert.Contains(t, out, fmt.Sprintf(`"total_tokens":42`))
+	assert.Contains(t, out, `"total_tokens":42`)
 	assert.Contains(t, out, `"prompt_tokens":10`)
 }

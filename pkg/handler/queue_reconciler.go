@@ -124,12 +124,9 @@ func (r *QueueReconciler) cycle() {
 		r.cursor = 0
 		return
 	}
-	handled := n
-	if handled > r.maxSessions {
-		handled = r.maxSessions
-	}
+	handled := min(n, r.maxSessions)
 	start := r.cursor % n
-	for i := 0; i < handled; i++ {
+	for i := range handled {
 		sid := sids[(start+i)%n]
 		// TTL keep-alive for the waiting entries (best-effort).
 		if entries, err := r.h.runs.Store.QueueEntries(ctx, sid); err == nil {

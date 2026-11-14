@@ -132,8 +132,7 @@ func TestTurnEvents_QueuedRunNotMisclassifiedAsDead(t *testing.T) {
 	ctx := context.Background()
 	seedQueuedRun(t, env, "trace-9")
 
-	ctxReq, cancelReq := context.WithCancel(context.Background())
-	defer cancelReq()
+	ctxReq := t.Context()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1/turns/trace-9/events", nil).WithContext(ctxReq)
 	w := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -946,7 +945,7 @@ func TestQueueReconciler_RotatesBeyondCap(t *testing.T) {
 	// effect is the TTL keep-alive (TouchQueued), which the recorder tracks.
 	const sessions = 5
 	ids := make([]string, 0, sessions)
-	for i := 0; i < sessions; i++ {
+	for i := range sessions {
 		sid := fmt.Sprintf("sess-%d", i)
 		ids = append(ids, sid)
 		rid := fmt.Sprintf("trace-%d", i)
@@ -970,7 +969,7 @@ func TestQueueReconciler_RotatesBeyondCap(t *testing.T) {
 	// would starve — both its pump chances and its TTL keep-alive.)
 	_ = ids
 	require.Eventually(t, func() bool {
-		for i := 0; i < sessions; i++ {
+		for i := range sessions {
 			if firstIndex(store.snapshot(), fmt.Sprintf("TouchQueued:trace-%d", i)) < 0 {
 				return false
 			}
@@ -1110,8 +1109,7 @@ func TestQueue_StartTurnShutdownCheckpoint(t *testing.T) {
 }
 
 // ptrOf is a small test helper.
-func ptrOf(s string) *string { return &s }
-
+//
 // ── review round 5 behavior tests ──────────────────────────────────────────
 
 // TestQueueCancel_AttachmentsStayBound (review round 6, conservative
@@ -1130,7 +1128,7 @@ func TestQueueCancel_AttachmentsStayBound(t *testing.T) {
 	require.NoError(t, err)
 	sessDir := filepath.Join(env.dataDir, "user-1", "attachments", "sess-1")
 	require.NoError(t, os.MkdirAll(sessDir, 0o755))
-	env.atts.rows["att-1"] = model.Attachment{ID: "att-1", UserID: "user-1", SessionID: ptrOf("sess-1"), Filename: "att-1.png", MIME: "image/png", Size: 4}
+	env.atts.rows["att-1"] = model.Attachment{ID: "att-1", UserID: "user-1", SessionID: new("sess-1"), Filename: "att-1.png", MIME: "image/png", Size: 4}
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "att-1.png"), []byte("data"), 0o644))
 	_, err = env.store.AdmitMessage(ctx, "sess-1", run.QueueEntry{
 		RunID: "trace-b", SessionID: "sess-1", UserID: "user-1", Content: "B",

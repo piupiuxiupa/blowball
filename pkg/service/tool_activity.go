@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -342,7 +343,7 @@ func parseToolActivitySections(sections []string) []ToolActivity {
 func parseToolActivitySection(section string) []ToolActivity {
 	var ledger []ToolActivity
 	current := -1
-	for _, line := range strings.Split(section, "\n") {
+	for line := range strings.SplitSeq(section, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(line, "- ") {
 			text := strings.TrimPrefix(trimmed, "- ")
@@ -391,12 +392,7 @@ func parseToolActivityCounts(text string) (calls, success, failures int, ok bool
 }
 
 func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, target)
 }
 
 func minInt(a, b int) int {

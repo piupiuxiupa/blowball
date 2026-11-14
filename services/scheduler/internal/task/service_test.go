@@ -186,7 +186,7 @@ func TestUpdateRevisionConflict(t *testing.T) {
 	require.NoError(t, err)
 	store.tasks[created.TaskID].Revision = 7
 	_, err = svc.Update(context.Background(), UpdateInput{
-		ActorUserID: "user-1", TaskID: created.TaskID, ExpectedRevision: 3, Name: ptr("new"),
+		ActorUserID: "user-1", TaskID: created.TaskID, ExpectedRevision: 3, Name: new("new"),
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrRevisionConflict)
@@ -203,7 +203,7 @@ func TestUpdateMigratesLegacySessionPolicy(t *testing.T) {
 		Enabled: true, Revision: 2,
 	}
 	updated, err := svc.Update(context.Background(), UpdateInput{
-		ActorUserID: "user-1", TaskID: "task-1", ExpectedRevision: 2, Name: ptr("renamed"),
+		ActorUserID: "user-1", TaskID: "task-1", ExpectedRevision: 2, Name: new("renamed"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, model.ScheduledSessionNew, updated.SessionMode)
@@ -270,7 +270,7 @@ func TestResumeConsumedAtDoesNotReplay(t *testing.T) {
 	}
 	// NextRunAt nil = the slot was already consumed. Enabling must not replay.
 	updated, err := svc.Update(context.Background(), UpdateInput{
-		ActorUserID: "user-1", TaskID: "task-at", Enabled: ptr(true),
+		ActorUserID: "user-1", TaskID: "task-at", Enabled: new(true),
 	})
 	require.NoError(t, err)
 	assert.Nil(t, updated.NextRunAt)
@@ -285,7 +285,7 @@ func TestResumePausedCronSchedulesFutureSlot(t *testing.T) {
 		PausedReason: model.ScheduledReasonTaskPaused,
 	}
 	updated, err := svc.Update(context.Background(), UpdateInput{
-		ActorUserID: "user-1", TaskID: "task-cron", Enabled: ptr(true),
+		ActorUserID: "user-1", TaskID: "task-cron", Enabled: new(true),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, updated.NextRunAt)
@@ -320,5 +320,3 @@ func TestOccurrencesAreReadableAfterTaskDeletion(t *testing.T) {
 func cronRule() schedule.Rule {
 	return schedule.Rule{Type: schedule.TypeCron, Expression: "0 2 * * *", Timezone: "UTC"}
 }
-
-func ptr[T any](v T) *T { return &v }

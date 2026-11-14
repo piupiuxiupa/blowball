@@ -316,7 +316,7 @@ func TestFind_NegativeMaxDepthRejected(t *testing.T) {
 
 func TestFind_PaginationWindowAndTruncated(t *testing.T) {
 	root := t.TempDir()
-	for i := 0; i < 205; i++ {
+	for i := range 205 {
 		name := fmt.Sprintf("f%03d.txt", i)
 		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644))
 	}

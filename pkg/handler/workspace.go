@@ -23,13 +23,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/lush/blowball/pkg/middleware"
 	"github.com/lush/blowball/pkg/jwt"
 	"github.com/lush/blowball/pkg/logger"
-	"github.com/lush/blowball/pkg/trace"
+	"github.com/lush/blowball/pkg/middleware"
 	"github.com/lush/blowball/pkg/resource"
 	"github.com/lush/blowball/pkg/store/fs"
 	"github.com/lush/blowball/pkg/tool/xizhi"
+	"github.com/lush/blowball/pkg/trace"
 )
 
 // WorkspaceHandler owns the /api/v1/workspace/* routes: file listing, upload,
@@ -458,8 +458,7 @@ func (h *WorkspaceHandler) Upload(c *gin.Context) {
 	}
 
 	if err := c.Request.ParseMultipartForm(h.maxUploadBytesMemory()); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
 			return
 		}
@@ -497,8 +496,7 @@ func (h *WorkspaceHandler) Upload(c *gin.Context) {
 
 	dstPath := filepath.Join(dstDir, filepath.Base(fileHeader.Filename))
 	if err := c.SaveUploadedFile(fileHeader, dstPath); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
 			return
 		}
@@ -711,8 +709,7 @@ func (h *WorkspaceHandler) WriteContent(c *gin.Context) {
 
 	var req writeContentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			c.JSON(http.StatusRequestEntityTooLarge, errorBody("FILE_TOO_LARGE", "file too large"))
 			return
 		}
@@ -1710,11 +1707,8 @@ func relPath(wsRoot, abs string) string {
 // heuristic for distinguishing text from binary that the OpenAPI specs of
 // GitHub et al. also use). A NUL byte in the prefix means the file is binary.
 func isBinary(data []byte) bool {
-	n := len(data)
-	if n > 1024 {
-		n = 1024
-	}
-	for i := 0; i < n; i++ {
+	n := min(len(data), 1024)
+	for i := range n {
 		if data[i] == 0 {
 			return true
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +29,9 @@ type planRoutingLLM struct {
 
 func (c *planRoutingLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onToken func(string) error, onReasoning func(string) error) (agent.LLMResponse, error) {
 	task := ""
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			task = req.Messages[i].Content
+	for _, v := range slices.Backward(req.Messages) {
+		if v.Role == "user" {
+			task = v.Content
 			break
 		}
 	}

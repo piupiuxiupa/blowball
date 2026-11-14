@@ -96,7 +96,7 @@ func (g *Guard) rejectSymlinkComponents(userID, taskID, clean string) error {
 		return nil
 	}
 	current := layout.DraftRoot()
-	for _, segment := range strings.Split(rest, "/") {
+	for segment := range strings.SplitSeq(rest, "/") {
 		current = filepath.Join(current, segment)
 		info, statErr := os.Lstat(current)
 		if os.IsNotExist(statErr) {

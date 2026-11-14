@@ -95,7 +95,6 @@ func dynamicTestRegistry(t *testing.T, names ...string) *tool.Registry {
 	t.Helper()
 	reg := tool.NewRegistry()
 	for _, name := range names {
-		name := name
 		require.NoError(t, reg.Register(&tool.ToolSpec{
 			Name: name, Description: name, ParametersJSON: []byte(`{}`),
 			Execute: func(context.Context, json.RawMessage) (any, error) { return "ok", nil },

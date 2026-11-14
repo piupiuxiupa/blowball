@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/base64"
+	"maps"
 )
 
 // defaultAPIKeyHeader is the header used for api-key auth when the server entry
@@ -50,12 +51,8 @@ func authHeaders(auth Auth) map[string]string {
 // redacted.
 func mergeHeaders(custom map[string]string, auth Auth) map[string]string {
 	out := make(map[string]string, len(custom)+2)
-	for k, v := range custom {
-		out[k] = v
-	}
-	for k, v := range authHeaders(auth) {
-		out[k] = v
-	}
+	maps.Copy(out, custom)
+	maps.Copy(out, authHeaders(auth))
 	return out
 }
 

@@ -7,8 +7,8 @@ import (
 	"slices"
 
 	"github.com/lush/blowball/pkg/config"
-	"github.com/lush/blowball/pkg/mcpmarket"
 	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/mcpmarket"
 	"github.com/lush/blowball/pkg/prompt"
 	"github.com/lush/blowball/pkg/stream"
 	"github.com/lush/blowball/pkg/tool"
@@ -55,14 +55,14 @@ type TurnCloser func()
 // orchestratorFactory is the production AgentFactory. It clones the base
 // config and rebuilds the per-agent tool registry and system prompt per request.
 type orchestratorFactory struct {
-	cfg          *config.Config
-	client       LLMClient
-	baseRegistry *tool.Registry       // holds process-wide tools (webfetch, MCP proxies, luban skill tools)
-	serverTools  map[string][]string  // server name -> prefixed tool names
-	skillLoader  *skill.Loader        // discovers global and per-user skills
-	userMCP      config.UserMCPConfig // per-user MCP tool timeouts/enabled flag
-	mcpMarket    *mcpmarket.Client    // optional MCP-market client (mcp-market capability; nil = off)
-	snapshots    SubAgentSnapshotStore
+	cfg           *config.Config
+	client        LLMClient
+	baseRegistry  *tool.Registry       // holds process-wide tools (webfetch, MCP proxies, luban skill tools)
+	serverTools   map[string][]string  // server name -> prefixed tool names
+	skillLoader   *skill.Loader        // discovers global and per-user skills
+	userMCP       config.UserMCPConfig // per-user MCP tool timeouts/enabled flag
+	mcpMarket     *mcpmarket.Client    // optional MCP-market client (mcp-market capability; nil = off)
+	snapshots     SubAgentSnapshotStore
 	resourceGuard xizhi.PathGuard // optional `.cron` write guard
 	// scheduledTaskTools are the Scheduler-backed management tool names made
 	// visible to every agent when the standalone Scheduler is configured.
@@ -259,12 +259,7 @@ func (f *orchestratorFactory) buildAgentRegistry(ctx context.Context, cfg config
 // agentListsMCPTool reports whether the agent's configured tools include any
 // per-user mcp_* tool.
 func agentListsMCPTool(tools []string) bool {
-	for _, name := range tools {
-		if mcp.IsMCPTool(name) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(tools, mcp.IsMCPTool)
 }
 
 // allowedMCPTools returns the prefixed tool names this agent is allowed to use

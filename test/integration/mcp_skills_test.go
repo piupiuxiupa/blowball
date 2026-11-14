@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -68,11 +69,11 @@ func (s *scriptedLLM) StreamChat(ctx context.Context, req agent.LLMRequest, onTo
 func (s *scriptedLLM) confuciusRequest() agent.LLMRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := len(s.requests) - 1; i >= 0; i-- {
-		if len(s.requests[i].Messages) > 0 && s.requests[i].Messages[0].Role == "system" {
-			content := s.requests[i].Messages[0].Content
+	for _, v := range slices.Backward(s.requests) {
+		if len(v.Messages) > 0 && v.Messages[0].Role == "system" {
+			content := v.Messages[0].Content
 			if contains(content, "you are confucius") {
-				return s.requests[i]
+				return v
 			}
 		}
 	}

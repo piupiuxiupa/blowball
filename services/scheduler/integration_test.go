@@ -80,7 +80,7 @@ func applySQLFile(t *testing.T, st *store.Store, path string) {
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var stmt strings.Builder
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
 			continue

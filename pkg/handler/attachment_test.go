@@ -26,9 +26,6 @@ import (
 // signature only, so this suffices without being a real decodable image.
 var pngBytes = append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 1, 2, 3, 4)
 
-// ptrStr returns a *string for nullable-session fixtures.
-func ptrStr(s string) *string { return &s }
-
 type fakeAttachmentStore struct {
 	rows map[string]model.Attachment
 	// claimHook overrides ClaimAttachment when set (race injection for tests).
@@ -116,7 +113,7 @@ func (f *fakeAttachmentStore) ClaimAttachment(_ context.Context, id, userID, ses
 	if !ok || a.UserID != userID || a.SessionID != nil {
 		return false, nil
 	}
-	a.SessionID = ptrStr(sessionID)
+	a.SessionID = new(sessionID)
 	f.rows[id] = a
 	return true, nil
 }
@@ -285,7 +282,7 @@ func TestAttachmentContent_CrossUserAndBadID(t *testing.T) {
 	// even if the file existed — the registry triple rejects it first.
 	id := "01953c5e-7f9e-7cc8-8db5-2f4a5b6c7d8e"
 	store.rows = map[string]model.Attachment{}
-	store.rows[id] = model.Attachment{ID: id, UserID: "u-2", SessionID: ptrStr("s-1"), Filename: "x.png", MIME: "image/png"}
+	store.rows[id] = model.Attachment{ID: id, UserID: "u-2", SessionID: new("s-1"), Filename: "x.png", MIME: "image/png"}
 
 	for _, aid := range []string{id, "../../etc/passwd", "not-a-uuid"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/s-1/attachments/"+aid+"/content", nil)
@@ -352,7 +349,7 @@ func TestAttachmentUploadStaged_QuotaExceeded(t *testing.T) {
 		store.rows[id] = model.Attachment{ID: id, UserID: "u-1", SessionID: nil, Filename: "x.png", MIME: "image/png"}
 	}
 	// A bound row and another user's staged row must not count against u-1.
-	store.rows["bound"] = model.Attachment{ID: "bound", UserID: "u-1", SessionID: ptrStr("s-1"), MIME: "image/png"}
+	store.rows["bound"] = model.Attachment{ID: "bound", UserID: "u-1", SessionID: new("s-1"), MIME: "image/png"}
 	store.rows["other"] = model.Attachment{ID: "other", UserID: "u-2", SessionID: nil, MIME: "image/png"}
 
 	w := postStagedAttachment(t, r, "shot.png", pngBytes)

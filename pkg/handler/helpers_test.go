@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 
@@ -53,9 +54,9 @@ func (c *fakeTitleLLM) StreamChat(_ context.Context, req agent.LLMRequest, _ fun
 func (c *fakeTitleLLM) lastUserContent() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i := len(c.lastReq.Messages) - 1; i >= 0; i-- {
-		if c.lastReq.Messages[i].Role == "user" {
-			return c.lastReq.Messages[i].Content
+	for _, v := range slices.Backward(c.lastReq.Messages) {
+		if v.Role == "user" {
+			return v.Content
 		}
 	}
 	return ""

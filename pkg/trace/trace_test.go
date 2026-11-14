@@ -21,7 +21,7 @@ func TestNew_ReturnsNonEmptyUniqueUUID(t *testing.T) {
 	// Uniqueness across many calls.
 	const n = 1000
 	seen := make(map[string]struct{}, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := New()
 		if _, dup := seen[id]; dup {
 			t.Fatalf("New() produced duplicate id %q after %d calls", id, i)

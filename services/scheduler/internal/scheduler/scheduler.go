@@ -12,8 +12,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/logger"
+	"github.com/lush/blowball/pkg/model"
 	"github.com/lush/blowball/pkg/rpcx"
 	"github.com/lush/blowball/pkg/scheduledcontract"
 )
@@ -235,12 +235,10 @@ func (s *Scheduler) dispatch(run *model.ScheduledTaskRun) bool {
 	if !s.beginWorker(run.OccurrenceID) {
 		return false
 	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		defer s.endWorker(run.OccurrenceID)
 		s.execute(s.ctx, run)
-	}()
+	})
 	return true
 }
 

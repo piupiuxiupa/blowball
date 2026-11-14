@@ -149,7 +149,7 @@ func TestFlusher_BatchThresholdEarlyFlush(t *testing.T) {
 	sink := NewSink(buf, notify)
 	// No Flusher.Start: drive the threshold logic by hand — pushing
 	// flushBatchSize records must leave the notify channel signalled.
-	for i := 0; i < flushBatchSize; i++ {
+	for i := range flushBatchSize {
 		sink.Capture(context.Background(), captureRec("call-x", i+1, model.RawKindRequest))
 	}
 	select {
@@ -172,7 +172,7 @@ func TestFlusher_FinalFlushOnClose(t *testing.T) {
 	flusher.Start()
 
 	// Records land after the loop started but without any ticker firing yet.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, buf.PushRawLog(context.Background(), []byte(`{"call_id":"c","seq":1,"kind":"request","agent":"Liang"}`)))
 	}
 
@@ -213,7 +213,7 @@ func TestFlusher_InsertFailureBackoffAndDropsBatch(t *testing.T) {
 	store.mu.Lock()
 	store.fail = false
 	store.mu.Unlock()
-	for i := 0; i < flushBatchSize; i++ {
+	for i := range flushBatchSize {
 		sink.Capture(context.Background(), captureRec("c2", i+2, model.RawKindRequest))
 	}
 	flusher.Close()

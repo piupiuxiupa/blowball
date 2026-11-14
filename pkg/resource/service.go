@@ -236,7 +236,7 @@ func (s *Service) allocateRevision(ctx context.Context, userID string, layout La
 	if err != nil {
 		return 0, fmt.Errorf("%w: revision allocation: %v", ErrUnavailable, err)
 	}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		_, statErr := os.Lstat(layout.RevisionRoot(revision))
 		existing, metaErr := s.store.GetResourceVersion(ctx, userID, layout.TaskID, revision)
 		if metaErr != nil {

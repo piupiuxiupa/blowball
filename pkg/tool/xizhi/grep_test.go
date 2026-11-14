@@ -175,7 +175,7 @@ func TestGrepFiles_ResultCapTruncates(t *testing.T) {
 	root := t.TempDir()
 	// A single file with >maxGrepMatches occurrences of "x".
 	var content []byte
-	for i := 0; i < maxGrepMatches+50; i++ {
+	for range maxGrepMatches + 50 {
 		content = append(content, 'x', '\n')
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(root, "big.txt"), content, 0o644))
@@ -436,7 +436,7 @@ func TestGrepFiles_LineTruncated(t *testing.T) {
 	// A single line longer than maxGrepLineRunes that still matches.
 	long := make([]byte, 0, maxGrepLineRunes*2+5)
 	long = append(long, 'A')
-	for i := 0; i < maxGrepLineRunes*2; i++ {
+	for range maxGrepLineRunes * 2 {
 		long = append(long, 'B')
 	}
 	long = append(long, '\n')

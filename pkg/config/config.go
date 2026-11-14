@@ -124,8 +124,8 @@ const (
 // Omitted/zero fields fall back to the defaults; explicit negative values are
 // rejected at load time.
 type MessagesConfig struct {
-	MaxInputTokens *int         `yaml:"max_input_tokens"`
-	Queue          QueueConfig  `yaml:"queue"`
+	MaxInputTokens *int        `yaml:"max_input_tokens"`
+	Queue          QueueConfig `yaml:"queue"`
 }
 
 // QueueConfig configures the in-session message queue (session-message-queue
@@ -1739,7 +1739,7 @@ func DefaultExecutorToolConfig() ExecutorToolConfig {
 		Timeout:            30 * time.Second,
 		MaxOutputBytes:     65536,
 		AllowedEnvPatterns: []string{"PATH", "HOME", "LANG", "USER", "TERM", "PYTHON*"},
-		Network:            BoolPtr(true),
+		Network:            new(true),
 	}
 }
 
@@ -1794,13 +1794,6 @@ func (e ExecutorToolConfig) validate() error {
 		}
 	}
 	return nil
-}
-
-// BoolPtr returns a pointer to b. It is the helper used for *bool config
-// defaults such as ExecutorToolConfig.Network and LandlockConfig.Enabled, and is
-// exported so callers (e.g. tests in other packages) can construct those fields.
-func BoolPtr(b bool) *bool {
-	return &b
 }
 
 // ToolsConfig groups all tool configuration.
@@ -2334,9 +2327,9 @@ func expandEnv(s string) string {
 		inner := match[2 : len(match)-1]
 		name := inner
 		def := ""
-		if i := strings.IndexByte(inner, ':'); i >= 0 {
-			name = inner[:i]
-			def = inner[i+1:]
+		if before, after, ok := strings.Cut(inner, ":"); ok {
+			name = before
+			def = after
 		}
 		if v, ok := os.LookupEnv(name); ok {
 			return v

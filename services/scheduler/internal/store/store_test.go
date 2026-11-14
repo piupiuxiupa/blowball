@@ -64,7 +64,7 @@ func execSQLFile(t *testing.T, st *Store, path string) {
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var stmt strings.Builder
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
 			continue
@@ -133,12 +133,10 @@ func TestMaterializeUniqueSlotUnderConcurrency(t *testing.T) {
 	seedTask(t, st, cronRule(), now.Add(-time.Minute), nil)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			_, _ = st.MaterializeTasks(ctx, now, 10)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -207,7 +205,7 @@ func TestMaterializeOverlapHoldAndLegacyPolicy(t *testing.T) {
 	// Legacy existing-session policy never executes.
 	legacyTask := seedTask(t, st, cronRule(), now.Add(-time.Minute), func(t *model.ScheduledTask) {
 		t.SessionMode = model.ScheduledSessionExisting
-		t.SessionID = strPtr("legacy-session")
+		t.SessionID = new("legacy-session")
 	})
 	runs, err = st.MaterializeTasks(ctx, now, 10)
 	require.NoError(t, err)
@@ -451,5 +449,3 @@ func TestDeleteTaskCancelsUnstartedKeepsStarted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.ScheduledRunRunning, running.Status, "an already-started execution is not cancelled by task deletion")
 }
-
-func strPtr(v string) *string { return &v }

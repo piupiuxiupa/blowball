@@ -160,7 +160,7 @@ func TestExecutorPipViaBashAndImport(t *testing.T) {
 	}
 
 	tools, _ := newExecutorTools(t, config.ExecutorConfig{
-		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: 120 * time.Second, MaxOutputBytes: 65536, Network: config.BoolPtr(true)},
+		Bash: config.ExecutorToolConfig{Enabled: true, Timeout: 120 * time.Second, MaxOutputBytes: 65536, Network: new(true)},
 	})
 	reg := newRegistryWithExecutor(t, tools)
 

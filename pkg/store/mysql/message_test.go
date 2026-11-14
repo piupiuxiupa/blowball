@@ -239,7 +239,7 @@ func TestListMessagesPaged_PageSizeClamped(t *testing.T) {
 
 	sessionID := "aaaaaaaa-0000-7000-8000-000000000005"
 	base := time.Unix(1_700_000_000, 0).UTC()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		insertTestMessage(t, store, sessionID, base.Add(time.Duration(i)*time.Second), 0, "msg")
 	}
 

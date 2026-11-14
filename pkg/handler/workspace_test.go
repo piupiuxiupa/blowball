@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/lush/blowball/pkg/middleware"
 	"github.com/lush/blowball/pkg/jwt"
+	"github.com/lush/blowball/pkg/middleware"
 	"github.com/lush/blowball/pkg/store/fs"
 	"github.com/lush/blowball/pkg/tool/xizhi"
 )
@@ -2026,13 +2026,13 @@ func newOnlyOfficeTestEnv(t *testing.T) *ooTestEnv {
 	// Config endpoint: catch-all with /onlyoffice-config suffix, Bearer auth.
 	r.GET("/api/v1/workspace/files/*path", middleware.AuthMiddleware(jwtSecret), func(c *gin.Context) {
 		raw := strings.TrimPrefix(c.Param("path"), "/")
-		if strings.HasSuffix(raw, onlyOfficeConfigSuffix) {
-			c.Params = []gin.Param{{Key: "path", Value: strings.TrimSuffix(raw, onlyOfficeConfigSuffix)}}
+		if before, ok := strings.CutSuffix(raw, onlyOfficeConfigSuffix); ok {
+			c.Params = []gin.Param{{Key: "path", Value: before}}
 			h.OnlyOfficeConfig(c)
 			return
 		}
-		if strings.HasSuffix(raw, onlyOfficeVersionConfigSuffix) {
-			c.Params = []gin.Param{{Key: "path", Value: strings.TrimSuffix(raw, onlyOfficeVersionConfigSuffix)}}
+		if before, ok := strings.CutSuffix(raw, onlyOfficeVersionConfigSuffix); ok {
+			c.Params = []gin.Param{{Key: "path", Value: before}}
 			h.OnlyOfficeVersionConfig(c)
 			return
 		}

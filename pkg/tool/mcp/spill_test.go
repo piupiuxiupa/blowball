@@ -244,7 +244,7 @@ func TestSpill_AutoPathSanitizesSegments(t *testing.T) {
 	// literal name (never "." or "..").
 	p := autoSpillRelPath("../../etc", "pwn/../../sh", "t-1", 1, ".txt")
 	assert.True(t, strings.HasPrefix(p, "tmp/mcp-outputs/"), "path %q must stay under the spill dir", p)
-	for _, seg := range strings.Split(p, "/") {
+	for seg := range strings.SplitSeq(p, "/") {
 		assert.NotContains(t, []string{".", "..", ""}, seg, "segment %q must be a literal name", seg)
 	}
 	// Empty trace falls back to a uniqueness-preserving stamp.
