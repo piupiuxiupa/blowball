@@ -43,7 +43,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，子 Agent
 - **THEN** 系统使用 errgroup 并行启动所有子 Agent goroutine，且每个 tool_call 获得独立的子 agent 实例
 
 #### Scenario: Parallel same-name invocations stay isolated
-- **WHEN** 并行的多个 tool_calls 解析为同名子 agent（如 3 个 `invoke_chongzhi`）
+- **WHEN** 并行的多个 tool_calls 解析为同名子 agent（如 3 个同名 `spawn_subagent` 调用）
 - **THEN** 各调用的 Run 状态互不可见——一个调用的工具执行不得置位其他调用的副作用标志，一个调用的 round-cap 不得污染其他调用的传播
 
 #### Scenario: Parallel results collected
@@ -70,7 +70,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，子 Agent
 
 #### Scenario: Sub-agent tokens streamed directly
 - **WHEN** 子 Agent 调用 OpenAI streaming API 产生 token
-- **THEN** token 作为 StreamEvent{Type: "token", Agent: "Chongzhi"} 写入共享 channel，SSE handler 直接推送给用户
+- **THEN** token 作为 StreamEvent{Type: "token", Agent: "Subagent"} 写入共享 channel，SSE handler 直接推送给用户
 
 #### Scenario: Agent lifecycle events
 - **WHEN** 子 Agent 开始或结束执行
@@ -112,7 +112,7 @@ Confucius SHALL 通过 OpenAI function-calling 机制调度子 Agent，子 Agent
 - **THEN** 配置加载失败,错误信息指向 `openai.models[].max_completion_tokens` 迁移(残留拒绝见 per-request-model-selection)
 
 ### Requirement: Confucius agent loop
-Confucius SHALL 实现多轮 tool-calling 循环，循环在 LLM 返回 finish_reason 为 stop 时自然终止；当循环用尽配置的 `max_rounds` 上限仍未自然终止时，SHALL 按「Agent tool-calling loop round cap and graceful termination」受控终止（WARN 日志、`usage.meta.round_capped`、一次 tool-disabled 收尾回合；详见该需求）。当某回合返回 `finish_reason=length` 时，SHALL 按 `llm-length-continuation` 能力处理：能力启用时不再将 `length` 视为循环终止信号，而是保留已输出内容并以扩容预算续写（续写尝试不消耗 `max_rounds`；耗尽时的 `length_exhausted` 终止见该能力）；能力未启用时维持 `length` 静默终止的现状行为。同一续写规则 SHALL 等价作用于 Chongzhi 与 Liang 的 tool-calling 循环及各 agent 的 tool-disabled 收尾回合。
+Confucius SHALL 实现多轮 tool-calling 循环，循环在 LLM 返回 finish_reason 为 stop 时自然终止；当循环用尽配置的 `max_rounds` 上限仍未自然终止时，SHALL 按「Agent tool-calling loop round cap and graceful termination」受控终止（WARN 日志、`usage.meta.round_capped`、一次 tool-disabled 收尾回合；详见该需求）。当某回合返回 `finish_reason=length` 时，SHALL 按 `llm-length-continuation` 能力处理：能力启用时不再将 `length` 视为循环终止信号，而是保留已输出内容并以扩容预算续写（续写尝试不消耗 `max_rounds`；耗尽时的 `length_exhausted` 终止见该能力）；能力未启用时维持 `length` 静默终止的现状行为。同一续写规则 SHALL 等价作用于全部子代理的 tool-calling 循环及各 agent 的 tool-disabled 收尾回合。
 
 #### Scenario: Confucius calls tools then summarizes
 - **WHEN** Confucius 首轮调用返回 tool_calls，执行后第二轮 LLM 返回 content 且 finish_reason 为 stop
@@ -123,11 +123,11 @@ Confucius SHALL 实现多轮 tool-calling 循环，循环在 LLM 返回 finish_r
 - **THEN** Confucius 直接输出内容，推送 done 事件
 
 #### Scenario: length round continues instead of terminating
-- **WHEN** `openai.length_continue` 已启用，Confucius（或 Chongzhi/Liang）某回合返回 `finish_reason=length`
+- **WHEN** turn 解析的目录条目启用了 `length_continue`，任一 agent（根或子代理）某回合返回 `finish_reason=length`
 - **THEN** 该回合按 `llm-length-continuation` 能力续写（保留已输出内容、扩容预算重发），不终止循环、不消耗 `max_rounds`
 
 #### Scenario: length still terminates when capability disabled
-- **WHEN** `openai.length_continue` 未启用，某回合返回 `finish_reason=length`
+- **WHEN** turn 解析的目录条目未启用 `length_continue`，某回合返回 `finish_reason=length`
 - **THEN** 循环按改动前行为终止（含 `length` 携带 tool_calls 时 `shouldDispatchToolCalls` 的 WARN + terminal 处理），不追加任何续写脚手架
 
 ### Requirement: Token usage observability
@@ -139,9 +139,9 @@ Confucius SHALL 实现多轮 tool-calling 循环，循环在 LLM 返回 finish_r
 - **AND THEN** `by_agent` 至少包含 `Confucius`；若调度了子 agent，则同时包含对应子 agent 键
 
 #### Scenario: Parallel sub-agent usage attributed separately
-- **WHEN** 一个 turn 中 Confucius 并行调度了 Chongzhi 与 Liang
-- **THEN** `usage.by_agent` 分别记录 Confucius、Chongzhi、Liang 三者的 token 消耗
-- **AND THEN** 三者之和等于 `usage.total`
+- **WHEN** 一个 turn 中 Confucius 并行调度了两个子 agent
+- **THEN** `usage.by_agent` 分别记录 Confucius 与各子 agent 的 token 消耗
+- **AND THEN** 各条目之和等于 `usage.total`
 
 #### Scenario: Usage persisted per turn
 - **WHEN** done 事件发射后，turn 的消息批次被持久化
@@ -166,7 +166,7 @@ Confucius 的 dispatch 循环 SHALL 在折叠子 agent usage 进 turn 总量的�
 配置了 `output_schema` 的子 agent SHALL 在其 tool-calling 循环的终轮（模型不再 emit tool_call、即将返回最终内容给父级时）启用 OpenAI structured output（`response_format: json_schema`），使返回给父级的内容符合声明 schema。未配置 `output_schema` 的子 agent SHALL 返回自由文本。结构化输出与 reasoning 互斥，该冲突 SHALL 在到达 LLM 之前被拦截：部署默认等级 ≠ none 时配置加载失败（见 agent-reasoning-configuration）；请求解析结果 effort ≠ none 时返回 400（见 per-request-model-selection）。
 
 #### Scenario: Sub-agent with output schema uses structured output on final round
-- **WHEN** 一个配置了 `output_schema` 的子 agent（如 Liang）在其循环中进入终轮（`finish_reason=stop`，无 tool_call）
+- **WHEN** 一个配置了 `output_schema` 的子 agent 在其循环中进入终轮（`finish_reason=stop`，无 tool_call）
 - **THEN** 该终轮的 LLM 请求携带 `response_format: json_schema`（内容为配置的 schema）
 - **AND THEN** 子 agent 返回给父级的内容（toolResult.content）是该 schema 的合规 JSON
 
@@ -179,7 +179,7 @@ Confucius 的 dispatch 循环 SHALL 在折叠子 agent usage 进 turn 总量的�
 - **THEN** 前者使配置加载失败、后者返回 HTTP 400,任何 `output_schema` agent 的 LLM 调用都不会以 effort ≠ none 执行
 
 #### Scenario: Sub-agent without output schema returns free text
-- **WHEN** 一个未配置 `output_schema` 的子 agent（如 Chongzhi）完成执行
+- **WHEN** 一个未配置 `output_schema` 的子 agent 完成执行
 - **THEN** 其返回内容为自由文本，行为与变更前一致
 
 #### Scenario: Parent informed of structured return shape
@@ -187,10 +187,10 @@ Confucius 的 dispatch 循环 SHALL 在折叠子 agent usage 进 turn 总量的�
 - **THEN** Confucius 的系统 prompt 声明该子 agent 返回结构化 JSON，辅助其综合质量
 
 ### Requirement: Transient error retry for sub-agent dispatch
-系统 SHALL 对子 agent dispatch 的瞬时错误（LLM 429/5xx/超时、瞬时 tool_error）执行受限重试，并对语义错误（`bad_args`、`unknown_tool`）永不重试。重试策略 SHALL 由 `agents.<name>.retry` 配置块统一承载，同时治理该 agent 的轮次级重试（见 `llm-round-retry`）与派发级重试；有副作用的子 agent（Chongzhi）的派发级重试 SHALL 仅当**该次调用**尚未触发任何成功 tool_call 时允许——副作用安全由该幂等闸门承载，与 enabled 开关无关，三个 agent 的策略 SHALL 默认启用（`enabled: true`，`max_attempts: 3`）。副作用判定 SHALL 以单次调用为作用域——并行同名调用之间不得串读彼此的副作用标志。派发级重试 SHALL 与轮次级重试嵌套组合：子代理内部轮次级重试耗尽后 Run 失败，才进入派发级判定；两级重试 SHALL 共用同一 turn 级重试预算。
+系统 SHALL 对子 agent dispatch 的瞬时错误（LLM 429/5xx/超时、瞬时 tool_error）执行受限重试，并对语义错误（`bad_args`、`unknown_tool`）永不重试。重试策略 SHALL 由 `agents.<name>.retry` 配置块统一承载，同时治理该 agent 的轮次级重试（见 `llm-round-retry`）与派发级重试；有副作用的子 agent 的派发级重试 SHALL 仅当**该次调用**尚未触发任何成功 tool_call 时允许——副作用安全由该幂等闸门承载，与 enabled 开关无关，各 agent 的策略 SHALL 默认启用（`enabled: true`，`max_attempts: 3`）。副作用判定 SHALL 以单次调用为作用域——并行同名调用之间不得串读彼此的副作用标志。派发级重试 SHALL 与轮次级重试嵌套组合：子代理内部轮次级重试耗尽后 Run 失败，才进入派发级判定；两级重试 SHALL 共用同一 turn 级重试预算。
 
 #### Scenario: Transient LLM error retried for read-only agent
-- **WHEN** Liang 的 LLM 调用返回 429 或超时（且其轮次级重试已耗尽）
+- **WHEN** 某只读子 agent 的 LLM 调用返回 429 或超时（且其轮次级重试已耗尽）
 - **THEN** 系统按指数退避重试（至多配置的 max_attempts，默认 3），复用相同 invoke 参数
 - **AND THEN** 重试时发射 `agent_error` 事件且 `Meta.retry=true` 以通知前端
 
@@ -199,7 +199,7 @@ Confucius 的 dispatch 循环 SHALL 在折叠子 agent usage 进 turn 总量的�
 - **THEN** 系统立即返回错误结果，不重试（相同参数必再败）
 
 #### Scenario: Side-effecting agent not retried after tool execution
-- **WHEN** Chongzhi 已成功执行至少一个 xizhi 工具调用（如 write_file）后，其后续 LLM 调用失败
+- **WHEN** 某有副作用的子 agent 已成功执行至少一个工具调用（如 xizhi_write_file）后，其后续 LLM 调用失败
 - **THEN** 系统不重试该 dispatch（已产生文件系统副作用，重试将重复执行）
 - **AND THEN** 错误结果喂回 Confucius 决策
 
@@ -208,7 +208,7 @@ Confucius 的 dispatch 循环 SHALL 在折叠子 agent usage 进 turn 总量的�
 - **THEN** X2 按自身状态判定为可重试，X1 的副作用不得抑制 X2 的重试
 
 #### Scenario: Side-effecting agent retried only before any tool call
-- **WHEN** Chongzhi 首轮 LLM 调用即失败（尚未触发任何 tool_call，含轮次级重试耗尽的情形）
+- **WHEN** 有副作用的子 agent 首轮 LLM 调用即失败（尚未触发任何 tool_call，含轮次级重试耗尽的情形）
 - **THEN** 系统可重试该 dispatch（无副作用风险，幂等闸门放行），重试上限受重试预算约束
 
 #### Scenario: Retry budget enforced
@@ -314,12 +314,12 @@ The orchestrator SHALL accept the complete session conversation history recovere
 - **THEN** its first `LLMRequest.Messages` consists of the system prompt followed by the full history ending with the current user message
 
 #### Scenario: Sub-agent context remains isolated
-- **WHEN** Confucius dispatches a sub-agent via `invoke_chongzhi` or `invoke_liang`
+- **WHEN** Confucius dispatches a sub-agent via `spawn_subagent`
 - **THEN** the sub-agent's `Run` still receives only its own system prompt plus a single user message assembled from the task and context arguments
 - **AND THEN** the sub-agent does not see the user's full conversation history
 
 ### Requirement: Agent tool-calling loop round cap and graceful termination
-每个 Agent（Confucius、Chongzhi、Liang）的 tool-calling 循环 SHALL 受该 Agent 配置的 `max_rounds` 上限约束。当循环用尽 `max_rounds` 轮仍未自然终止（模型持续 emit tool_calls）时，系统 SHALL：(a) 发射一条结构化 WARN 日志（含 agent 名、上限值、已执行轮数）；(b) 将 `usage.meta.round_capped` 置为 `true` 折入终态 done 事件（非 cap 终止的 turn SHALL 不携带该键）；(c) 执行一次"收尾回合"——发起一轮额外 LLM 请求且禁用 tools（Confucius 同时不再 dispatch 子 agent），并在消息末尾追加一条收尾指令（告知模型已达轮数上限、不得再调用工具、须基于既有对话给出最终答复），以引导模型综合而非继续 tool-use 流；该轮 token SHALL 正常计入用量。若收尾回合返回 finish_reason=stop 的可用文本内容（无 tool_calls），其内容成为 turn 的 `finalContent`，turn 按正常成功结束（WARN 日志与 `meta.round_capped` 为仅有的 cap 信号，不发射 `agent_error`，done 事件不携带 `error`）。若收尾回合返回 tool_calls（某些 OpenAI 兼容网关在 tools 缺省时仍回显习得的 tool-use，这些调用无法被受理、其伴随文本仅为"接下来调用 X"式前言而非综合答案）、或未产出内容、或出错，均视为收尾失败：系统 SHALL 发射 `agent_error`（`Meta.error_code` 为 `round_cap_exhausted`）随后 `agent_end`，done 事件 SHALL 携带 `error` 字段，且该前言文本 SHALL NOT 作为最终答案返回。自然终止（`finish_reason=stop`、空 assistant 响应）SHALL 不触发上述任何 cap 行为。
+每个 Agent（根 Confucius 与动态子代理）的 tool-calling 循环 SHALL 受该 Agent 配置的 `max_rounds` 上限约束。当循环用尽 `max_rounds` 轮仍未自然终止（模型持续 emit tool_calls）时，系统 SHALL：(a) 发射一条结构化 WARN 日志（含 agent 名、上限值、已执行轮数）；(b) 将 `usage.meta.round_capped` 置为 `true` 折入终态 done 事件（非 cap 终止的 turn SHALL 不携带该键）；(c) 执行一次"收尾回合"——发起一轮额外 LLM 请求且禁用 tools（Confucius 同时不再 dispatch 子 agent），并在消息末尾追加一条收尾指令（告知模型已达轮数上限、不得再调用工具、须基于既有对话给出最终答复），以引导模型综合而非继续 tool-use 流；该轮 token SHALL 正常计入用量。若收尾回合返回 finish_reason=stop 的可用文本内容（无 tool_calls），其内容成为 turn 的 `finalContent`，turn 按正常成功结束（WARN 日志与 `meta.round_capped` 为仅有的 cap 信号，不发射 `agent_error`，done 事件不携带 `error`）。若收尾回合返回 tool_calls（某些 OpenAI 兼容网关在 tools 缺省时仍回显习得的 tool-use，这些调用无法被受理、其伴随文本仅为"接下来调用 X"式前言而非综合答案）、或未产出内容、或出错，均视为收尾失败：系统 SHALL 发射 `agent_error`（`Meta.error_code` 为 `round_cap_exhausted`）随后 `agent_end`，done 事件 SHALL 携带 `error` 字段，且该前言文本 SHALL NOT 作为最终答案返回。自然终止（`finish_reason=stop`、空 assistant 响应）SHALL 不触发上述任何 cap 行为。
 
 #### Scenario: Cap hit with successful wrap-up round
 - **WHEN** 某 Agent 的循环用尽 `max_rounds` 轮仍未自然终止，且随后的 tool-disabled 收尾回合返回了非空 content
@@ -349,7 +349,7 @@ The orchestrator SHALL accept the complete session conversation history recovere
 - **THEN** 收尾回合 SHALL 正常产出 reasoning + content，不发生 response_format 冲突
 
 #### Scenario: Structured-output agent wrap-up round
-- **WHEN** 一个配置了 `output_schema` 的子 agent（如 Liang）触达上限并执行收尾回合
+- **WHEN** 一个配置了 `output_schema` 的子 agent 触达上限并执行收尾回合
 - **THEN** 该收尾回合作为终轮 SHALL 携带 `response_format: json_schema`，返回内容为该 schema 的合规 JSON
 
 #### Scenario: Configurable cap respected

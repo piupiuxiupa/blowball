@@ -18,7 +18,7 @@ The system SHALL accept an operator-configured map `tools.timeouts` mapping buil
 - **THEN** the system parses it via the existing config duration expansion
 
 ### Requirement: Central timeout enforcement at the registry entry point
-The execution timeout SHALL be enforced centrally at the registry's tool-dispatch entry point: before invoking a tool's `Execute`, the dispatcher SHALL derive a child context bounded by the configured duration for that tool name (when one is configured) and pass that context to the tool. Enforcement SHALL cover every tool that flows through the registry, including all three agents (Confucius, Chongzhi, Liang) and MCP proxy tools. A registered built-in tool SHALL NOT discard or replace that dispatch context with an unbounded context on a path that performs the tool's work.
+The execution timeout SHALL be enforced centrally at the registry's tool-dispatch entry point: before invoking a tool's `Execute`, the dispatcher SHALL derive a child context bounded by the configured duration for that tool name (when one is configured) and pass that context to the tool. Enforcement SHALL cover every tool that flows through the registry, including every agent's dispatch path (root Confucius and dynamic sub-agents) and MCP proxy tools. A registered built-in tool SHALL NOT discard or replace that dispatch context with an unbounded context on a path that performs the tool's work.
 
 #### Scenario: Timeout cancels a long-running tool
 - **WHEN** a tool configured with a 5s timeout runs longer than 5s

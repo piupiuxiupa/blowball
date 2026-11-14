@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定义 Xizhi 工具集能力，包括工具注册表、文件读/写/改工具，以及通过 go-landlock 实现的进程级文件沙箱与应用层路径前缀校验。
+定义 Xizhi 工具集能力，包括工具注册表、文件读/写/改/查找/搜索/删除工具与图像理解 sidecar，以及通过 go-landlock 实现的进程级文件沙箱与应用层路径前缀校验。
 
 ## Requirements
 
@@ -11,7 +11,7 @@
 
 #### Scenario: Build tools for agent
 - **WHEN** Agent 需要调用 OpenAI API
-- **THEN** 系统根据 Agent 配置的 tools 列表，从注册表中查找对应的 tool definition，构造 tools 参数；注册表中除包含 read/write/modify 外，还包含 list_files、tree、glob_files 等 workspace-scoped 工具
+- **THEN** 系统根据 Agent 配置的 tools 列表，从注册表中查找对应的 tool definition，构造 tools 参数；注册表中除包含 read/write/modify 外，还包含 list_files、tree、find、grep、delete、view_image 等 workspace-scoped 工具
 
 #### Scenario: Tool not found in registry
 - **WHEN** Agent 配置引用了不存在的 tool name
@@ -28,42 +28,42 @@
 - **WHEN** 配置中 `tools.xizhi.tree.enabled` 为 true
 - **THEN** 系统将 `xizhi_tree` 注册到工具注册表，可被 Agent 使用
 
-#### Scenario: Enable glob files tool
-- **WHEN** 配置中 `tools.xizhi.glob_files.enabled` 为 true
-- **THEN** 系统将 `xizhi_glob_files` 注册到工具注册表，可被 Agent 使用
+#### Scenario: Enable find tool
+- **WHEN** 配置中 `tools.xizhi.find.enabled` 为 true
+- **THEN** 系统将 `xizhi_find` 注册到工具注册表，可被 Agent 使用
 
 ### Requirement: Xizhi read file
 Xizhi SHALL 提供读取用户工作空间文件的工具，只能读取 data/{user_uuid}/workspace/ 下的文件。
 
 #### Scenario: Read existing file
-- **WHEN** Chongzhi 调用 xizhi_read_file，path 为 "src/main.go"
+- **WHEN** Agent 调用 xizhi_read_file，path 为 "src/main.go"
 - **THEN** 系统读取 data/{user_uuid}/workspace/src/main.go 的内容，作为 tool response 返回
 
 #### Scenario: Read file outside workspace
-- **WHEN** Chongzhi 调用 xizhi_read_file，path 为 "../../etc/passwd"
+- **WHEN** Agent 调用 xizhi_read_file，path 为 "../../etc/passwd"
 - **THEN** 系统拒绝操作，返回错误 "path outside workspace"
 
 #### Scenario: Read non-existent file
-- **WHEN** Chongzhi 调用 xizhi_read_file，文件不存在
+- **WHEN** Agent 调用 xizhi_read_file，文件不存在
 - **THEN** 系统返回错误 "file not found"
 
 ### Requirement: Xizhi write file
 Xizhi SHALL 提供写入文件到用户工作空间的工具，只能在 data/{user_uuid}/workspace/ 下写文件。工具 SHALL 支持可选 `mode` 参数（枚举 `write` | `append`）：缺省或 `write` 保持现行创建或覆盖语义（行为与引入 `mode` 前逐字节一致）；`append` SHALL 在文件不存在时创建（含自动创建父目录）、存在时将 `content` 追加到文件末尾。结果 SHALL 返回 `{path, size, absolute, appended}`，其中 `size` 为写后文件总大小，`appended` 为本次调用写入的字节数（`write` 模式等于全文长度，`append` 模式等于追加内容长度）。
 
 #### Scenario: Write new file
-- **WHEN** Chongzhi 调用 xizhi_write_file，path 为 "src/main.go"，content 为文件内容
+- **WHEN** Agent 调用 xizhi_write_file，path 为 "src/main.go"，content 为文件内容
 - **THEN** 系统在 data/{user_uuid}/workspace/src/main.go 写入内容，自动创建中间目录
 
 #### Scenario: Overwrite existing file
-- **WHEN** Chongzhi 调用 xizhi_write_file，文件已存在，mode 缺省或为 "write"
+- **WHEN** Agent 调用 xizhi_write_file，文件已存在，mode 缺省或为 "write"
 - **THEN** 系统覆盖文件内容
 
 #### Scenario: Append to existing file
-- **WHEN** Chongzhi 调用 xizhi_write_file，path 为已存在文件，content 为新内容，mode 为 "append"
+- **WHEN** Agent 调用 xizhi_write_file，path 为已存在文件，content 为新内容，mode 为 "append"
 - **THEN** 系统将 content 追加到文件末尾（原内容保留），返回的 `size` 为追加后总大小、`appended` 为本次追加字节数
 
 #### Scenario: Append creates missing file
-- **WHEN** Chongzhi 调用 xizhi_write_file，mode 为 "append"，文件不存在
+- **WHEN** Agent 调用 xizhi_write_file，mode 为 "append"，文件不存在
 - **THEN** 系统创建该文件（含父目录）并写入 content，行为等同首次写入
 
 #### Scenario: Default mode preserves current behavior
@@ -71,7 +71,7 @@ Xizhi SHALL 提供写入文件到用户工作空间的工具，只能在 data/{u
 - **THEN** 语义与引入 mode 前的 xizhi_write_file 完全一致（创建或覆盖），结果仅新增 `appended` 字段
 
 #### Scenario: Write outside workspace blocked
-- **WHEN** Chongzhi 调用 xizhi_write_file，解析后的绝对路径不在 workspace 目录下
+- **WHEN** Agent 调用 xizhi_write_file，解析后的绝对路径不在 workspace 目录下
 - **THEN** 系统拒绝操作，返回错误 "path outside workspace"
 
 #### Scenario: Invalid mode rejected
@@ -82,15 +82,15 @@ Xizhi SHALL 提供写入文件到用户工作空间的工具，只能在 data/{u
 Xizhi SHALL 提供修改已有文件部分内容的工具，通过 old_content/new_content 替换。
 
 #### Scenario: Modify file with matching content
-- **WHEN** Chongzhi 调用 xizhi_modify_file，old_content 在文件中存在且唯一
+- **WHEN** Agent 调用 xizhi_modify_file，old_content 在文件中存在且唯一
 - **THEN** 系统将 old_content 替换为 new_content
 
 #### Scenario: Old content not found
-- **WHEN** Chongzhi 调用 xizhi_modify_file，old_content 在文件中不存在
+- **WHEN** Agent 调用 xizhi_modify_file，old_content 在文件中不存在
 - **THEN** 系统返回错误 "old content not found"
 
 #### Scenario: Old content matches multiple locations
-- **WHEN** Chongzhi 调用 xizhi_modify_file，old_content 在文件中出现多次
+- **WHEN** Agent 调用 xizhi_modify_file，old_content 在文件中出现多次
 - **THEN** 系统返回错误 "old content is ambiguous, found multiple matches"
 
 ### Requirement: Landlock process-level restriction
@@ -166,11 +166,11 @@ Xizhi 的每个工具调用 SHALL 在应用层验证路径前缀，确保操作�
 - **THEN** 描述声明 `old_content` 必须在文件中唯一匹配，缺失或多次出现则失败
 
 #### Scenario: 写入预算引导按解析条目注入
-- **WHEN** turn 解析的目录条目 `max_completion_tokens: 8192`，Chongzhi 的工具列表包含 `xizhi_write_file`/`xizhi_modify_file`，系统渲染 Chongzhi 的 tools[]
+- **WHEN** turn 解析的目录条目 `max_completion_tokens: 8192`，某 agent 的工具列表包含 `xizhi_write_file`/`xizhi_modify_file`，系统渲染该 agent 的 tools[]
 - **THEN** 两个工具的描述包含写入预算引导语句，预算数字为 5734（`floor(8192 × 0.7)`），并引导大内容分块多次写入
 
 #### Scenario: 无写入工具的 agent 不受影响
-- **WHEN** 某 agent（如 Liang）的工具列表不包含 `xizhi_write_file`/`xizhi_modify_file`
+- **WHEN** 某 agent 的工具列表不包含 `xizhi_write_file`/`xizhi_modify_file`
 - **THEN** 该 agent 渲染的 tools[] 描述不含写入预算引导语句
 
 #### Scenario: 预算数字随解析条目区分

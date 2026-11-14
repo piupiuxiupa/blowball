@@ -2,7 +2,7 @@
 
 ## Purpose
 
-当一个 LLM 回合的响应因输出 token 上限被截断（`finish_reason == "length"`）时，续写能力（`openai.length_continue`，opt-in）使其被继续而非静默终止：保留已输出内容，向该回合上下文追加续写脚手架后以扩容预算（`max_tokens + N × expand_step`）重发请求，最多 `max_retries` 次续写（尝试不消耗 `max_rounds`）；覆盖 Confucius/Chongzhi/Liang 三个主循环与轮数上限收尾回合（标题生成与 compaction 摘要不覆盖）。SSE 事件面与持久化面零改动——不引入新事件类型、尝试间不插入事件（`MergeEvents` 仍合并为单行）、脚手架不落库。未配置或全零时行为与改动前逐字节一致。
+当一个 LLM 回合的响应因输出 token 上限被截断（`finish_reason == "length"`）时，续写能力（按模型目录条目配置的 `length_continue` 子块，opt-in）使其被继续而非静默终止：保留已输出内容，向该回合上下文追加续写脚手架后以扩容预算（基础配额 + N × expand_step）重发请求，最多 `max_retries` 次续写（尝试不消耗 `max_rounds`）；覆盖全部 agent 的 tool-calling 主循环（根 Confucius 与动态子代理）与轮数上限收尾回合（标题生成与 compaction 摘要不覆盖）。SSE 事件面与持久化面零改动——不引入新事件类型、尝试间不插入事件（`MergeEvents` 仍合并为单行）、脚手架不落库。未配置或全零时行为与改动前逐字节一致。
 
 ## Requirements
 
@@ -117,7 +117,7 @@
 
 ### Requirement: 续写覆盖范围
 
-续写 SHALL 通过一个共享 helper 覆盖四个 `StreamChat` 调用点：Confucius、Chongzhi、Liang 三个主循环，以及轮数上限收尾回合（`runWrapUpRound`）。TitleService 的标题生成与 compaction 摘要生成 SHALL NOT 触发续写。
+续写 SHALL 通过一个共享 helper 覆盖两类 `StreamChat` 调用点：agent 的 tool-calling 主循环（根 Confucius 与动态子代理共用同一循环），以及轮数上限收尾回合（`runWrapUpRound`）。TitleService 的标题生成与 compaction 摘要生成 SHALL NOT 触发续写。
 
 #### Scenario: 收尾回合同样续写
 

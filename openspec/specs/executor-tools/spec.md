@@ -253,7 +253,7 @@ bwrap 沙箱 SHALL 读取 `tools.executor.sandbox` 配置（见 `sandbox-directo
 - **THEN** 输出含 `/workspace/.pip`（前置或独占）
 
 ### Requirement: Executor tool descriptions declare result shape, limits, and file-tool anti-pattern
-`bash` 的工具描述 SHALL 声明其结果结构为 `{output, exit_code, truncated}`（`output` 为合并的 stdout+stderr），并告知输出有上限（默认 64KB，超限截断并以 `...output truncated...` 标记、置 `truncated: true`）与超时（默认 30s）。`bash` 描述 SHALL 包含一条扩充的反模式，以强指令词 `DO NOT` 标记：工作区文件的读取/列出/搜索/修改/删除**不要**直接用 `cat`、`rm`、`ls`、`find`、`sed`、`awk`、`grep`，而用对应的 `xizhi_*` 专用工具（`cat`→`xizhi_read_file`；`ls`→`xizhi_list_files`/`xizhi_tree`；`find`→`xizhi_glob_files`；`grep`→`xizhi_grep`；`sed`/`awk`→`xizhi_modify_file`；`rm`→`xizhi_delete`），除非专用工具无法完成该任务。该反模式为**纯提示词引导，系统不在代码层对命令入参做拦截**（bash 图灵完备，子串/正则检测必然误报与漏报；破坏性操作由沙箱与 warn audit 兜底）。描述 SHALL 对其致命约束（如 64KB 截断）用加粗 + 大写强指令词（`MUST`/`DO NOT`/`IMPORTANT` 等）标记不少于 2 处。
+`bash` 的工具描述 SHALL 声明其结果结构为 `{output, exit_code, truncated}`（`output` 为合并的 stdout+stderr），并告知输出有上限（默认 64KB，超限截断并以 `...output truncated...` 标记、置 `truncated: true`）与超时（默认 30s）。`bash` 描述 SHALL 包含一条扩充的反模式，以强指令词 `DO NOT` 标记：工作区文件的读取/列出/搜索/修改/删除**不要**直接用 `cat`、`rm`、`ls`、`find`、`sed`、`awk`、`grep`，而用对应的 `xizhi_*` 专用工具（`cat`→`xizhi_read_file`；`ls`→`xizhi_list_files`/`xizhi_tree`；`find`→`xizhi_find`；`grep`→`xizhi_grep`；`sed`/`awk`→`xizhi_modify_file`；`rm`→`xizhi_delete`），除非专用工具无法完成该任务。该反模式为**纯提示词引导，系统不在代码层对命令入参做拦截**（bash 图灵完备，子串/正则检测必然误报与漏报；破坏性操作由沙箱与 warn audit 兜底）。描述 SHALL 对其致命约束（如 64KB 截断）用加粗 + 大写强指令词（`MUST`/`DO NOT`/`IMPORTANT` 等）标记不少于 2 处。
 
 #### Scenario: bash 描述声明结果结构与上限
 - **WHEN** `bash` 工具被注册并渲染给模型
@@ -261,7 +261,7 @@ bwrap 沙箱 SHALL 读取 `tools.executor.sandbox` 配置（见 `sandbox-directo
 
 #### Scenario: bash 描述包含扩充的文件工具让位反模式
 - **WHEN** `bash` 工具被注册并渲染给模型
-- **THEN** 描述中以强指令词 `DO NOT` 标记让位反模式，名单覆盖 `cat`/`rm`/`ls`/`find`/`sed`/`awk`/`grep`，并逐个指向 `xizhi_read_file`/`xizhi_list_files`/`xizhi_tree`/`xizhi_glob_files`/`xizhi_grep`/`xizhi_modify_file`/`xizhi_delete`
+- **THEN** 描述中以强指令词 `DO NOT` 标记让位反模式，名单覆盖 `cat`/`rm`/`ls`/`find`/`sed`/`awk`/`grep`，并逐个指向 `xizhi_read_file`/`xizhi_list_files`/`xizhi_tree`/`xizhi_find`/`xizhi_grep`/`xizhi_modify_file`/`xizhi_delete`
 
 #### Scenario: 反模式为纯提示词，无代码拦截
 - **WHEN** Agent 调用 `bash` 执行含让位关键词的命令（如 `cat tmp/a.txt`）

@@ -44,7 +44,7 @@ Agent 的 `mcp.servers[].tools` 中每个具体工具名 SHALL 对应该 server 
 - **THEN** 系统启动失败并报告未知工具
 
 ### Requirement: Per-agent MCP tool visibility
-仅当 Agent 的 `mcp.servers` 明确允许某 server 时，该 server 的工具才对该 Agent 可见。
+Agent 的 MCP 工具可见性 SHALL 由其 `mcp.servers` 配置决定：仅当 Agent 的 `mcp.servers` 明确允许某 server 时，该 server 的工具才对该 Agent 可见。
 
 #### Scenario: Allowed server tools visible
 - **WHEN** agent 配置允许某 server

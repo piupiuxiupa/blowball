@@ -58,7 +58,7 @@
 每次子 agent 调用 SHALL 使用独立的子 agent 实例（或等价的按调用隔离的 run 状态），并行同名调用之间不得共享可变 run 状态（副作用执行标志、round-cap 标志）。构建子 agent 所需的只读部分（配置、LLM client、工具注册表、per-turn MCP manager）MAY 共享。
 
 #### Scenario: Side-effect flags do not cross invocations
-- **WHEN** 调用 X1 的 Chongzhi 已成功执行工具，并发调用 X2 的 Chongzhi 尚未执行任何工具且随后因瞬时错误失败
+- **WHEN** 并发同名调用 X1 已成功执行工具，X2 尚未执行任何工具且随后因瞬时错误失败
 - **THEN** X2 的重试资格判定只看 X2 自身的副作用标志（可重试），不被 X1 的状态影响
 
 #### Scenario: Round-cap propagation is per invocation

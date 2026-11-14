@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定义按请求选择模型与思考等级的能力：必填的 `openai.models` 模型目录（含 `default_model`、`default_reasoning_effort` 与 `title_model`）、`POST /messages` 的 `model` / `reasoning_effort` 请求参数及其双轴解析与校验规则、解析结果对 Confucius/Chongzhi/Liang 三 agent 的一致覆盖、已删除配置字段的残留拒绝，以及 `GET /api/v1/models` 模型列表端点。
+定义按请求选择模型与思考等级的能力：必填的 `openai.models` 模型目录（含 `default_model`、`default_reasoning_effort` 与 `title_model`）、`POST /messages` 的 `model` / `reasoning_effort` 请求参数及其双轴解析与校验规则、解析结果对该 turn 全部 agent（根 Confucius 与动态子代理）的一致覆盖、已删除配置字段的残留拒绝，以及 `GET /api/v1/models` 模型列表端点。
 
 ## Requirements
 
@@ -78,14 +78,14 @@
 - **WHEN** `openai.default_reasoning_effort: high`,请求选择 `thinking: false` 的条目且未携带 effort
 - **THEN** 该 turn effort 钳为 `none` 并记 WARN,请求正常进行(不返回 400)
 
-### Requirement: 三 agent 一致覆盖
+### Requirement: turn 内全部 agent 一致覆盖
 
-模型、思考等级、输出配额与续写配置 SHALL 为 turn 级属性:系统 SHALL 将解析条目的(模型,思考等级,`max_completion_tokens`,`length_continue`)同时应用于 Confucius、Chongzhi、Liang 三个 agent 的全部 LLM 调用(含轮数上限收尾回合);agent 配置 SHALL NOT 包含模型、思考或输出配额字段(不存在 agent 间差异,亦不存在被请求"接管"的 agent 级配置)。若任一 agent 配置了 `output_schema` 且解析结果 effort ≠ none,系统 SHALL 返回 400(不静默降级)。
+模型、思考等级、输出配额与续写配置 SHALL 为 turn 级属性:系统 SHALL 将解析条目的(模型,思考等级,`max_completion_tokens`,`length_continue`)同时应用于该 turn 全部 agent(根 Confucius 与动态子代理)的全部 LLM 调用(含轮数上限收尾回合);agent 配置 SHALL NOT 包含模型、思考或输出配额字段(不存在 agent 间差异,亦不存在被请求"接管"的 agent 级配置)。若任一 agent 配置了 `output_schema` 且解析结果 effort ≠ none,系统 SHALL 返回 400(不静默降级)。
 
-#### Scenario: 三 agent 同模型同配额
+#### Scenario: turn 内全部 agent 同模型同配额
 
 - **WHEN** 请求携带 `model: "gpt-5"` 与 `reasoning_effort: "high"`
-- **THEN** 本 turn Confucius、Chongzhi、Liang 的全部 LLM 调用使用 gpt-5、`reasoning_effort=high`,且每轮输出预算均为该条目的 `max_completion_tokens`
+- **THEN** 本 turn 全部 agent(根与子代理)的 LLM 调用使用 gpt-5、`reasoning_effort=high`,且每轮输出预算均为该条目的 `max_completion_tokens`
 
 #### Scenario: output_schema 冲突 fail fast
 

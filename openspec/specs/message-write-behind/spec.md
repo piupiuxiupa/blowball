@@ -2,55 +2,31 @@
 
 ## Purpose
 
-定义消息的 Redis-first write-behind 持久化能力：Redis 入库队列（`msgs:buffer`/`msgs:processing` 双列表可靠队列语义）与后台 flusher 的分批幂等入库——LMOVE 认领、LREM 确认、失败重试不丢弃、FK 死信例外、启动回收、批量刷新 `sessions.update_time`、同步 drain 原语、配置参数与角色归属（agent/all），以及 Redis AOF 持久化的部署前置。
+定义消息 Redis-first write-behind 持久化能力的**退役状态**：全局入库队列（`msgs:buffer`/`msgs:processing`）与后台 flusher 已由 `refactor-message-storage` / `harden-turn-persistence` 变更移除，round 终稿改为事务直写 MySQL（持久化行为见 `message-final-persistence` 与 `message-storage-optimization`）；本能力仅保留仍存活的两个切面——确定性幂等键约束与 per-session 读缓存的 best-effort 语义。
+
 ## Requirements
-### Requirement: Redis 入库队列与读缓存双写
-chunk 级全局入库队列（`msgs:buffer` / `msgs:processing`）与后台 flusher SHALL 退役：round 终稿批写直接走 turn 持久化路径（确定性 ID + 重试预算）。用户消息 send-time 写与 per-session 读缓存 SHALL 保留。
+
+### Requirement: 入库队列与后台 flusher 退役
+
+chunk 级全局入库队列（`msgs:buffer` / `msgs:processing`）与后台 flusher SHALL 退役：round 终稿批写直接走 turn 持久化路径（确定性 ID + 重试预算，单事务跨 `messages`/`tool_calls`），SHALL NOT 再有任何生产写入路径入队。遗留的队列 key 常量与运维排空助手 SHALL 仅保留用于迁移残留的人工排空，SHALL NOT 被生产装配消费。用户消息 send-time 写与 per-session 读缓存 SHALL 保留（见下）。
 
 #### Scenario: round 批写不经过全局队列
+
 - **WHEN** round 完成触发终稿批写
 - **THEN** 写入路径为事务直写 + 幂等重试，无全局队列参与
 
-### Requirement: flusher 批量认领与确认
+#### Scenario: 队列配置残留不再生效
 
-后台 flusher SHALL 通过 `LMOVE msgs:buffer → msgs:processing` 逐条原子认领记录（单轮累计不超过配置的批阈值），批量幂等插入 MySQL，插入成功后逐条 `LREM msgs:processing` 确认移除。多个进程各自运行的 flusher SHALL 能并发消费同一队列而不重复、不丢失记录。
-
-#### Scenario: 正常批量入库
-
-- **WHEN** `msgs:buffer` 非空且 flush 周期到达
-- **THEN** flusher 认领至多批阈值条记录，一次多值幂等 INSERT 写入 messages 表，随后全部从 `msgs:processing` 移除
-
-#### Scenario: 多进程并发安全
-
-- **WHEN** 两个 agent 角色进程的 flusher 同时消费同一 `msgs:buffer`
-- **THEN** 每条记录经由 `LMOVE` 只被一个 flusher 认领，不出现同一条记录进入两个批次或被整体遗漏
-
-### Requirement: 入库失败重试不丢弃
-
-flusher 的 MySQL 插入失败时，已认领记录 SHALL 留在 `msgs:processing` 中，flusher 在退避（默认 1s）后重试，SHALL NOT 丢弃或跳过。进程启动时 SHALL 将 `msgs:processing` 中的残留记录推回 `msgs:buffer` 重新投递（回收上次崩溃的 in-flight 批）。
-
-#### Scenario: MySQL 故障时记录保留重试
-
-- **WHEN** 批量插入因 MySQL 不可用而失败
-- **THEN** 该批记录保留在 `msgs:processing`，flusher 退避后重试同一批记录，直到插入成功
-
-#### Scenario: 崩溃后启动回收
-
-- **WHEN** 进程在"插入已提交、LREM 未完成"或"认领后插入前"崩溃，新进程启动
-- **THEN** 启动流程将 `msgs:processing` 残留推回 `msgs:buffer`，由 flusher 重新认领入库
+- **WHEN** 配置中仍出现 `messages.flush_interval` / `messages.flush_batch_size`
+- **THEN** 不存在任何消费这些参数的后台 flusher（键本身待随代码清理移除）
 
 ### Requirement: 幂等插入
 
-messages 表 SHALL 增加 `client_msg_id CHAR(36)` 列与 UNIQUE 索引（遗留行允许 NULL）。消息批次持久化时 SHALL 为每条消息 mint 一个 `client_msg_id`。flusher 与降级直写路径的 INSERT SHALL 使用 `INSERT IGNORE` 语义，使重复投递的同一条记录只落一行。
-
-#### Scenario: 持久化时 mint 幂等键
-
-- **WHEN** 一轮 turn 的消息批次进入 Redis 双写
-- **THEN** 批内每条消息携带唯一 `client_msg_id`
+messages 表 SHALL 保留 `client_msg_id` 列与 UNIQUE 索引（遗留行允许 NULL）。turn 各持久化路径（send-time 用户行写、round 终稿批写、中断恢复）SHALL 使用确定性 `client_msg_id = {trace_id}:{msg_index}` 并依赖 UNIQUE 约束的幂等 INSERT 语义，使重复投递的同一条记录只落一行。
 
 #### Scenario: 重复投递不产生重复行
 
-- **WHEN** 同一条消息记录因崩溃回收或重试被插入两次
+- **WHEN** 同一条消息记录因重试或恢复路径被插入两次
 - **THEN** 第二次插入被 UNIQUE 索引忽略，messages 表中该 `client_msg_id` 仅存在一行
 
 #### Scenario: 遗留行不受影响
@@ -58,77 +34,16 @@ messages 表 SHALL 增加 `client_msg_id CHAR(36)` 列与 UNIQUE 索引（遗留
 - **WHEN** migration 在既有库上为 messages 加 `client_msg_id` UNIQUE 索引
 - **THEN** 遗留行的 NULL 值不违反唯一约束，旧数据读写不受影响
 
-### Requirement: 会话已删的死信例外
+### Requirement: per-session 读缓存 best-effort
 
-对因会话已删除导致的 MySQL 外键错误（错误码 1452），flusher SHALL 将该记录从 `msgs:processing` 移除并记录 ERROR 日志（含记录摘要），SHALL NOT 无限重试。其他错误 SHALL 保持重试。
+Redis `msgs:{session_id}`（24h TTL）SHALL 仅作为 MySQL 之上的读缓存：终稿持久化后以 best-effort 方式追加缓存，缓存写入失败 SHALL 仅记录降级日志并继续，SHALL NOT 影响落库或 turn 结果；读路径遇缓存 miss 或错误 SHALL 回源 MySQL 并回填。
 
-#### Scenario: FK 错误按死信丢弃
+#### Scenario: 缓存写失败不阻断
 
-- **WHEN** 一条记录插入时命中外键错误（其 session 已被删除）
-- **THEN** 该记录从 `msgs:processing` 移除并记 ERROR 日志，flusher 继续处理后续记录
+- **WHEN** round 终稿已写入 MySQL，追加 Redis 缓存时 Redis 报错
+- **THEN** turn 正常完成，后续读路径回源 MySQL 重建缓存
 
-#### Scenario: 非 FK 错误不丢弃
+#### Scenario: 缓存 miss 回源
 
-- **WHEN** 插入失败但错误码不是外键错误（如连接超时）
-- **THEN** 该批记录保留重试，不进入死信路径
-
-### Requirement: flusher 配置与触发
-
-flusher 的行为 SHALL 可配置：`messages.flush_interval`（默认 1s）为定时触发间隔，`messages.flush_batch_size`（默认 100）为单轮认领上限与队列长度提前触发阈值。配置中的非正数值 SHALL 在加载时被拒绝。优雅停机时 SHALL 执行一次有界的最终 drain。
-
-#### Scenario: 定时触发
-
-- **WHEN** 到达 flush_interval 且队列非空
-- **THEN** flusher 执行一轮认领-插入-确认
-
-#### Scenario: 队列超阈值提前触发
-
-- **WHEN** 队列长度在两次定时触发之间超过 flush_batch_size
-- **THEN** flusher 提前执行一轮冲刷，不等下一个间隔
-
-#### Scenario: 优雅停机最终 drain
-
-- **WHEN** 进程收到停机信号
-- **THEN** flusher 停止主循环后执行一次有界 final drain，超时则放弃并记 WARN
-
-### Requirement: 会话 update_time 随批刷新
-
-flusher 在一批插入成功后，SHALL 对批内出现的每个 distinct session_id 刷新一次 `sessions.update_time`；刷新失败 SHALL 仅记录日志，不影响消息入库与后续批次。
-
-#### Scenario: 批量刷新 update_time
-
-- **WHEN** 一批消息插入成功且涉及多个 session
-- **THEN** 每个涉及的 session 各执行一次 update_time 刷新
-
-#### Scenario: 刷新失败不阻断
-
-- **WHEN** update_time 刷新失败
-- **THEN** 系统记录错误日志，消息行与后续 flush 周期不受影响
-
-### Requirement: 同步 drain 原语
-
-系统 SHALL 提供同步 drain 能力：一次性将 `msgs:buffer` 与 `msgs:processing` 中当前全部记录认领并插入 MySQL（含重试语义），供会话删除流程与读路径 miss 场景复用。drain SHALL 有界（不无限等待）。
-
-#### Scenario: drain 清空队列
-
-- **WHEN** 调用同步 drain 且队列中存在记录
-- **THEN** drain 返回前 buffer 与 processing 中的记录全部完成插入（或因有界超时报错）
-
-### Requirement: flusher 角色归属
-
-flusher SHALL 仅在 agent 与 all 角色进程中构造并启动；api 角色 SHALL NOT 构造 flusher。
-
-#### Scenario: api 角色不运行 flusher
-
-- **WHEN** 进程以 `--role api` 启动
-- **THEN** 不存在消息 flusher goroutine，也不连接消息入库队列的消费路径
-
-### Requirement: Redis 持久化部署前置
-
-Redis 启用 AOF（`appendonly yes`）SHALL 作为部署要求。进程启动时 SHALL 尽力探测 Redis 的 `appendonly` 配置，探测失败或无权限时跳过，未开启时 SHALL 记录 WARN 日志（提示丢数据风险窗口），SHALL NOT 阻断启动。
-
-#### Scenario: AOF 未开启时启动告警
-
-- **WHEN** 启动时探测到 Redis `appendonly` 为 `no`
-- **THEN** 记录一条 WARN 日志说明 flush 间隔内的消息可能因 Redis 重启丢失，进程正常启动
-
+- **WHEN** 读历史时缓存 key 不存在或已过期
+- **THEN** 从 MySQL 读取并在成功后回填缓存

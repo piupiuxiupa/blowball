@@ -1,7 +1,7 @@
 # message-final-persistence Specification
 
 ## Purpose
-TBD - created by archiving change refactor-message-storage. Update Purpose after archive.
+定义以 round 为持久化单位的消息终稿模型：一轮完整 LLM 回复及其全部工具执行结果在单事务内直写 MySQL（`messages` 存终稿行与工具占位行、`tool_calls` 为工具交互唯一权威存储），流式 chunk 不落库；替代早期逐事件行/token 行持久化模型（遗留行的读取适配见 `agent-conversation-memory` 与 `message-storage-optimization`）。
 ## Requirements
 ### Requirement: Round-boundary final content persistence
 系统 SHALL 以 round 为最小持久化单位：一轮（一次完整 LLM 回复及其全部工具执行结果）完成后，将该 round 的终稿写入 MySQL。持久化批 SHALL 在单事务内跨 `messages` 与 `tool_calls` 两表写入。新数据 SHALL NOT 产生 `token`、`reasoning`、`tool_result`、`agent_start`、`agent_end` 或 `plan_updated` 事件行；例外：`agent_error` SHALL 作为错误留痕行持久化（role 为空、content 为错误文本、随所属 round 批次落库），`tool_call` 仅以占位行形式存在（见下）。当一个 tool result 之后出现下一轮 LLM 响应的 tool_call 时，系统 SHALL 将其视为新 round 并关闭前一个 round。

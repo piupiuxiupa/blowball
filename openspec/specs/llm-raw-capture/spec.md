@@ -8,7 +8,7 @@
 
 ### Requirement: 每次 LLM 调用的原始记录含请求与终态行
 
-系统 SHALL 在每次 LLM 调用(所有经由 `LLMClient.StreamChat` 的调用方:Confucius、Chongzhi、Liang、round-cap 收尾轮、title 生成)产生 `kind=request` 行(调用发起时)以及 `kind=response` 或 `kind=error` 行(调用结束时;缝合版保留)。系统 MUST NOT 为新的 SSE chunk 产生 `kind=chunk` 行。同一调用的全部行 MUST 共享同一 `call_id`(uuid)与同一 `seq`(trace 内单调递增的调用序号),request 行 MUST 使用 `frame_index=0`,response/error 行 MUST 使用 `frame_index=1`,并携带 `trace_id`、`session_id`、`user_id`、`agent`、`model` 列。
+系统 SHALL 在每次 LLM 调用(所有经由 `LLMClient.StreamChat` 的调用方:各 agent 的 tool-calling 主循环(根与动态子代理)、round-cap 收尾轮、title 生成)产生 `kind=request` 行(调用发起时)以及 `kind=response` 或 `kind=error` 行(调用结束时;缝合版保留)。系统 MUST NOT 为新的 SSE chunk 产生 `kind=chunk` 行。同一调用的全部行 MUST 共享同一 `call_id`(uuid)与同一 `seq`(trace 内单调递增的调用序号),request 行 MUST 使用 `frame_index=0`,response/error 行 MUST 使用 `frame_index=1`,并携带 `trace_id`、`session_id`、`user_id`、`agent`、`model` 列。
 
 #### Scenario: 成功的流式调用
 - **WHEN** 一次 `StreamChat` 调用正常完成(网关发送了 N 个 SSE chunk 并正常结束)

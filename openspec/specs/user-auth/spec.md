@@ -21,6 +21,10 @@
 - **WHEN** 用户发送 POST /api/v1/auth/login，username 不存在
 - **THEN** 系统返回 HTTP 401，body 包含错误信息 "user not found"
 
+#### Scenario: Passwordless login for seeded users (dev)
+- **WHEN** 配置 `auth.password_required: false`，用户发送 POST /api/v1/auth/login，body 只含 username（无 password 或 password 为空），且该用户存在
+- **THEN** 系统返回 HTTP 200 并签发 JWT token（密码不参与校验）；该开关面向开发环境的种子用户，缺省 `true` 时免密登录 SHALL 被拒绝
+
 ### Requirement: JWT token structure
 签发的 JWT token SHALL 包含 user_id (UUID) claim，使用 HS256 算法签名，过期时间由配置文件 jwt.expire 控制。
 

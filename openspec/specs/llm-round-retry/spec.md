@@ -2,12 +2,12 @@
 
 ## Purpose
 
-轮次级瞬时 LLM 重试：重试单位是 agent 轮次内部的单次 `StreamChat` 流式调用（`runLLMRound` 里的 `streamChatWithRetry`），覆盖 Confucius/Chongzhi/Liang 三个主循环与 round-cap 后的 tool-disabled wrap-up 轮（标题生成与 compaction 摘要不覆盖）。瞬态失败（`isTransientError` 判定：429/5xx/网络抖动/流中断/watchdog 空闲超时）以逐字节相同的请求重发——Messages 与该 attempt 的 `MaxCompletionTokens` 均不变，不重派工具、不追加 continuation 脚手架，重试计数与续写计数相互独立；上下文取消与语义错误绝不重试，取消判定优先于一切。失败 attempt 的报出 usage 折入真实花费（`total`/`by_agent`/`turn_usage`），其部分内容被丢弃。轮次级与派发级重试共用同一 turn 级 `retryBudget`，由 `agents.confucius.retry.budget_tokens` 配置。三个 agent 默认 `enabled: true`、`max_attempts: 3`，退避复用既有指数退避默认。
+轮次级瞬时 LLM 重试：重试单位是 agent 轮次内部的单次 `StreamChat` 流式调用（`runLLMRound` 里的 `streamChatWithRetry`），覆盖全部 agent 的 tool-calling 主循环（根 Confucius 与动态子代理）与 round-cap 后的 tool-disabled wrap-up 轮（标题生成与 compaction 摘要不覆盖）。瞬态失败（`isTransientError` 判定：429/5xx/网络抖动/流中断/watchdog 空闲超时）以逐字节相同的请求重发——Messages 与该 attempt 的 `MaxCompletionTokens` 均不变，不重派工具、不追加 continuation 脚手架，重试计数与续写计数相互独立；上下文取消与语义错误绝不重试，取消判定优先于一切。失败 attempt 的报出 usage 折入真实花费（`total`/`by_agent`/`turn_usage`），其部分内容被丢弃。轮次级与派发级重试共用同一 turn 级 `retryBudget`，由 `agents.confucius.retry.budget_tokens` 配置。各 agent 的 retry 块默认 `enabled: true`、`max_attempts: 3`，退避复用既有指数退避默认。
 
 ## Requirements
 
 ### Requirement: Transient retry of individual LLM streaming calls in agent rounds
-系统 SHALL 在 `runLLMRound` 内部对单次 `StreamChat` 流式调用执行瞬时错误重试：所有 agent（Confucius/Chongzhi/Liang）的主循环与 round-cap 后的 wrap-up 轮均受覆盖。重试触发条件 SHALL 为：错误经 `isTransientError` 判定为瞬时（LLM 429/5xx/超时/网络抖动/流中断/watchdog 空闲超时）、未达 `max_attempts` 上限、且 turn 级重试预算允许。上下文取消（`ctx.Err() != nil`）与语义错误（`bad_args`、`unknown_tool`、length 耗尽等非瞬时错误）SHALL 绝不重试，取消判定 SHALL 优先于一切重试判定。
+系统 SHALL 在 `runLLMRound` 内部对单次 `StreamChat` 流式调用执行瞬时错误重试：所有 agent（根 Confucius 与动态子代理）的主循环与 round-cap 后的 wrap-up 轮均受覆盖。重试触发条件 SHALL 为：错误经 `isTransientError` 判定为瞬时（LLM 429/5xx/超时/网络抖动/流中断/watchdog 空闲超时）、未达 `max_attempts` 上限、且 turn 级重试预算允许。上下文取消（`ctx.Err() != nil`）与语义错误（`bad_args`、`unknown_tool`、length 耗尽等非瞬时错误）SHALL 绝不重试，取消判定 SHALL 优先于一切重试判定。
 
 #### Scenario: Mid-stream transient failure retried
 - **WHEN** 某 agent 轮次的 LLM 流在中途因 429/网络错误/EOF 断流（流已开始，SDK 不再兜底）
@@ -58,11 +58,11 @@
 - **THEN** 该 turn 内后续任何瞬时失败（无论哪个 agent、哪一级）不再重试，错误直接浮出
 
 ### Requirement: Default-enabled policy for every agent
-`agents.<name>.retry` 配置块 SHALL 统一治理该 agent 的轮次级与派发级瞬时重试；三个 agent SHALL 默认 `enabled: true`、`max_attempts: 3`（1 次原始 + 2 次重试）、退避复用既有指数退避默认（500ms 起、4s 封顶）。显式配置 SHALL 覆盖默认（如显式 `enabled: false` 关闭该 agent 的两级重试）。
+`agents.<name>.retry` 配置块 SHALL 统一治理该 agent 的轮次级与派发级瞬时重试；每个 agent（根与子代理）SHALL 默认 `enabled: true`、`max_attempts: 3`（1 次原始 + 2 次重试）、退避复用既有指数退避默认（500ms 起、4s 封顶）。显式配置 SHALL 覆盖默认（如显式 `enabled: false` 关闭该 agent 的两级重试）。
 
 #### Scenario: Zero-value retry blocks get retry for all agents
 - **WHEN** 配置未显式设置任何 `retry` 块
-- **THEN** Confucius、Chongzhi、Liang 的轮次级重试均默认启用且 max_attempts 为 3
+- **THEN** 每个 agent（根与子代理）的轮次级重试均默认启用且 max_attempts 为 3
 
 #### Scenario: Explicit disable honored
 - **WHEN** 某 agent 显式配置 `retry: {enabled: false}`

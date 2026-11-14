@@ -15,7 +15,7 @@
 
 #### Scenario: 共享模式挂在 MinIO 支撑的 POSIX 文件系统上
 - **WHEN** `storage.workspace.backend` 为 `shared` 且 operator 已将 JuiceFS 挂载到 `{data-dir}/data`
-- **THEN** per-user 数据物理落于 MinIO（经 JuiceFS），而 `xizhi_read_file`/`xizhi_write_file`/`xizhi_modify_file`/`xizhi_list_files`/`xizhi_tree`/`xizhi_glob_files` 与全部 workspace HTTP 端点的请求/响应契约不变
+- **THEN** per-user 数据物理落于 MinIO（经 JuiceFS），而 `xizhi_read_file`/`xizhi_write_file`/`xizhi_modify_file`/`xizhi_list_files`/`xizhi_tree`/`xizhi_find` 与全部 workspace HTTP 端点的请求/响应契约不变
 
 #### Scenario: 验证符号链接防御在共享文件系统上仍然生效
 - **WHEN** `backend` 为 `shared` 且攻击者构造指向工作空间外的符号链接

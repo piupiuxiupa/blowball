@@ -26,10 +26,10 @@ surfaces require **no code change** in shared mode (audit checklist for review):
 |---|---|
 | `pkg/store/fs/*` (`UserWorkspace`, `sessionPath`, `EnsureUserDirs`, `UserSkills`) | All paths derived via `filepath.Join(root, ...)`. The root is `{data-dir}/data`; whatever is mounted there is used verbatim. |
 | `pkg/handler/workspace.go` (upload/download/content/delete/rename/OnlyOffice) | Plain `os.*` calls scoped by `xizhi.ValidatePath`. |
-| `pkg/handler/message_stream.go:151` (`workspaceRoot := filepath.Join(h.dataDir, userID, "workspace")`) | Derives the workspace from `dataDir`; follows the mount. |
-| `pkg/tool/xizhi/*` (6 tools + `ValidatePath` symlink defense) | Real POSIX paths; `EvalSymlinks` + `os.SameFile` work on JuiceFS. |
+| `pkg/handler/message_stream.go` / `pkg/turn/executor.go` (`workspaceRoot := filepath.Join(h/e.dataDir, userID, "workspace")`) | Derives the workspace from `dataDir`; follows the mount. |
+| `pkg/tool/xizhi/*` (9 tools + `ValidatePath` symlink defense) | Real POSIX paths; `EvalSymlinks` + `os.SameFile` work on JuiceFS. |
 | `pkg/tool/executor/*` (`bwrap --bind {workspace} /workspace`, `runner.go`) | Binds a real directory; rename atomicity, random write, dir listing all hold on JuiceFS. |
-| `onlyOfficePersist` atomic `os.Rename` (`workspace.go:806`) | JuiceFS `rename` is atomic (s3fs is NOT — that is why s3fs was rejected). |
+| `atomicWriteFromReader` atomic `os.Rename` (`workspace.go:1576`, used by OnlyOffice persist) | JuiceFS `rename` is atomic (s3fs is NOT — that is why s3fs was rejected). |
 
 The only code added by the `add-minio-workspace-storage` change is:
 

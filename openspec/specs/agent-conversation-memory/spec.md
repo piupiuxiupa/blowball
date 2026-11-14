@@ -18,6 +18,10 @@ The system SHALL provide a function that converts the ordered `[]model.Message` 
 - **THEN** their `content` values are concatenated into a single `agent.Message{Role: "assistant", Content: <combined>}`
 - **AND THEN** a change in `agent` value starts a new assistant message
 
+#### Scenario: Reasoning rows merge into the same assistant message
+- **WHEN** consecutive rows from the same `agent` mix `event_type = token` and `event_type = reasoning`
+- **THEN** they merge into a single assistant message whose `Content` carries the token text and `ReasoningContent` carries the reasoning text (implementation: `pkg/turn/message_reconstruct.go`)
+
 #### Scenario: Marker events are excluded from the prompt
 - **WHEN** rows have `event_type` of `agent_start`, `agent_end`, or `agent_error`, or an empty `role`
 - **THEN** those rows SHALL NOT appear in the reconstructed `[]agent.Message`

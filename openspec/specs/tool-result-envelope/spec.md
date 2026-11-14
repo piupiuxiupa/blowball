@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Every built-in tool result fed to the model as a `role="tool"` message is wrapped in a uniform `{status, result|error}` envelope, rendered by one shared function across all three agents.
+Every built-in tool result fed to the model as a `role="tool"` message is wrapped in a uniform `{status, result|error}` envelope, rendered by one shared function across every agent's tool-dispatch path (root and sub-agents).
 
 ## Requirements
 
@@ -26,10 +26,10 @@ Every built-in tool result that is fed back to the model as a `role="tool"` mess
 - **THEN** the model receives `{"status":1,"error":"<err.Error()>"}` and no `result` field
 
 ### Requirement: Central envelope rendering across all agents
-The envelope SHALL be produced by a single shared rendering function invoked from every agent's tool-dispatch path (Confucius, Chongzhi, and Liang), replacing the prior per-call result marshaler. The renderer SHALL accept both the tool's return value and its error so that success and failure are handled symmetrically in one place.
+The envelope SHALL be produced by a single shared rendering function invoked from every agent's tool-dispatch path (root Confucius and dynamic sub-agents), replacing the prior per-call result marshaler. The renderer SHALL accept both the tool's return value and its error so that success and failure are handled symmetrically in one place.
 
-#### Scenario: All three agents render the envelope
-- **WHEN** any of Confucius, Chongzhi, or Liang dispatches a registry tool call
+#### Scenario: All agents render the envelope
+- **WHEN** any agent (root or sub-agent) dispatches a registry tool call
 - **THEN** the resulting `role="tool"` message body is produced by the shared envelope renderer, not by inline per-agent marshaling
 
 ### Requirement: Envelope preserves byte-slice and string returns as text
@@ -40,7 +40,7 @@ When a tool's logical return value is a Go `[]byte` or `string`, the `result` fi
 - **THEN** the envelope's `result` is a JSON string containing the decoded text, not a base64 blob
 
 ### Requirement: Status envelope is the sole channel for registry-tool failures
-The in-body `status` field SHALL be the single, authoritative signal for a registry-tool failure. When a tool dispatched through the registry returns a non-nil error, the system SHALL render the `role="tool"` message body as `{"status":1,"error":"<message>"}` (the model-facing channel) and SHALL NOT emit an `agent_error` SSE event for that failure. The model receives the failure in-band and may retry the tool or explain it to the user; no additional out-of-band event is produced. The rendering itself (`renderToolResult`) and its placement in the `role="tool"` message are unchanged — only the redundant `agent_error` emission for the `tool_error` code is removed, across all three agents' registry-tool dispatch sites (Confucius, Chongzhi, Liang).
+The in-body `status` field SHALL be the single, authoritative signal for a registry-tool failure. When a tool dispatched through the registry returns a non-nil error, the system SHALL render the `role="tool"` message body as `{"status":1,"error":"<message>"}` (the model-facing channel) and SHALL NOT emit an `agent_error` SSE event for that failure. The model receives the failure in-band and may retry the tool or explain it to the user; no additional out-of-band event is produced. The rendering itself (`renderToolResult`) and its placement in the `role="tool"` message are unchanged — only the redundant `agent_error` emission for the `tool_error` code is removed, across every agent's registry-tool dispatch sites (root and sub-agents).
 
 #### Scenario: Tool failure emits the envelope only
 - **WHEN** a registry tool call fails (e.g. `xizhi_read_file` on a missing file, `xizhi_modify_file` old-content mismatch, `xizhi_grep` regex compile failure, or a tool execution timeout)

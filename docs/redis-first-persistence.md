@@ -1,5 +1,17 @@
 # Redis-first message persistence — deploy / migrate / rollback runbook
 
+> **⚠️ HISTORICAL — this architecture is retired.** The write-behind ingest
+> queue (`msgs:buffer` / `msgs:processing`) and its background flusher were
+> removed by the `refactor-message-storage` / `harden-turn-persistence`
+> changes (see the `message-write-behind` and `message-final-persistence`
+> specs): the round is now the persistence unit and finals are written
+> directly to MySQL in one transaction, so **Redis is no longer a message
+> durability layer** — it is a read cache (`msgs:{session_id}`) plus transient
+> turn-orchestration state. There is also no startup `appendonly` probe
+> anymore. This document is kept verbatim as the runbook for deployments that
+> still run a pre-retirement build; for the current Redis role and HA guidance
+> see `docs/redis-ha-deployment.md` and `docs/shared-storage.md`.
+
 This runbook covers the operational side of the Redis-first write-behind
 message persistence (the `message-write-behind` capability; see the change
 `openspec/changes/redis-first-message-persistence/` and the Persistence

@@ -112,8 +112,6 @@ SSE transport SHALL 在连接断开后尝试重连；stdio transport SHALL 在�
 - **WHEN** 一个未在 `mcp.servers` 中声明的 MCP 端点尝试被使用
 - **THEN** 系统拒绝连接，该端点不会出现在工具列表中
 
-## ADDED Requirements
-
 ### Requirement: HTTP transport support
 系统 SHALL 支持通过 MCP Streamable HTTP 连接外部 MCP 服务，并完成 `initialize`、`tools/list`、`tools/call` JSON-RPC 调用。
 

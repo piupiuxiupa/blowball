@@ -15,8 +15,8 @@
 - **AND THEN** `usage_json` 同时包含 `total`（聚合）与 `by_agent`（per-agent 拆分，键为 agent 名）两段
 
 #### Scenario: Parallel sub-agent turn attributes per-agent cost
-- **WHEN** 一个 turn 中 Confucius 并行调度了 Chongzhi 与 Liang
-- **THEN** `turn_usage.usage_json.by_agent` 包含三个键：`Confucius`、`Chongzhi`、`Liang`，各自的 prompt_tokens/completion_tokens/total_tokens 反映该 agent 本 turn 的实际消耗
+- **WHEN** 一个 turn 中 Confucius 并行调度了两个子 agent
+- **THEN** `turn_usage.usage_json.by_agent` 包含 `Confucius` 与各子 agent 名的键，各自的 prompt_tokens/completion_tokens/total_tokens 反映该 agent 本 turn 的实际消耗
 - **AND THEN** `by_agent` 各值之和等于 `total`
 
 #### Scenario: Turn with no sub-agents
