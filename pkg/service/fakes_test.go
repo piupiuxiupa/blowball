@@ -523,27 +523,9 @@ func (c *fakeLLMClient) StreamChat(ctx context.Context, req agent.LLMRequest, on
 	return c.resp, nil
 }
 
-// newDeps builds a SessionDeps with the supplied fakes and no drain hook.
+// newDeps builds a SessionDeps with the supplied fakes.
 func newDeps(m *fakeMySQLStore, r *fakeRedisStore, f *fakeFSStore) SessionDeps {
 	return SessionDeps{MySQL: m, Redis: r, FS: f}
-}
-
-// fakeDrain records write-behind drain invocations (the msgflush.Drain stand-in).
-type fakeDrain struct {
-	mu    sync.Mutex
-	calls int
-	err   error
-	order *[]string // optional shared order log (mirrors the store fakes)
-}
-
-func (d *fakeDrain) drain(ctx context.Context) error {
-	d.mu.Lock()
-	d.calls++
-	d.mu.Unlock()
-	if d.order != nil {
-		*d.order = append(*d.order, "drain")
-	}
-	return d.err
 }
 
 // sampleMessage is a stable message used across tests.

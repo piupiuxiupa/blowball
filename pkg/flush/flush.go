@@ -1,5 +1,5 @@
 // Package flush provides the shared pacing loop behind the write-behind
-// flushers (internal/msgflush, internal/llmraw): one goroutine that wakes on
+// flushers (pkg/llmraw): one goroutine that wakes on
 // an interval ticker, an optional producer nudge (which triggers an early
 // flush once the queue crosses the batch threshold), or stop, plus a final
 // bounded drain on Close. The Flush callback owns the claim/insert/ack

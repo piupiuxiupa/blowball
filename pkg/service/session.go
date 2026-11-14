@@ -25,16 +25,13 @@ type SessionSummary struct {
 	UpdateTime time.Time `json:"update_time"`
 }
 
-// SessionService owns session lifecycle and the Redis-first write-behind
-// message persistence. It is safe for concurrent use: every public method
-// takes a context, has no shared mutable state, and pushes straight through
-// to the underlying stores.
+// SessionService owns session lifecycle and the message persist paths.
+// It is safe for concurrent use: every public method takes a context, has no
+// shared mutable state, and pushes straight through to the underlying stores.
 type SessionService struct {
 	mysql MySQLStore
 	redis RedisStore
 	fs    FSStore
-	drain func(ctx context.Context) error
-	nudge func()
 	// attachmentDir resolves the per-session chat-attachment directory
 	// (add-image-attachments); nil skips the delete-time directory removal.
 	// Wired from the fs store rather than the FSStore interface so the small
@@ -53,8 +50,6 @@ func NewSessionService(deps SessionDeps) *SessionService {
 		mysql: deps.MySQL,
 		redis: deps.Redis,
 		fs:    deps.FS,
-		drain: deps.DrainMessageQueue,
-		nudge: deps.NudgeMessageFlush,
 	}
 }
 
@@ -211,32 +206,18 @@ func (s *SessionService) GetSessionDetail(ctx context.Context, sessionID string)
 // string-matching.
 var ErrSessionNotFound = errors.New("session not found")
 
-// messageDrainTimeout bounds the synchronous write-behind drain invoked
-// before archiving a deleted session and on a Redis read miss. Neither call
-// site is an interactive hot path (DELETE is rare; a cache miss means 24h of
-// idleness or a Redis restart), but both must eventually give up rather than
-// hang on a wedged drain.
-const messageDrainTimeout = 5 * time.Second
-
-// DeleteSession removes a session the caller owns, in three steps:
+// DeleteSession removes a session the caller owns, in steps:
 //
-//  1. Synchronously drain the write-behind ingest queue (bounded) so this
-//     session's messages still awaiting their MySQL flush land BEFORE the
-//     archive transaction snapshots the rows — otherwise the *_deleted
-//     mirrors would silently miss everything sitting in the queue. A drain
-//     failure aborts the delete: archiving an incomplete session is exactly
-//     the data loss the caller avoids by retrying.
-//  2. Atomically archive sessions/titles/messages into the *_deleted mirror
+//  1. Atomically archive sessions/titles/messages into the *_deleted mirror
 //     tables and delete the live sessions row (cascade clears live
 //     titles/messages) in one MySQL transaction.
-//  3. Proactively clear the Redis cache keys (msgs:{id}, session:{id}) —
+//  2. Proactively clear the Redis cache keys (msgs:{id}, session:{id}) —
 //     database first, cache second. A stale cache key was already
 //     unreachable (every read re-validates ownership against MySQL), so a
 //     clear failure is logged and the key simply ages out on TTL.
 //
 // Ownership is validated first via GetSessionByID; a missing or non-owned
-// session returns ErrSessionNotFound without touching any tier — and without
-// draining anything.
+// session returns ErrSessionNotFound without touching any tier.
 func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID string) error {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
@@ -257,24 +238,13 @@ func (s *SessionService) DeleteSession(ctx context.Context, userID, sessionID st
 		return ErrSessionNotFound
 	}
 
-	// 1) Bounded synchronous drain: unflushed messages must be in MySQL
-	// before the archive transaction reads them out.
-	if s.drain != nil {
-		drainCtx, cancel := context.WithTimeout(ctx, messageDrainTimeout)
-		defer cancel()
-		if err := s.drain(drainCtx); err != nil {
-			log.Error("pre-delete message queue drain failed; aborting delete", zap.Error(err))
-			return fmt.Errorf("session.delete: drain: %w", err)
-		}
-	}
-
-	// 2) Atomic archive + purge.
+	// 1) Atomic archive + purge.
 	if err := s.mysql.DeleteSession(ctx, sessionID); err != nil {
 		log.Error("archive and purge failed", zap.Error(err))
 		return fmt.Errorf("session.delete: purge: %w", err)
 	}
 
-	// 3) Cache clear, best-effort (db already deleted; TTL covers failures).
+	// 2) Cache clear, best-effort (db already deleted; TTL covers failures).
 	if err := s.redis.ClearMessages(ctx, sessionID); err != nil {
 		log.Warn("redis msgs cache clear failed; key expires on TTL", zap.Error(err))
 	}
@@ -478,20 +448,6 @@ func (s *SessionService) fallbackDirectWrite(ctx context.Context, log *zap.Logge
 		log.Error("update session time failed", zap.String("session_id", msgs[0].SessionID), zap.Error(err))
 	}
 	return nil
-}
-
-// DrainMessages runs the synchronous write-behind drain primitive (bounded by
-// the caller's context): it claims and inserts everything currently sitting in
-// msgs:buffer / msgs:processing. The turn-end path (harden-turn-persistence)
-// invokes it after the terminal batch's dual write and before the session
-// claim is released, so MySQL — the history endpoint's only read tier — holds
-// the complete turn by the time clients observe generating:false. A nil drain
-// wiring (tests) is a no-op.
-func (s *SessionService) DrainMessages(ctx context.Context) error {
-	if s.drain == nil {
-		return nil
-	}
-	return s.drain(ctx)
 }
 
 // SaveTurnUsage persists one turn's per-agent token cost into the turn_usage

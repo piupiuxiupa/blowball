@@ -103,12 +103,7 @@ func (w WorkspaceStorageConfig) validate() error {
 	}
 }
 
-// Default message-flush parameters (message-write-behind capability): the
-// ticker is deliberately shorter than llmraw's 5s because the history API is
-// sensitive to when a just-sent turn becomes readable from MySQL.
 const (
-	defaultMessageFlushInterval  = time.Second
-	defaultMessageFlushBatchSize = 100
 	// defaultMaxInputTokens is the effective user-input token cap for the
 	// streaming message endpoint when messages.max_input_tokens is unset
 	// (add-input-token-limit): detection is on by default.
@@ -119,24 +114,18 @@ const (
 	defaultQueueMaxDepth = 8
 )
 
-// MessagesConfig holds the Redis-first write-behind message persistence knobs
-// plus the user-input limit (the top-level `messages:` block; see the
-// message-write-behind and add-input-token-limit capabilities).
-// FlushInterval is the background flusher's ticker — the upper bound on how
-// long a persisted message can sit in the Redis ingest queue before it lands
-// in MySQL (and therefore the read-your-writes window of the history
-// endpoint). FlushBatchSize caps the records claimed per flush round and
-// doubles as the queue-length threshold that triggers an early flush.
+// MessagesConfig holds the user-input limit and the in-session message queue
+// (the top-level `messages:` block; see the add-input-token-limit and
+// session-message-queue capabilities). The retired write-behind knobs
+// flush_interval / flush_batch_size are rejected at load time below.
 // MaxInputTokens caps the estimated token count of a user message on
 // POST /sessions/:id/messages — a pointer so "unset → default 5000" and
 // "explicit 0 → disable" coexist (a plain int cannot distinguish them).
 // Omitted/zero fields fall back to the defaults; explicit negative values are
 // rejected at load time.
 type MessagesConfig struct {
-	FlushInterval  time.Duration `yaml:"flush_interval"`
-	FlushBatchSize int           `yaml:"flush_batch_size"`
-	MaxInputTokens *int          `yaml:"max_input_tokens"`
-	Queue          QueueConfig   `yaml:"queue"`
+	MaxInputTokens *int         `yaml:"max_input_tokens"`
+	Queue          QueueConfig  `yaml:"queue"`
 }
 
 // QueueConfig configures the in-session message queue (session-message-queue
@@ -165,18 +154,9 @@ func (m MessagesConfig) QueueMaxDepthLimit() int {
 	return defaultQueueMaxDepth
 }
 
-// applyDefaults fills zero-valued fields with the documented defaults. It is
-// idempotent and leaves explicit values (including negatives, which validate
-// rejects) untouched. MaxInputTokens is deliberately NOT defaulted here: the
-// pointer's nil-ness is the "unset" signal resolved by MaxInputTokensLimit.
-func (m *MessagesConfig) applyDefaults() {
-	if m.FlushInterval == 0 {
-		m.FlushInterval = defaultMessageFlushInterval
-	}
-	if m.FlushBatchSize == 0 {
-		m.FlushBatchSize = defaultMessageFlushBatchSize
-	}
-}
+// applyDefaults is a no-op kept for symmetry with the other config blocks:
+// every remaining field is a pointer whose nil-ness is the "unset" signal.
+func (m *MessagesConfig) applyDefaults() {}
 
 // MaxInputTokensLimit resolves the effective user-input token cap: an explicit
 // value wins (0 = token detection disabled), unset falls back to the default
@@ -189,16 +169,8 @@ func (m MessagesConfig) MaxInputTokensLimit() int {
 	return defaultMaxInputTokens
 }
 
-// validate rejects explicit non-positive values. After applyDefaults a zero
-// never survives, so this only fires on negatives — a typo, not "use the
-// default" (mirrors the agents.<name>.max_rounds convention).
+// validate rejects explicit non-positive values for the pointer fields.
 func (m MessagesConfig) validate() error {
-	if m.FlushInterval < 0 {
-		return fmt.Errorf("messages.flush_interval: must be positive (got %s)", m.FlushInterval)
-	}
-	if m.FlushBatchSize < 0 {
-		return fmt.Errorf("messages.flush_batch_size: must be positive (got %d)", m.FlushBatchSize)
-	}
 	if m.MaxInputTokens != nil && *m.MaxInputTokens < 0 {
 		return fmt.Errorf("messages.max_input_tokens: must be zero (disable) or positive (got %d)", *m.MaxInputTokens)
 	}
@@ -2017,6 +1989,20 @@ func Load(path string) (*Config, error) {
 	}
 	if _, ok := shadowTools.Tools.Xizhi["glob_files"]; ok {
 		return nil, fmt.Errorf("config validation error: tools.xizhi.glob_files was removed; use tools.xizhi.find (tool xizhi_find)")
+	}
+	// The retired write-behind flusher knobs (messages.flush_interval /
+	// messages.flush_batch_size) would be silently ignored by the typed
+	// decode; probe the raw map so a stale config fails fast.
+	var shadowMessages struct {
+		Messages map[string]any `yaml:"messages"`
+	}
+	if err := yaml.Unmarshal([]byte(expanded), &shadowMessages); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	for _, removed := range []string{"flush_interval", "flush_batch_size"} {
+		if _, ok := shadowMessages.Messages[removed]; ok {
+			return nil, fmt.Errorf("config validation error: messages.%s was removed with the write-behind flusher (message-final-persistence): round finals are written to MySQL directly — delete the key", removed)
+		}
 	}
 	if rawModels, ok := shadow.OpenAI["models"].([]any); ok {
 		for i, raw := range rawModels {

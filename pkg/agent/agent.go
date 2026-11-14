@@ -377,13 +377,6 @@ const SpawnSubagentTool = "spawn_subagent"
 // sub-agents never receive it.
 const UpdatePlanTool = "update_plan"
 
-// Legacy fixed-role tool names remain only for readers of pre-migration event
-// data; they are not model-facing and IsInvokeTool no longer recognizes them.
-const (
-	ToolInvokeChongzhi = "invoke_chongzhi"
-	ToolInvokeLiang    = "invoke_liang"
-)
-
 // SpawnSubagentSchema returns the JSON Schema describing spawn_subagent.
 func SpawnSubagentSchema() []byte { return append([]byte(nil), spawnArgsSchema...) }
 

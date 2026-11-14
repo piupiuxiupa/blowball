@@ -50,16 +50,6 @@ func (s *MessageService) ListToolCalls(ctx context.Context, sessionID string) ([
 // the priority chain Redis → MySQL, backfilling the cache on the MySQL
 // fallback so subsequent reads are cheaper. The filesystem no longer
 // participates.
-//
-// On a Redis miss (or a Redis error) a bounded synchronous drain of the
-// write-behind queue runs first: messages dual-written but not yet flushed
-// must land in MySQL BEFORE the ListMessages read, and especially before the
-// SetMessages backfill — the DEL+RPUSH inside SetMessages would otherwise
-// drop the unflushed rows from the cache layer, stretching the inconsistency
-// window from one flush interval to the whole cache TTL. Misses only happen
-// after 24h of idleness or a Redis restart, so the drain cost is negligible;
-// a drain failure is logged and the read proceeds (the backfill race then
-// self-heals on the next miss once the flusher catches up).
 func (s *MessageService) RecoverMessages(ctx context.Context, userID, sessionID string) ([]model.Message, error) {
 	tid := trace.FromContext(ctx)
 	log := logger.L().With(
@@ -71,7 +61,7 @@ func (s *MessageService) RecoverMessages(ctx context.Context, userID, sessionID 
 		log = log.With(zap.String("trace_id", tid))
 	}
 
-	// 1) Hot tier: Redis. A hit short-circuits the drain and the MySQL read.
+	// 1) Hot tier: Redis. A hit short-circuits the MySQL read.
 	if msgs, _, err := s.tryRedis(ctx, log, sessionID); err != nil {
 		log.Warn("redis recover failed; falling back to MySQL", zap.Error(err))
 	} else if msgs != nil {
@@ -80,17 +70,7 @@ func (s *MessageService) RecoverMessages(ctx context.Context, userID, sessionID 
 		log.Debug("redis miss")
 	}
 
-	// 2) Miss: drain the write-behind queue first (bounded, best-effort) so
-	// the MySQL read below observes every persisted message.
-	if s.deps.DrainMessageQueue != nil {
-		drainCtx, cancel := context.WithTimeout(ctx, messageDrainTimeout)
-		if err := s.deps.DrainMessageQueue(drainCtx); err != nil {
-			log.Warn("write-behind drain before mysql fallback failed", zap.Error(err))
-		}
-		cancel()
-	}
-
-	// 3) Cold tier: MySQL. On hit, backfill the Redis cache.
+	// 2) Cold tier: MySQL. On hit, backfill the Redis cache.
 	msgs, err := s.deps.MySQL.ListMessages(ctx, sessionID)
 	if err != nil {
 		log.Error("mysql recover failed", zap.Error(err))

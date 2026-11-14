@@ -12,19 +12,16 @@ import (
 	"github.com/lush/blowball/pkg/model"
 )
 
-// newDeleteSvc wires a SessionService with a drain hook, sharing one order
-// log across the fakes so tests can assert the drain → purge → cache-clear
-// sequence.
-func newDeleteSvc(m *fakeMySQLStore, r *fakeRedisStore, d *fakeDrain) *SessionService {
+// newDeleteSvc wires a SessionService, sharing one order log across the
+// fakes so tests can assert the purge → cache-clear sequence.
+func newDeleteSvc(m *fakeMySQLStore, r *fakeRedisStore) *SessionService {
 	order := &[]string{}
 	m.order = order
 	r.order = order
-	d.order = order
 	return NewSessionService(SessionDeps{
-		MySQL:             m,
-		Redis:             r,
-		FS:                &fakeFSStore{},
-		DrainMessageQueue: d.drain,
+		MySQL: m,
+		Redis: r,
+		FS:    &fakeFSStore{},
 	})
 }
 
@@ -44,8 +41,7 @@ func TestDeleteSession_RemovesAttachmentDir(t *testing.T) {
 
 	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d).WithAttachmentDir(func(uid, sid string) string {
+	svc := newDeleteSvc(m, r).WithAttachmentDir(func(uid, sid string) string {
 		return filepath.Join(root, uid, "attachments", sid)
 	})
 
@@ -67,8 +63,7 @@ func TestDeleteSession_AttachmentDirRemovalFailureDoesNotFailDelete(t *testing.T
 
 	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d).WithAttachmentDir(func(string, string) string {
+	svc := newDeleteSvc(m, r).WithAttachmentDir(func(string, string) string {
 		return filepath.Join(blocker, "child")
 	})
 
@@ -85,77 +80,37 @@ func TestDeleteSession_NoAttachmentDirWired(t *testing.T) {
 	)
 	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d)
+	svc := newDeleteSvc(m, r)
 
 	require.NoError(t, svc.DeleteSession(context.Background(), userID, sessionID))
 	require.Equal(t, 1, m.deleteSessionCalls)
 }
 
-// TestDeleteSession_Success_ThreeStepOrder verifies the happy path and its
-// strict ordering: ① drain the write-behind queue → ② MySQL archive+purge →
-// ③ clear the Redis cache keys (database before cache).
-func TestDeleteSession_Success_ThreeStepOrder(t *testing.T) {
+// TestDeleteSession_Success_PurgeThenCacheClear verifies the happy path and
+// its strict ordering: ① MySQL archive+purge → ② clear the Redis cache keys
+// (database before cache).
+func TestDeleteSession_Success_PurgeThenCacheClear(t *testing.T) {
 	const (
 		userID    = "u-del-1"
 		sessionID = "s-del-1"
 	)
 	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d)
+	svc := newDeleteSvc(m, r)
 
 	require.NoError(t, svc.DeleteSession(context.Background(), userID, sessionID))
 
 	require.Equal(t, 1, m.deleteSessionCalls)
 	assert.Equal(t, sessionID, m.deleteSessionArg)
-	require.Equal(t, 1, d.calls, "pre-delete drain must run exactly once")
 	require.Equal(t, 1, r.clearCalls, "msgs:{sid} cache key must be cleared")
 	require.Equal(t, 1, r.delSessCalls, "session:{sid} cache key must be cleared")
 
-	require.Equal(t, []string{"drain", "mysql.delete", "redis.clear_msgs", "redis.del_session"}, *r.order,
-		"delete must run drain → purge → cache clear in order")
-}
-
-// TestDeleteSession_DrainFailure_AbortsDelete verifies a failed drain aborts
-// before any archive happens — archiving a session whose unflushed messages
-// are still in the ingest queue would silently truncate the mirror tables.
-func TestDeleteSession_DrainFailure_AbortsDelete(t *testing.T) {
-	const (
-		userID    = "u-del-drain"
-		sessionID = "s-del-drain"
-	)
-	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
-	r := &fakeRedisStore{}
-	d := &fakeDrain{err: errFake}
-	svc := newDeleteSvc(m, r, d)
-
-	err := svc.DeleteSession(context.Background(), userID, sessionID)
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, ErrSessionNotFound)
-	assert.Equal(t, 1, d.calls)
-	assert.Equal(t, 0, m.deleteSessionCalls, "purge must not run when the drain fails")
-	assert.Equal(t, 0, r.clearCalls, "cache must not be cleared when the drain fails")
-}
-
-// TestDeleteSession_NilDrainHook_Proceeds verifies legacy wiring (no drain
-// hook) still deletes — the drain is skipped, not fatal.
-func TestDeleteSession_NilDrainHook_Proceeds(t *testing.T) {
-	const (
-		userID    = "u-del-nil"
-		sessionID = "s-del-nil"
-	)
-	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
-	r := &fakeRedisStore{}
-	svc := NewSessionService(SessionDeps{MySQL: m, Redis: r, FS: &fakeFSStore{}})
-
-	require.NoError(t, svc.DeleteSession(context.Background(), userID, sessionID))
-	require.Equal(t, 1, m.deleteSessionCalls)
-	require.Equal(t, 1, r.clearCalls)
+	require.Equal(t, []string{"mysql.delete", "redis.clear_msgs", "redis.del_session"}, *r.order,
+		"delete must run purge → cache clear in order")
 }
 
 // TestDeleteSession_SessionMissing_NotFound verifies a non-existent session
-// returns ErrSessionNotFound and drains/purges/clears nothing.
+// returns ErrSessionNotFound and purges/clears nothing.
 func TestDeleteSession_SessionMissing_NotFound(t *testing.T) {
 	const (
 		userID    = "u-del-2"
@@ -163,13 +118,11 @@ func TestDeleteSession_SessionMissing_NotFound(t *testing.T) {
 	)
 	m := &fakeMySQLStore{getSessionByIDFound: nil} // session does not exist
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d)
+	svc := newDeleteSvc(m, r)
 
 	err := svc.DeleteSession(context.Background(), userID, sessionID)
 	require.ErrorIs(t, err, ErrSessionNotFound)
 	assert.Equal(t, 0, m.deleteSessionCalls, "MySQL must not be purged on not-found")
-	assert.Equal(t, 0, d.calls, "not-found must not drain")
 	assert.Equal(t, 0, r.clearCalls, "not-found must not clear the cache")
 }
 
@@ -182,13 +135,11 @@ func TestDeleteSession_WrongOwner_NotFound(t *testing.T) {
 	)
 	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: "someone-else"}}
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d)
+	svc := newDeleteSvc(m, r)
 
 	err := svc.DeleteSession(context.Background(), userID, sessionID)
 	require.ErrorIs(t, err, ErrSessionNotFound)
 	assert.Equal(t, 0, m.deleteSessionCalls, "MySQL must not be purged for non-owner")
-	assert.Equal(t, 0, d.calls)
 }
 
 // TestDeleteSession_LookupError_ReturnsError verifies a store error during the
@@ -200,14 +151,13 @@ func TestDeleteSession_LookupError_ReturnsError(t *testing.T) {
 	)
 	m := &fakeMySQLStore{getSessionIDErr: errFake}
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d)
+	svc := newDeleteSvc(m, r)
 
 	err := svc.DeleteSession(context.Background(), userID, sessionID)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrSessionNotFound)
 	assert.Equal(t, 0, m.deleteSessionCalls)
-	assert.Equal(t, 0, d.calls)
+	assert.Equal(t, 0, r.clearCalls)
 }
 
 // TestDeleteSession_PurgeError_ReturnsError verifies a MySQL purge failure is
@@ -223,13 +173,11 @@ func TestDeleteSession_PurgeError_ReturnsError(t *testing.T) {
 		deleteSessionErr:    errFake,
 	}
 	r := &fakeRedisStore{}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d)
+	svc := newDeleteSvc(m, r)
 
 	err := svc.DeleteSession(context.Background(), userID, sessionID)
 	require.Error(t, err)
 	assert.Equal(t, 1, m.deleteSessionCalls)
-	assert.Equal(t, 1, d.calls, "drain runs before the purge attempt")
 	assert.Equal(t, 0, r.clearCalls, "cache must not be cleared when the purge fails")
 }
 
@@ -243,8 +191,7 @@ func TestDeleteSession_CacheClearFailure_BestEffort(t *testing.T) {
 	)
 	m := &fakeMySQLStore{getSessionByIDFound: &model.Session{SessionID: sessionID, UserID: userID}}
 	r := &fakeRedisStore{clearErr: errFake}
-	d := &fakeDrain{}
-	svc := newDeleteSvc(m, r, d)
+	svc := newDeleteSvc(m, r)
 
 	require.NoError(t, svc.DeleteSession(context.Background(), userID, sessionID),
 		"cache clear failure must not surface from DeleteSession")

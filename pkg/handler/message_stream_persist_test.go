@@ -25,11 +25,11 @@ import (
 
 // This file covers harden-turn-persistence: the terminal message batch is
 // durable (dual-write, or bounded retry) BEFORE Finalize releases the session
-// claim, a heartbeat keeper spans the persist/drain phase, and the send-time
+// claim, a heartbeat keeper spans the persist phase, and the send-time
 // at-least-once fallback for the user row actually triggers on a dual-tier
 // failure.
 
-// orderLog records cross-store event ordering (persist / drain / status /
+// orderLog records cross-store event ordering (persist / status /
 // release / retire) so tests can assert the terminal sequence.
 type orderLog struct {
 	mu     sync.Mutex
@@ -99,7 +99,7 @@ type persistTestEnv struct {
 	reg     *run.Registry
 }
 
-func newPersistTestEnv(t *testing.T, stub *stubOrchestrator, drainErr error) *persistTestEnv {
+func newPersistTestEnv(t *testing.T, stub *stubOrchestrator) *persistTestEnv {
 	t.Helper()
 	log := &orderLog{}
 	env := &persistTestEnv{log: log}
@@ -107,15 +107,10 @@ func newPersistTestEnv(t *testing.T, stub *stubOrchestrator, drainErr error) *pe
 		getSessionByIDFound: &model.Session{SessionID: "sess-1", UserID: "user-1"},
 	}
 	redis := &recordingRedis{handlerFakeRedis: &handlerFakeRedis{}, log: log}
-	drain := func(ctx context.Context) error {
-		log.add("drain")
-		return drainErr
-	}
 	deps := service.SessionDeps{
-		MySQL:             mysql,
-		Redis:             redis,
-		FS:                newHandlerFakeFS(),
-		DrainMessageQueue: drain,
+		MySQL: mysql,
+		Redis: redis,
+		FS:    newHandlerFakeFS(),
 	}
 	sessSvc := service.NewSessionService(deps)
 	msgSvc := service.NewMessageService(deps, sessSvc.SaveMessage)
@@ -175,7 +170,7 @@ func doneStub() *stubOrchestrator {
 // has succeeded, the shared turn pipeline drains its own event stream and
 // reaches durable terminal state without an HTTP request or SSE reader.
 func TestStartTurn_WithoutSubscriberPersistsAndFinalizes(t *testing.T) {
-	env := newPersistTestEnv(t, doneStub(), nil)
+	env := newPersistTestEnv(t, doneStub())
 	ctx := agent.WithUserID(context.Background(), "user-1")
 	holder, ok, err := env.store.ClaimSession(ctx, "sess-1", "headless-run")
 	require.NoError(t, err)
@@ -221,11 +216,10 @@ func TestStartTurn_WithoutSubscriberPersistsAndFinalizes(t *testing.T) {
 }
 
 // terminalOrder is the harden-turn-persistence terminal sequence for the
-// turn's own persistence (the log may carry earlier markers from the read
-// path's miss-drain and the send-time user-row write, which are correct and
-// unrelated). The pre-release drain step is retired with the ingest queue
-// (refactor-message-storage): the terminal batch is itself a synchronous
-// transactional MySQL write.
+// turn's own persistence (the log may carry an earlier marker from the
+// send-time user-row write, which is correct and unrelated). The terminal
+// batch is itself a synchronous transactional MySQL write
+// (refactor-message-storage).
 var terminalOrder = []string{"persist", "status", "release", "retire"}
 
 // requireTerminalSuffix asserts seq ENDS WITH want.
@@ -237,11 +231,11 @@ func requireTerminalSuffix(t *testing.T, seq, want []string) {
 
 // TestSendMessage_TerminalPersistBeforeClaimRelease_DonePath verifies the
 // core harden-turn-persistence invariant on the success path: the terminal
-// message batch is durable and the pre-release drain has run BEFORE Finalize
-// flips the run terminal and releases the session claim — so generating:false
-// implies a complete, MySQL-visible history.
+// message batch is durable BEFORE Finalize flips the run terminal and
+// releases the session claim — so generating:false implies a complete,
+// MySQL-visible history.
 func TestSendMessage_TerminalPersistBeforeClaimRelease_DonePath(t *testing.T) {
-	env := newPersistTestEnv(t, doneStub(), nil)
+	env := newPersistTestEnv(t, doneStub())
 
 	w := postMessage(t, env)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -251,24 +245,12 @@ func TestSendMessage_TerminalPersistBeforeClaimRelease_DonePath(t *testing.T) {
 
 // TestSendMessage_TerminalPersistBeforeClaimRelease_ErrorPath repeats the
 // ordering invariant on the orchestrator-error path: the partial event stream
-// is persisted (and drained) before the run is marked error and unlocked.
+// is persisted before the run is marked error and unlocked.
 // The cancel path shares the same turn-goroutine code sequence.
 func TestSendMessage_TerminalPersistBeforeClaimRelease_ErrorPath(t *testing.T) {
 	stub := doneStub()
 	stub.returnErr = errors.New("upstream 429")
-	env := newPersistTestEnv(t, stub, nil)
-
-	w := postMessage(t, env)
-	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-
-	requireTerminalSuffix(t, env.log.snapshot(), terminalOrder)
-}
-
-// drain is best-effort: a drain failure logs a WARN but the claim is still
-// released after the (successful) message batch — the background flusher
-// closes the residual ≤1s visibility gap.
-func TestSendMessage_DrainFailure_DoesNotBlockFinalize(t *testing.T) {
-	env := newPersistTestEnv(t, doneStub(), errors.New("drain wedged"))
+	env := newPersistTestEnv(t, stub)
 
 	w := postMessage(t, env)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -282,7 +264,7 @@ func TestSendMessage_DrainFailure_DoesNotBlockFinalize(t *testing.T) {
 // locking the session forever. The not-durable batch is now a loud, bounded
 // ERROR — not a silent fire-and-forget drop.
 func TestSendMessage_PersistBudgetExhausted_StillFinalizes(t *testing.T) {
-	env := newPersistTestEnv(t, doneStub(), nil)
+	env := newPersistTestEnv(t, doneStub())
 	env.redis.dualErr = errors.New("redis down")
 	env.mysql.appendMessagesErr = errors.New("mysql down")
 
@@ -363,7 +345,7 @@ func TestStartPersistHeartbeat(t *testing.T) {
 // the run is still registered (WaitAll would block); once released, WaitAll
 // returns nil.
 func TestSendMessage_RegistryFinishWaitsForTerminalSequence(t *testing.T) {
-	env := newPersistTestEnv(t, doneStub(), nil)
+	env := newPersistTestEnv(t, doneStub())
 	hold := make(chan struct{})
 	entered := make(chan struct{})
 	env.mysql.setFinalBatchHold(entered, hold)
@@ -398,16 +380,6 @@ func TestSendMessage_RegistryFinishWaitsForTerminalSequence(t *testing.T) {
 	wctx2, wcancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer wcancel2()
 	require.NoError(t, env.reg.WaitAll(wctx2))
-}
-
-// logContains reports whether the snapshot contains ev.
-func logContains(seq []string, ev string) bool {
-	for _, s := range seq {
-		if s == ev {
-			return true
-		}
-	}
-	return false
 }
 
 // heartbeatRecordingStore counts Heartbeat calls over a real MemStore.

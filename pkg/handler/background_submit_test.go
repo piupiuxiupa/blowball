@@ -26,7 +26,7 @@ func backgroundRequest(t *testing.T, runID string) *turnexec.Request {
 }
 
 func TestBackgroundSubmit_StableRunIDWithoutSubscriber(t *testing.T) {
-	env := newPersistTestEnv(t, doneStub(), nil)
+	env := newPersistTestEnv(t, doneStub())
 	req := backgroundRequest(t, "scheduled-run-1")
 	submission := env.streamH.TurnExecutor().Submit(agent.WithUserID(context.Background(), "user-1"), req)
 	require.Equal(t, turnexec.SubmitStarted, submission.Outcome, submission.Err)
@@ -51,7 +51,7 @@ func TestBackgroundSubmit_StableRunIDWithoutSubscriber(t *testing.T) {
 
 func TestBackgroundSubmit_BusyClaimDoesNotStart(t *testing.T) {
 	stub := doneStub()
-	env := newPersistTestEnv(t, stub, nil)
+	env := newPersistTestEnv(t, stub)
 	ctx := context.Background()
 	_, claimed, err := env.store.ClaimSession(ctx, "sess-1", "interactive-run")
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestBackgroundSubmit_BusyClaimDoesNotStart(t *testing.T) {
 
 func TestBackgroundSubmit_NonEmptyFIFODoesNotStart(t *testing.T) {
 	stub := doneStub()
-	env := newPersistTestEnv(t, stub, nil)
+	env := newPersistTestEnv(t, stub)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	first := run.QueueEntry{RunID: "chat-running", SessionID: "sess-1", UserID: "user-1", Content: "first", EnqueuedAt: now}
@@ -102,7 +102,7 @@ func (s *backgroundClaimErrorStore) ClaimBackgroundSession(context.Context, stri
 
 func TestBackgroundSubmit_RedisFailureIsFailClosed(t *testing.T) {
 	stub := doneStub()
-	env := newPersistTestEnv(t, stub, nil)
+	env := newPersistTestEnv(t, stub)
 	env.streamH.runs.Store = &backgroundClaimErrorStore{Store: env.store, err: errors.New("redis down")}
 
 	submission := env.streamH.TurnExecutor().Submit(context.Background(), backgroundRequest(t, "scheduled-run-redis"))
@@ -114,7 +114,7 @@ func TestBackgroundSubmit_RedisFailureIsFailClosed(t *testing.T) {
 
 func TestBackgroundSubmit_FenceRejectionReleasesClaimBeforeWrites(t *testing.T) {
 	stub := doneStub()
-	env := newPersistTestEnv(t, stub, nil)
+	env := newPersistTestEnv(t, stub)
 	req := backgroundRequest(t, "scheduled-run-fence")
 	fenceErr := errors.New("task paused")
 	req.BeforeStart = func(context.Context) error { return fenceErr }

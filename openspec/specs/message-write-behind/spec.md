@@ -8,17 +8,17 @@
 
 ### Requirement: 入库队列与后台 flusher 退役
 
-chunk 级全局入库队列（`msgs:buffer` / `msgs:processing`）与后台 flusher SHALL 退役：round 终稿批写直接走 turn 持久化路径（确定性 ID + 重试预算，单事务跨 `messages`/`tool_calls`），SHALL NOT 再有任何生产写入路径入队。遗留的队列 key 常量与运维排空助手 SHALL 仅保留用于迁移残留的人工排空，SHALL NOT 被生产装配消费。用户消息 send-time 写与 per-session 读缓存 SHALL 保留（见下）。
+chunk 级全局入库队列（`msgs:buffer` / `msgs:processing`）、后台 flusher 及其 drain 挂点（`SessionDeps` 的 `DrainMessageQueue`/`NudgeMessageFlush`）SHALL 完全移除：round 终稿批写直接走 turn 持久化路径（确定性 ID + 重试预算，单事务跨 `messages`/`tool_calls`），SHALL NOT 存在任何生产写入或排空路径。遗留配置键 `messages.flush_interval` / `messages.flush_batch_size` SHALL 在加载时被拒绝并输出迁移指引。用户消息 send-time 写与 per-session 读缓存 SHALL 保留（见下）。
 
 #### Scenario: round 批写不经过全局队列
 
 - **WHEN** round 完成触发终稿批写
 - **THEN** 写入路径为事务直写 + 幂等重试，无全局队列参与
 
-#### Scenario: 队列配置残留不再生效
+#### Scenario: 队列配置残留被拒绝加载
 
 - **WHEN** 配置中仍出现 `messages.flush_interval` / `messages.flush_batch_size`
-- **THEN** 不存在任何消费这些参数的后台 flusher（键本身待随代码清理移除）
+- **THEN** 配置加载失败，错误信息指向该键已随 write-behind flusher 退役
 
 ### Requirement: 幂等插入
 

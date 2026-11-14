@@ -148,26 +148,14 @@ func (s *CompactionService) LatestContextTokens(ctx context.Context, sessionID s
 	return s.deps.MySQL.LatestContextTokens(ctx, sessionID)
 }
 
-// RecoverDurable returns the session's persisted history from the DURABLE
-// tier: it first drains the write-behind ingest queue (bounded, the same
-// primitive the pre-delete archive path uses) so rows dual-written moments
-// ago carry real MySQL identities, then reads MySQL directly.
+// RecoverDurable returns the session's persisted history straight from MySQL.
 //
 // Compaction MUST operate on this view, not on RecoverMessages' Redis-first
-// view: the Redis read cache serves rows whose id is still 0 (ids are minted
-// by the MySQL flusher), and a boundary cursor recorded against an id-0 row
-// matches nothing once the cache backfills from MySQL — the stitched context
-// would silently degrade to full history. A drain failure aborts the caller's
-// compaction attempt (the durable view would be missing the queued rows).
+// view: the Redis cache is a read-tier snapshot, and a boundary cursor must
+// be recorded against durable row identities — a cursor recorded against a
+// cache-only row matches nothing once the cache backfills from MySQL, and the
+// stitched context would silently degrade to full history.
 func (s *CompactionService) RecoverDurable(ctx context.Context, sessionID string) ([]model.Message, []model.ToolCall, error) {
-	if s.deps.DrainMessageQueue != nil {
-		drainCtx, cancel := context.WithTimeout(ctx, messageDrainTimeout)
-		err := s.deps.DrainMessageQueue(drainCtx)
-		cancel()
-		if err != nil {
-			return nil, nil, fmt.Errorf("compaction.recover_durable: drain: %w", err)
-		}
-	}
 	rows, err := s.deps.MySQL.ListMessages(ctx, sessionID)
 	if err != nil {
 		return nil, nil, err

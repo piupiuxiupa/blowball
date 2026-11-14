@@ -1813,8 +1813,8 @@ func containsStr(s []string, v string) bool {
 }
 
 func TestLoad_MessagesDefaults(t *testing.T) {
-	// Omitting the messages block must default flush_interval to 1s and
-	// flush_batch_size to 100.
+	// Omitting the messages block must leave max_input_tokens unset (the
+	// pointer stays nil; the resolved limit is the 5000 default).
 	path := writeTempYAML(t, `
 openai:
   api_key: sk-test
@@ -1830,12 +1830,6 @@ jwt:
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.Messages.FlushInterval != time.Second {
-		t.Errorf("Messages.FlushInterval = %s, want 1s", cfg.Messages.FlushInterval)
-	}
-	if cfg.Messages.FlushBatchSize != 100 {
-		t.Errorf("Messages.FlushBatchSize = %d, want 100", cfg.Messages.FlushBatchSize)
 	}
 	// An unset max_input_tokens resolves to the default 5000 (detection on)
 	// while the raw pointer stays nil (the "unset" signal).
@@ -1847,8 +1841,13 @@ jwt:
 	}
 }
 
-func TestLoad_MessagesExplicitValues(t *testing.T) {
-	path := writeTempYAML(t, `
+// TestLoad_MessagesFlusherKnobsRejected covers the retired write-behind
+// flusher knobs: any residue of messages.flush_interval /
+// messages.flush_batch_size fails config load with a migration pointer.
+func TestLoad_MessagesFlusherKnobsRejected(t *testing.T) {
+	for _, key := range []string{"flush_interval", "flush_batch_size"} {
+		t.Run(key, func(t *testing.T) {
+			path := writeTempYAML(t, `
 openai:
   api_key: sk-test
   models:
@@ -1860,18 +1859,16 @@ mysql:
 jwt:
   secret: "ok"
 messages:
-  flush_interval: 500ms
-  flush_batch_size: 25
+  `+key+`: 500
 `)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.Messages.FlushInterval != 500*time.Millisecond {
-		t.Errorf("Messages.FlushInterval = %s, want 500ms", cfg.Messages.FlushInterval)
-	}
-	if cfg.Messages.FlushBatchSize != 25 {
-		t.Errorf("Messages.FlushBatchSize = %d, want 25", cfg.Messages.FlushBatchSize)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("Load with messages.%s succeeded, want rejection", key)
+			}
+			if !strings.Contains(err.Error(), "messages."+key) {
+				t.Errorf("error %q does not name messages.%s", err, key)
+			}
+		})
 	}
 }
 
@@ -1947,40 +1944,6 @@ func TestLoad_MessagesNegativeRejected(t *testing.T) {
 		yaml string
 	}{
 		{
-			name: "negative flush_interval",
-			yaml: `
-openai:
-  api_key: sk-test
-  models:
-    - name: gpt-4o-mini
-      max_context_tokens: 128000
-      max_completion_tokens: 8192
-mysql:
-  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
-jwt:
-  secret: "ok"
-messages:
-  flush_interval: -1s
-`,
-		},
-		{
-			name: "negative flush_batch_size",
-			yaml: `
-openai:
-  api_key: sk-test
-  models:
-    - name: gpt-4o-mini
-      max_context_tokens: 128000
-      max_completion_tokens: 8192
-mysql:
-  dsn: "user:pass@tcp(127.0.0.1:3306)/db"
-jwt:
-  secret: "ok"
-messages:
-  flush_batch_size: -5
-`,
-		},
-		{
 			name: "negative max_input_tokens",
 			yaml: `
 openai:
@@ -2034,8 +1997,6 @@ mysql:
   dsn: "user:pass@tcp(127.0.0.1:3306)/db"
 jwt:
   secret: "ok"
-messages:
-  flush_interval: 1s
 `,
 			wantOn:    false,
 			wantDepth: 8,

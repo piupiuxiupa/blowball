@@ -83,26 +83,10 @@ type FSStore interface {
 }
 
 // SessionDeps bundles the store dependencies every service in this package
-// needs. Phase 9 handlers / Phase 10 bootstrap construct one of these and
-// hand it to NewSessionService, NewMessageService and NewTitleService.
-//
-// DrainMessageQueue is the synchronous write-behind drain primitive
-// (msgflush.Drain bound to the concrete stores at wiring time). It is invoked
-// with a bounded context before a session is archived for deletion (so the
-// mirror tables capture messages still sitting in the ingest queue) and on a
-// Redis read miss (so the cache backfill cannot erase unflushed rows). A nil
-// value disables both call sites — production wiring always sets it, tests
-// substitute a fake or leave it nil.
-//
-// NudgeMessageFlush (optional) is invoked after every successful dual write
-// so the background flusher can flush early once the queue crosses its batch
-// threshold instead of waiting for the interval ticker. Production wiring
-// sets it to a non-blocking send on the flusher's shared notify channel; a
-// nil value simply disables the early-flush path.
+// needs. Handlers / bootstrap construct one of these and hand it to
+// NewSessionService, NewMessageService and NewTitleService.
 type SessionDeps struct {
-	MySQL             MySQLStore
-	Redis             RedisStore
-	FS                FSStore
-	DrainMessageQueue func(ctx context.Context) error
-	NudgeMessageFlush func()
+	MySQL MySQLStore
+	Redis RedisStore
+	FS    FSStore
 }

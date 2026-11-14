@@ -109,7 +109,7 @@ Event types (`pkg/stream/event.go`): `agent_start`, `token`, `reasoning`, `tool_
 
 ## Conventions that catch mistakes
 
-- Removed config keys fail config load (or the registry's unknown-tools startup check) with migration-pointing errors — e.g. the legacy agent model fields, `openai.model`, global `openai.length_continue`, `agents.chongzhi`/`agents.liang`, `xizhi_glob_files`, `scheduled_tasks.enabled: true`. When retiring a key, keep that pattern.
+- Removed config keys fail config load (or the registry's unknown-tools startup check) with migration-pointing errors — e.g. the legacy agent model fields, `openai.model`, global `openai.length_continue`, `agents.chongzhi`/`agents.liang`, `xizhi_glob_files`, `scheduled_tasks.enabled: true`, `messages.flush_interval`/`flush_batch_size` (write-behind flusher). When retiring a key, keep that pattern.
 - MySQL and filesystem store methods return `(nil, nil)` on missing records, not errors.
 - Turn-path logging goes through `logger.FromContext(ctx)` (session_id + trace_id attached); `Registry.Call` emits the central tool-dispatch log line for every registry-tool call.
 - Gin wildcard trap: workspace file GET/PUT/POST share one catch-all `/workspace/files/*path` with internal suffix dispatch (`download`, `/content`, `onlyoffice-config`); `/workspace/search` and `/workspace/upload` must fork statically before the wildcard — gin rejects a static segment beside a wildcard at one node.

@@ -151,26 +151,13 @@ storage:
   workspace:
     backend: local  # local (default) | shared
 
-# Redis-first write-behind message persistence (message-write-behind
-# capability). Every turn's message batch is dual-written into Redis (the
-# msgs:{session_id} read cache + the global msgs:buffer ingest queue) in one
-# pipeline; a background flusher (agent/all roles only) then batch-inserts the
-# queue into MySQL idempotently. These knobs tune that flusher. Omit the whole
-# block for the defaults; explicit negative values are rejected at load.
-#
-# DEPLOYMENT PREREQUISITE: with the queue as the only synchronous layer, Redis
-# must run with AOF persistence (appendonly yes) — a bare-restart Redis loses
-# the messages still sitting in the flush window. The server probes
-# appendonly at startup and WARNs when it is off.
+# Message-path knobs (the top-level `messages:` block). Persistence itself is
+# queue-free (message-final-persistence): round finals are written to MySQL in
+# one transaction and Redis only mirrors them into the per-session read cache
+# (msgs:{session_id}) — the retired write-behind keys flush_interval /
+# flush_batch_size fail config load if they linger in an old config.
 #
 # Fields:
-#   flush_interval  - optional; ticker bounding how long a persisted message
-#                     can sit in the queue before landing in MySQL (default
-#                     1s). Also the read-your-writes window of the message
-#                     history endpoint; the SSE stream itself is unaffected.
-#   flush_batch_size - optional; records claimed per flush round, and the
-#                     queue-length threshold that triggers an early flush
-#                     between ticks (default 100).
 #   max_input_tokens - optional; caps the ESTIMATED token count of a user
 #                     message on POST /sessions/:id/messages
 #                     (add-input-token-limit; CJK-aware heuristic, NOT exact
@@ -181,8 +168,6 @@ storage:
 #                     config load. Raise it if users legitimately paste large
 #                     documents/code.
 messages:
-  flush_interval: 1s
-  flush_batch_size: 100
   # max_input_tokens: 5000
   # In-session message queue (session-message-queue): while a turn is running,
   # new messages are admitted into the session's FIFO queue and auto-continued

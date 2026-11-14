@@ -43,7 +43,6 @@ blowball 当前的 Redis 写路径使用"跨 key 族的 Lua 原子脚本",而 Re
 |---|---|---|
 | `pkg/store/redis/queuestore.go` `admitScript` | 一段 Lua 原子完成"运行权空闲且队列为空 ⇒ 直接占用,否则 RPUSH 入 FIFO"(跨 `session:{sid}:run`、`queue:{sid}`、`run:{rid}:meta`、`run:{rid}:events` 共 4 个 key) | 各 key 几乎必然落在不同槽 → CROSSSLOT,**消息准入直接失败** |
 | `pkg/store/redis/queuestore.go` `pumpHeadScript` | 一段 Lua 原子完成"队头弹出 + 运行权转移"(跨 `session:{sid}:run`、`queue:{sid}`) | 同上 |
-| `pkg/store/redis/msgqueue.go` 遗留 drain | 升级残留的运维排空使用 `LMOVE msgs:buffer msgs:processing`(双全局 key) | 仅影响历史残留排空,但同样跨槽 |
 
 理论上可以给 key 加 hash tag 修掉跨槽问题,但 `session:{sid}` / `queue:{sid}`
 / `run:{rid}` 本就按不同实体散列,强行同槽等于把一个会话的全部编排态手工钉在
@@ -473,8 +472,7 @@ redis-cli -h <任意哨兵> -p 26379 SENTINEL failover blowball-master
   收尾或被客户端重试;
 - `llm_raw:buffer` —— 观测数据,排空为佳,未排空部分接受丢失;
 - 从 write-behind 时代部署升级迁移时遗留的 `msgs:buffer` / `msgs:processing`
-  —— 新代码不再写入;残留按 `docs/redis-first-persistence.md` 的回滚规则
-  先排空再切。
+  —— 新代码既不写入也不排空;残留键为惰性垃圾,迁移时直接 `DEL` 即可。
 
 **JuiceFS 元数据(持久业务数据,必须迁移)** —— 若旧单机 Redis 上已有
 JuiceFS 元数据,绝不能弃,否则整个共享文件系统的索引就没了(数据块还在
